@@ -750,7 +750,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let admin = admin_for(ctx.bootstrap_servers());
     create_topic(admin.as_ref(), &topic, 2, 1).await;
     create_topic(admin.as_ref(), &other_topic, 2, 1).await;
-    admin.close(Duration::from_secs(5)).await;
+    admin.close_timeout(Duration::from_secs(5)).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(

@@ -250,23 +250,23 @@ pub trait Admin: Send + Sync {
     /// Create a batch of new topics.
     ///
     /// Corresponds to `Admin.createTopics(Collection<NewTopic>, CreateTopicsOptions)`.
-    fn create_topics(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
+    fn create_topics_options(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
 
     /// Delete a batch of topics (by name or by id, per the `TopicCollection`).
     ///
     /// Corresponds to `Admin.deleteTopics(TopicCollection, DeleteTopicsOptions)`.
-    fn delete_topics(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
+    fn delete_topics_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
 
     /// List the topics available in the cluster.
     ///
     /// Corresponds to `Admin.listTopics(ListTopicsOptions)`.
-    fn list_topics(&self, options: ListTopicsOptions) -> ListTopicsResult;
+    fn list_topics_options(&self, options: ListTopicsOptions) -> ListTopicsResult;
 
     /// Describe some topics in the cluster (by name or by id, per the
     /// `TopicCollection`).
     ///
     /// Corresponds to `Admin.describeTopics(TopicCollection, DescribeTopicsOptions)`.
-    fn describe_topics(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
+    fn describe_topics_options(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
 
     /// Increase the number of partitions of the given topics.
     ///
@@ -275,7 +275,7 @@ pub trait Admin: Send + Sync {
     /// less than or equal to the current partition count.
     ///
     /// Corresponds to `Admin.createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)`.
-    fn create_partitions(
+    fn create_partitions_options(
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
         options: CreatePartitionsOptions,
@@ -285,7 +285,7 @@ pub trait Admin: Send + Sync {
     /// corresponding partition.
     ///
     /// Corresponds to `Admin.deleteRecords(Map<TopicPartition, RecordsToDelete>, DeleteRecordsOptions)`.
-    fn delete_records(
+    fn delete_records_options(
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
@@ -294,7 +294,7 @@ pub trait Admin: Send + Sync {
     /// Describe the active producers for a set of topic partitions.
     ///
     /// Corresponds to `Admin.describeProducers(Collection<TopicPartition>, DescribeProducersOptions)`.
-    fn describe_producers(
+    fn describe_producers_options(
         &self,
         partitions: &[TopicPartition],
         options: DescribeProducersOptions,
@@ -303,13 +303,16 @@ pub trait Admin: Send + Sync {
     /// Forcefully abort a transaction which is open on a topic partition.
     ///
     /// Corresponds to `Admin.abortTransaction(AbortTransactionSpec, AbortTransactionOptions)`.
-    fn abort_transaction(&self, spec: AbortTransactionSpec, options: AbortTransactionOptions)
-    -> AbortTransactionResult;
+    fn abort_transaction_options(
+        &self,
+        spec: AbortTransactionSpec,
+        options: AbortTransactionOptions,
+    ) -> AbortTransactionResult;
 
     /// List the transaction states of the given transactional ids.
     ///
     /// Corresponds to `Admin.describeTransactions(Collection<String>, DescribeTransactionsOptions)`.
-    fn describe_transactions(
+    fn describe_transactions_options(
         &self,
         transactional_ids: &[String],
         options: DescribeTransactionsOptions,
@@ -318,17 +321,21 @@ pub trait Admin: Send + Sync {
     /// Fence out all active producers that use any of the provided transactional ids.
     ///
     /// Corresponds to `Admin.fenceProducers(Collection<String>, FenceProducersOptions)`.
-    fn fence_producers(&self, transactional_ids: &[String], options: FenceProducersOptions) -> FenceProducersResult;
+    fn fence_producers_options(
+        &self,
+        transactional_ids: &[String],
+        options: FenceProducersOptions,
+    ) -> FenceProducersResult;
 
     /// List the transactions in the cluster (fans out to all brokers).
     ///
     /// Corresponds to `Admin.listTransactions(ListTransactionsOptions)`.
-    fn list_transactions(&self, options: ListTransactionsOptions) -> ListTransactionsResult;
+    fn list_transactions_options(&self, options: ListTransactionsOptions) -> ListTransactionsResult;
 
     /// Forcefully terminate an ongoing transaction for a given transactional id.
     ///
     /// Corresponds to `Admin.forceTerminateTransaction(String, TerminateTransactionOptions)`.
-    fn force_terminate_transaction(
+    fn force_terminate_transaction_options(
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
@@ -337,12 +344,12 @@ pub trait Admin: Send + Sync {
     /// Get information about the nodes in the cluster.
     ///
     /// Corresponds to `Admin.describeCluster(DescribeClusterOptions)`.
-    fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult;
+    fn describe_cluster_options(&self, options: DescribeClusterOptions) -> DescribeClusterResult;
 
     /// Get the configuration for the specified resources.
     ///
     /// Corresponds to `Admin.describeConfigs(Collection<ConfigResource>, DescribeConfigsOptions)`.
-    fn describe_configs(
+    fn describe_configs_options(
         &self,
         config_resources: &[ConfigResource],
         options: DescribeConfigsOptions,
@@ -351,7 +358,7 @@ pub trait Admin: Send + Sync {
     /// Incrementally update the configuration for the specified resources.
     ///
     /// Corresponds to `Admin.incrementalAlterConfigs(Map<ConfigResource, Collection<AlterConfigOp>>, AlterConfigsOptions)`.
-    fn incremental_alter_configs(
+    fn incremental_alter_configs_options(
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         options: AlterConfigsOptions,
@@ -361,7 +368,7 @@ pub trait Admin: Send + Sync {
     /// given set (an empty set means all supported types).
     ///
     /// Corresponds to `Admin.listConfigResources(Set<ConfigResource.Type>, ListConfigResourcesOptions)`.
-    fn list_config_resources(
+    fn list_config_resources_options(
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
         options: ListConfigResourcesOptions,
@@ -373,7 +380,7 @@ pub trait Admin: Send + Sync {
     /// (deprecated since 4.1 in favor of
     /// [`list_config_resources`](Admin::list_config_resources)).
     #[allow(deprecated)]
-    fn list_client_metrics_resources(
+    fn list_client_metrics_resources_options(
         &self,
         options: ListClientMetricsResourcesOptions,
     ) -> ListClientMetricsResourcesResult;
@@ -382,12 +389,12 @@ pub trait Admin: Send + Sync {
     /// brokers.
     ///
     /// Corresponds to `Admin.describeLogDirs(Collection<Integer>, DescribeLogDirsOptions)`.
-    fn describe_log_dirs(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult;
+    fn describe_log_dirs_options(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult;
 
     /// Change the log directory for the specified replicas.
     ///
     /// Corresponds to `Admin.alterReplicaLogDirs(Map<TopicPartitionReplica, String>, AlterReplicaLogDirsOptions)`.
-    fn alter_replica_log_dirs(
+    fn alter_replica_log_dirs_options(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         options: AlterReplicaLogDirsOptions,
@@ -396,7 +403,7 @@ pub trait Admin: Send + Sync {
     /// Query the replica log directory information for the specified replicas.
     ///
     /// Corresponds to `Admin.describeReplicaLogDirs(Collection<TopicPartitionReplica>, DescribeReplicaLogDirsOptions)`.
-    fn describe_replica_log_dirs(
+    fn describe_replica_log_dirs_options(
         &self,
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
@@ -406,7 +413,7 @@ pub trait Admin: Send + Sync {
     /// partitions if `partitions` is `None`.
     ///
     /// Corresponds to `Admin.electLeaders(ElectionType, Set<TopicPartition>, ElectLeadersOptions)`.
-    fn elect_leaders(
+    fn elect_leaders_options(
         &self,
         election_type: ElectionType,
         partitions: Option<HashSet<TopicPartition>>,
@@ -419,7 +426,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterPartitionReassignments(Map<TopicPartition, Optional<NewPartitionReassignment>>, AlterPartitionReassignmentsOptions)`.
-    fn alter_partition_reassignments(
+    fn alter_partition_reassignments_options(
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         options: AlterPartitionReassignmentsOptions,
@@ -430,7 +437,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.listPartitionReassignments(Optional<Set<TopicPartition>>, ListPartitionReassignmentsOptions)`.
-    fn list_partition_reassignments(
+    fn list_partition_reassignments_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
         options: ListPartitionReassignmentsOptions,
@@ -439,7 +446,7 @@ pub trait Admin: Send + Sync {
     /// List the offsets for the given partitions and offset specifications.
     ///
     /// Corresponds to `Admin.listOffsets(Map<TopicPartition, OffsetSpec>, ListOffsetsOptions)`.
-    fn list_offsets(
+    fn list_offsets_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         options: ListOffsetsOptions,
@@ -448,19 +455,19 @@ pub trait Admin: Send + Sync {
     /// List the groups available in the cluster.
     ///
     /// Corresponds to `Admin.listGroups(ListGroupsOptions)`.
-    fn list_groups(&self, options: ListGroupsOptions) -> ListGroupsResult;
+    fn list_groups_options(&self, options: ListGroupsOptions) -> ListGroupsResult;
 
     /// List the consumer groups available in the cluster.
     ///
     /// Corresponds to `Admin.listConsumerGroups(ListConsumerGroupsOptions)`
     /// (deprecated since 4.1 in favor of [`list_groups`](Admin::list_groups)).
     #[allow(deprecated)]
-    fn list_consumer_groups(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult;
+    fn list_consumer_groups_options(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult;
 
     /// Describe some consumer groups in the cluster.
     ///
     /// Corresponds to `Admin.describeConsumerGroups(Collection<String>, DescribeConsumerGroupsOptions)`.
-    fn describe_consumer_groups(
+    fn describe_consumer_groups_options(
         &self,
         group_ids: &[String],
         options: DescribeConsumerGroupsOptions,
@@ -469,7 +476,7 @@ pub trait Admin: Send + Sync {
     /// Describe some classic groups in the cluster.
     ///
     /// Corresponds to `Admin.describeClassicGroups(Collection<String>, DescribeClassicGroupsOptions)`.
-    fn describe_classic_groups(
+    fn describe_classic_groups_options(
         &self,
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
@@ -480,7 +487,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.listConsumerGroupOffsets(Map<String, ListConsumerGroupOffsetsSpec>, ListConsumerGroupOffsetsOptions)`.
-    fn list_consumer_group_offsets(
+    fn list_consumer_group_offsets_options(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         options: ListConsumerGroupOffsetsOptions,
@@ -490,7 +497,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
-    fn alter_consumer_group_offsets(
+    fn alter_consumer_group_offsets_options(
         &self,
         group_id: &str,
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
@@ -501,7 +508,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
-    fn delete_consumer_group_offsets(
+    fn delete_consumer_group_offsets_options(
         &self,
         group_id: &str,
         partitions: &HashSet<TopicPartition>,
@@ -512,7 +519,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.deleteConsumerGroups(Collection<String>, DeleteConsumerGroupsOptions)`.
-    fn delete_consumer_groups(
+    fn delete_consumer_groups_options(
         &self,
         group_ids: &[String],
         options: DeleteConsumerGroupsOptions,
@@ -522,7 +529,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)`.
-    fn remove_members_from_consumer_group(
+    fn remove_members_from_consumer_group_options(
         &self,
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
@@ -531,23 +538,23 @@ pub trait Admin: Send + Sync {
     /// Create ACLs.
     ///
     /// Corresponds to `Admin.createAcls(Collection<AclBinding>, CreateAclsOptions)`.
-    fn create_acls(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult;
+    fn create_acls_options(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult;
 
     /// Describe ACLs matching the provided filter.
     ///
     /// Corresponds to `Admin.describeAcls(AclBindingFilter, DescribeAclsOptions)`.
-    fn describe_acls(&self, filter: &AclBindingFilter, options: DescribeAclsOptions) -> DescribeAclsResult;
+    fn describe_acls_options(&self, filter: &AclBindingFilter, options: DescribeAclsOptions) -> DescribeAclsResult;
 
     /// Delete ACLs matching the provided filters.
     ///
     /// Corresponds to `Admin.deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`.
-    fn delete_acls(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult;
+    fn delete_acls_options(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult;
 
     /// Describe the client quotas matching the provided filter.
     ///
     /// Corresponds to
     /// `Admin.describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)`.
-    fn describe_client_quotas(
+    fn describe_client_quotas_options(
         &self,
         filter: &ClientQuotaFilter,
         options: DescribeClientQuotasOptions,
@@ -557,7 +564,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterClientQuotas(Collection<ClientQuotaAlteration>, AlterClientQuotasOptions)`.
-    fn alter_client_quotas(
+    fn alter_client_quotas_options(
         &self,
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
@@ -568,7 +575,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.describeUserScramCredentials(List<String>, DescribeUserScramCredentialsOptions)`.
-    fn describe_user_scram_credentials(
+    fn describe_user_scram_credentials_options(
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
@@ -578,7 +585,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterUserScramCredentials(List<UserScramCredentialAlteration>, AlterUserScramCredentialsOptions)`.
-    fn alter_user_scram_credentials(
+    fn alter_user_scram_credentials_options(
         &self,
         alterations: &[UserScramCredentialAlteration],
         options: AlterUserScramCredentialsOptions,
@@ -588,19 +595,23 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.createDelegationToken(CreateDelegationTokenOptions)`.
-    fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult;
+    fn create_delegation_token_options(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult;
 
     /// Renew a delegation token identified by its HMAC.
     ///
     /// Corresponds to
     /// `Admin.renewDelegationToken(byte[], RenewDelegationTokenOptions)`.
-    fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult;
+    fn renew_delegation_token_options(
+        &self,
+        hmac: &[u8],
+        options: RenewDelegationTokenOptions,
+    ) -> RenewDelegationTokenResult;
 
     /// Expire a delegation token identified by its HMAC.
     ///
     /// Corresponds to
     /// `Admin.expireDelegationToken(byte[], ExpireDelegationTokenOptions)`.
-    fn expire_delegation_token(
+    fn expire_delegation_token_options(
         &self,
         hmac: &[u8],
         options: ExpireDelegationTokenOptions,
@@ -610,12 +621,15 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.describeDelegationToken(DescribeDelegationTokenOptions)`.
-    fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult;
+    fn describe_delegation_token_options(
+        &self,
+        options: DescribeDelegationTokenOptions,
+    ) -> DescribeDelegationTokenResult;
 
     /// Describe the finalized and supported features of the cluster.
     ///
     /// Corresponds to `Admin.describeFeatures(DescribeFeaturesOptions)`.
-    fn describe_features(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult;
+    fn describe_features_options(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult;
 
     /// Apply the given feature updates.
     ///
@@ -632,7 +646,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Returns [`Error::local_illegal_argument`] if `feature_updates` is empty or
     /// any feature name is blank.
-    fn update_features(
+    fn update_features_options(
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
@@ -648,7 +662,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.close(Duration)`; blocking in Java, so `async` in
     /// Rust (CLAUDE.md §9.4).
-    async fn close(&self, timeout: Duration);
+    async fn close_timeout(&self, timeout: Duration);
 }
 
 /// Creates a network-backed [`Admin`] client from the given configuration.

@@ -597,7 +597,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close(admin: *const kafka_admin
     }
     let h = unsafe { handle_ref(admin) };
     let timeout = close_timeout(timeout_ms);
-    h.runtime.block_on(h.admin().close(timeout));
+    h.runtime.block_on(h.admin().close_timeout(timeout));
 }
 
 /// Completion callback for [`kafka_admin_AdminClient_close_async`].
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
     let timeout = close_timeout(timeout_ms);
     unsafe {
         admin_async_void_op(admin, callback, user_data, move |a| async move {
-            a.close(timeout).await;
+            a.close_timeout(timeout).await;
             Ok(())
         })
     };
@@ -3203,7 +3203,7 @@ fn submit_create_topics(
     new_topics: &[NewTopic],
     options: CreateTopicsOptions,
 ) -> KafkaFuture<CreateTopicsOutcomes> {
-    let result = admin.create_topics(new_topics, options);
+    let result = admin.create_topics_options(new_topics, options);
     let entries: Vec<(String, KafkaFuture<TopicMetadataAndConfig>)> =
         result.futures().iter().map(|(name, f)| (name.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -3215,7 +3215,7 @@ fn submit_delete_topics_by_names(
     names: Vec<String>,
     options: DeleteTopicsOptions,
 ) -> Result<KafkaFuture<DeleteTopicsOutcomes<String>>, Error> {
-    let result = admin.delete_topics(TopicCollection::of_topic_names(names), options);
+    let result = admin.delete_topics_options(TopicCollection::of_topic_names(names), options);
     let values = result
         .topic_name_values()
         .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
@@ -3229,7 +3229,7 @@ fn submit_delete_topics_by_ids(
     ids: Vec<Uuid>,
     options: DeleteTopicsOptions,
 ) -> Result<KafkaFuture<DeleteTopicsOutcomes<Uuid>>, Error> {
-    let result = admin.delete_topics(TopicCollection::of_topic_ids(ids), options);
+    let result = admin.delete_topics_options(TopicCollection::of_topic_ids(ids), options);
     let values = result
         .topic_id_values()
         .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
@@ -3243,7 +3243,7 @@ fn submit_describe_topics_by_names(
     names: Vec<String>,
     options: DescribeTopicsOptions,
 ) -> Result<KafkaFuture<DescribeTopicsOutcomes<String>>, Error> {
-    let result = admin.describe_topics(TopicCollection::of_topic_names(names), options);
+    let result = admin.describe_topics_options(TopicCollection::of_topic_names(names), options);
     let values = result
         .topic_name_values()
         .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures"))?;
@@ -3259,7 +3259,7 @@ fn submit_create_partitions(
     new_partitions: &HashMap<String, NewPartitions>,
     options: CreatePartitionsOptions,
 ) -> KafkaFuture<CreatePartitionsOutcomes> {
-    let result = admin.create_partitions(new_partitions, options);
+    let result = admin.create_partitions_options(new_partitions, options);
     let entries: Vec<(String, KafkaFuture<()>)> =
         result.values().iter().map(|(name, f)| (name.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -3272,7 +3272,7 @@ fn submit_delete_records(
     records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
     options: DeleteRecordsOptions,
 ) -> KafkaFuture<DeleteRecordsOutcomes> {
-    let result = admin.delete_records(records_to_delete, options);
+    let result = admin.delete_records_options(records_to_delete, options);
     let entries: Vec<(TopicPartition, KafkaFuture<DeletedRecords>)> =
         result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -3284,7 +3284,7 @@ fn submit_describe_topics_by_ids(
     ids: Vec<Uuid>,
     options: DescribeTopicsOptions,
 ) -> Result<KafkaFuture<DescribeTopicsOutcomes<Uuid>>, Error> {
-    let result = admin.describe_topics(TopicCollection::of_topic_ids(ids), options);
+    let result = admin.describe_topics_options(TopicCollection::of_topic_ids(ids), options);
     let values = result
         .topic_id_values()
         .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
@@ -3648,7 +3648,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
     let options = ListTopicsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_list_internal(list_internal);
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_topics(options).names_to_listings())) };
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_topics_options(options).names_to_listings())) };
     unsafe { finish_sync(outcome, out_result, box_list_topics_result) }
 }
 
@@ -3687,7 +3688,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics_async(
         admin_async_value_op(
             admin,
             user_data,
-            move |a| Ok(a.list_topics(options).names_to_listings()),
+            move |a| Ok(a.list_topics_options(options).names_to_listings()),
             move |outcome, ud| {
                 let (result, error) = match outcome {
                     Ok(listings) => (box_list_topics_result(listings), std::ptr::null_mut()),
@@ -4874,7 +4875,7 @@ fn submit_describe_cluster(
     admin: &dyn Admin,
     options: DescribeClusterOptions,
 ) -> impl std::future::Future<Output = Result<DescribeClusterOutcome, Error>> + Send + use<> {
-    let result = admin.describe_cluster(options);
+    let result = admin.describe_cluster_options(options);
     let nodes = result.nodes();
     let controller = result.controller();
     let cluster_id = result.cluster_id();
@@ -5162,7 +5163,7 @@ fn submit_describe_configs(
     resources: &[ConfigResource],
     options: DescribeConfigsOptions,
 ) -> KafkaFuture<DescribeConfigsOutcomes> {
-    let result = admin.describe_configs(resources, options);
+    let result = admin.describe_configs_options(resources, options);
     let entries: Vec<(ConfigResource, KafkaFuture<Config>)> =
         result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -5419,7 +5420,7 @@ fn submit_incremental_alter_configs(
     configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
     options: AlterConfigsOptions,
 ) -> KafkaFuture<AlterConfigsOutcomes> {
-    let result = admin.incremental_alter_configs(configs, options);
+    let result = admin.incremental_alter_configs_options(configs, options);
     let entries: Vec<(ConfigResource, KafkaFuture<()>)> =
         result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -5691,7 +5692,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
 ) -> *mut kafka_common_Error_t {
     let types = unsafe { read_config_resource_types(resource_types, count) };
     let options = ListConfigResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources(&types, options).all())) };
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources_options(&types, options).all())) };
     unsafe { finish_sync(outcome, out_result, box_list_config_resources_result) }
 }
 
@@ -5731,7 +5733,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
         admin_async_value_op(
             admin,
             user_data,
-            move |a| Ok(a.list_config_resources(&types, options).all()),
+            move |a| Ok(a.list_config_resources_options(&types, options).all()),
             move |outcome, ud| {
                 let (result, error) = match outcome {
                     Ok(resources) => (box_list_config_resources_result(resources), std::ptr::null_mut()),
@@ -5870,7 +5872,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
     out_result: *mut *mut kafka_admin_ListClientMetricsResourcesResult_t,
 ) -> *mut kafka_common_Error_t {
     let options = ListClientMetricsResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
-    let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_client_metrics_resources(options).all())) };
+    let outcome =
+        unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_client_metrics_resources_options(options).all())) };
     unsafe { finish_sync(outcome, out_result, box_list_client_metrics_resources_result) }
 }
 
@@ -5907,7 +5910,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources_a
         admin_async_value_op(
             admin,
             user_data,
-            move |a| Ok(a.list_client_metrics_resources(options).all()),
+            move |a| Ok(a.list_client_metrics_resources_options(options).all()),
             move |outcome, ud| {
                 let (result, error) = match outcome {
                     Ok(listings) => (box_list_client_metrics_resources_result(listings), std::ptr::null_mut()),
@@ -6070,7 +6073,7 @@ fn submit_describe_log_dirs(
     brokers: &[i32],
     options: DescribeLogDirsOptions,
 ) -> KafkaFuture<DescribeLogDirsOutcomes> {
-    let result = admin.describe_log_dirs(brokers, options);
+    let result = admin.describe_log_dirs_options(brokers, options);
     let entries: Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> =
         result.descriptions().iter().map(|(b, f)| (*b, f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -6369,7 +6372,7 @@ fn submit_alter_replica_log_dirs(
     replica_assignment: &HashMap<TopicPartitionReplica, String>,
     options: AlterReplicaLogDirsOptions,
 ) -> KafkaFuture<AlterReplicaLogDirsOutcomes> {
-    let result = admin.alter_replica_log_dirs(replica_assignment, options);
+    let result = admin.alter_replica_log_dirs_options(replica_assignment, options);
     let entries: Vec<(TopicPartitionReplica, KafkaFuture<()>)> =
         result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -6689,7 +6692,7 @@ fn submit_describe_replica_log_dirs(
     replicas: &[TopicPartitionReplica],
     options: DescribeReplicaLogDirsOptions,
 ) -> KafkaFuture<DescribeReplicaLogDirsOutcomes> {
-    let result = admin.describe_replica_log_dirs(replicas, options);
+    let result = admin.describe_replica_log_dirs_options(replicas, options);
     let entries: Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> =
         result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -7841,7 +7844,7 @@ fn submit_elect_leaders(
     partitions: Option<HashSet<TopicPartition>>,
     options: ElectLeadersOptions,
 ) -> KafkaFuture<ElectLeadersOutcomes> {
-    admin.elect_leaders(election_type, partitions, options).partitions()
+    admin.elect_leaders_options(election_type, partitions, options).partitions()
 }
 
 /// Submits `alterPartitionReassignments` and returns the collect-all future over
@@ -7851,7 +7854,7 @@ fn submit_alter_partition_reassignments(
     reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
     options: AlterPartitionReassignmentsOptions,
 ) -> KafkaFuture<AlterPartitionReassignmentsOutcomes> {
-    let result = admin.alter_partition_reassignments(reassignments, options);
+    let result = admin.alter_partition_reassignments_options(reassignments, options);
     let entries: Vec<(TopicPartition, KafkaFuture<()>)> =
         result.values().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -7864,7 +7867,9 @@ fn submit_list_partition_reassignments(
     partitions: Option<HashSet<TopicPartition>>,
     options: ListPartitionReassignmentsOptions,
 ) -> KafkaFuture<ListPartitionReassignmentsOutcomes> {
-    admin.list_partition_reassignments(partitions, options).reassignments()
+    admin
+        .list_partition_reassignments_partitions_options(partitions, options)
+        .reassignments()
 }
 
 /// Submits `listOffsets` and returns the collect-all future over its
@@ -7880,7 +7885,7 @@ fn submit_list_offsets(
     topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
     options: ListOffsetsOptions,
 ) -> Result<KafkaFuture<ListOffsetsOutcomes>, Error> {
-    let result = admin.list_offsets(topic_partition_offsets, options);
+    let result = admin.list_offsets_options(topic_partition_offsets, options);
     let mut entries: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)> =
         Vec::with_capacity(topic_partition_offsets.len());
     for tp in topic_partition_offsets.keys() {
@@ -10062,7 +10067,7 @@ fn submit_list_groups(
     admin: &dyn Admin,
     options: ListGroupsOptions,
 ) -> impl std::future::Future<Output = Result<ListGroupsOutcome, Error>> + Send + use<> {
-    let result = admin.list_groups(options);
+    let result = admin.list_groups_options(options);
     let valid = result.valid();
     let errors = result.errors();
     async move {
@@ -10079,7 +10084,7 @@ fn submit_list_consumer_groups(
     admin: &dyn Admin,
     options: ListConsumerGroupsOptions,
 ) -> impl std::future::Future<Output = Result<ListConsumerGroupsOutcome, Error>> + Send + use<> {
-    let result = admin.list_consumer_groups(options);
+    let result = admin.list_consumer_groups_options(options);
     let valid = result.valid();
     let errors = result.errors();
     async move {
@@ -10096,7 +10101,7 @@ fn submit_describe_consumer_groups(
     group_ids: &[String],
     options: DescribeConsumerGroupsOptions,
 ) -> KafkaFuture<DescribeConsumerGroupsOutcomes> {
-    let result = admin.describe_consumer_groups(group_ids, options);
+    let result = admin.describe_consumer_groups_options(group_ids, options);
     KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
 }
 
@@ -10107,7 +10112,7 @@ fn submit_describe_classic_groups(
     group_ids: &[String],
     options: DescribeClassicGroupsOptions,
 ) -> KafkaFuture<DescribeClassicGroupsOutcomes> {
-    let result = admin.describe_classic_groups(group_ids, options);
+    let result = admin.describe_classic_groups_options(group_ids, options);
     KafkaFuture::join_map_results(result.described_groups().into_iter().collect())
 }
 
@@ -10123,7 +10128,7 @@ fn submit_list_consumer_group_offsets(
     group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
     options: ListConsumerGroupOffsetsOptions,
 ) -> Result<KafkaFuture<ListConsumerGroupOffsetsOutcomes>, Error> {
-    let result = admin.list_consumer_group_offsets(group_specs, options);
+    let result = admin.list_consumer_group_offsets_options(group_specs, options);
     let mut entries: Vec<(String, KafkaFuture<GroupOffsets>)> = Vec::with_capacity(group_specs.len());
     for group_id in group_specs.keys() {
         entries.push((group_id.clone(), result.partitions_to_offset_and_metadata_for_group(group_id)?));
@@ -10154,7 +10159,7 @@ fn submit_alter_consumer_group_offsets(
     offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
     options: AlterConsumerGroupOffsetsOptions,
 ) -> KafkaFuture<PartitionVoidOutcomes> {
-    let result = admin.alter_consumer_group_offsets(group_id, offsets, options);
+    let result = admin.alter_consumer_group_offsets_options(group_id, offsets, options);
     if offsets.is_empty() {
         return empty_outcomes(result.all());
     }
@@ -10175,7 +10180,7 @@ fn submit_delete_consumer_group_offsets(
     partitions: &HashSet<TopicPartition>,
     options: DeleteConsumerGroupOffsetsOptions,
 ) -> Result<KafkaFuture<PartitionVoidOutcomes>, Error> {
-    let result = admin.delete_consumer_group_offsets(group_id, partitions, options);
+    let result = admin.delete_consumer_group_offsets_options(group_id, partitions, options);
     if partitions.is_empty() {
         return Ok(empty_outcomes(result.all()));
     }
@@ -10193,7 +10198,7 @@ fn submit_delete_consumer_groups(
     group_ids: &[String],
     options: DeleteConsumerGroupsOptions,
 ) -> KafkaFuture<GroupVoidOutcomes> {
-    let result = admin.delete_consumer_groups(group_ids, options);
+    let result = admin.delete_consumer_groups_options(group_ids, options);
     KafkaFuture::join_map_results(result.deleted_groups().into_iter().collect())
 }
 
@@ -10208,7 +10213,7 @@ fn submit_remove_members_from_consumer_group(
     options: RemoveMembersFromConsumerGroupOptions,
 ) -> Result<KafkaFuture<GroupVoidOutcomes>, Error> {
     let members: Vec<MemberToRemove> = options.members().iter().cloned().collect();
-    let result = admin.remove_members_from_consumer_group(group_id, options);
+    let result = admin.remove_members_from_consumer_group_options(group_id, options);
     if members.is_empty() {
         return Ok(empty_outcomes(result.all()));
     }
@@ -13318,7 +13323,7 @@ fn submit_create_acls(
     acls: &[AclBinding],
     options: CreateAclsOptions,
 ) -> KafkaFuture<CreateAclsOutcomes> {
-    let result = admin.create_acls(acls, options);
+    let result = admin.create_acls_options(acls, options);
     // Driven from the result's own map (Java's `values()`), which is the
     // authority on which bindings got a future.
     let entries: Vec<(AclBinding, KafkaFuture<()>)> =
@@ -13332,7 +13337,7 @@ fn submit_describe_acls(
     filter: &AclBindingFilter,
     options: DescribeAclsOptions,
 ) -> KafkaFuture<Vec<AclBinding>> {
-    admin.describe_acls(filter, options).values().clone()
+    admin.describe_acls_options(filter, options).values().clone()
 }
 
 /// Submits `deleteAcls` and returns the collect-all future over its per-filter
@@ -13342,7 +13347,7 @@ fn submit_delete_acls(
     filters: &[AclBindingFilter],
     options: DeleteAclsOptions,
 ) -> KafkaFuture<DeleteAclsOutcomes> {
-    let result = admin.delete_acls(filters, options);
+    let result = admin.delete_acls_options(filters, options);
     let entries: Vec<(AclBindingFilter, KafkaFuture<FilterResults>)> =
         result.values().iter().map(|(f, fut)| (f.clone(), fut.clone())).collect();
     KafkaFuture::join_map_results(entries)
@@ -13354,7 +13359,7 @@ fn submit_describe_client_quotas(
     filter: &ClientQuotaFilter,
     options: DescribeClientQuotasOptions,
 ) -> KafkaFuture<DescribeClientQuotasOutcome> {
-    admin.describe_client_quotas(filter, options).entities().clone()
+    admin.describe_client_quotas_options(filter, options).entities().clone()
 }
 
 /// Submits `alterClientQuotas` and returns the collect-all future over its
@@ -13364,7 +13369,7 @@ fn submit_alter_client_quotas(
     entries: &[ClientQuotaAlteration],
     options: AlterClientQuotasOptions,
 ) -> KafkaFuture<AlterClientQuotasOutcomes> {
-    let result = admin.alter_client_quotas(entries, options);
+    let result = admin.alter_client_quotas_options(entries, options);
     let futures: Vec<(ClientQuotaEntity, KafkaFuture<()>)> =
         result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(futures)
@@ -15733,7 +15738,7 @@ fn submit_describe_user_scram_credentials(
     users: &[String],
     options: DescribeUserScramCredentialsOptions,
 ) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, Error>> + Send + use<> {
-    let result = admin.describe_user_scram_credentials(users, options);
+    let result = admin.describe_user_scram_credentials_options(users, options);
     async move {
         let all_error = match result.all().get().await {
             Ok(map) => {
@@ -15761,7 +15766,7 @@ fn submit_alter_user_scram_credentials(
     alterations: &[UserScramCredentialAlteration],
     options: AlterUserScramCredentialsOptions,
 ) -> KafkaFuture<AlterScramOutcomes> {
-    let result = admin.alter_user_scram_credentials(alterations, options);
+    let result = admin.alter_user_scram_credentials_options(alterations, options);
     // Driven from the result's own map (Java's `values()`), which is the
     // authority on which users got a future.
     let entries: Vec<(String, KafkaFuture<()>)> =
@@ -15774,7 +15779,7 @@ fn submit_create_delegation_token(
     admin: &dyn Admin,
     options: CreateDelegationTokenOptions,
 ) -> KafkaFuture<DelegationToken> {
-    admin.create_delegation_token(options).delegation_token().clone()
+    admin.create_delegation_token_options(options).delegation_token().clone()
 }
 
 /// Submits `renewDelegationToken` and returns its single expiry-timestamp
@@ -15784,7 +15789,7 @@ fn submit_renew_delegation_token(
     hmac: &[u8],
     options: RenewDelegationTokenOptions,
 ) -> KafkaFuture<i64> {
-    admin.renew_delegation_token(hmac, options).expiry_timestamp().clone()
+    admin.renew_delegation_token_options(hmac, options).expiry_timestamp().clone()
 }
 
 /// Submits `expireDelegationToken` and returns its single expiry-timestamp
@@ -15794,7 +15799,7 @@ fn submit_expire_delegation_token(
     hmac: &[u8],
     options: ExpireDelegationTokenOptions,
 ) -> KafkaFuture<i64> {
-    admin.expire_delegation_token(hmac, options).expiry_timestamp().clone()
+    admin.expire_delegation_token_options(hmac, options).expiry_timestamp().clone()
 }
 
 /// Submits `describeDelegationToken` and returns its single token-list future.
@@ -15802,12 +15807,12 @@ fn submit_describe_delegation_token(
     admin: &dyn Admin,
     options: DescribeDelegationTokenOptions,
 ) -> KafkaFuture<Vec<DelegationToken>> {
-    admin.describe_delegation_token(options).delegation_tokens().clone()
+    admin.describe_delegation_token_options(options).delegation_tokens().clone()
 }
 
 /// Submits `describeFeatures` and returns its single metadata future.
 fn submit_describe_features(admin: &dyn Admin, options: DescribeFeaturesOptions) -> KafkaFuture<FeatureMetadata> {
-    admin.describe_features(options).feature_metadata()
+    admin.describe_features_options(options).feature_metadata()
 }
 
 /// Submits `updateFeatures` and returns the collect-all future over its
@@ -15829,7 +15834,7 @@ fn submit_update_features(
     feature_updates: &HashMap<String, FeatureUpdate>,
     options: UpdateFeaturesOptions,
 ) -> Result<KafkaFuture<UpdateFeaturesOutcomes>, Error> {
-    let result = admin.update_features(feature_updates, options)?;
+    let result = admin.update_features_options(feature_updates, options)?;
     let entries: Vec<(String, KafkaFuture<()>)> = result
         .values()
         .iter()
@@ -17955,7 +17960,7 @@ fn submit_describe_producers(
     partitions: &[TopicPartition],
     options: DescribeProducersOptions,
 ) -> Result<KafkaFuture<DescribeProducersOutcomes>, Error> {
-    let result = admin.describe_producers(partitions, options);
+    let result = admin.describe_producers_options(partitions, options);
     let mut entries: Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)> = Vec::with_capacity(partitions.len());
     let mut seen: HashSet<&TopicPartition> = HashSet::with_capacity(partitions.len());
     for tp in partitions {
@@ -17977,7 +17982,7 @@ fn submit_describe_transactions(
     transactional_ids: &[String],
     options: DescribeTransactionsOptions,
 ) -> Result<KafkaFuture<DescribeTransactionsOutcomes>, Error> {
-    let result = admin.describe_transactions(transactional_ids, options);
+    let result = admin.describe_transactions_options(transactional_ids, options);
     let mut entries: Vec<(String, KafkaFuture<TransactionDescription>)> = Vec::with_capacity(transactional_ids.len());
     let mut seen: HashSet<&String> = HashSet::with_capacity(transactional_ids.len());
     for id in transactional_ids {
@@ -17995,7 +18000,7 @@ fn submit_abort_transaction(
     spec: AbortTransactionSpec,
     options: AbortTransactionOptions,
 ) -> KafkaFuture<()> {
-    admin.abort_transaction(spec, options).all()
+    admin.abort_transaction_options(spec, options).all()
 }
 
 /// Submits `forceTerminateTransaction` and returns its single `result()` future.
@@ -18004,7 +18009,7 @@ fn submit_force_terminate_transaction(
     transactional_id: &str,
     options: TerminateTransactionOptions,
 ) -> KafkaFuture<()> {
-    admin.force_terminate_transaction(transactional_id, options).result()
+    admin.force_terminate_transaction_options(transactional_id, options).result()
 }
 
 /// Submits `fenceProducers` and returns a future over its per-transactional-id
@@ -18025,7 +18030,7 @@ fn submit_fence_producers(
     transactional_ids: &[String],
     options: FenceProducersOptions,
 ) -> Result<impl std::future::Future<Output = Result<FenceProducersOutcomes, Error>> + Send + use<>, Error> {
-    let result = admin.fence_producers(transactional_ids, options);
+    let result = admin.fence_producers_options(transactional_ids, options);
     let mut ids: Vec<String> = Vec::with_capacity(transactional_ids.len());
     let mut producer_id_entries: Vec<(String, KafkaFuture<i64>)> = Vec::with_capacity(transactional_ids.len());
     let mut epoch_entries: Vec<(String, KafkaFuture<i16>)> = Vec::with_capacity(transactional_ids.len());
@@ -18077,7 +18082,7 @@ fn submit_list_transactions(
     admin: &dyn Admin,
     options: ListTransactionsOptions,
 ) -> impl std::future::Future<Output = Result<ListTransactionsOutcomes, Error>> + Send + use<> {
-    let result = admin.list_transactions(options);
+    let result = admin.list_transactions_options(options);
     async move {
         let by_broker = result.by_broker_id().get().await?;
         let entries: Vec<(i32, KafkaFuture<Vec<TransactionListing>>)> = by_broker.into_iter().collect();

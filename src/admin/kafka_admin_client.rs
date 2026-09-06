@@ -3003,7 +3003,7 @@ fn get_delete_topics_with_ids_call(
 
 #[async_trait]
 impl Admin for KafkaAdminClient {
-    fn create_topics(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult {
+    fn create_topics_options(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
@@ -3045,7 +3045,7 @@ impl Admin for KafkaAdminClient {
         CreateTopicsResult::new(public)
     }
 
-    fn delete_topics(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult {
+    fn delete_topics_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
@@ -3117,7 +3117,7 @@ impl Admin for KafkaAdminClient {
         }
     }
 
-    fn list_topics(&self, options: ListTopicsOptions) -> ListTopicsResult {
+    fn list_topics_options(&self, options: ListTopicsOptions) -> ListTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<HashMap<String, TopicListing>> = KafkaFutureImpl::new();
@@ -3168,7 +3168,7 @@ impl Admin for KafkaAdminClient {
         ListTopicsResult::new(public)
     }
 
-    fn describe_topics(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult {
+    fn describe_topics_options(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
@@ -3236,7 +3236,7 @@ impl Admin for KafkaAdminClient {
         }
     }
 
-    fn create_partitions(
+    fn create_partitions_options(
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
         options: CreatePartitionsOptions,
@@ -3284,7 +3284,7 @@ impl Admin for KafkaAdminClient {
         CreatePartitionsResult::new(public)
     }
 
-    fn delete_records(
+    fn delete_records_options(
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
@@ -3323,7 +3323,7 @@ impl Admin for KafkaAdminClient {
         DeleteRecordsResult::new(result_map)
     }
 
-    fn describe_producers(
+    fn describe_producers_options(
         &self,
         partitions: &[TopicPartition],
         options: DescribeProducersOptions,
@@ -3344,7 +3344,7 @@ impl Admin for KafkaAdminClient {
         DescribeProducersResult::new(result_map)
     }
 
-    fn abort_transaction(
+    fn abort_transaction_options(
         &self,
         spec: AbortTransactionSpec,
         options: AbortTransactionOptions,
@@ -3365,7 +3365,7 @@ impl Admin for KafkaAdminClient {
         AbortTransactionResult::new(result_map)
     }
 
-    fn describe_transactions(
+    fn describe_transactions_options(
         &self,
         transactional_ids: &[String],
         options: DescribeTransactionsOptions,
@@ -3384,7 +3384,11 @@ impl Admin for KafkaAdminClient {
         DescribeTransactionsResult::new(coordinator_keyed_by_id(result_map))
     }
 
-    fn fence_producers(&self, transactional_ids: &[String], options: FenceProducersOptions) -> FenceProducersResult {
+    fn fence_producers_options(
+        &self,
+        transactional_ids: &[String],
+        options: FenceProducersOptions,
+    ) -> FenceProducersResult {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
         let future = FenceProducersHandler::new_future(transactional_ids);
         let result_map = future.all();
@@ -3399,7 +3403,7 @@ impl Admin for KafkaAdminClient {
         FenceProducersResult::new(coordinator_keyed_by_id(result_map))
     }
 
-    fn list_transactions(&self, options: ListTransactionsOptions) -> ListTransactionsResult {
+    fn list_transactions_options(&self, options: ListTransactionsOptions) -> ListTransactionsResult {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
         let future = ListTransactionsHandler::new_future();
         let result_future = future.all();
@@ -3414,7 +3418,7 @@ impl Admin for KafkaAdminClient {
         ListTransactionsResult::new(result_future)
     }
 
-    fn force_terminate_transaction(
+    fn force_terminate_transaction_options(
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
@@ -3426,7 +3430,7 @@ impl Admin for KafkaAdminClient {
             fence_options = fence_options.set_timeout_ms(options.timeout_ms());
         }
         let ids = vec![transactional_id.to_string()];
-        let fence_result = self.fence_producers(&ids, fence_options);
+        let fence_result = self.fence_producers_options(&ids, fence_options);
 
         // Convert the result to a TerminateTransactionResult.
         let future = fence_result
@@ -3437,7 +3441,7 @@ impl Admin for KafkaAdminClient {
         TerminateTransactionResult::new(future)
     }
 
-    fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
+    fn describe_cluster_options(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
@@ -3573,7 +3577,7 @@ impl Admin for KafkaAdminClient {
         public
     }
 
-    fn describe_configs(
+    fn describe_configs_options(
         &self,
         config_resources: &[ConfigResource],
         options: DescribeConfigsOptions,
@@ -3612,7 +3616,7 @@ impl Admin for KafkaAdminClient {
         DescribeConfigsResult::new(public)
     }
 
-    fn incremental_alter_configs(
+    fn incremental_alter_configs_options(
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         options: AlterConfigsOptions,
@@ -3656,7 +3660,7 @@ impl Admin for KafkaAdminClient {
         AlterConfigsResult::new(all_futures)
     }
 
-    fn list_config_resources(
+    fn list_config_resources_options(
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
         options: ListConfigResourcesOptions,
@@ -3706,7 +3710,7 @@ impl Admin for KafkaAdminClient {
     }
 
     #[allow(deprecated)]
-    fn list_client_metrics_resources(
+    fn list_client_metrics_resources_options(
         &self,
         options: ListClientMetricsResourcesOptions,
     ) -> ListClientMetricsResourcesResult {
@@ -3763,7 +3767,7 @@ impl Admin for KafkaAdminClient {
         ListClientMetricsResourcesResult::new(public)
     }
 
-    fn describe_log_dirs(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
+    fn describe_log_dirs_options(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
@@ -3778,7 +3782,7 @@ impl Admin for KafkaAdminClient {
         DescribeLogDirsResult::new(public)
     }
 
-    fn alter_replica_log_dirs(
+    fn alter_replica_log_dirs_options(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         options: AlterReplicaLogDirsOptions,
@@ -3829,7 +3833,7 @@ impl Admin for KafkaAdminClient {
         AlterReplicaLogDirsResult::new(public)
     }
 
-    fn describe_replica_log_dirs(
+    fn describe_replica_log_dirs_options(
         &self,
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
@@ -3884,7 +3888,7 @@ impl Admin for KafkaAdminClient {
         DescribeReplicaLogDirsResult::new(public)
     }
 
-    fn elect_leaders(
+    fn elect_leaders_options(
         &self,
         election_type: ElectionType,
         partitions: Option<HashSet<TopicPartition>>,
@@ -3942,7 +3946,7 @@ impl Admin for KafkaAdminClient {
         ElectLeadersResult::new(public)
     }
 
-    fn alter_partition_reassignments(
+    fn alter_partition_reassignments_options(
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         options: AlterPartitionReassignmentsOptions,
@@ -4001,7 +4005,7 @@ impl Admin for KafkaAdminClient {
         AlterPartitionReassignmentsResult::new(public)
     }
 
-    fn list_partition_reassignments(
+    fn list_partition_reassignments_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
         options: ListPartitionReassignmentsOptions,
@@ -4043,7 +4047,7 @@ impl Admin for KafkaAdminClient {
         ListPartitionReassignmentsResult::new(public)
     }
 
-    fn list_offsets(
+    fn list_offsets_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         options: ListOffsetsOptions,
@@ -4085,7 +4089,7 @@ impl Admin for KafkaAdminClient {
         ListOffsetsResult::new(result_map)
     }
 
-    fn list_groups(&self, options: ListGroupsOptions) -> ListGroupsResult {
+    fn list_groups_options(&self, options: ListGroupsOptions) -> ListGroupsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
@@ -4115,7 +4119,7 @@ impl Admin for KafkaAdminClient {
     }
 
     #[allow(deprecated)]
-    fn list_consumer_groups(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
+    fn list_consumer_groups_options(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
@@ -4148,7 +4152,7 @@ impl Admin for KafkaAdminClient {
         ListConsumerGroupsResult::new(future)
     }
 
-    fn describe_consumer_groups(
+    fn describe_consumer_groups_options(
         &self,
         group_ids: &[String],
         options: DescribeConsumerGroupsOptions,
@@ -4167,7 +4171,7 @@ impl Admin for KafkaAdminClient {
         DescribeConsumerGroupsResult::new(coordinator_keyed_by_id(result_map))
     }
 
-    fn describe_classic_groups(
+    fn describe_classic_groups_options(
         &self,
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
@@ -4186,7 +4190,7 @@ impl Admin for KafkaAdminClient {
         DescribeClassicGroupsResult::new(coordinator_keyed_by_id(result_map))
     }
 
-    fn list_consumer_group_offsets(
+    fn list_consumer_group_offsets_options(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         options: ListConsumerGroupOffsetsOptions,
@@ -4207,7 +4211,7 @@ impl Admin for KafkaAdminClient {
         ListConsumerGroupOffsetsResult::new(coordinator_keyed_by_id(result_map))
     }
 
-    fn alter_consumer_group_offsets(
+    fn alter_consumer_group_offsets_options(
         &self,
         group_id: &str,
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
@@ -4228,7 +4232,7 @@ impl Admin for KafkaAdminClient {
         AlterConsumerGroupOffsetsResult::new(result_map.get(&key).expect("future exists for the group key").clone())
     }
 
-    fn delete_consumer_group_offsets(
+    fn delete_consumer_group_offsets_options(
         &self,
         group_id: &str,
         partitions: &HashSet<TopicPartition>,
@@ -4252,7 +4256,7 @@ impl Admin for KafkaAdminClient {
         )
     }
 
-    fn delete_consumer_groups(
+    fn delete_consumer_groups_options(
         &self,
         group_ids: &[String],
         options: DeleteConsumerGroupsOptions,
@@ -4271,7 +4275,7 @@ impl Admin for KafkaAdminClient {
         DeleteConsumerGroupsResult::new(coordinator_keyed_by_id(result_map))
     }
 
-    fn remove_members_from_consumer_group(
+    fn remove_members_from_consumer_group_options(
         &self,
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
@@ -4397,7 +4401,7 @@ impl Admin for KafkaAdminClient {
         RemoveMembersFromConsumerGroupResult::new(group_future, options.members().clone())
     }
 
-    fn create_acls(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult {
+    fn create_acls_options(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
@@ -4436,7 +4440,7 @@ impl Admin for KafkaAdminClient {
         CreateAclsResult::new(public)
     }
 
-    fn describe_acls(&self, filter: &AclBindingFilter, options: DescribeAclsOptions) -> DescribeAclsResult {
+    fn describe_acls_options(&self, filter: &AclBindingFilter, options: DescribeAclsOptions) -> DescribeAclsResult {
         // Short-circuit on an unknown filter, mirroring
         // `KafkaAdminClient.describeAcls`: complete the future exceptionally
         // with InvalidRequestException and enqueue no Call.
@@ -4458,7 +4462,7 @@ impl Admin for KafkaAdminClient {
         DescribeAclsResult::new(public)
     }
 
-    fn delete_acls(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult {
+    fn delete_acls_options(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
@@ -4486,7 +4490,7 @@ impl Admin for KafkaAdminClient {
         DeleteAclsResult::new(public)
     }
 
-    fn describe_client_quotas(
+    fn describe_client_quotas_options(
         &self,
         filter: &ClientQuotaFilter,
         options: DescribeClientQuotasOptions,
@@ -4500,7 +4504,7 @@ impl Admin for KafkaAdminClient {
         DescribeClientQuotasResult::new(public)
     }
 
-    fn alter_client_quotas(
+    fn alter_client_quotas_options(
         &self,
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
@@ -4522,7 +4526,7 @@ impl Admin for KafkaAdminClient {
         AlterClientQuotasResult::new(public)
     }
 
-    fn describe_user_scram_credentials(
+    fn describe_user_scram_credentials_options(
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
@@ -4536,7 +4540,7 @@ impl Admin for KafkaAdminClient {
         DescribeUserScramCredentialsResult::new(public)
     }
 
-    fn alter_user_scram_credentials(
+    fn alter_user_scram_credentials_options(
         &self,
         alterations: &[UserScramCredentialAlteration],
         options: AlterUserScramCredentialsOptions,
@@ -4648,7 +4652,7 @@ impl Admin for KafkaAdminClient {
         AlterUserScramCredentialsResult::new(public)
     }
 
-    fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
+    fn create_delegation_token_options(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
@@ -4658,7 +4662,11 @@ impl Admin for KafkaAdminClient {
         CreateDelegationTokenResult::new(public)
     }
 
-    fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult {
+    fn renew_delegation_token_options(
+        &self,
+        hmac: &[u8],
+        options: RenewDelegationTokenOptions,
+    ) -> RenewDelegationTokenResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
@@ -4668,7 +4676,7 @@ impl Admin for KafkaAdminClient {
         RenewDelegationTokenResult::new(public)
     }
 
-    fn expire_delegation_token(
+    fn expire_delegation_token_options(
         &self,
         hmac: &[u8],
         options: ExpireDelegationTokenOptions,
@@ -4682,7 +4690,10 @@ impl Admin for KafkaAdminClient {
         ExpireDelegationTokenResult::new(public)
     }
 
-    fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult {
+    fn describe_delegation_token_options(
+        &self,
+        options: DescribeDelegationTokenOptions,
+    ) -> DescribeDelegationTokenResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
@@ -4693,7 +4704,7 @@ impl Admin for KafkaAdminClient {
         DescribeDelegationTokenResult::new(public)
     }
 
-    fn describe_features(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
+    fn describe_features_options(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
         let handle: KafkaFutureImpl<FeatureMetadata> = KafkaFutureImpl::new();
         let public = handle.future();
         let now = self.now();
@@ -4745,7 +4756,7 @@ impl Admin for KafkaAdminClient {
         DescribeFeaturesResult::new(public)
     }
 
-    fn update_features(
+    fn update_features_options(
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
@@ -4877,7 +4888,7 @@ impl Admin for KafkaAdminClient {
         Ok(UpdateFeaturesResult::new(public))
     }
 
-    async fn close(&self, timeout: Duration) {
+    async fn close_timeout(&self, timeout: Duration) {
         // Java: `waitTimeMs = Math.min(TimeUnit.DAYS.toMillis(365), timeout.toMillis())`.
         // Its `waitTimeMs < 0` check throws `IllegalArgumentException`; a
         // `Duration` cannot be negative, so that branch is unrepresentable here.
@@ -5557,7 +5568,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(describe_acls_response(&[acl1(), acl2()]));
-        let result = admin.describe_acls(&filter1(), DescribeAclsOptions::new());
+        let result = admin.describe_acls_options(&filter1(), DescribeAclsOptions::new());
         pump(&mut runnable, 5).await;
         let mut acls = result.values().get().await.unwrap();
         acls.sort_by(|a, b| a.pattern().name().cmp(b.pattern().name()));
@@ -5565,7 +5576,7 @@ mod tests {
 
         // Test a call where we get back no results.
         runnable.client_mut().prepare_response(describe_acls_response(&[]));
-        let result = admin.describe_acls(&filter2(), DescribeAclsOptions::new());
+        let result = admin.describe_acls_options(&filter2(), DescribeAclsOptions::new());
         pump(&mut runnable, 5).await;
         assert!(result.values().get().await.unwrap().is_empty());
 
@@ -5573,7 +5584,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(describe_acls_error_response(Errors::SecurityDisabled, "Security is disabled"));
-        let result = admin.describe_acls(&filter2(), DescribeAclsOptions::new());
+        let result = admin.describe_acls_options(&filter2(), DescribeAclsOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.values().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::SecurityDisabled);
@@ -5581,7 +5592,7 @@ mod tests {
         // Test a call where we supply an invalid filter: completes exceptionally
         // with InvalidRequest and enqueues NO network call.
         let before = runnable.client_mut().request_count();
-        let result = admin.describe_acls(&unknown_filter(), DescribeAclsOptions::new());
+        let result = admin.describe_acls_options(&unknown_filter(), DescribeAclsOptions::new());
         assert!(result.values().is_done());
         pump(&mut runnable, 5).await;
         assert_eq!(
@@ -5602,7 +5613,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(create_acls_response(vec![create_acls_result_ok(), create_acls_result_ok()]));
-        let results = admin.create_acls(&[acl1(), acl2()], CreateAclsOptions::new());
+        let results = admin.create_acls_options(&[acl1(), acl2()], CreateAclsOptions::new());
         let keys: HashSet<AclBinding> = results.values().keys().cloned().collect();
         assert_eq!(keys, HashSet::from([acl1(), acl2()]));
         pump(&mut runnable, 5).await;
@@ -5616,7 +5627,7 @@ mod tests {
             create_acls_result_error(Errors::SecurityDisabled, "Security is disabled"),
             create_acls_result_ok(),
         ]));
-        let results = admin.create_acls(&[acl1(), acl2()], CreateAclsOptions::new());
+        let results = admin.create_acls_options(&[acl1(), acl2()], CreateAclsOptions::new());
         pump(&mut runnable, 5).await;
         assert_eq!(
             results.values()[&acl1()].get().await.unwrap_err().error(),
@@ -5649,7 +5660,7 @@ mod tests {
             .client_mut()
             .prepare_response(create_acls_response(vec![create_acls_result_ok()]));
 
-        let results = admin.create_acls(&[acl1()], CreateAclsOptions::new());
+        let results = admin.create_acls_options(&[acl1()], CreateAclsOptions::new());
         let keys: HashSet<AclBinding> = results.values().keys().cloned().collect();
         assert_eq!(keys, HashSet::from([acl1()]));
         for _ in 0..30 {
@@ -5682,7 +5693,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_acls_response(vec![filter1_result, filter2_result]));
-        let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
+        let results = admin.delete_acls_options(&[filter1(), filter2()], DeleteAclsOptions::new());
         pump(&mut runnable, 5).await;
         let filter1_results = results.values()[&filter1()].get().await.unwrap();
         assert!(filter1_results.values()[0].error().is_none());
@@ -5713,7 +5724,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_acls_response(vec![filter1_result, filter2_result]));
-        let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
+        let results = admin.delete_acls_options(&[filter1(), filter2()], DeleteAclsOptions::new());
         pump(&mut runnable, 5).await;
         assert!(results.values()[&filter2()].get().await.unwrap().values().is_empty());
         assert_eq!(results.all().get().await.unwrap_err().error(), Errors::SecurityDisabled);
@@ -5724,7 +5735,7 @@ mod tests {
         let mut f2 = DeleteAclsFilterResult::new();
         f2.set_matching_acls(vec![DeleteAclsResponse::matching_acl(&acl2(), Errors::None, None)]);
         runnable.client_mut().prepare_response(delete_acls_response(vec![f1, f2]));
-        let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
+        let results = admin.delete_acls_options(&[filter1(), filter2()], DeleteAclsOptions::new());
         pump(&mut runnable, 5).await;
         let mut deleted = results.all().get().await.unwrap();
         deleted.sort_by(|a, b| a.pattern().name().cmp(b.pattern().name()));
@@ -5749,7 +5760,7 @@ mod tests {
         ok.set_matching_acls(vec![DeleteAclsResponse::matching_acl(&acl1(), Errors::None, None)]);
         runnable.client_mut().prepare_response(delete_acls_response(vec![ok]));
 
-        let results = admin.delete_acls(&[filter1()], DeleteAclsOptions::new());
+        let results = admin.delete_acls_options(&[filter1()], DeleteAclsOptions::new());
         for _ in 0..30 {
             if results.values()[&filter1()].is_done() {
                 break;
@@ -5776,7 +5787,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(create_acls_response(vec![create_acls_result_ok()]));
-        let results = admin.create_acls(&[acl1(), bad.clone()], CreateAclsOptions::new());
+        let results = admin.create_acls_options(&[acl1(), bad.clone()], CreateAclsOptions::new());
         pump(&mut runnable, 5).await;
         results.values()[&acl1()].get().await.unwrap();
         let err = results.values()[&bad].get().await.unwrap_err();
@@ -5819,7 +5830,7 @@ mod tests {
         ));
 
         let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(USER, value)]);
-        let result = admin.describe_client_quotas(&filter, DescribeClientQuotasOptions::new());
+        let result = admin.describe_client_quotas_options(&filter, DescribeClientQuotasOptions::new());
         pump(&mut runnable, 5).await;
 
         let result_data = result.entities().get().await.unwrap();
@@ -5869,7 +5880,7 @@ mod tests {
             ClientQuotaAlteration::new(unauthorized_entity.clone(), vec![Op::new("producer_byte_rate", Some(10000.0))]),
             ClientQuotaAlteration::new(invalid_entity.clone(), vec![Op::new("producer_byte_rate", Some(100.0))]),
         ];
-        let result = admin.alter_client_quotas(&entries, AlterClientQuotasOptions::new());
+        let result = admin.alter_client_quotas_options(&entries, AlterClientQuotasOptions::new());
         pump(&mut runnable, 5).await;
 
         // good_entity got CLUSTER_AUTHORIZATION_FAILED in this response fixture.
@@ -5948,7 +5959,8 @@ mod tests {
                     DescribeUserScramCredentialsResponse::new(response_data.clone(), 0),
                 ));
 
-            let result = admin.describe_user_scram_credentials(&users, DescribeUserScramCredentialsOptions::new());
+            let result =
+                admin.describe_user_scram_credentials_options(&users, DescribeUserScramCredentialsOptions::new());
             let user0_desc_future = result.description(user0_name);
             let user1_desc_future = result.description(user1_name);
             pump(&mut runnable, 5).await;
@@ -6014,7 +6026,7 @@ mod tests {
             )
             .into(),
         ];
-        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        let result = admin.alter_user_scram_credentials_options(&alterations, AlterUserScramCredentialsOptions::new());
         pump(&mut runnable, 5).await;
 
         let result_data = result.values();
@@ -6071,7 +6083,7 @@ mod tests {
             )
             .into(),
         ];
-        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        let result = admin.alter_user_scram_credentials_options(&alterations, AlterUserScramCredentialsOptions::new());
         pump(&mut runnable, 5).await;
 
         let result_data = result.values();
@@ -6132,7 +6144,7 @@ mod tests {
             .into(),
             UserScramCredentialDeletion::new(user2_name, user2_mechanism0).into(),
         ];
-        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        let result = admin.alter_user_scram_credentials_options(&alterations, AlterUserScramCredentialsOptions::new());
         pump(&mut runnable, 5).await;
 
         let result_data = result.values();
@@ -6148,7 +6160,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_success() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
@@ -6168,7 +6180,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_error_surfaces_message() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor("bad", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
@@ -6186,7 +6198,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_partial_response_completes_unrealized() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[
                 NewTopic::new_num_partitions_replication_factor("present", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("missing", Some(1), Some(1)),
@@ -6209,7 +6221,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_retries_on_disconnect() {
         let (admin, mut runnable, time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
@@ -6243,7 +6255,7 @@ mod tests {
     async fn test_create_topics_retry_backoff() {
         let retry_backoff = 5000;
         let (admin, mut runnable, time, _nodes) = env_with_props(&[("retry.backoff.ms", &retry_backoff.to_string())]);
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
@@ -6299,7 +6311,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
@@ -6339,7 +6351,7 @@ mod tests {
             .client_mut()
             .prepare_response(create_response_throttled(0, vec![create_result("topic2", Errors::None, None)]));
 
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[
                 NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
@@ -6365,7 +6377,7 @@ mod tests {
                 create_result("topic3", Errors::TopicAlreadyExists, None),
             ],
         ));
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[
                 NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
@@ -6399,7 +6411,7 @@ mod tests {
             1000,
             vec![create_result("topic2", Errors::ThrottlingQuotaExceeded, None)],
         ));
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[
                 NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
@@ -6432,7 +6444,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_success() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -6446,7 +6458,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_error() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_names(vec!["ghost".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -6463,7 +6475,7 @@ mod tests {
     async fn test_delete_topics_by_id_success() {
         let (admin, mut runnable, _time, _nodes) = env();
         let id = Uuid::new(1, 2);
-        let result = admin.delete_topics(TopicCollection::of_topic_ids(vec![id]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_options(TopicCollection::of_topic_ids(vec![id]), DeleteTopicsOptions::new());
         let mut r = DeletableTopicResult::new();
         r.set_topic_id(id);
         r.set_error_code(Errors::None.code());
@@ -6477,7 +6489,7 @@ mod tests {
         // By name: the response omits "myOtherTopic", so its future is
         // completed by the unrealized-futures sanity check.
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string(), "myOtherTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -6497,7 +6509,8 @@ mod tests {
         let (admin, mut runnable, _time, _nodes) = env();
         let id1 = Uuid::new(1, 1);
         let id2 = Uuid::new(2, 2);
-        let result = admin.delete_topics(TopicCollection::of_topic_ids(vec![id1, id2]), DeleteTopicsOptions::new());
+        let result =
+            admin.delete_topics_options(TopicCollection::of_topic_ids(vec![id1, id2]), DeleteTopicsOptions::new());
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(1000, vec![delete_result_with_id(id1, Errors::None)]));
@@ -6529,7 +6542,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_named("topic2", Errors::None)]));
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -6559,7 +6572,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_with_id(id2, Errors::None)]));
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -6582,7 +6595,7 @@ mod tests {
                 delete_result_named("topic3", Errors::TopicAlreadyExists),
             ],
         ));
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -6607,7 +6620,7 @@ mod tests {
                 delete_result_with_id(id3, Errors::UnknownTopicId),
             ],
         ));
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -6638,7 +6651,7 @@ mod tests {
             1000,
             vec![delete_result_named("topic2", Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -6673,7 +6686,7 @@ mod tests {
             1000,
             vec![delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics(
+        let result = admin.delete_topics_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -6708,7 +6721,7 @@ mod tests {
         // is what `submit`'s `SendError` arm observes.
         drop(runnable);
 
-        let result = admin.list_topics(ListTopicsOptions::new());
+        let result = admin.list_topics_options(ListTopicsOptions::new());
         let error = result.names().get().await.expect_err("the call cannot be delivered");
 
         assert_eq!(error.message(), "The AdminClient thread has exited.");
@@ -6755,7 +6768,7 @@ mod tests {
             true,
         );
 
-        let result = admin.list_topics(ListTopicsOptions::new());
+        let result = admin.list_topics_options(ListTopicsOptions::new());
         for _ in 0..30 {
             if result.names().is_done() {
                 break;
@@ -6987,7 +7000,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_topics_filters_internal_by_default() {
         let (admin, mut runnable, _time, nodes) = env();
-        let result = admin.list_topics(ListTopicsOptions::new());
+        let result = admin.list_topics_options(ListTopicsOptions::new());
         let topics = vec![
             topic_meta("visible", false, Uuid::new(0, 1), 1),
             topic_meta("__consumer_offsets", true, Uuid::new(0, 2), 1),
@@ -7009,7 +7022,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_topics_includes_internal_when_requested() {
         let (admin, mut runnable, _time, nodes) = env();
-        let result = admin.list_topics(ListTopicsOptions::new().set_list_internal(true));
+        let result = admin.list_topics_options(ListTopicsOptions::new().set_list_internal(true));
         let topics = vec![topic_meta("__consumer_offsets", true, Uuid::new(0, 2), 1)];
         runnable
             .client_mut()
@@ -7029,7 +7042,7 @@ mod tests {
     #[tokio::test]
     async fn test_describe_topics_success() {
         let (admin, mut runnable, _time, nodes) = env();
-        let result = admin.describe_topics(
+        let result = admin.describe_topics_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string()]),
             DescribeTopicsOptions::new(),
         );
@@ -7053,7 +7066,7 @@ mod tests {
     #[tokio::test]
     async fn test_describe_topics_unknown_topic() {
         let (admin, mut runnable, _time, nodes) = env();
-        let result = admin.describe_topics(
+        let result = admin.describe_topics_options(
             TopicCollection::of_topic_names(vec!["nope".to_string()]),
             DescribeTopicsOptions::new(),
         );
@@ -7087,7 +7100,8 @@ mod tests {
                 0,
                 topics,
             )));
-        let result = admin.describe_topics(TopicCollection::of_topic_ids(vec![topic_id]), DescribeTopicsOptions::new());
+        let result =
+            admin.describe_topics_options(TopicCollection::of_topic_ids(vec![topic_id]), DescribeTopicsOptions::new());
         pump(&mut runnable, 5).await;
         let all = result.all_topic_ids().unwrap().get().await.unwrap();
         assert_eq!(all[&topic_id].name(), "test-topic");
@@ -7104,7 +7118,7 @@ mod tests {
                 Vec::new(),
             )));
         let result =
-            admin.describe_topics(TopicCollection::of_topic_ids(vec![non_exist]), DescribeTopicsOptions::new());
+            admin.describe_topics_options(TopicCollection::of_topic_ids(vec![non_exist]), DescribeTopicsOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.all_topic_ids().unwrap().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownTopicId);
@@ -7112,7 +7126,7 @@ mod tests {
 
         // The zero id cannot be represented in a request; no request is sent.
         let (admin, _runnable, _time, _nodes) = env();
-        let result = admin.describe_topics(
+        let result = admin.describe_topics_options(
             TopicCollection::of_topic_ids(vec![Uuid::ZERO_UUID]),
             DescribeTopicsOptions::new(),
         );
@@ -7128,7 +7142,7 @@ mod tests {
     async fn test_create_topics_response_config_metadata() {
         use crate::create_topics_response_data::CreatableTopicConfigs;
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
@@ -7157,7 +7171,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor("", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
@@ -7169,8 +7183,8 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
-        let result =
-            admin.delete_topics(TopicCollection::of_topic_names(vec![String::new()]), DeleteTopicsOptions::new());
+        let result = admin
+            .delete_topics_options(TopicCollection::of_topic_names(vec![String::new()]), DeleteTopicsOptions::new());
         let err = result.topic_name_values().unwrap()[""].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
@@ -7207,7 +7221,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_partitions() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_partitions(&new_partitions_counts(), CreatePartitionsOptions::new());
+        let result = admin.create_partitions_options(&new_partitions_counts(), CreatePartitionsOptions::new());
         runnable.client_mut().prepare_response(create_partitions_response(
             1000,
             vec![
@@ -7252,7 +7266,7 @@ mod tests {
         counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
         counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
         let result =
-            admin.create_partitions(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(true));
+            admin.create_partitions_options(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(true));
 
         pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
         result.values()["topic1"].get().await.unwrap();
@@ -7277,8 +7291,8 @@ mod tests {
         counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
         counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
         counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
-        let result =
-            admin.create_partitions(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(false));
+        let result = admin
+            .create_partitions_options(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(false));
 
         pump(&mut runnable, 5).await;
         result.values()["topic1"].get().await.unwrap();
@@ -7316,7 +7330,7 @@ mod tests {
         counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
         counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
         let result =
-            admin.create_partitions(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(true));
+            admin.create_partitions_options(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(true));
 
         pump_until(&mut runnable, 30, |r| {
             !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
@@ -7425,7 +7439,7 @@ mod tests {
         records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::new_before_offset(10));
         records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::new_before_offset(10));
         records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::new_before_offset(10));
-        let result = admin.delete_records(&records, DeleteRecordsOptions::new());
+        let result = admin.delete_records_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
         pump_until(&mut runnable, 40, |_r| values.values().all(|f| f.is_done())).await;
@@ -7458,7 +7472,7 @@ mod tests {
 
         let mut records = HashMap::new();
         records.insert(TopicPartition::new("foo", 0), RecordsToDelete::new_before_offset(10));
-        let result = admin.delete_records(&records, DeleteRecordsOptions::new());
+        let result = admin.delete_records_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
         pump_until(&mut runnable, 20, |_r| values.values().all(|f| f.is_done())).await;
@@ -7494,7 +7508,7 @@ mod tests {
         let mut records = HashMap::new();
         records.insert(TopicPartition::new("foo", 0), RecordsToDelete::new_before_offset(10));
         records.insert(TopicPartition::new("foo", 1), RecordsToDelete::new_before_offset(10));
-        let result = admin.delete_records(&records, DeleteRecordsOptions::new());
+        let result = admin.delete_records_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
         pump_until(&mut runnable, 40, |_r| values.values().all(|f| f.is_done())).await;
@@ -7510,7 +7524,7 @@ mod tests {
     async fn test_mock_delete_records_empty() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.delete_records(&HashMap::new(), DeleteRecordsOptions::new());
+        let result = mock.delete_records_options(&HashMap::new(), DeleteRecordsOptions::new());
         assert!(result.low_watermarks().is_empty());
     }
 
@@ -7590,7 +7604,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(build_describe_producers_response(&tp, &expected), &nodes[0]);
 
-        let result = admin.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
+        let result = admin.describe_producers_options(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let partition_future = result.partition_result(&tp).unwrap();
         pump_until(&mut runnable, 40, |_r| partition_future.is_done()).await;
         let state = partition_future.get().await.unwrap();
@@ -7616,7 +7630,7 @@ mod tests {
             }
 
             let options = DescribeProducersOptions::new().set_timeout_ms(Some(request_timeout_ms));
-            let result = admin.describe_producers(std::slice::from_ref(&tp), options);
+            let result = admin.describe_producers_options(std::slice::from_ref(&tp), options);
             let all = result.all();
             // Drain whatever is prepared, then confirm the request has not
             // completed before the timeout elapses.
@@ -7658,7 +7672,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(build_describe_producers_response(&tp, &expected), &nodes[1]);
 
-        let result = admin.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
+        let result = admin.describe_producers_options(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let partition_future = result.partition_result(&tp).unwrap();
         drive_until(&mut runnable, &time, 60, || partition_future.is_done()).await;
         let state = partition_future.get().await.unwrap();
@@ -7682,7 +7696,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(write_txn_markers_response(&spec, Errors::None), &nodes[0]);
 
-        let result = admin.abort_transaction(spec, AbortTransactionOptions::new());
+        let result = admin.abort_transaction_options(spec, AbortTransactionOptions::new());
         let all = result.all();
         pump_until(&mut runnable, 40, |_r| all.is_done()).await;
         all.get().await.unwrap();
@@ -7708,7 +7722,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(write_txn_markers_response(&spec, Errors::None), &nodes[1]);
 
-        let result = admin.abort_transaction(spec, AbortTransactionOptions::new());
+        let result = admin.abort_transaction_options(spec, AbortTransactionOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 60, || all.is_done()).await;
         all.get().await.unwrap();
@@ -7720,7 +7734,7 @@ mod tests {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let tp = TopicPartition::new("foo", 0);
-        let result = mock.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
+        let result = mock.describe_producers_options(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let err = result.partition_result(&tp).unwrap().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
@@ -7731,7 +7745,7 @@ mod tests {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
-        let result = mock.abort_transaction(spec, AbortTransactionOptions::new());
+        let result = mock.abort_transaction_options(spec, AbortTransactionOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
@@ -7806,7 +7820,7 @@ mod tests {
             coordinator,
         );
 
-        let result = admin.describe_transactions(&["foo".to_string()], DescribeTransactionsOptions::new());
+        let result = admin.describe_transactions_options(&["foo".to_string()], DescribeTransactionsOptions::new());
         let future = result.description(transactional_id).unwrap();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
         let expected = TransactionDescription::new(
@@ -7851,7 +7865,7 @@ mod tests {
             coordinator2,
         );
 
-        let result = admin.describe_transactions(&["foo".to_string()], DescribeTransactionsOptions::new());
+        let result = admin.describe_transactions_options(&["foo".to_string()], DescribeTransactionsOptions::new());
         let future = result.description(transactional_id).unwrap();
         drive_until(&mut runnable, &time, 60, || future.is_done()).await;
         let expected = TransactionDescription::new(
@@ -7894,7 +7908,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(init_producer_id_resp(Errors::None, 4761, 489), coordinator);
 
-        let result = admin.fence_producers(&["copyCat".to_string()], FenceProducersOptions::new());
+        let result = admin.fence_producers_options(&["copyCat".to_string()], FenceProducersOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 80, || all.is_done()).await;
         all.get().await.unwrap();
@@ -7907,7 +7921,7 @@ mod tests {
     async fn test_mock_describe_transactions_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.describe_transactions(&["t".to_string()], DescribeTransactionsOptions::new());
+        let result = mock.describe_transactions_options(&["t".to_string()], DescribeTransactionsOptions::new());
         assert_eq!(
             result.description("t").unwrap().get().await.unwrap_err().error(),
             Errors::UnsupportedVersion
@@ -7919,7 +7933,7 @@ mod tests {
     async fn test_mock_fence_producers_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.fence_producers(&["t".to_string()], FenceProducersOptions::new());
+        let result = mock.fence_producers_options(&["t".to_string()], FenceProducersOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
@@ -7958,7 +7972,7 @@ mod tests {
                 .prepare_response_from(list_transactions_resp(&expected[node.id() as usize]), node);
         }
 
-        let result = admin.list_transactions(ListTransactionsOptions::new());
+        let result = admin.list_transactions_options(ListTransactionsOptions::new());
         let all = result.all();
         pump_until(&mut runnable, 60, |_r| all.is_done()).await;
         assert_eq!(
@@ -7980,7 +7994,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(init_producer_id_resp(Errors::None, 5678, 123), coordinator);
 
-        let result = admin.force_terminate_transaction(transactional_id, TerminateTransactionOptions::new());
+        let result = admin.force_terminate_transaction_options(transactional_id, TerminateTransactionOptions::new());
         let future = result.result();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
         future.get().await.unwrap();
@@ -8000,7 +8014,7 @@ mod tests {
             coordinator,
         );
 
-        let result = admin.force_terminate_transaction(transactional_id, TerminateTransactionOptions::new());
+        let result = admin.force_terminate_transaction_options(transactional_id, TerminateTransactionOptions::new());
         let future = result.result();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
         assert_eq!(
@@ -8023,7 +8037,7 @@ mod tests {
             .prepare_response_from(init_producer_id_resp(Errors::None, 9012, 456), coordinator);
 
         let options = TerminateTransactionOptions::new().set_timeout_ms(Some(10000));
-        let result = admin.force_terminate_transaction(transactional_id, options);
+        let result = admin.force_terminate_transaction_options(transactional_id, options);
         let future = result.result();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
         future.get().await.unwrap();
@@ -8034,7 +8048,7 @@ mod tests {
     async fn test_mock_list_transactions_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.list_transactions(ListTransactionsOptions::new());
+        let result = mock.list_transactions_options(ListTransactionsOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
@@ -8043,7 +8057,7 @@ mod tests {
     async fn test_mock_force_terminate_transaction_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.force_terminate_transaction("t", TerminateTransactionOptions::new());
+        let result = mock.force_terminate_transaction_options("t", TerminateTransactionOptions::new());
         assert_eq!(result.result().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
@@ -8107,7 +8121,7 @@ mod tests {
             cluster_id,
             AUTHORIZED_OPERATIONS_OMITTED,
         ));
-        let result = admin.describe_cluster(DescribeClusterOptions::new());
+        let result = admin.describe_cluster_options(DescribeClusterOptions::new());
         pump(&mut runnable, 5).await;
         assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
         let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
@@ -8120,7 +8134,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(describe_cluster_response(1, &nodes, cluster_id, ops));
-        let result2 = admin.describe_cluster(DescribeClusterOptions::new());
+        let result2 = admin.describe_cluster_options(DescribeClusterOptions::new());
         pump(&mut runnable, 5).await;
         assert_eq!(result2.controller().get().await.unwrap().unwrap().id(), 1);
         let expected: BTreeSet<AclOperation> = [AclOperation::Describe, AclOperation::Alter].into_iter().collect();
@@ -8138,7 +8152,7 @@ mod tests {
             .client_mut()
             .prepare_response(ConcreteResponse::DescribeCluster(DescribeClusterResponse::new(data)));
 
-        let result = admin.describe_cluster(DescribeClusterOptions::new());
+        let result = admin.describe_cluster_options(DescribeClusterOptions::new());
         pump(&mut runnable, 5).await;
         for err in [
             result.cluster_id().get().await.unwrap_err(),
@@ -8167,7 +8181,7 @@ mod tests {
                 Vec::new(),
             )));
 
-        let result = admin.describe_cluster(DescribeClusterOptions::new());
+        let result = admin.describe_cluster_options(DescribeClusterOptions::new());
         pump(&mut runnable, 8).await;
         assert_eq!(result.cluster_id().get().await.unwrap(), cluster_id);
         let got: HashSet<Node> = result.nodes().get().await.unwrap().into_iter().collect();
@@ -8182,7 +8196,7 @@ mod tests {
         // includeFencedBrokers=true: an UnsupportedVersion must NOT fall back to
         // the Metadata request; it propagates as UnsupportedVersion.
         runnable.client_mut().prepare_unsupported_version_response();
-        let result = admin.describe_cluster(DescribeClusterOptions::new().set_include_fenced_brokers(true));
+        let result = admin.describe_cluster_options(DescribeClusterOptions::new().set_include_fenced_brokers(true));
         pump(&mut runnable, 8).await;
         let err = result.nodes().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -8226,7 +8240,7 @@ mod tests {
             )]),
             &nodes[1],
         );
-        let result = admin.describe_configs(&[broker0.clone(), broker1.clone()], DescribeConfigsOptions::new());
+        let result = admin.describe_configs_options(&[broker0.clone(), broker1.clone()], DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
         let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
         assert_eq!(keys, [broker0.clone(), broker1.clone()].into_iter().collect());
@@ -8248,7 +8262,8 @@ mod tests {
             ]),
             &nodes[0],
         );
-        let result = admin.describe_configs(&[broker.clone(), broker_logger.clone()], DescribeConfigsOptions::new());
+        let result =
+            admin.describe_configs_options(&[broker.clone(), broker_logger.clone()], DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
         let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
         assert_eq!(keys, [broker.clone(), broker_logger.clone()].into_iter().collect());
@@ -8269,7 +8284,7 @@ mod tests {
                 ConfigResourceType::Topic.id(),
                 Errors::None,
             )]));
-        let result = admin.describe_configs(&[topic.clone(), topic2.clone()], DescribeConfigsOptions::new());
+        let result = admin.describe_configs_options(&[topic.clone(), topic2.clone()], DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
         let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
         assert_eq!(keys, [topic.clone(), topic2.clone()].into_iter().collect());
@@ -8286,7 +8301,7 @@ mod tests {
             describe_configs_result("topic", ConfigResourceType::Topic.id(), Errors::None),
             describe_configs_result("unrequested", ConfigResourceType::Topic.id(), Errors::None),
         ]));
-        let result = admin.describe_configs(std::slice::from_ref(&topic), DescribeConfigsOptions::new());
+        let result = admin.describe_configs_options(std::slice::from_ref(&topic), DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
         let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
         assert_eq!(keys, [topic.clone()].into_iter().collect());
@@ -8302,7 +8317,7 @@ mod tests {
             describe_configs_result("sub1", ConfigResourceType::ClientMetrics.id(), Errors::None),
             describe_configs_result("sub2", ConfigResourceType::ClientMetrics.id(), Errors::None),
         ]));
-        let result = admin.describe_configs(&[sub1.clone(), sub2.clone()], DescribeConfigsOptions::new());
+        let result = admin.describe_configs_options(&[sub1.clone(), sub2.clone()], DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
         let keys: HashSet<ConfigResource> = result.values().keys().cloned().collect();
         assert_eq!(keys, [sub1.clone(), sub2.clone()].into_iter().collect());
@@ -8394,7 +8409,7 @@ mod tests {
         configs.insert(metric_resource.clone(), vec![op3.clone()]);
         configs.insert(group_resource.clone(), vec![op4.clone()]);
 
-        let result = admin.incremental_alter_configs(&configs, AlterConfigsOptions::new());
+        let result = admin.incremental_alter_configs_options(&configs, AlterConfigsOptions::new());
         pump(&mut runnable, 8).await;
         assert_eq!(
             result.values().get(&broker_resource).unwrap().get().await.unwrap_err().error(),
@@ -8423,7 +8438,7 @@ mod tests {
         success.insert(broker_resource, vec![op1]);
         success.insert(metric_resource, vec![op3]);
         success.insert(group_resource, vec![op4]);
-        let result = admin.incremental_alter_configs(&success, AlterConfigsOptions::new());
+        let result = admin.incremental_alter_configs_options(&success, AlterConfigsOptions::new());
         pump(&mut runnable, 8).await;
         result.all().get().await.unwrap();
     }
@@ -8459,7 +8474,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(list_config_resources_response(Errors::None, &expected));
-        let result = admin.list_config_resources(&HashSet::new(), ListConfigResourcesOptions::new());
+        let result = admin.list_config_resources_options(&HashSet::new(), ListConfigResourcesOptions::new());
         pump(&mut runnable, 5).await;
         let listed = result.all().get().await.unwrap();
         assert_eq!(listed.len(), expected.len());
@@ -8476,7 +8491,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(list_config_resources_response(Errors::None, &[]));
-        let result = admin.list_config_resources(&HashSet::new(), ListConfigResourcesOptions::new());
+        let result = admin.list_config_resources_options(&HashSet::new(), ListConfigResourcesOptions::new());
         pump(&mut runnable, 5).await;
         assert!(result.all().get().await.unwrap().is_empty());
     }
@@ -8489,7 +8504,7 @@ mod tests {
             .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
         let mut types = HashSet::new();
         types.insert(ConfigResourceType::Unknown);
-        let result = admin.list_config_resources(&types, ListConfigResourcesOptions::new());
+        let result = admin.list_config_resources_options(&types, ListConfigResourcesOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.all().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -8514,7 +8529,7 @@ mod tests {
             Errors::None,
             &[("one", client_metrics_id), ("two", client_metrics_id)],
         ));
-        let result = admin.list_client_metrics_resources(ListClientMetricsResourcesOptions::new());
+        let result = admin.list_client_metrics_resources_options(ListClientMetricsResourcesOptions::new());
         pump(&mut runnable, 5).await;
         let listed = result.all().get().await.unwrap();
         assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected);
@@ -8529,7 +8544,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(list_config_resources_response(Errors::None, &[]));
-        let result = admin.list_client_metrics_resources(ListClientMetricsResourcesOptions::new());
+        let result = admin.list_client_metrics_resources_options(ListClientMetricsResourcesOptions::new());
         pump(&mut runnable, 5).await;
         assert!(result.all().get().await.unwrap().is_empty());
     }
@@ -8543,7 +8558,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
-        let result = admin.list_client_metrics_resources(ListClientMetricsResourcesOptions::new());
+        let result = admin.list_client_metrics_resources_options(ListClientMetricsResourcesOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.all().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -8806,7 +8821,7 @@ mod tests {
             describe_log_dirs_single(Errors::None, log_dir, &tp, partition_size, offset_lag),
             &nodes[0],
         );
-        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        let result = admin.describe_log_dirs_options(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
 
         let descriptions = result.descriptions();
@@ -8821,7 +8836,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(empty_describe_log_dirs_response(None), &nodes[0]);
-        let error_result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        let error_result = admin.describe_log_dirs_options(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| error_result.descriptions()[&0].is_done()).await;
         let err = error_result.all_descriptions().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
@@ -8830,7 +8845,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(empty_describe_log_dirs_response(Some(Errors::UnknownServerError)), &nodes[0]);
-        let error_result2 = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        let error_result2 = admin.describe_log_dirs_options(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| error_result2.descriptions()[&0].is_done()).await;
         let err2 = error_result2.all_descriptions().get().await.unwrap_err();
         assert_eq!(err2.error(), Errors::UnknownServerError);
@@ -8885,7 +8900,7 @@ mod tests {
             ),
             &nodes[0],
         );
-        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        let result = admin.describe_log_dirs_options(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
         let map = result.descriptions()[&0].get().await.unwrap();
         assert_description_contains(
@@ -8921,7 +8936,7 @@ mod tests {
             describe_log_dirs_single_cordoned(Errors::None, log_dir, &tp, 123, -1, -1, -1, true),
             &nodes[0],
         );
-        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        let result = admin.describe_log_dirs_options(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
 
         let descriptions = result.descriptions();
@@ -8960,7 +8975,7 @@ mod tests {
             describe_log_dirs_response(vec![describe_log_dirs_result(Errors::KafkaStorageError, log_dir, Vec::new())]),
             &nodes[0],
         );
-        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        let result = admin.describe_log_dirs_options(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
         let map = result.descriptions()[&0].get().await.unwrap();
         assert_eq!(
@@ -8984,7 +8999,7 @@ mod tests {
             describe_log_dirs_response(vec![describe_log_dirs_result(Errors::None, "/data", Vec::new())]),
             &nodes[1],
         );
-        let result = admin.describe_log_dirs(&[0, 1], DescribeLogDirsOptions::new());
+        let result = admin.describe_log_dirs_options(&[0, 1], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 30, |r| !r.client_mut().has_pending_responses()).await;
         time.sleep(default_api_timeout + 1);
         pump_until(&mut runnable, 30, |_r| {
@@ -9021,8 +9036,8 @@ mod tests {
             &nodes[2],
         );
 
-        let result =
-            admin.describe_replica_log_dirs(&[tpr1.clone(), tpr2.clone()], DescribeReplicaLogDirsOptions::new());
+        let result = admin
+            .describe_replica_log_dirs_options(&[tpr1.clone(), tpr2.clone()], DescribeReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| {
             result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
         })
@@ -9062,8 +9077,8 @@ mod tests {
             &nodes[1],
         );
 
-        let result =
-            admin.describe_replica_log_dirs(std::slice::from_ref(&expected), DescribeReplicaLogDirsOptions::new());
+        let result = admin
+            .describe_replica_log_dirs_options(std::slice::from_ref(&expected), DescribeReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| result.values()[&expected].is_done()).await;
 
         assert_eq!(
@@ -9094,8 +9109,8 @@ mod tests {
             &nodes[broker_id as usize],
         );
 
-        let result =
-            admin.describe_replica_log_dirs(&[tpr1.clone(), tpr2.clone()], DescribeReplicaLogDirsOptions::new());
+        let result = admin
+            .describe_replica_log_dirs_options(&[tpr1.clone(), tpr2.clone()], DescribeReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| {
             result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
         })
@@ -9130,7 +9145,7 @@ mod tests {
             (tpr0.clone(), "/data0".to_string()),
             (tpr1.clone(), "/data1".to_string()),
         ]);
-        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = admin.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| {
             result.values()[&tpr0].is_done() && result.values()[&tpr1].is_done()
         })
@@ -9156,7 +9171,7 @@ mod tests {
             (tpr0.clone(), "/data0".to_string()),
             (tpr1.clone(), "/data1".to_string()),
         ]);
-        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = admin.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| {
             result.values()[&tpr0].is_done() && result.values()[&tpr1].is_done()
         })
@@ -9177,7 +9192,7 @@ mod tests {
 
         let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
         let assignment = HashMap::from([(tpr1.clone(), "/data1".to_string())]);
-        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = admin.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| result.values()[&tpr1].is_done()).await;
         result.values()[&tpr1].get().await.unwrap();
     }
@@ -9197,7 +9212,7 @@ mod tests {
             (tpr1.clone(), "/data1".to_string()),
             (tpr2.clone(), "/data1".to_string()),
         ]);
-        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = admin.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 20, |_r| {
             result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
         })
@@ -9228,7 +9243,7 @@ mod tests {
             (tpr1.clone(), "/data1".to_string()),
             (tpr2.clone(), "/data1".to_string()),
         ]);
-        let result = admin.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = admin.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         pump_until(&mut runnable, 30, |r| !r.client_mut().has_pending_responses()).await;
         time.sleep(default_api_timeout + 1);
         pump_until(&mut runnable, 30, |_r| {
@@ -9256,7 +9271,7 @@ mod tests {
         mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None)
             .expect("seeding a topic with known brokers succeeds");
 
-        let result = mock.describe_log_dirs(&[0, 1], DescribeLogDirsOptions::new());
+        let result = mock.describe_log_dirs_options(&[0, 1], DescribeLogDirsOptions::new());
         let broker0 = result.descriptions()[&0].get().await.unwrap();
         assert!(broker0.contains_key("/tmp/kafka-logs"));
         let infos = broker0["/tmp/kafka-logs"].replica_infos();
@@ -9286,16 +9301,18 @@ mod tests {
 
         // Before any move, current log dir is the seeded first broker log dir.
         let tpr = TopicPartitionReplica::new("topic", 0, 0);
-        let before = mock.describe_replica_log_dirs(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
+        let before =
+            mock.describe_replica_log_dirs_options(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
         let info = before.values()[&tpr].get().await.unwrap();
         assert_eq!(info.current_replica_log_dir(), Some("/data0"));
         assert_eq!(info.future_replica_log_dir(), None);
 
         // Move to /data1; describe should reflect the pending move.
         let assignment = HashMap::from([(tpr.clone(), "/data1".to_string())]);
-        let alter = mock.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let alter = mock.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         alter.values()[&tpr].get().await.unwrap();
-        let after = mock.describe_replica_log_dirs(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
+        let after =
+            mock.describe_replica_log_dirs_options(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
         let moved = after.values()[&tpr].get().await.unwrap();
         assert_eq!(moved.current_replica_log_dir(), Some("/data0"));
         assert_eq!(moved.future_replica_log_dir(), Some("/data1"));
@@ -9315,7 +9332,7 @@ mod tests {
         let tpr = TopicPartitionReplica::new("topic", 0, 0);
         // "/nope" is not among the broker's log dirs -> KafkaStorageError.
         let assignment = HashMap::from([(tpr.clone(), "/nope".to_string())]);
-        let result = mock.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = mock.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         let err = result.values()[&tpr].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::KafkaStorageError);
     }
@@ -9339,7 +9356,7 @@ mod tests {
         // must be handled the same way an unknown replica is, not panic.
         let tpr = TopicPartitionReplica::new("topic", -1, 0);
         let assignment = HashMap::from([(tpr.clone(), "/data0".to_string())]);
-        let result = mock.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let result = mock.alter_replica_log_dirs_options(&assignment, AlterReplicaLogDirsOptions::new());
         let err = result.values()[&tpr].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::ReplicaNotAvailable);
         assert!(err.message().starts_with("Can't find"), "message was: {}", err.message());
@@ -9360,7 +9377,8 @@ mod tests {
         .expect("seeding a topic with known brokers succeeds");
 
         let tpr = TopicPartitionReplica::new("topic", -1, 0);
-        let result = mock.describe_replica_log_dirs(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
+        let result =
+            mock.describe_replica_log_dirs_options(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
         let info = result.values()[&tpr].get().await.unwrap();
         assert_eq!(info, ReplicaLogDirInfo::default());
     }
@@ -9423,7 +9441,8 @@ mod tests {
                 )],
             ));
             let partitions: HashSet<TopicPartition> = [topic1.clone(), topic2.clone()].into_iter().collect();
-            let result = admin.elect_leaders(election_type, Some(partitions.clone()), ElectLeadersOptions::new());
+            let result =
+                admin.elect_leaders_options(election_type, Some(partitions.clone()), ElectLeadersOptions::new());
             pump(&mut runnable, 5).await;
             let map = result.partitions().get().await.unwrap();
             assert_eq!(map[&topic2].as_ref().unwrap().error(), Errors::ClusterAuthorizationFailed);
@@ -9436,14 +9455,15 @@ mod tests {
                     &[(0, Errors::None, None), (2, Errors::None, None)],
                 )],
             ));
-            let result = admin.elect_leaders(election_type, Some(partitions.clone()), ElectLeadersOptions::new());
+            let result =
+                admin.elect_leaders_options(election_type, Some(partitions.clone()), ElectLeadersOptions::new());
             pump(&mut runnable, 5).await;
             let map = result.partitions().get().await.unwrap();
             assert!(map[&topic1].is_none());
             assert!(map[&topic2].is_none());
 
             // A call that times out (no response prepared).
-            let result = admin.elect_leaders(
+            let result = admin.elect_leaders_options(
                 election_type,
                 Some(partitions),
                 ElectLeadersOptions::new().set_timeout_ms(Some(100)),
@@ -9529,7 +9549,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(api_versions_feature_response(Errors::None));
-        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
+        let result = admin.describe_features_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
         assert_eq!(metadata, default_feature_metadata());
@@ -9542,7 +9562,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(api_versions_feature_response(Errors::InvalidRequest));
-        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
+        let result = admin.describe_features_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
         pump(&mut runnable, 5).await;
         let err = result.feature_metadata().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
@@ -9556,7 +9576,8 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[0]);
-        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)).set_node_id(0));
+        let result =
+            admin.describe_features_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)).set_node_id(0));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
         assert_eq!(metadata, default_feature_metadata());
@@ -9571,7 +9592,8 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[1]);
-        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).set_node_id(0));
+        let result =
+            admin.describe_features_options(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).set_node_id(0));
         pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
         time.sleep(2000);
         pump_until(&mut runnable, 30, |_r| result.feature_metadata().is_done()).await;
@@ -9595,7 +9617,7 @@ mod tests {
                 .prepare_response(update_features_response(Errors::None, None, &features));
             let updates = make_test_feature_updates();
             let result = admin
-                .update_features(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
+                .update_features_options(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
                 .unwrap();
             pump(&mut runnable, 5).await;
             for future in result.values().values() {
@@ -9613,7 +9635,7 @@ mod tests {
             .prepare_response(update_features_response(Errors::InvalidRequest, None, &[]));
         let updates = make_test_feature_updates();
         let result = admin
-            .update_features(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
+            .update_features_options(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
             .unwrap();
         pump(&mut runnable, 5).await;
         for future in result.values().values() {
@@ -9655,7 +9677,7 @@ mod tests {
                 .prepare_response(update_features_response(Errors::None, None, &features));
             let updates = make_test_feature_updates();
             let result = admin
-                .update_features(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
+                .update_features_options(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
                 .unwrap();
             // The NOT_CONTROLLER retry is gated by retry-backoff, so advance the
             // mock clock until every future resolves.
@@ -9675,7 +9697,7 @@ mod tests {
     async fn test_update_features_should_fail_request_for_empty_updates() {
         let (admin, _runnable, _time, _nodes) = env();
         let err = admin
-            .update_features(&HashMap::new(), UpdateFeaturesOptions::new())
+            .update_features_options(&HashMap::new(), UpdateFeaturesOptions::new())
             .unwrap_err();
         assert_eq!(err.message(), "Feature updates can not be null or empty.");
     }
@@ -9687,7 +9709,9 @@ mod tests {
         let mut updates = HashMap::new();
         updates.insert("feature".to_string(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
         updates.insert(String::new(), FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap());
-        let err = admin.update_features(&updates, UpdateFeaturesOptions::new()).unwrap_err();
+        let err = admin
+            .update_features_options(&updates, UpdateFeaturesOptions::new())
+            .unwrap_err();
         assert_eq!(err.message(), "Provided feature can not be empty.");
     }
 
@@ -9743,8 +9767,8 @@ mod tests {
             None,
             vec![reassignable_topic_response("A", &[(0, Errors::None, None)])],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         let all_err = result.all().get().await.unwrap_err();
         assert_eq!(all_err.error(), Errors::UnknownServerError);
@@ -9766,8 +9790,8 @@ mod tests {
                 reassignable_topic_response("B", &[(0, Errors::None, None)]),
             ],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         assert_eq!(
             result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err().error(),
@@ -9786,8 +9810,8 @@ mod tests {
                 reassignable_topic_response("B", &[(0, Errors::None, None)]),
             ],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         let all_err = result.all().get().await.unwrap_err();
         assert_eq!(all_err.error(), Errors::ClusterAuthorizationFailed);
@@ -9820,8 +9844,8 @@ mod tests {
                 reassignable_topic_response("B", &[(0, Errors::None, None)]),
             ],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         let all_err = result.all().get().await.unwrap_err();
         assert_eq!(all_err.error(), Errors::NoReassignmentInProgress);
@@ -9839,8 +9863,8 @@ mod tests {
                 reassignable_topic_response("B", &[(0, Errors::None, None)]),
             ],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         let a0_err = result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err();
         assert_eq!(a0_err.error(), Errors::NoReassignmentInProgress);
@@ -9858,8 +9882,8 @@ mod tests {
                 reassignable_topic_response("B", &[(0, Errors::None, None)]),
             ],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         assert_eq!(
             result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err().message(),
@@ -9884,7 +9908,8 @@ mod tests {
                 ListPartitionReassignmentsResponse::new(data),
             ));
 
-        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        let result =
+            admin.list_partition_reassignments_partitions_options(None, ListPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.reassignments().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
@@ -9914,7 +9939,8 @@ mod tests {
             None,
             vec![reassignable_topic_response("A", &[(0, Errors::None, None)])],
         ));
-        let result = admin.alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new());
+        let result =
+            admin.alter_partition_reassignments_options(&reassignments, AlterPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         assert_eq!(
             result.values()[&invalid_topic].get().await.unwrap_err().error(),
@@ -9955,8 +9981,8 @@ mod tests {
                 reassignable_topic_response("B", &[(0, Errors::None, None)]),
             ],
         ));
-        let result =
-            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        let result = admin
+            .alter_partition_reassignments_options(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
         for _ in 0..30 {
             if result.all().is_done() {
                 break;
@@ -10012,7 +10038,8 @@ mod tests {
             Errors::None,
             vec![ongoing_topic("A", 0), ongoing_topic("B", 0)],
         ));
-        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        let result =
+            admin.list_partition_reassignments_partitions_options(None, ListPartitionReassignmentsOptions::new());
         for _ in 0..30 {
             if result.reassignments().is_done() {
                 break;
@@ -10028,7 +10055,10 @@ mod tests {
             .client_mut()
             .prepare_response(list_reassignments_resp(Errors::UnknownTopicOrPartition, Vec::new()));
         let partitions: HashSet<TopicPartition> = [tp1.clone(), tp2.clone()].into_iter().collect();
-        let result = admin.list_partition_reassignments(Some(partitions), ListPartitionReassignmentsOptions::new());
+        let result = admin.list_partition_reassignments_partitions_options(
+            Some(partitions),
+            ListPartitionReassignmentsOptions::new(),
+        );
         pump(&mut runnable, 5).await;
         assert_eq!(
             result.reassignments().get().await.unwrap_err().error(),
@@ -10041,7 +10071,8 @@ mod tests {
             Errors::None,
             vec![ongoing_topic("A", 0), ongoing_topic("B", 0)],
         ));
-        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        let result =
+            admin.list_partition_reassignments_partitions_options(None, ListPartitionReassignmentsOptions::new());
         pump(&mut runnable, 5).await;
         let reassignments = result.reassignments().get().await.unwrap();
         assert_eq!(reassignments[&tp1].adding_replicas(), &[4, 5, 6]);
@@ -10092,7 +10123,7 @@ mod tests {
         partitions.insert(tp1.clone(), OffsetSpec::earliest());
         partitions.insert(tp2.clone(), OffsetSpec::for_timestamp(1_000_000));
         partitions.insert(tp3.clone(), OffsetSpec::max_timestamp());
-        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
 
         let offsets = result.all().get().await.unwrap();
@@ -10126,7 +10157,7 @@ mod tests {
         )]));
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::latest());
-        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::TopicAuthorizationFailed);
     }
@@ -10172,7 +10203,7 @@ mod tests {
         partitions.insert(tp0.clone(), OffsetSpec::latest());
         partitions.insert(tp1.clone(), OffsetSpec::latest());
         partitions.insert(tp2.clone(), OffsetSpec::latest());
-        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         for _ in 0..60 {
             if result.all().is_done() {
                 break;
@@ -10197,7 +10228,7 @@ mod tests {
         runnable.client_mut().prepare_unsupported_version_response();
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::max_timestamp());
-        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -10220,7 +10251,7 @@ mod tests {
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::max_timestamp());
         partitions.insert(tp1.clone(), OffsetSpec::latest());
-        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         for _ in 0..60 {
             if result.partition_result(&tp0).unwrap().is_done() && result.partition_result(&tp1).unwrap().is_done() {
                 break;
@@ -10252,7 +10283,7 @@ mod tests {
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::latest());
         partitions.insert(tp1.clone(), OffsetSpec::latest());
-        let result = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert!(result.partition_result(&tp0).unwrap().get().await.is_ok());
         assert!(result.partition_result(&tp1).unwrap().get().await.is_err());
@@ -10304,7 +10335,7 @@ mod tests {
 
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::latest());
-        let first = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let first = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         pump_until(&mut runnable, 40, |_r| first.all().is_done()).await;
         assert_eq!(first.all().get().await.unwrap()[&tp0].offset(), 100);
 
@@ -10334,7 +10365,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 200, 5)]), &node0);
 
-        let second = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        let second = admin.list_offsets_options(&partitions, ListOffsetsOptions::new());
         for _ in 0..60 {
             if second.all().is_done() {
                 break;
@@ -10373,7 +10404,7 @@ mod tests {
         partitions.insert(earliest.clone(), OffsetSpec::earliest());
         partitions.insert(latest.clone(), OffsetSpec::latest());
         partitions.insert(ts.clone(), OffsetSpec::for_timestamp(123));
-        let result = mock.list_offsets(&partitions, ListOffsetsOptions::new());
+        let result = mock.list_offsets_options(&partitions, ListOffsetsOptions::new());
         assert_eq!(result.partition_result(&earliest).unwrap().get().await.unwrap().offset(), 5);
         assert_eq!(result.partition_result(&latest).unwrap().get().await.unwrap().offset(), 99);
         assert!(result.partition_result(&ts).unwrap().get().await.is_err());
@@ -10395,11 +10426,12 @@ mod tests {
         let tp = TopicPartition::new("topic", 0);
         let mut reassignments = HashMap::new();
         reassignments.insert(tp.clone(), Some(NewPartitionReassignment::new(vec![1, 2]).unwrap()));
-        let result = mock.alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new());
+        let result =
+            mock.alter_partition_reassignments_options(&reassignments, AlterPartitionReassignmentsOptions::new());
         result.values()[&tp].get().await.unwrap();
 
         let listed = mock
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .list_partition_reassignments_partitions_options(None, ListPartitionReassignmentsOptions::new())
             .reassignments()
             .get()
             .await
@@ -10415,7 +10447,7 @@ mod tests {
     async fn test_mock_elect_leaders_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new());
+        let result = mock.elect_leaders_options(ElectionType::Preferred, None, ElectLeadersOptions::new());
         let err = result.partitions().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
@@ -10554,7 +10586,7 @@ mod tests {
             .prepare_response_from(listed_group("g2", "consumer", "Stable", "Consumer"), &nodes[1]);
         runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
 
-        let result = admin.list_groups(ListGroupsOptions::new());
+        let result = admin.list_groups_options(ListGroupsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
 
         let mut ids: Vec<String> = result
@@ -10584,7 +10616,7 @@ mod tests {
         runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
 
         let options = ListGroupsOptions::new().with_protocol_types(HashSet::from(["consumer".to_string()]));
-        let result = admin.list_groups(options);
+        let result = admin.list_groups_options(options);
         pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
 
         let ids: Vec<String> = result
@@ -10612,7 +10644,7 @@ mod tests {
             .prepare_response_from(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
         runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
 
-        let result = admin.list_consumer_groups(ListConsumerGroupsOptions::new());
+        let result = admin.list_consumer_groups_options(ListConsumerGroupsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
 
         // Only the consumer-protocol group is retained.
@@ -10640,7 +10672,7 @@ mod tests {
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
 
         let options = ListGroupsOptions::new().with_types(HashSet::from([GroupType::Consumer]));
-        let result = admin.list_groups(options);
+        let result = admin.list_groups_options(options);
         pump_until_request_queued(&mut runnable).await;
 
         // The single per-broker ListGroups request carries the types filter.
@@ -10698,13 +10730,14 @@ mod tests {
         // A SHARE-only filter cannot be omitted, so it surfaces UnsupportedVersion.
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
         runnable.client_mut().prepare_unsupported_version_response();
-        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Share])));
+        let result = admin.list_groups_options(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Share])));
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
 
         // A CLASSIC-only filter is omitted on an older broker and succeeds.
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
-        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Classic])));
+        let result =
+            admin.list_groups_options(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Classic])));
         pump_until_request_queued(&mut runnable).await;
         {
             let reqs = runnable.client_mut().requests_mut();
@@ -10734,7 +10767,8 @@ mod tests {
         // A CONSUMER-only filter (without classic) also surfaces UnsupportedVersion.
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
         runnable.client_mut().prepare_unsupported_version_response();
-        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Consumer])));
+        let result =
+            admin.list_groups_options(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Consumer])));
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -10751,7 +10785,7 @@ mod tests {
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
 
-        let result = admin.list_groups(ListGroupsOptions::for_consumer_groups());
+        let result = admin.list_groups_options(ListGroupsOptions::for_consumer_groups());
         pump_until_request_queued(&mut runnable).await;
         {
             let reqs = runnable.client_mut().requests_mut();
@@ -10796,7 +10830,8 @@ mod tests {
 
         // States filter with no types filter is fine at v4.
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
-        let result = admin.list_groups(ListGroupsOptions::new().in_group_states(HashSet::from([GroupState::Stable])));
+        let result =
+            admin.list_groups_options(ListGroupsOptions::new().in_group_states(HashSet::from([GroupState::Stable])));
         pump_until_request_queued(&mut runnable).await;
         {
             let reqs = runnable.client_mut().requests_mut();
@@ -10817,7 +10852,7 @@ mod tests {
         // A SHARE types filter cannot be set against the older broker.
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
         runnable.client_mut().prepare_unsupported_version_response();
-        let result = admin.list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Share])));
+        let result = admin.list_groups_options(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Share])));
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -10837,7 +10872,7 @@ mod tests {
         let options = ListConsumerGroupsOptions::new()
             .in_group_states(HashSet::from([GroupState::Stable]))
             .with_types(HashSet::from([GroupType::Consumer]));
-        let result = admin.list_consumer_groups(options);
+        let result = admin.list_consumer_groups_options(options);
         pump_until_request_queued(&mut runnable).await;
         {
             let reqs = runnable.client_mut().requests_mut();
@@ -10868,7 +10903,7 @@ mod tests {
         runnable.client_mut().prepare_unsupported_version_response();
 
         let options = ListConsumerGroupsOptions::new().with_types(HashSet::from([GroupType::Share]));
-        let result = admin.list_consumer_groups(options);
+        let result = admin.list_consumer_groups_options(options);
         pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -10885,7 +10920,7 @@ mod tests {
         // Empty broker list → no brokers to send to.
         runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
 
-        let result = admin.list_consumer_groups(ListConsumerGroupsOptions::new());
+        let result = admin.list_consumer_groups_options(ListConsumerGroupsOptions::new());
         for _ in 0..40 {
             if result.all().is_done() {
                 break;
@@ -10913,7 +10948,7 @@ mod tests {
         let (admin, mut runnable, time, _nodes) = env_nodes_with_props(3, &[("retries", "0")]);
         runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
 
-        let result = admin.list_groups(ListGroupsOptions::new());
+        let result = admin.list_groups_options(ListGroupsOptions::new());
         for _ in 0..40 {
             if result.all().is_done() {
                 break;
@@ -10944,7 +10979,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(consumer_group_describe_resp("g1"), &nodes[0]);
 
-        let result = admin.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
+        let result = admin.describe_consumer_groups_options(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let future = result.described_groups()["g1"].clone();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
 
@@ -10983,7 +11018,8 @@ mod tests {
             &nodes[0],
         );
 
-        let result = admin.describe_consumer_groups(&["missing".to_string()], DescribeConsumerGroupsOptions::new());
+        let result =
+            admin.describe_consumer_groups_options(&["missing".to_string()], DescribeConsumerGroupsOptions::new());
         let future = result.described_groups()["missing"].clone();
         // The classic-API fallback is a driver retry gated on the retry backoff,
         // so the mock clock must advance for the second (DescribeGroups) request.
@@ -11017,7 +11053,7 @@ mod tests {
         // Fail the classic DescribeGroups fallback as well.
         runnable.client_mut().prepare_unsupported_version_response();
 
-        let result = admin.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
+        let result = admin.describe_consumer_groups_options(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let future = result.described_groups()["g1"].clone();
         // The classic-API fallback is a driver retry gated on the retry backoff,
         // so the mock clock must advance for the second request to be sent.
@@ -11083,7 +11119,8 @@ mod tests {
             c.prepare_response(describe_groups_full_resp(vec![group]));
         }
 
-        let result = admin.describe_classic_groups(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
+        let result =
+            admin.describe_classic_groups_options(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
         let future = result.described_groups()["group-0"].clone();
         for _ in 0..300 {
             if future.is_done() {
@@ -11140,7 +11177,8 @@ mod tests {
             c.prepare_response_from(describe_groups_full_resp(vec![group]), &nodes[0]);
         }
 
-        let result = admin.describe_classic_groups(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
+        let result =
+            admin.describe_classic_groups_options(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
         let future = result.described_groups()["group-0"].clone();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
 
@@ -11196,7 +11234,7 @@ mod tests {
             c.prepare_response_from(describe_groups_full_resp(vec![group0, group1]), &nodes[0]);
         }
 
-        let result = admin.describe_classic_groups(
+        let result = admin.describe_classic_groups_options(
             &["group-0".to_string(), "group-1".to_string()],
             DescribeClassicGroupsOptions::new(),
         );
@@ -11223,7 +11261,7 @@ mod tests {
         )];
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), ops);
-        mock.incremental_alter_configs(&configs, AlterConfigsOptions::new())
+        mock.incremental_alter_configs_options(&configs, AlterConfigsOptions::new())
             .all()
             .get()
             .await
@@ -11237,7 +11275,7 @@ mod tests {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         seed_mock_group(&mock, "g1").await;
-        let result = mock.list_groups(ListGroupsOptions::new());
+        let result = mock.list_groups_options(ListGroupsOptions::new());
         let listings = result.valid().get().await.unwrap();
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].group_id(), "g1");
@@ -11252,7 +11290,7 @@ mod tests {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         seed_mock_group(&mock, "g1").await;
-        let result = mock.list_consumer_groups(ListConsumerGroupsOptions::new());
+        let result = mock.list_consumer_groups_options(ListConsumerGroupsOptions::new());
         let listings = result.valid().get().await.unwrap();
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].group_id(), "g1");
@@ -11265,7 +11303,7 @@ mod tests {
     async fn test_mock_describe_consumer_groups_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
+        let result = mock.describe_consumer_groups_options(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
@@ -11276,7 +11314,7 @@ mod tests {
     async fn test_mock_describe_classic_groups_unsupported() {
         use crate::admin::MockAdminClient;
         let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = mock.describe_classic_groups(&["g1".to_string()], DescribeClassicGroupsOptions::new());
+        let result = mock.describe_classic_groups_options(&["g1".to_string()], DescribeClassicGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
@@ -11446,7 +11484,7 @@ mod tests {
             &[(0, 10), (1, 0), (2, 20), (3, -1)],
         ));
 
-        let result = admin.list_consumer_group_offsets(
+        let result = admin.list_consumer_group_offsets_options(
             &single_spec(&[tp0.clone(), tp1.clone(), tp2.clone(), tp3.clone()]),
             ListConsumerGroupOffsetsOptions::new(),
         );
@@ -11480,7 +11518,7 @@ mod tests {
                 .client_mut()
                 .prepare_response(offset_fetch_group_error(GROUP_ID, error));
 
-            let result = admin.list_consumer_group_offsets(
+            let result = admin.list_consumer_group_offsets_options(
                 &single_spec(&[TopicPartition::new("t", 0)]),
                 ListConsumerGroupOffsetsOptions::new(),
             );
@@ -11539,7 +11577,8 @@ mod tests {
             .client_mut()
             .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
 
-        let result = admin.list_consumer_group_offsets(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
+        let result =
+            admin.list_consumer_group_offsets_options(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 40, || all.is_done()).await;
 
@@ -11575,7 +11614,8 @@ mod tests {
             .client_mut()
             .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
 
-        let result = admin.list_consumer_group_offsets(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
+        let result =
+            admin.list_consumer_group_offsets_options(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 80, || all.is_done()).await;
         assert_eq!(all.get().await.unwrap().len(), 2);
@@ -11606,7 +11646,8 @@ mod tests {
             .client_mut()
             .prepare_response(offset_fetch_multi(&[("groupA", "A", 1), ("groupB", "B", 2)]));
 
-        let result = admin.list_consumer_group_offsets(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
+        let result =
+            admin.list_consumer_group_offsets_options(&batched_specs(), ListConsumerGroupOffsetsOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 80, || all.is_done()).await;
         assert_eq!(all.get().await.unwrap().len(), 2);
@@ -11629,7 +11670,7 @@ mod tests {
         let options = ListConsumerGroupOffsetsOptions::new()
             .set_require_stable(true)
             .set_timeout_ms(Some(300));
-        let _result = admin.list_consumer_group_offsets(&single_spec(&[TopicPartition::new("A", 0)]), options);
+        let _result = admin.list_consumer_group_offsets_options(&single_spec(&[TopicPartition::new("A", 0)]), options);
 
         // Pump until the `OffsetFetch` request is queued. The `FindCoordinator`
         // request is matched to the prepared response at send time (so it never
@@ -11682,8 +11723,11 @@ mod tests {
             .client_mut()
             .prepare_response(offset_commit_resp(&[(tp1.clone(), Errors::None), (tp2.clone(), Errors::None)]));
 
-        let result =
-            admin.alter_consumer_group_offsets(GROUP_ID, &offsets_to_alter(), AlterConsumerGroupOffsetsOptions::new());
+        let result = admin.alter_consumer_group_offsets_options(
+            GROUP_ID,
+            &offsets_to_alter(),
+            AlterConsumerGroupOffsetsOptions::new(),
+        );
         let all = result.all();
         drive_until(&mut runnable, &time, 40, || all.is_done()).await;
 
@@ -11715,7 +11759,8 @@ mod tests {
             (foo0.clone(), OffsetAndMetadata::new(123).unwrap()),
             (foo1.clone(), OffsetAndMetadata::new(456).unwrap()),
         ]);
-        let result = admin.alter_consumer_group_offsets(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
+        let result =
+            admin.alter_consumer_group_offsets_options(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 40, || all.is_done()).await;
 
@@ -11747,7 +11792,7 @@ mod tests {
 
             let offsets = HashMap::from([(tp1.clone(), OffsetAndMetadata::new(123).unwrap())]);
             let result =
-                admin.alter_consumer_group_offsets(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
+                admin.alter_consumer_group_offsets_options(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
             let all = result.all();
             drive_until(&mut runnable, &time, 40, || all.is_done()).await;
             assert_eq!(all.get().await.unwrap_err().error(), error);
@@ -11765,7 +11810,8 @@ mod tests {
             .prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::GroupAuthorizationFailed));
 
         let offsets = HashMap::from([(tp1.clone(), OffsetAndMetadata::new(123).unwrap())]);
-        let result = admin.alter_consumer_group_offsets(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
+        let result =
+            admin.alter_consumer_group_offsets_options(GROUP_ID, &offsets, AlterConsumerGroupOffsetsOptions::new());
         let all = result.all();
         drive_until(&mut runnable, &time, 40, || all.is_done()).await;
         assert_eq!(all.get().await.unwrap_err().error(), Errors::GroupAuthorizationFailed);
@@ -11808,7 +11854,7 @@ mod tests {
             ));
         }
 
-        let result = admin.delete_consumer_group_offsets(
+        let result = admin.delete_consumer_group_offsets_options(
             GROUP_ID,
             &HashSet::from([tp1.clone(), tp2.clone()]),
             DeleteConsumerGroupOffsetsOptions::new(),
@@ -11841,7 +11887,7 @@ mod tests {
                 .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
             runnable.client_mut().prepare_response(offset_delete_top_level(error));
 
-            let result = admin.delete_consumer_group_offsets(
+            let result = admin.delete_consumer_group_offsets_options(
                 GROUP_ID,
                 &HashSet::from([tp1.clone()]),
                 DeleteConsumerGroupOffsetsOptions::new(),
@@ -11862,7 +11908,7 @@ mod tests {
             .client_mut()
             .prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::GroupAuthorizationFailed));
 
-        let result = admin.delete_consumer_group_offsets(
+        let result = admin.delete_consumer_group_offsets_options(
             GROUP_ID,
             &HashSet::from([tp1.clone()]),
             DeleteConsumerGroupOffsetsOptions::new(),
@@ -11904,7 +11950,7 @@ mod tests {
             .client_mut()
             .prepare_response(offset_delete_partition("foo", 0, Errors::None));
 
-        let result = admin.delete_consumer_group_offsets(
+        let result = admin.delete_consumer_group_offsets_options(
             GROUP_ID,
             &HashSet::from([tp1.clone()]),
             DeleteConsumerGroupOffsetsOptions::new(),
@@ -12014,7 +12060,7 @@ mod tests {
             .client_mut()
             .prepare_response(find_coordinator_resp(&[("groupId", &nodes[0])]));
 
-        let result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let result = admin.delete_consumer_groups_options(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
         let all = result.all();
         pump_until(&mut runnable, 40, |r| !r.client_mut().has_pending_responses()).await;
         time.sleep(default_api_timeout + 1);
@@ -12042,7 +12088,7 @@ mod tests {
             .client_mut()
             .prepare_response(delete_groups_resp(&[("groupId", Errors::None)]));
 
-        let result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let result = admin.delete_consumer_groups_options(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
         let deleted = result.deleted_groups()["groupId"].clone();
         drive_until(&mut runnable, &time, 80, || deleted.is_done()).await;
         assert_eq!(deleted.get().await.unwrap(), ());
@@ -12051,7 +12097,8 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(old_find_coordinator_error_resp(Errors::GroupAuthorizationFailed));
-        let error_result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let error_result =
+            admin.delete_consumer_groups_options(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
         let error_deleted = error_result.deleted_groups()["groupId"].clone();
         drive_until(&mut runnable, &time, 80, || error_deleted.is_done()).await;
         assert_eq!(error_deleted.get().await.unwrap_err().error(), Errors::GroupAuthorizationFailed);
@@ -12074,7 +12121,8 @@ mod tests {
             .client_mut()
             .prepare_response(delete_groups_resp(&[("groupId", Errors::None)]));
 
-        let retry_result = admin.delete_consumer_groups(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
+        let retry_result =
+            admin.delete_consumer_groups_options(&["groupId".to_string()], DeleteConsumerGroupsOptions::new());
         let retry_deleted = retry_result.deleted_groups()["groupId"].clone();
         drive_until(&mut runnable, &time, 120, || retry_deleted.is_done()).await;
         assert_eq!(retry_deleted.get().await.unwrap(), ());
@@ -12101,8 +12149,8 @@ mod tests {
             .client_mut()
             .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
 
-        let result =
-            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&["instance-1", "instance-2"]));
+        let result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, members_to_remove(&["instance-1", "instance-2"]));
         let all = result.all();
         pump_until(&mut runnable, 40, |r| !r.client_mut().has_pending_responses()).await;
         time.sleep(default_api_timeout + 1);
@@ -12137,7 +12185,7 @@ mod tests {
             .prepare_response(leave_group_members_resp(&[("instance-1", Errors::None)]));
 
         let member = MemberToRemove::new("instance-1");
-        let result = admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&["instance-1"]));
+        let result = admin.remove_members_from_consumer_group_options(GROUP_ID, members_to_remove(&["instance-1"]));
         let all = result.all();
         drive_until(&mut runnable, &time, 120, || all.is_done()).await;
         assert_eq!(all.get().await.unwrap(), ());
@@ -12159,7 +12207,7 @@ mod tests {
             runnable.client_mut().prepare_response(leave_group_top_level(error));
 
             let member = MemberToRemove::new("instance-1");
-            let result = admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&["instance-1"]));
+            let result = admin.remove_members_from_consumer_group_options(GROUP_ID, members_to_remove(&["instance-1"]));
             let all = result.all();
             drive_until(&mut runnable, &time, 60, || all.is_done()).await;
             assert_eq!(all.get().await.unwrap_err().error(), error);
@@ -12186,8 +12234,8 @@ mod tests {
             (instance_two, Errors::None),
         ]));
 
-        let member_level_error_result =
-            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
+        let member_level_error_result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
         let all = member_level_error_result.all();
         drive_until(&mut runnable, &time, 60, || all.is_done()).await;
         assert_eq!(all.get().await.unwrap_err().error(), Errors::UnknownMemberId);
@@ -12219,8 +12267,8 @@ mod tests {
             .client_mut()
             .prepare_response(leave_group_members_resp(&[(instance_two, Errors::None)]));
 
-        let missing_member_result =
-            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
+        let missing_member_result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
         let missing_all = missing_member_result.all();
         drive_until(&mut runnable, &time, 60, || missing_all.is_done()).await;
         assert!(matches!(missing_all.get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
@@ -12246,8 +12294,8 @@ mod tests {
             (instance_two, Errors::None),
             (instance_one, Errors::None),
         ]));
-        let no_error_result =
-            admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
+        let no_error_result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
         let no_error_all = no_error_result.all();
         drive_until(&mut runnable, &time, 60, || no_error_all.is_done()).await;
         assert_eq!(no_error_all.get().await.unwrap(), ());
@@ -12269,8 +12317,8 @@ mod tests {
             (instance_one, Errors::UnknownMemberId),
             (instance_two, Errors::None),
         ]));
-        let partial_failure_result =
-            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let partial_failure_result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
         let partial_all = partial_failure_result.all();
         drive_until(&mut runnable, &time, 80, || partial_all.is_done()).await;
         assert_eq!(partial_all.get().await.unwrap_err().error(), Errors::UnknownMemberId);
@@ -12289,8 +12337,8 @@ mod tests {
             (instance_two, Errors::None),
             (instance_one, Errors::None),
         ]));
-        let success_result =
-            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let success_result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
         let success_all = success_result.all();
         drive_until(&mut runnable, &time, 80, || success_all.is_done()).await;
         assert_eq!(success_all.get().await.unwrap(), ());
@@ -12322,7 +12370,7 @@ mod tests {
         // but stays queued (unanswered), ready for inspection.
         let options = RemoveMembersFromConsumerGroupOptions::default().set_timeout_ms(Some(5000));
         assert!(options.remove_all());
-        let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
+        let _result = admin.remove_members_from_consumer_group_options(GROUP_ID, options);
 
         pump_until(&mut runnable, 40, |r| r.client_mut().request_count() >= 1).await;
 
@@ -12378,7 +12426,7 @@ mod tests {
 
         let options = RemoveMembersFromConsumerGroupOptions::default().set_timeout_ms(Some(5000));
         assert!(options.remove_all());
-        let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
+        let _result = admin.remove_members_from_consumer_group_options(GROUP_ID, options);
 
         // Advance the clock to 10000 — past the pre-describe LeaveGroup deadline
         // (call-time 1000 + options.timeout 5000 == 6000) — before describe is
@@ -12431,7 +12479,7 @@ mod tests {
         if let Some(reason) = reason {
             options.set_reason(reason);
         }
-        let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
+        let _result = admin.remove_members_from_consumer_group_options(GROUP_ID, options);
 
         pump_until(&mut runnable, 40, |r| {
             r.client_mut()
@@ -12659,7 +12707,7 @@ mod tests {
             .inner
             .prepare_response_disconnected(metadata_resp(&nodes, Vec::new()), true);
 
-        let result = admin.list_topics(ListTopicsOptions::new());
+        let result = admin.list_topics_options(ListTopicsOptions::new());
         let names = result.names();
         for _ in 0..40 {
             if names.is_done() {
@@ -12722,7 +12770,7 @@ mod tests {
             .client_mut()
             .prepare_response_disconnected(metadata_resp(&nodes, Vec::new()), true);
 
-        let result = admin.list_groups(ListGroupsOptions::new());
+        let result = admin.list_groups_options(ListGroupsOptions::new());
         let errors = result.errors();
         drive_until(&mut runnable, &time, 60, || errors.is_done()).await;
 
@@ -12777,8 +12825,8 @@ mod tests {
             None,
         ));
 
-        let result =
-            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let result = admin
+            .remove_members_from_consumer_group_options(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
         let all = result.all();
         drive_until(&mut runnable, &time, 80, || all.is_done()).await;
         let error = all.get().await.expect_err("the describe step must fail the removeAll");
@@ -12814,7 +12862,7 @@ mod tests {
     #[tokio::test]
     async fn an_unrealized_future_fails_with_a_bare_api_error() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(
+        let result = admin.create_topics_options(
             &[NewTopic::new_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
@@ -12866,9 +12914,9 @@ mod tests {
     #[tokio::test]
     async fn a_call_submitted_while_closing_uses_javas_message() {
         let (admin, _runnable, _time, _nodes) = env();
-        admin.close(Duration::from_millis(0)).await;
+        admin.close_timeout(Duration::from_millis(0)).await;
 
-        let result = admin.list_topics(ListTopicsOptions::new());
+        let result = admin.list_topics_options(ListTopicsOptions::new());
         let error = result
             .names()
             .get()
@@ -12963,7 +13011,7 @@ mod tests {
     #[tokio::test]
     async fn close_waits_for_an_active_external_call_until_the_hard_deadline() {
         let (admin, mut runnable, time, _nodes) = env();
-        let _result = admin.list_topics(ListTopicsOptions::new());
+        let _result = admin.list_topics_options(ListTopicsOptions::new());
         pump(&mut runnable, 1).await;
         assert!(
             runnable.has_active_external_calls_for_test(),
@@ -13174,7 +13222,7 @@ mod tests {
         // hence no `retry_backoff_ms` floor, and the only contributors left to
         // the poll timeout are the call deadline (`default.api.timeout.ms`) and
         // `metadata.max.age.ms`.
-        let _result = admin.list_topics(ListTopicsOptions::new());
+        let _result = admin.list_topics_options(ListTopicsOptions::new());
         for _ in 0..40 {
             if runnable.client_mut().inner.request_count() >= 1 {
                 break;
@@ -13259,10 +13307,11 @@ mod tests {
         admin.spawn(runnable);
         // An active external call, so `should_exit` could not short-circuit on
         // "all work has been completed" even if the task did run again.
-        let _result = admin.list_topics(ListTopicsOptions::new());
+        let _result = admin.list_topics_options(ListTopicsOptions::new());
 
         let started = std::time::Instant::now();
-        let returned = tokio::time::timeout(Duration::from_secs(5), admin.close(Duration::from_millis(50))).await;
+        let returned =
+            tokio::time::timeout(Duration::from_secs(5), admin.close_timeout(Duration::from_millis(50))).await;
         assert!(
             returned.is_ok(),
             "close(50ms) must return even though the I/O task can never exit; it was still \
@@ -13288,17 +13337,17 @@ mod tests {
         let deadline = || admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
 
         // No task was spawned, so each `close()` here only publishes the deadline.
-        admin.close(Duration::from_millis(100)).await;
+        admin.close_timeout(Duration::from_millis(100)).await;
         assert_eq!(deadline(), now + 100, "the first close() installs its own deadline");
 
-        admin.close(Duration::from_secs(60)).await;
+        admin.close_timeout(Duration::from_secs(60)).await;
         assert_eq!(
             deadline(),
             now + 100,
             "a later, more relaxed close() must keep the earlier deadline"
         );
 
-        admin.close(Duration::from_millis(10)).await;
+        admin.close_timeout(Duration::from_millis(10)).await;
         assert_eq!(deadline(), now + 10, "a more urgent close() does move the deadline earlier");
     }
 
@@ -13309,7 +13358,7 @@ mod tests {
     async fn close_clamps_the_wait_to_a_year() {
         let (admin, _runnable, time, _nodes) = env();
         let now = time.now.load(Ordering::Acquire);
-        admin.close(Duration::from_millis(i64::MAX as u64)).await;
+        admin.close_timeout(Duration::from_millis(i64::MAX as u64)).await;
         assert_eq!(
             admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),
             now + MAX_CLOSE_WAIT_TIME_MS

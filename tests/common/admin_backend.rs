@@ -1093,7 +1093,7 @@ impl AdminBackend for RustNativeAdmin {
         new_topics: &[NewTopic],
         options: CreateTopicsOptions,
     ) -> Result<Outcomes<String, TopicMetadataAndConfig>, Error> {
-        let result = self.admin.create_topics(new_topics, options);
+        let result = self.admin.create_topics_options(new_topics, options);
         let mut outcomes = HashMap::new();
         for (name, created) in result.values() {
             // `values()` is Java's `KafkaFuture<Void>` view: it fails only if the
@@ -1115,7 +1115,7 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<String, ()>, Error> {
         let result = self
             .admin
-            .delete_topics(TopicCollection::of_topic_names(names.to_vec()), options);
+            .delete_topics_options(TopicCollection::of_topic_names(names.to_vec()), options);
         let values = result.topic_name_values().ok_or_else(|| {
             Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures")
         })?;
@@ -1129,7 +1129,7 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<Uuid, ()>, Error> {
         let result = self
             .admin
-            .delete_topics(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
+            .delete_topics_options(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
         let values = result
             .topic_id_values()
             .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
@@ -1138,7 +1138,7 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, Error> {
         self.admin
-            .list_topics(options)
+            .list_topics_options(options)
             .names_to_listings()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1151,7 +1151,7 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<String, TopicDescription>, Error> {
         let result = self
             .admin
-            .describe_topics(TopicCollection::of_topic_names(names.to_vec()), options);
+            .describe_topics_options(TopicCollection::of_topic_names(names.to_vec()), options);
         let values = result.topic_name_values().ok_or_else(|| {
             Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures")
         })?;
@@ -1165,7 +1165,7 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<Uuid, TopicDescription>, Error> {
         let result = self
             .admin
-            .describe_topics(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
+            .describe_topics_options(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
         let values = result
             .topic_id_values()
             .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
@@ -1177,7 +1177,7 @@ impl AdminBackend for RustNativeAdmin {
         new_partitions: &HashMap<String, NewPartitions>,
         options: CreatePartitionsOptions,
     ) -> Result<Outcomes<String, ()>, Error> {
-        let result = self.admin.create_partitions(new_partitions, options);
+        let result = self.admin.create_partitions_options(new_partitions, options);
         Ok(resolve(result.values().iter().map(|(name, f)| (name.clone(), f.clone()))).await)
     }
 
@@ -1186,12 +1186,12 @@ impl AdminBackend for RustNativeAdmin {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
     ) -> Result<Outcomes<TopicPartition, DeletedRecords>, Error> {
-        let result = self.admin.delete_records(records_to_delete, options);
+        let result = self.admin.delete_records_options(records_to_delete, options);
         Ok(resolve(result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone()))).await)
     }
 
     async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, Error> {
-        let result = self.admin.describe_cluster(options);
+        let result = self.admin.describe_cluster_options(options);
         // All four are awaited before any error is reported, so none is
         // abandoned; when more than one failed, the first in Java's declaration
         // order wins. Identical to the FFI's `submit_describe_cluster`, so the
@@ -1213,7 +1213,7 @@ impl AdminBackend for RustNativeAdmin {
         resources: &[ConfigResource],
         options: DescribeConfigsOptions,
     ) -> Result<Outcomes<ConfigResource, ConfigView>, Error> {
-        let result = self.admin.describe_configs(resources, options);
+        let result = self.admin.describe_configs_options(resources, options);
         let mut outcomes = HashMap::with_capacity(result.values().len());
         for (resource, future) in result.values() {
             outcomes.insert(
@@ -1232,7 +1232,7 @@ impl AdminBackend for RustNativeAdmin {
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         options: AlterConfigsOptions,
     ) -> Result<Outcomes<ConfigResource, ()>, Error> {
-        let result = self.admin.incremental_alter_configs(configs, options);
+        let result = self.admin.incremental_alter_configs_options(configs, options);
         Ok(resolve(result.values().iter().map(|(r, f)| (r.clone(), f.clone()))).await)
     }
 
@@ -1242,7 +1242,7 @@ impl AdminBackend for RustNativeAdmin {
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error> {
         self.admin
-            .list_config_resources(config_resource_types, options)
+            .list_config_resources_options(config_resource_types, options)
             .all()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1254,7 +1254,7 @@ impl AdminBackend for RustNativeAdmin {
         options: ListClientMetricsResourcesOptions,
     ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
         self.admin
-            .list_client_metrics_resources(options)
+            .list_client_metrics_resources_options(options)
             .all()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1265,7 +1265,7 @@ impl AdminBackend for RustNativeAdmin {
         brokers: &[i32],
         options: DescribeLogDirsOptions,
     ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, Error> {
-        let result = self.admin.describe_log_dirs(brokers, options);
+        let result = self.admin.describe_log_dirs_options(brokers, options);
         Ok(resolve(result.descriptions().iter().map(|(broker, f)| (*broker, f.clone()))).await)
     }
 
@@ -1274,7 +1274,7 @@ impl AdminBackend for RustNativeAdmin {
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         options: AlterReplicaLogDirsOptions,
     ) -> Result<Outcomes<TopicPartitionReplica, ()>, Error> {
-        let result = self.admin.alter_replica_log_dirs(replica_assignment, options);
+        let result = self.admin.alter_replica_log_dirs_options(replica_assignment, options);
         Ok(resolve(result.values().iter().map(|(r, f)| (r.clone(), f.clone()))).await)
     }
 
@@ -1283,7 +1283,7 @@ impl AdminBackend for RustNativeAdmin {
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
     ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, Error> {
-        let result = self.admin.describe_replica_log_dirs(replicas, options);
+        let result = self.admin.describe_replica_log_dirs_options(replicas, options);
         let mut outcomes = HashMap::with_capacity(result.values().len());
         for (replica, future) in result.values() {
             let outcome = future
@@ -1312,7 +1312,7 @@ impl AdminBackend for RustNativeAdmin {
         // `partitions()` unchanged.
         let outcomes = self
             .admin
-            .elect_leaders(election_type, partitions, options)
+            .elect_leaders_options(election_type, partitions, options)
             .partitions()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await?;
@@ -1327,7 +1327,7 @@ impl AdminBackend for RustNativeAdmin {
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         options: AlterPartitionReassignmentsOptions,
     ) -> Result<Outcomes<TopicPartition, ()>, Error> {
-        let result = self.admin.alter_partition_reassignments(reassignments, options);
+        let result = self.admin.alter_partition_reassignments_options(reassignments, options);
         Ok(resolve(result.values().iter().map(|(tp, f)| (tp.clone(), f.clone()))).await)
     }
 
@@ -1337,7 +1337,7 @@ impl AdminBackend for RustNativeAdmin {
         options: ListPartitionReassignmentsOptions,
     ) -> Result<HashMap<TopicPartition, PartitionReassignment>, Error> {
         self.admin
-            .list_partition_reassignments(partitions, options)
+            .list_partition_reassignments_partitions_options(partitions, options)
             .reassignments()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1348,7 +1348,7 @@ impl AdminBackend for RustNativeAdmin {
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
-        let result = self.admin.list_offsets(topic_partition_offsets, options);
+        let result = self.admin.list_offsets_options(topic_partition_offsets, options);
         // `ListOffsetsResult` exposes its futures through `partitionResult(tp)`
         // rather than as a map, so the *requested* keys drive the collection —
         // and a key the call did not attempt is a whole-call `Err`, not a
@@ -1365,7 +1365,7 @@ impl AdminBackend for RustNativeAdmin {
     }
 
     async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error> {
-        let result = self.admin.list_groups(options);
+        let result = self.admin.list_groups_options(options);
         // Both views are awaited before either error is reported, so neither is
         // abandoned. Identical to the FFI's `submit_list_groups`.
         let valid = result.valid().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
@@ -1378,7 +1378,7 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         options: ListConsumerGroupsOptions,
     ) -> Result<Listings<ConsumerGroupListing>, Error> {
-        let result = self.admin.list_consumer_groups(options);
+        let result = self.admin.list_consumer_groups_options(options);
         let valid = result.valid().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let errors = result.errors().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
         Ok(Listings { valid: valid?, errors: errors? })
@@ -1389,7 +1389,7 @@ impl AdminBackend for RustNativeAdmin {
         group_ids: &[String],
         options: DescribeConsumerGroupsOptions,
     ) -> Result<Outcomes<String, ConsumerGroupDescription>, Error> {
-        let result = self.admin.describe_consumer_groups(group_ids, options);
+        let result = self.admin.describe_consumer_groups_options(group_ids, options);
         Ok(resolve(result.described_groups().into_iter()).await)
     }
 
@@ -1398,7 +1398,7 @@ impl AdminBackend for RustNativeAdmin {
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
     ) -> Result<Outcomes<String, ClassicGroupDescription>, Error> {
-        let result = self.admin.describe_classic_groups(group_ids, options);
+        let result = self.admin.describe_classic_groups_options(group_ids, options);
         Ok(resolve(result.described_groups().into_iter()).await)
     }
 
@@ -1407,7 +1407,7 @@ impl AdminBackend for RustNativeAdmin {
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         options: ListConsumerGroupOffsetsOptions,
     ) -> Result<Outcomes<String, GroupOffsets>, Error> {
-        let result = self.admin.list_consumer_group_offsets(group_specs, options);
+        let result = self.admin.list_consumer_group_offsets_options(group_specs, options);
         // The *requested* group ids drive the collection, and a group the call
         // did not attempt is a whole-call `Err` rather than a missing entry —
         // Java's `partitionsToOffsetAndMetadata(groupId)` throws
@@ -1428,7 +1428,7 @@ impl AdminBackend for RustNativeAdmin {
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
         options: AlterConsumerGroupOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ()>, Error> {
-        let result = self.admin.alter_consumer_group_offsets(group_id, offsets, options);
+        let result = self.admin.alter_consumer_group_offsets_options(group_id, offsets, options);
         if offsets.is_empty() {
             // No per-partition slot exists, so the single future's failure is
             // the only observable. Same branch as the FFI's
@@ -1449,7 +1449,7 @@ impl AdminBackend for RustNativeAdmin {
         partitions: &HashSet<TopicPartition>,
         options: DeleteConsumerGroupOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ()>, Error> {
-        let result = self.admin.delete_consumer_group_offsets(group_id, partitions, options);
+        let result = self.admin.delete_consumer_group_offsets_options(group_id, partitions, options);
         if partitions.is_empty() {
             result.all().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
             return Ok(HashMap::new());
@@ -1469,7 +1469,7 @@ impl AdminBackend for RustNativeAdmin {
         group_ids: &[String],
         options: DeleteConsumerGroupsOptions,
     ) -> Result<Outcomes<String, ()>, Error> {
-        let result = self.admin.delete_consumer_groups(group_ids, options);
+        let result = self.admin.delete_consumer_groups_options(group_ids, options);
         Ok(resolve(result.deleted_groups().into_iter()).await)
     }
 
@@ -1482,7 +1482,7 @@ impl AdminBackend for RustNativeAdmin {
         // into the call, exactly as the FFI's
         // `submit_remove_members_from_consumer_group` does.
         let members: Vec<_> = options.members().iter().cloned().collect();
-        let result = self.admin.remove_members_from_consumer_group(group_id, options);
+        let result = self.admin.remove_members_from_consumer_group_options(group_id, options);
         if members.is_empty() {
             // `removeAll` mode: Java's `memberResult` is not applicable, so
             // `all()` is the only observable and the map stays empty.
@@ -1505,7 +1505,7 @@ impl AdminBackend for RustNativeAdmin {
         acls: &[AclBinding],
         options: CreateAclsOptions,
     ) -> Result<Outcomes<AclBinding, ()>, Error> {
-        let result = self.admin.create_acls(acls, options);
+        let result = self.admin.create_acls_options(acls, options);
         Ok(resolve(result.values().iter().map(|(binding, f)| (binding.clone(), f.clone()))).await)
     }
 
@@ -1515,7 +1515,7 @@ impl AdminBackend for RustNativeAdmin {
         options: DescribeAclsOptions,
     ) -> Result<Vec<AclBinding>, Error> {
         self.admin
-            .describe_acls(filter, options)
+            .describe_acls_options(filter, options)
             .values()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1526,7 +1526,7 @@ impl AdminBackend for RustNativeAdmin {
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
     ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
-        let result = self.admin.delete_acls(filters, options);
+        let result = self.admin.delete_acls_options(filters, options);
         Ok(resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await)
     }
 
@@ -1536,7 +1536,7 @@ impl AdminBackend for RustNativeAdmin {
         options: DescribeClientQuotasOptions,
     ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, Error> {
         self.admin
-            .describe_client_quotas(filter, options)
+            .describe_client_quotas_options(filter, options)
             .entities()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1547,7 +1547,7 @@ impl AdminBackend for RustNativeAdmin {
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
     ) -> Result<Outcomes<ClientQuotaEntity, ()>, Error> {
-        let result = self.admin.alter_client_quotas(entries, options);
+        let result = self.admin.alter_client_quotas_options(entries, options);
         Ok(resolve(result.values().iter().map(|(entity, f)| (entity.clone(), f.clone()))).await)
     }
 
@@ -1556,7 +1556,7 @@ impl AdminBackend for RustNativeAdmin {
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
     ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
-        let result = self.admin.describe_user_scram_credentials(users, options);
+        let result = self.admin.describe_user_scram_credentials_options(users, options);
         // Java's three views composed into the per-user shape, exactly as
         // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
         // all four backends answer with the same key set and the same errors.
@@ -1596,13 +1596,13 @@ impl AdminBackend for RustNativeAdmin {
         alterations: &[UserScramCredentialAlteration],
         options: AlterUserScramCredentialsOptions,
     ) -> Result<Outcomes<String, ()>, Error> {
-        let result = self.admin.alter_user_scram_credentials(alterations, options);
+        let result = self.admin.alter_user_scram_credentials_options(alterations, options);
         Ok(resolve(result.values().iter().map(|(user, f)| (user.clone(), f.clone()))).await)
     }
 
     async fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> Result<DelegationToken, Error> {
         self.admin
-            .create_delegation_token(options)
+            .create_delegation_token_options(options)
             .delegation_token()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1610,7 +1610,7 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> Result<i64, Error> {
         self.admin
-            .renew_delegation_token(hmac, options)
+            .renew_delegation_token_options(hmac, options)
             .expiry_timestamp()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1618,7 +1618,7 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn expire_delegation_token(&self, hmac: &[u8], options: ExpireDelegationTokenOptions) -> Result<i64, Error> {
         self.admin
-            .expire_delegation_token(hmac, options)
+            .expire_delegation_token_options(hmac, options)
             .expiry_timestamp()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1629,7 +1629,7 @@ impl AdminBackend for RustNativeAdmin {
         options: DescribeDelegationTokenOptions,
     ) -> Result<Vec<DelegationToken>, Error> {
         self.admin
-            .describe_delegation_token(options)
+            .describe_delegation_token_options(options)
             .delegation_tokens()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1638,7 +1638,7 @@ impl AdminBackend for RustNativeAdmin {
     async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, Error> {
         let metadata = self
             .admin
-            .describe_features(options)
+            .describe_features_options(options)
             .feature_metadata()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await?;
@@ -1657,7 +1657,7 @@ impl AdminBackend for RustNativeAdmin {
         // The only RPC whose Rust submission is fallible: an empty map or a blank
         // feature name is an `IllegalArgumentException` in Java, thrown before any
         // future exists, so it is the whole-call `Err` here.
-        let result = self.admin.update_features(feature_updates, options)?;
+        let result = self.admin.update_features_options(feature_updates, options)?;
         Ok(resolve(result.values().iter().map(|(feature, f)| (feature.clone(), f.clone()))).await)
     }
 
@@ -1666,7 +1666,7 @@ impl AdminBackend for RustNativeAdmin {
         partitions: &[TopicPartition],
         options: DescribeProducersOptions,
     ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, Error> {
-        let result = self.admin.describe_producers(partitions, options);
+        let result = self.admin.describe_producers_options(partitions, options);
         // `DescribeProducersResult` exposes `partitionResult(tp)` rather than a
         // map, so the *requested* keys drive the collection and a partition the
         // call did not attempt is a whole-call `Err`. A repeated partition
@@ -1691,7 +1691,7 @@ impl AdminBackend for RustNativeAdmin {
         transactional_ids: &[String],
         options: DescribeTransactionsOptions,
     ) -> Result<Outcomes<String, TransactionDescription>, Error> {
-        let result = self.admin.describe_transactions(transactional_ids, options);
+        let result = self.admin.describe_transactions_options(transactional_ids, options);
         // `description(id)` rather than a map, so the requested ids drive the
         // collection — the `describeProducers` shape, and the FFI's
         // `submit_describe_transactions`.
@@ -1711,7 +1711,7 @@ impl AdminBackend for RustNativeAdmin {
         options: AbortTransactionOptions,
     ) -> Result<(), Error> {
         self.admin
-            .abort_transaction(spec, options)
+            .abort_transaction_options(spec, options)
             .all()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1723,7 +1723,7 @@ impl AdminBackend for RustNativeAdmin {
         options: TerminateTransactionOptions,
     ) -> Result<(), Error> {
         self.admin
-            .force_terminate_transaction(transactional_id, options)
+            .force_terminate_transaction_options(transactional_id, options)
             .result()
             .get_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
@@ -1733,7 +1733,7 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         options: ListTransactionsOptions,
     ) -> Result<Outcomes<i32, Vec<TransactionListing>>, Error> {
-        let result = self.admin.list_transactions(options);
+        let result = self.admin.list_transactions_options(options);
         // `by_broker_id()` keeps the per-broker future, so a broker that failed
         // is one entry error rather than a whole-call failure; only the
         // broker-discovery future's own failure is the outer `Err`. Same view the
@@ -1751,7 +1751,7 @@ impl AdminBackend for RustNativeAdmin {
         transactional_ids: &[String],
         options: FenceProducersOptions,
     ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
-        let result = self.admin.fence_producers(transactional_ids, options);
+        let result = self.admin.fence_producers_options(transactional_ids, options);
         // Java has no accessor for the pair, only the two `then_apply`
         // projections `producerId(id)` and `epochId(id)`. They resolve from the
         // same per-id future, so they succeed or fail together and awaiting both
@@ -1776,7 +1776,7 @@ impl AdminBackend for RustNativeAdmin {
     }
 
     async fn close(&self, timeout: Option<Duration>) -> Result<(), Error> {
-        self.admin.close(close_timeout(timeout)).await;
+        self.admin.close_timeout(close_timeout(timeout)).await;
         Ok(())
     }
 

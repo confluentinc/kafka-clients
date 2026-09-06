@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::common::KafkaFuture;
 
-/// The result of the [`update_features`](crate::admin::Admin::update_features)
+/// The result of the [`update_features_options`](crate::admin::Admin::update_features_options)
 /// call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesResult`.
