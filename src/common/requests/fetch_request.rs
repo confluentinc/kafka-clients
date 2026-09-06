@@ -320,10 +320,24 @@ impl FetchRequestBuilder {
         self
     }
 
+    /// Returns the removed-partitions list.
+    ///
+    /// Translates `FetchRequest.Builder.removed()`.
+    pub fn removed(&self) -> &[TopicIdPartition] {
+        &self.removed
+    }
+
     /// Sets the removed-partitions list.
     pub fn set_removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
         self.removed = removed;
         self
+    }
+
+    /// Returns the replaced-partitions list.
+    ///
+    /// Translates `FetchRequest.Builder.replaced()`.
+    pub fn replaced(&self) -> &[TopicIdPartition] {
+        &self.replaced
     }
 
     /// Sets the replaced-partitions list.
@@ -654,6 +668,21 @@ mod tests {
         let req = builder.build_version(13);
         let forgotten = &req.data().forgotten_topics_data;
         assert_eq!(2, forgotten.len());
+    }
+
+    #[test]
+    fn test_removed_and_replaced_round_trip() {
+        let id = Uuid::random_uuid();
+        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        // Java's Builder defaults both to `Collections.emptyList()`.
+        assert!(builder.removed().is_empty());
+        assert!(builder.replaced().is_empty());
+
+        let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
+        let builder = builder.set_removed(removed.clone()).set_replaced(replaced.clone());
+        assert_eq!(removed.as_slice(), builder.removed());
+        assert_eq!(replaced.as_slice(), builder.replaced());
     }
 
     #[test]
