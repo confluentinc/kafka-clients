@@ -12,7 +12,7 @@ direction: down
 appside: "App task — KafkaProducer::send()" {
   style.fill: "#eef6ff"
 
-  send: "send(record) / send_with_callback(record, cb)"
+  send: "send(record) / send_callback(record, cb)"
   meta: "do_send(): wait_on_metadata(max_block_ms)"
   prep: "serialize key/value -> choose partition -> validate size"
   append: "accumulator.append(...) — writes into the batch buffer"
