@@ -1764,14 +1764,14 @@ where
 
     /// Asynchronously send a record to a topic.
     ///
-    /// See [`send_with_callback`](Producer::send_with_callback) for details.
+    /// See [`send_callback`](Producer::send_callback) for details.
     async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.do_send(record, None).await
     }
 
     /// Asynchronously send a record to a topic and invoke the provided callback
     /// when the send has been acknowledged.
-    async fn send_with_callback(
+    async fn send_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
@@ -2087,7 +2087,7 @@ mod tests {
         // An `ApiException` yields `Ok(failed_future)`, not `Err` — Java's
         // `return new FutureFailure(e)`.
         let future = producer
-            .send_with_callback(record, Some(callback))
+            .send_callback(record, Some(callback))
             .await
             .expect("an API-error serializer failure must come back as a failed future, not Err");
 
@@ -2856,7 +2856,7 @@ mod tests {
     /// Translated from `KafkaProducerTest.testCallbackAndInterceptorHandleError`
     /// (the callback invocation part).
     #[tokio::test]
-    async fn test_send_with_callback() {
+    async fn test_send_callback() {
         use std::sync::atomic::AtomicBool;
 
         let metadata = create_metadata_with_topic(TOPIC, 1);
@@ -2870,7 +2870,7 @@ mod tests {
         });
 
         let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
-        let result = producer.send_with_callback(record, Some(callback)).await;
+        let result = producer.send_callback(record, Some(callback)).await;
         assert!(result.is_ok(), "Send with callback should succeed");
     }
 
@@ -2926,7 +2926,7 @@ mod tests {
         // Send a record that exceeds max_request_size
         let large_value = "a".repeat(100);
         let record = ProducerRecord::new(TOPIC.to_string(), Some(large_value));
-        let result = producer.send_with_callback(record, Some(callback)).await;
+        let result = producer.send_callback(record, Some(callback)).await;
 
         // send() returns Ok with a failed future (Java's FutureFailure pattern)
         assert!(result.is_ok(), "send() should return Ok with a failed future");
@@ -3012,7 +3012,7 @@ mod tests {
 
         let second: ProducerRecord<String, String> =
             ProducerRecord::new_partition_key(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
-        let result = producer.send_with_callback(second, Some(callback)).await;
+        let result = producer.send_callback(second, Some(callback)).await;
 
         // Java returns a `FutureFailure`, not a thrown exception, for an
         // `ApiException`.
@@ -3074,7 +3074,7 @@ mod tests {
 
         let record: ProducerRecord<String, String> =
             ProducerRecord::new_partition_key(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
-        let error = match producer.send_with_callback(record, Some(callback)).await {
+        let error = match producer.send_callback(record, Some(callback)).await {
             Ok(_) => panic!("a bare KafkaException must propagate as Err, not as a failed future"),
             Err(e) => e,
         };
@@ -3303,7 +3303,7 @@ mod tests {
         });
 
         let record = ProducerRecord::new(invalid_topic.to_string(), Some("value".to_string()));
-        let result = producer.send_with_callback(record, Some(callback)).await;
+        let result = producer.send_callback(record, Some(callback)).await;
 
         // Should return a failed future, not propagate the error
         assert!(result.is_ok(), "send() should return Ok with a failed future for InvalidTopic");

@@ -285,10 +285,10 @@ impl ProducerCallbackLog {
 
     /// Send `record` with a delivery callback that appends a `"delivery"` entry
     /// to this log. Returns the send future so the caller can still await the
-    /// record's completion, exactly like `Producer::send_with_callback`.
+    /// record's completion, exactly like `Producer::send_callback`.
     ///
     /// The gRPC arm passes a no-op callback rather than one that appends
-    /// locally: `MultilanguageProducer::send_with_callback` sets the proto
+    /// locally: `MultilanguageProducer::send_callback` sets the proto
     /// `with_callback` flag from `callback.is_some()` (which is what makes the
     /// *server* register a real delivery callback) and then invokes the closure
     /// client-side. Appending there too would double-count, and would record the
@@ -306,12 +306,12 @@ impl ProducerCallbackLog {
                 let log = Arc::clone(log);
                 let callback: confluent_kafka::producer::Callback =
                     Box::new(move |metadata, error| push(&log, delivery_entry(metadata, error)));
-                producer.send_with_callback(record, Some(callback)).await
+                producer.send_callback(record, Some(callback)).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ProducerCallbackLog::Grpc(_) => {
                 let callback: confluent_kafka::producer::Callback = Box::new(|_, _| {});
-                producer.send_with_callback(record, Some(callback)).await
+                producer.send_callback(record, Some(callback)).await
             },
         }
     }

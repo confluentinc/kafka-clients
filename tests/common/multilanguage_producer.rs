@@ -22,7 +22,7 @@
 //!      producer's future internally; the unary RPC response is the
 //!      resolved future. We wrap it in a [`KafkaFuture::completed`].
 //!
-//!   2. `send_with_callback`'s closure stays Rust-side. After awaiting the
+//!   2. `send_callback`'s closure stays Rust-side. After awaiting the
 //!      RPC we synchronously invoke the user's callback with the decoded
 //!      `RecordMetadata` or `Error` reference. Passing a callback also
 //!      sets the proto `with_callback` flag, which makes the *server* register
@@ -232,10 +232,10 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        self.send_with_callback(record, None).await
+        self.send_callback(record, None).await
     }
 
-    async fn send_with_callback(
+    async fn send_callback(
         &self,
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
         callback: Option<Callback>,

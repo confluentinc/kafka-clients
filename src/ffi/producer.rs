@@ -392,7 +392,7 @@ fn producer_send_with_callback(
                 ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), None),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
-            rt.block_on(mock.send_with_callback(owned_record, Some(callback)))
+            rt.block_on(mock.send_callback(owned_record, Some(callback)))
         },
         ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, Some(callback))),
     }
@@ -818,7 +818,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                     ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), Some(headers)),
                 ) {
                     Ok(record) => {
-                        if let Err(e) = mp.send_with_callback(record, Some(callback)).await {
+                        if let Err(e) = mp.send_callback(record, Some(callback)).await {
                             fire_error(e);
                         }
                     },

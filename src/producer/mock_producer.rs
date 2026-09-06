@@ -146,7 +146,7 @@ use super::Callback;
 // stated at their entries in the test accounting block at the end of this file.
 //
 // Two Java names cover four Rust `fn`s, so "30 present" is not "30 signatures":
-// `send` (278, 288) → `send` / `send_with_callback`, and `close` (412, 417) →
+// `send` (278, 288) → `send` / `send_callback`, and `close` (412, 417) →
 // `close` / `close_timeout`. The nested `Completion` class sits at 8-space
 // indent and so is outside the scan; its one method, `complete` (567), is
 // translated as `Completion::complete`.
@@ -933,10 +933,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     }
 
     async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        self.send_with_callback(record, None).await
+        self.send_callback(record, None).await
     }
 
-    async fn send_with_callback(
+    async fn send_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
@@ -1342,7 +1342,7 @@ mod tests {
             ));
         });
 
-        let future = producer.send_with_callback(record2(), Some(callback)).await.unwrap();
+        let future = producer.send_callback(record2(), Some(callback)).await.unwrap();
         let e = Error::local_illegal_argument("dummy error");
         assert!(producer.error_next(e), "Complete the second request with an error");
 

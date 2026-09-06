@@ -114,9 +114,9 @@ pub trait Producer<K, V> {
     async fn abort_transaction(&self) -> Result<(), Error>;
 
     /// Asynchronously send a record to a topic. Equivalent to
-    /// `send_with_callback(record, None)`.
+    /// `send_callback(record, None)`.
     ///
-    /// See [`send_with_callback`](Producer::send_with_callback) for details.
+    /// See [`send_callback`](Producer::send_callback) for details.
     async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error>;
 
     /// Asynchronously send a record to a topic and invoke the provided callback
@@ -138,7 +138,7 @@ pub trait Producer<K, V> {
     /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
     /// - A Kafka-related error occurs
-    async fn send_with_callback(
+    async fn send_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
