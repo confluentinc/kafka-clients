@@ -876,8 +876,8 @@ impl MultilanguageAdmin {
             admin_id: self.admin_id,
             topics: Some(topics),
             timeout_ms: options.timeout_ms(),
-            include_authorized_operations: options.should_include_authorized_operations(),
-            partition_size_limit_per_response: Some(options.partition_size_limit()),
+            include_authorized_operations: options.include_authorized_operations(),
+            partition_size_limit_per_response: Some(options.partition_size_limit_per_response()),
         }
     }
 
@@ -1481,7 +1481,7 @@ impl AdminBackend for MultilanguageAdmin {
                 .map(|(topic, np)| new_partitions_to_proto(topic, np))
                 .collect(),
             timeout_ms: options.timeout_ms(),
-            validate_only: options.should_validate_only(),
+            validate_only: options.validate_only(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
         let response = self.call(|mut c| async move { c.create_partitions(request).await }).await?;
@@ -1522,8 +1522,8 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeClusterRequest {
             admin_id: self.admin_id,
             timeout_ms: options.timeout_ms(),
-            include_authorized_operations: options.should_include_authorized_operations(),
-            include_fenced_brokers: options.should_include_fenced_brokers(),
+            include_authorized_operations: options.include_authorized_operations(),
+            include_fenced_brokers: options.include_fenced_brokers(),
         };
         let response = self.call(|mut c| async move { c.describe_cluster(request).await }).await?;
         if let Some(err) = response.error {
@@ -1551,8 +1551,8 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             resources: resources.iter().map(config_resource_to_proto).collect(),
             timeout_ms: options.timeout_ms(),
-            include_synonyms: options.should_include_synonyms(),
-            include_documentation: options.should_include_documentation(),
+            include_synonyms: options.include_synonyms(),
+            include_documentation: options.include_documentation(),
         };
         let response = self.call(|mut c| async move { c.describe_configs(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -1782,7 +1782,7 @@ impl AdminBackend for MultilanguageAdmin {
                 .collect(),
             timeout_ms: options.timeout_ms(),
             // Java's default is true, so this is optional on the wire.
-            allow_replication_factor_change: Some(options.should_allow_replication_factor_change()),
+            allow_replication_factor_change: Some(options.allow_replication_factor_change()),
         };
         let response = self
             .call(|mut c| async move { c.alter_partition_reassignments(request).await })
@@ -1930,7 +1930,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
             timeout_ms: options.timeout_ms(),
-            include_authorized_operations: options.should_include_authorized_operations(),
+            include_authorized_operations: options.include_authorized_operations(),
         };
         let response = self
             .call(|mut c| async move { c.describe_consumer_groups(request).await })
@@ -1957,7 +1957,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
             timeout_ms: options.timeout_ms(),
-            include_authorized_operations: options.should_include_authorized_operations(),
+            include_authorized_operations: options.include_authorized_operations(),
         };
         let response = self
             .call(|mut c| async move { c.describe_classic_groups(request).await })
@@ -1996,7 +1996,7 @@ impl AdminBackend for MultilanguageAdmin {
                 })
                 .collect(),
             timeout_ms: options.timeout_ms(),
-            require_stable: options.should_require_stable(),
+            require_stable: options.require_stable(),
         };
         let response = self
             .call(|mut c| async move { c.list_consumer_group_offsets(request).await })
@@ -2115,7 +2115,7 @@ impl AdminBackend for MultilanguageAdmin {
                         .collect(),
                 })
             },
-            reason: options.reason_value().map(str::to_string),
+            reason: options.reason().map(str::to_string),
             timeout_ms: options.timeout_ms(),
         };
         let response = self
@@ -2227,7 +2227,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::AlterClientQuotasRequest {
             admin_id: self.admin_id,
             entries: entries.iter().map(quota_alteration_to_proto).collect(),
-            validate_only: options.is_validate_only(),
+            validate_only: options.validate_only(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.alter_client_quotas(request).await }).await?;
@@ -2283,11 +2283,11 @@ impl AdminBackend for MultilanguageAdmin {
     async fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> Result<DelegationToken, Error> {
         let request = proto::CreateDelegationTokenRequest {
             admin_id: self.admin_id,
-            renewers: options.get_renewers().iter().map(kafka_principal_to_proto).collect(),
+            renewers: options.renewers().iter().map(kafka_principal_to_proto).collect(),
             // Absent is Java's unset owner, which makes the requesting principal
             // the owner; both halves of the principal are absent together.
-            owner: options.get_owner().map(kafka_principal_to_proto),
-            max_lifetime_ms: options.get_max_lifetime_ms(),
+            owner: options.owner().map(kafka_principal_to_proto),
+            max_lifetime_ms: options.max_lifetime_ms(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self
@@ -2306,7 +2306,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::RenewDelegationTokenRequest {
             admin_id: self.admin_id,
             hmac: hmac.to_vec(),
-            renew_time_period_ms: options.get_renew_time_period_ms(),
+            renew_time_period_ms: options.renew_time_period_ms(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self
@@ -2322,7 +2322,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::ExpireDelegationTokenRequest {
             admin_id: self.admin_id,
             hmac: hmac.to_vec(),
-            expiry_time_period_ms: options.get_expiry_time_period_ms(),
+            expiry_time_period_ms: options.expiry_time_period_ms(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self
@@ -2343,7 +2343,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Absent is Java's unset filter ("every token I may see"), which must
             // stay distinct from an explicitly empty one — the wrapper message is
             // what keeps them apart, never emptiness.
-            owners: options.get_owners().map(|owners| proto::KafkaPrincipalList {
+            owners: options.owners().map(|owners| proto::KafkaPrincipalList {
                 principals: owners.iter().map(kafka_principal_to_proto).collect(),
             }),
             timeout_ms: options.timeout_ms(),
@@ -2362,7 +2362,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             // Absent is Java's empty `OptionalInt`; node id 0 is a legal broker,
             // so the absence cannot be encoded as a value.
-            node_id: options.get_node_id(),
+            node_id: options.node_id(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_features(request).await }).await?;
@@ -2386,7 +2386,7 @@ impl AdminBackend for MultilanguageAdmin {
                 .iter()
                 .map(|(feature, update)| (feature.clone(), feature_update_to_proto(update)))
                 .collect(),
-            validate_only: options.get_validate_only(),
+            validate_only: options.validate_only(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.update_features(request).await }).await?;
@@ -2408,7 +2408,7 @@ impl AdminBackend for MultilanguageAdmin {
             partitions: partitions.iter().map(tp_to_proto).collect(),
             // Absent is Java's empty `OptionalInt` (query each partition's
             // leader); broker id 0 is legal, so the absence is its own state.
-            broker_id: options.broker_id_opt(),
+            broker_id: options.broker_id(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_producers(request).await }).await?;

@@ -1790,7 +1790,7 @@ impl Admin for MockAdminClient {
         // renewer, otherwise mint a token whose id doubles as its HMAC and
         // whose owner is the first renewer, and store it in `all_tokens`.
         let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
-        for renewer in options.get_renewers() {
+        for renewer in options.renewers() {
             if renewer.principal_type() != KafkaPrincipal::USER_TYPE {
                 handle.complete_with_error(Error::with_message(Errors::InvalidPrincipalType, ""));
                 return CreateDelegationTokenResult::new(handle.future());
@@ -1804,7 +1804,7 @@ impl Admin for MockAdminClient {
         // inline on the calling thread, so it would unwind across an
         // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
         // future is completed exceptionally instead.
-        let Some(owner) = options.get_renewers().first().cloned() else {
+        let Some(owner) = options.renewers().first().cloned() else {
             handle.complete_with_error(Error::local_illegal_argument(
                 "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner",
             ));
@@ -1816,9 +1816,9 @@ impl Admin for MockAdminClient {
         let token_info = TokenInformation::new(
             token_id.clone(),
             owner,
-            options.get_renewers().to_vec(),
+            options.renewers().to_vec(),
             current_time_millis(),
-            options.get_max_lifetime_ms(),
+            options.max_lifetime_ms(),
             -1,
         );
         let token = DelegationToken::new(token_info, token_id.into_bytes());
@@ -1831,7 +1831,7 @@ impl Admin for MockAdminClient {
         // Mirrors MockAdminClient.renewDelegationToken: update the expiry of
         // every matching token; error if none matched.
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
-        let expiry_timestamp = options.get_renew_time_period_ms();
+        let expiry_timestamp = options.renew_time_period_ms();
         let mut token_found = false;
         {
             let mut state = self.state.lock().unwrap();
@@ -1859,7 +1859,7 @@ impl Admin for MockAdminClient {
         // whose expiry period is the `-1` sentinel or already in the past;
         // error if none matched.
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
-        let expiry_timestamp = options.get_expiry_time_period_ms();
+        let expiry_timestamp = options.expiry_time_period_ms();
         let now = current_time_millis();
         let mut token_found = false;
         let mut tokens_to_remove = Vec::new();
@@ -1893,7 +1893,7 @@ impl Admin for MockAdminClient {
         // tokens — matching the real client's "null describes all" contract.)
         let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
         let state = self.state.lock().unwrap();
-        let tokens = match options.get_owners() {
+        let tokens = match options.owners() {
             // Null or empty owners filter -> describe all tokens.
             None | Some([]) => state.all_tokens.clone(),
             Some(owners) => state
@@ -1960,7 +1960,7 @@ impl Admin for MockAdminClient {
             match &error {
                 None => {
                     handle.complete(());
-                    if !options.get_validate_only() {
+                    if !options.validate_only() {
                         state.feature_levels.insert(feature.clone(), update.max_version_level());
                     }
                 },
@@ -2140,7 +2140,7 @@ mod tests {
         let mock = admin_with_features();
         let updates = HashMap::from([("feature".to_string(), FeatureUpdate::new(4, UpgradeType::Upgrade).unwrap())]);
         let result = mock
-            .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+            .update_features(&updates, UpdateFeaturesOptions::new().set_validate_only(true))
             .unwrap();
         result.values()["feature"].get().await.unwrap();
         // Level unchanged because validate_only was set.
@@ -2674,7 +2674,7 @@ mod tests {
     #[tokio::test]
     async fn create_delegation_token_rejects_non_user_renewer() {
         let client = admin();
-        let options = CreateDelegationTokenOptions::new().renewers(vec![KafkaPrincipal::new("Group", "admins")]);
+        let options = CreateDelegationTokenOptions::new().set_renewers(vec![KafkaPrincipal::new("Group", "admins")]);
         let err = client
             .create_delegation_token(options)
             .delegation_token()
@@ -2724,8 +2724,8 @@ mod tests {
     async fn create_then_describe_lists_token() {
         let client = admin();
         let options = CreateDelegationTokenOptions::new()
-            .renewers(vec![user("alice")])
-            .max_lifetime_ms(1000);
+            .set_renewers(vec![user("alice")])
+            .set_max_lifetime_ms(1000);
         let token = client.create_delegation_token(options).delegation_token().get().await.unwrap();
         assert_eq!(token.token_info().owner(), &user("alice"));
         assert_eq!(token.token_info().max_timestamp(), 1000);
@@ -2747,7 +2747,7 @@ mod tests {
     async fn renew_delegation_token_found_and_not_found() {
         let client = admin();
         let unknown = client
-            .renew_delegation_token(b"nope", RenewDelegationTokenOptions::new().renew_time_period_ms(10))
+            .renew_delegation_token(b"nope", RenewDelegationTokenOptions::new().set_renew_time_period_ms(10))
             .expiry_timestamp()
             .get()
             .await
@@ -2756,13 +2756,13 @@ mod tests {
         assert_eq!(unknown.message(), "");
 
         let token = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .create_delegation_token(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
         let expiry = client
-            .renew_delegation_token(token.hmac(), RenewDelegationTokenOptions::new().renew_time_period_ms(4242))
+            .renew_delegation_token(token.hmac(), RenewDelegationTokenOptions::new().set_renew_time_period_ms(4242))
             .expiry_timestamp()
             .get()
             .await
@@ -2791,14 +2791,14 @@ mod tests {
     async fn expire_delegation_token_negative_one_removes_token() {
         let client = admin();
         let token = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .create_delegation_token(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
 
         let expiry = client
-            .expire_delegation_token(token.hmac(), ExpireDelegationTokenOptions::new().expiry_time_period_ms(-1))
+            .expire_delegation_token(token.hmac(), ExpireDelegationTokenOptions::new().set_expiry_time_period_ms(-1))
             .expiry_timestamp()
             .get()
             .await
@@ -2820,20 +2820,20 @@ mod tests {
     async fn describe_delegation_token_owners_filter() {
         let client = admin();
         let token_alice = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .create_delegation_token(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
         let _token_bob = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("bob")]))
+            .create_delegation_token(CreateDelegationTokenOptions::new().set_renewers(vec![user("bob")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
 
         let listed = client
-            .describe_delegation_token(DescribeDelegationTokenOptions::new().owners(Some(vec![user("alice")])))
+            .describe_delegation_token(DescribeDelegationTokenOptions::new().set_owners(Some(vec![user("alice")])))
             .delegation_tokens()
             .get()
             .await

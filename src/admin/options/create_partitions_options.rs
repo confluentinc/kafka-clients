@@ -56,14 +56,14 @@ impl CreatePartitionsOptions {
     /// Set to true if the request should be validated without creating new
     /// partitions.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
 
     /// Return true if the request should be validated without creating new
     /// partitions.
-    pub fn should_validate_only(&self) -> bool {
+    pub fn validate_only(&self) -> bool {
         self.validate_only
     }
 
@@ -88,7 +88,7 @@ mod tests {
     fn defaults_match_java() {
         let options = CreatePartitionsOptions::new();
         assert_eq!(options.timeout_ms(), None);
-        assert!(!options.should_validate_only());
+        assert!(!options.validate_only());
         assert!(options.should_retry_on_quota_violation());
     }
 
@@ -96,10 +96,10 @@ mod tests {
     fn fluent_setters() {
         let options = CreatePartitionsOptions::new()
             .set_timeout_ms(Some(5000))
-            .validate_only(true)
+            .set_validate_only(true)
             .retry_on_quota_violation(false);
         assert_eq!(options.timeout_ms(), Some(5000));
-        assert!(options.should_validate_only());
+        assert!(options.validate_only());
         assert!(!options.should_retry_on_quota_violation());
     }
 }

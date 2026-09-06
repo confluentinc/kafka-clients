@@ -1518,9 +1518,9 @@ fn get_create_delegation_token_call(
     // The renewer principals are needed both to build the request and to
     // reconstruct the returned TokenInformation (Java uses `options.renewers()`
     // in handleResponse), so capture them once.
-    let renewer_principals = options.get_renewers().to_vec();
-    let owner = options.get_owner().cloned();
-    let max_lifetime_ms = options.get_max_lifetime_ms();
+    let renewer_principals = options.renewers().to_vec();
+    let owner = options.owner().cloned();
+    let max_lifetime_ms = options.max_lifetime_ms();
 
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = CreateDelegationTokenRequestData::new();
@@ -1542,7 +1542,7 @@ fn get_create_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let resp_renewers = options.get_renewers().to_vec();
+    let resp_renewers = options.renewers().to_vec();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateDelegationToken(create_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a CreateDelegationToken response"));
@@ -3194,7 +3194,7 @@ impl Admin for KafkaAdminClient {
                     let call = get_describe_topics_by_names_call(
                         Arc::new(handles),
                         valid_topic_names,
-                        options.should_include_authorized_operations(),
+                        options.include_authorized_operations(),
                         deadline,
                     );
                     self.submit(call);
@@ -3226,7 +3226,7 @@ impl Admin for KafkaAdminClient {
                     let call = get_describe_topics_by_ids_call(
                         Arc::new(handles),
                         valid_topic_ids,
-                        options.should_include_authorized_operations(),
+                        options.include_authorized_operations(),
                         deadline,
                     );
                     self.submit(call);
@@ -3273,7 +3273,7 @@ impl Admin for KafkaAdminClient {
                 Arc::new(topics_by_name),
                 names,
                 HashMap::new(),
-                options.should_validate_only(),
+                options.validate_only(),
                 options.should_retry_on_quota_violation(),
                 now,
                 deadline,
@@ -3457,8 +3457,8 @@ impl Admin for KafkaAdminClient {
         // handler so the retry falls back to a Metadata request (mirrors Java).
         let use_metadata_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mm = self.shared.metadata_manager.clone();
-        let include_authorized_operations = options.should_include_authorized_operations();
-        let include_fenced_brokers = options.should_include_fenced_brokers();
+        let include_authorized_operations = options.include_authorized_operations();
+        let include_fenced_brokers = options.include_fenced_brokers();
 
         let req_use_metadata = Arc::clone(&use_metadata_request);
         let req_mm = mm.clone();
@@ -3591,8 +3591,8 @@ impl Admin for KafkaAdminClient {
 
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-        let include_synonyms = options.should_include_synonyms();
-        let include_documentation = options.should_include_documentation();
+        let include_synonyms = options.include_synonyms();
+        let include_documentation = options.include_documentation();
 
         let mut public: HashMap<ConfigResource, KafkaFuture<Config>> = HashMap::new();
         for (node, unified) in &node_futures {
@@ -3985,7 +3985,7 @@ impl Admin for KafkaAdminClient {
         if !topics_to_reassignments.is_empty() {
             let now = self.now();
             let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-            let allow_replication_factor_change = options.should_allow_replication_factor_change();
+            let allow_replication_factor_change = options.allow_replication_factor_change();
             let expected_responses_count: usize =
                 topics_to_reassignments.values().map(std::collections::BTreeMap::len).sum();
             let call = get_alter_partition_reassignments_call(
@@ -4156,8 +4156,7 @@ impl Admin for KafkaAdminClient {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
         let future = DescribeConsumerGroupsHandler::new_future(group_ids);
         let result_map = future.all();
-        let handler =
-            DescribeConsumerGroupsHandler::new(options.should_include_authorized_operations(), log_context.clone());
+        let handler = DescribeConsumerGroupsHandler::new(options.include_authorized_operations(), log_context.clone());
 
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
@@ -4176,8 +4175,7 @@ impl Admin for KafkaAdminClient {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
         let future = DescribeClassicGroupsHandler::new_future(group_ids);
         let result_map = future.all();
-        let handler =
-            DescribeClassicGroupsHandler::new(options.should_include_authorized_operations(), log_context.clone());
+        let handler = DescribeClassicGroupsHandler::new(options.include_authorized_operations(), log_context.clone());
 
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
@@ -4197,11 +4195,8 @@ impl Admin for KafkaAdminClient {
         let group_ids: Vec<String> = group_specs.keys().cloned().collect();
         let future = ListConsumerGroupOffsetsHandler::new_future(&group_ids);
         let result_map = future.all();
-        let handler = ListConsumerGroupOffsetsHandler::new(
-            group_specs.clone(),
-            options.should_require_stable(),
-            log_context.clone(),
-        );
+        let handler =
+            ListConsumerGroupOffsetsHandler::new(group_specs.clone(), options.require_stable(), log_context.clone());
 
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
@@ -4282,7 +4277,7 @@ impl Admin for KafkaAdminClient {
         options: RemoveMembersFromConsumerGroupOptions,
     ) -> RemoveMembersFromConsumerGroupResult {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
-        let reason = match options.reason_value() {
+        let reason = match options.reason() {
             None | Some("") => DEFAULT_LEAVE_GROUP_REASON.to_string(),
             Some(r) => maybe_truncate_reason(r),
         };
@@ -4522,8 +4517,7 @@ impl Admin for KafkaAdminClient {
         let public: HashMap<ClientQuotaEntity, KafkaFuture<()>> =
             handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
 
-        let call =
-            get_alter_client_quotas_call(entries.to_vec(), options.is_validate_only(), Arc::new(handles), deadline);
+        let call = get_alter_client_quotas_call(entries.to_vec(), options.validate_only(), Arc::new(handles), deadline);
         self.submit(call);
         AlterClientQuotasResult::new(public)
     }
@@ -4669,7 +4663,7 @@ impl Admin for KafkaAdminClient {
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
         let public = handle.future();
-        let call = get_renew_delegation_token_call(hmac.to_vec(), options.get_renew_time_period_ms(), handle, deadline);
+        let call = get_renew_delegation_token_call(hmac.to_vec(), options.renew_time_period_ms(), handle, deadline);
         self.submit(call);
         RenewDelegationTokenResult::new(public)
     }
@@ -4683,8 +4677,7 @@ impl Admin for KafkaAdminClient {
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
         let public = handle.future();
-        let call =
-            get_expire_delegation_token_call(hmac.to_vec(), options.get_expiry_time_period_ms(), handle, deadline);
+        let call = get_expire_delegation_token_call(hmac.to_vec(), options.expiry_time_period_ms(), handle, deadline);
         self.submit(call);
         ExpireDelegationTokenResult::new(public)
     }
@@ -4694,7 +4687,7 @@ impl Admin for KafkaAdminClient {
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
         let public = handle.future();
-        let owners = options.get_owners().map(<[KafkaPrincipal]>::to_vec);
+        let owners = options.owners().map(<[KafkaPrincipal]>::to_vec);
         let call = get_describe_delegation_token_call(owners, handle, deadline);
         self.submit(call);
         DescribeDelegationTokenResult::new(public)
@@ -4709,7 +4702,7 @@ impl Admin for KafkaAdminClient {
         // Mirrors Java: a set nodeId routes to that specific broker via
         // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
         // broker or the active controller.
-        let node_provider = match options.get_node_id() {
+        let node_provider = match options.node_id() {
             Some(node_id) => NodeProvider::ConstantNodeId(node_id),
             None => NodeProvider::LeastLoadedBrokerOrActiveKController,
         };
@@ -4782,7 +4775,7 @@ impl Admin for KafkaAdminClient {
             .iter()
             .map(|(feature, update)| (feature.clone(), *update))
             .collect();
-        let validate_only = options.get_validate_only();
+        let validate_only = options.validate_only();
         let create_request = Box::new(move |timeout_ms: i32| {
             let mut collection = Vec::with_capacity(updates_for_request.len());
             for (feature, update) in &updates_for_request {
@@ -8186,7 +8179,7 @@ mod tests {
         // includeFencedBrokers=true: an UnsupportedVersion must NOT fall back to
         // the Metadata request; it propagates as UnsupportedVersion.
         runnable.client_mut().prepare_unsupported_version_response();
-        let result = admin.describe_cluster(DescribeClusterOptions::new().include_fenced_brokers(true));
+        let result = admin.describe_cluster(DescribeClusterOptions::new().set_include_fenced_brokers(true));
         pump(&mut runnable, 8).await;
         let err = result.nodes().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -9560,7 +9553,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[0]);
-        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)).node_id(0));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)).set_node_id(0));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
         assert_eq!(metadata, default_feature_metadata());
@@ -9575,7 +9568,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[1]);
-        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).node_id(0));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).set_node_id(0));
         pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
         time.sleep(2000);
         pump_until(&mut runnable, 30, |_r| result.feature_metadata().is_done()).await;
@@ -11631,7 +11624,7 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
 
         let options = ListConsumerGroupOffsetsOptions::new()
-            .require_stable(true)
+            .set_require_stable(true)
             .set_timeout_ms(Some(300));
         let _result = admin.list_consumer_group_offsets(&single_spec(&[TopicPartition::new("A", 0)]), options);
 
@@ -12433,7 +12426,7 @@ mod tests {
 
         let mut options = members_to_remove(&["instance-1", "instance-2"]);
         if let Some(reason) = reason {
-            options.reason(reason);
+            options.set_reason(reason);
         }
         let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
 

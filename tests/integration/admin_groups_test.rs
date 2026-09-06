@@ -612,7 +612,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
         let outcomes = admin
             .describe_consumer_groups(
                 std::slice::from_ref(&group_id),
-                DescribeConsumerGroupsOptions::new().include_authorized_operations(true),
+                DescribeConsumerGroupsOptions::new().set_include_authorized_operations(true),
             )
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe consumer groups: {e}"));

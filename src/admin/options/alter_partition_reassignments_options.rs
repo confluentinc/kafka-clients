@@ -60,7 +60,7 @@ impl AlterPartitionReassignmentsOptions {
     ///
     /// Mirrors `allowReplicationFactorChange(boolean)`.
     #[must_use]
-    pub fn allow_replication_factor_change(mut self, allow: bool) -> Self {
+    pub fn set_allow_replication_factor_change(mut self, allow: bool) -> Self {
         self.allow_replication_factor_change = allow;
         self
     }
@@ -69,7 +69,7 @@ impl AlterPartitionReassignmentsOptions {
     /// allowed to alter the replication factor of a partition.
     ///
     /// Mirrors `allowReplicationFactorChange()`.
-    pub fn should_allow_replication_factor_change(&self) -> bool {
+    pub fn allow_replication_factor_change(&self) -> bool {
         self.allow_replication_factor_change
     }
 }
@@ -82,15 +82,15 @@ mod tests {
     fn defaults_match_java() {
         let options = AlterPartitionReassignmentsOptions::new();
         assert_eq!(options.timeout_ms(), None);
-        assert!(options.should_allow_replication_factor_change());
+        assert!(options.allow_replication_factor_change());
     }
 
     #[test]
     fn fluent_setters() {
         let options = AlterPartitionReassignmentsOptions::new()
             .set_timeout_ms(Some(5000))
-            .allow_replication_factor_change(false);
+            .set_allow_replication_factor_change(false);
         assert_eq!(options.timeout_ms(), Some(5000));
-        assert!(!options.should_allow_replication_factor_change());
+        assert!(!options.allow_replication_factor_change());
     }
 }

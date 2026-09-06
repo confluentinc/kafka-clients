@@ -34,7 +34,7 @@ impl DescribeConsumerGroupsOptions {
     /// Whether to include authorized operations in the description. Mirrors
     /// `includeAuthorizedOperations`.
     #[must_use]
-    pub fn include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
+    pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
         self.include_authorized_operations = include_authorized_operations;
         self
     }
@@ -48,7 +48,7 @@ impl DescribeConsumerGroupsOptions {
 
     /// Whether authorized operations are requested. Mirrors
     /// `includeAuthorizedOperations()`.
-    pub fn should_include_authorized_operations(&self) -> bool {
+    pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
@@ -65,9 +65,9 @@ mod tests {
     #[test]
     fn defaults_and_setter() {
         let options = DescribeConsumerGroupsOptions::new();
-        assert!(!options.should_include_authorized_operations());
-        let options = options.include_authorized_operations(true).set_timeout_ms(Some(100));
-        assert!(options.should_include_authorized_operations());
+        assert!(!options.include_authorized_operations());
+        let options = options.set_include_authorized_operations(true).set_timeout_ms(Some(100));
+        assert!(options.include_authorized_operations());
         assert_eq!(options.timeout_ms(), Some(100));
     }
 }

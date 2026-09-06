@@ -51,13 +51,13 @@ impl DescribeProducersOptions {
     /// Set the broker id to query for the topic partitions. Mirrors
     /// `DescribeProducersOptions.brokerId(int)`.
     #[must_use]
-    pub fn broker_id(mut self, broker_id: i32) -> Self {
+    pub fn set_broker_id(mut self, broker_id: i32) -> Self {
         self.broker_id = Some(broker_id);
         self
     }
 
     /// The broker id to query, if set. Mirrors `DescribeProducersOptions.brokerId()`.
-    pub fn broker_id_opt(&self) -> Option<i32> {
+    pub fn broker_id(&self) -> Option<i32> {
         self.broker_id
     }
 }
@@ -70,13 +70,13 @@ mod tests {
     fn defaults_match_java() {
         let options = DescribeProducersOptions::new();
         assert_eq!(options.timeout_ms(), None);
-        assert_eq!(options.broker_id_opt(), None);
+        assert_eq!(options.broker_id(), None);
     }
 
     #[test]
     fn fluent_broker_id_and_timeout() {
-        let options = DescribeProducersOptions::new().broker_id(3).set_timeout_ms(Some(5000));
-        assert_eq!(options.broker_id_opt(), Some(3));
+        let options = DescribeProducersOptions::new().set_broker_id(3).set_timeout_ms(Some(5000));
+        assert_eq!(options.broker_id(), Some(3));
         assert_eq!(options.timeout_ms(), Some(5000));
     }
 }

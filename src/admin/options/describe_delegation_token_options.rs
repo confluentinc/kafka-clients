@@ -43,7 +43,7 @@ impl DescribeDelegationTokenOptions {
     ///
     /// Mirrors `DescribeDelegationTokenOptions.owners`.
     #[must_use]
-    pub fn owners(mut self, owners: Option<Vec<KafkaPrincipal>>) -> Self {
+    pub fn set_owners(mut self, owners: Option<Vec<KafkaPrincipal>>) -> Self {
         self.owners = owners;
         self
     }
@@ -52,7 +52,7 @@ impl DescribeDelegationTokenOptions {
     /// authorized tokens.
     ///
     /// Mirrors `DescribeDelegationTokenOptions.owners`.
-    pub fn get_owners(&self) -> Option<&[KafkaPrincipal]> {
+    pub fn owners(&self) -> Option<&[KafkaPrincipal]> {
         self.owners.as_deref()
     }
 
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn defaults() {
         let options = DescribeDelegationTokenOptions::new();
-        assert!(options.get_owners().is_none());
+        assert!(options.owners().is_none());
         assert_eq!(options.timeout_ms(), None);
     }
 
@@ -86,9 +86,9 @@ mod tests {
     fn setters() {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
         let options = DescribeDelegationTokenOptions::new()
-            .owners(Some(vec![owner.clone()]))
+            .set_owners(Some(vec![owner.clone()]))
             .set_timeout_ms(Some(5000));
-        assert_eq!(options.get_owners(), Some([owner].as_slice()));
+        assert_eq!(options.owners(), Some([owner].as_slice()));
         assert_eq!(options.timeout_ms(), Some(5000));
     }
 }

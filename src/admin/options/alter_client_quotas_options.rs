@@ -50,7 +50,7 @@ impl AlterClientQuotasOptions {
     ///
     /// Mirrors `AlterClientQuotasOptions.validateOnly(boolean)`.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
@@ -59,7 +59,7 @@ impl AlterClientQuotasOptions {
     /// configs.
     ///
     /// Mirrors `AlterClientQuotasOptions.validateOnly()`.
-    pub fn is_validate_only(&self) -> bool {
+    pub fn validate_only(&self) -> bool {
         self.validate_only
     }
 }
@@ -72,10 +72,12 @@ mod tests {
     fn defaults_and_setters() {
         let opts = AlterClientQuotasOptions::new();
         assert_eq!(opts.timeout_ms(), None);
-        assert!(!opts.is_validate_only());
+        assert!(!opts.validate_only());
 
-        let opts = AlterClientQuotasOptions::new().set_timeout_ms(Some(5000)).validate_only(true);
+        let opts = AlterClientQuotasOptions::new()
+            .set_timeout_ms(Some(5000))
+            .set_validate_only(true);
         assert_eq!(opts.timeout_ms(), Some(5000));
-        assert!(opts.is_validate_only());
+        assert!(opts.validate_only());
     }
 }

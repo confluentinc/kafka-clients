@@ -53,7 +53,7 @@ impl DescribeProducersHandler {
     /// [`StaticBrokerStrategy`] targets that broker directly; otherwise a
     /// [`PartitionLeaderStrategy`] looks up each partition's leader.
     pub(crate) fn new(options: DescribeProducersOptions, log_context: LogContext) -> Self {
-        let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id_opt() {
+        let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id() {
             Some(broker_id) => Box::new(StaticBrokerStrategy::new(broker_id)),
             None => Box::new(PartitionLeaderStrategy::new(log_context.clone())),
         };
@@ -104,7 +104,7 @@ impl DescribeProducersHandler {
     ) {
         match error {
             Errors::NotLeaderOrFollower => {
-                if let Some(broker_id) = self.options.broker_id_opt() {
+                if let Some(broker_id) = self.options.broker_id() {
                     // Typically these errors are retriable, but if the user
                     // specified the brokerId explicitly, then they are fatal.
                     kafka_error!(
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn broker_id_set_in_options() {
         let broker_id = 3;
-        let handler = new_handler(DescribeProducersOptions::new().broker_id(broker_id));
+        let handler = new_handler(DescribeProducersOptions::new().set_broker_id(broker_id));
         for tp in [tp("foo", 5), tp("bar", 3), tp("foo", 4)] {
             let scope = handler.lookup_strategy().lookup_scope(&tp);
             assert_eq!(scope.destination_broker_id(), Some(broker_id), "Unexpected brokerId for {tp}");
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn fatal_not_leader_error_if_static_mapped() {
         let topic_partition = tp("foo", 5);
-        let options = DescribeProducersOptions::new().broker_id(1);
+        let options = DescribeProducersOptions::new().set_broker_id(1);
         let result = handle_response_with_error(options, &topic_partition, Errors::NotLeaderOrFollower);
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn completed_result() {
         let topic_partition = tp("foo", 5);
-        let options = DescribeProducersOptions::new().broker_id(1);
+        let options = DescribeProducersOptions::new().set_broker_id(1);
         let handler = new_handler(options);
 
         let mut wire0 = WireProducerState::new();

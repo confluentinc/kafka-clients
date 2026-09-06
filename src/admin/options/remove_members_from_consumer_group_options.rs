@@ -54,7 +54,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// Sets an optional reason.
     ///
     /// Mirrors Java's `reason(String)`.
-    pub fn reason(&mut self, reason: impl Into<String>) {
+    pub fn set_reason(&mut self, reason: impl Into<String>) {
         self.reason = Some(reason.into());
     }
 
@@ -75,7 +75,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     /// The optional reason.
     ///
     /// Mirrors Java's `reason()`.
-    pub fn reason_value(&self) -> Option<&str> {
+    pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
 
@@ -115,16 +115,16 @@ mod tests {
     fn default_is_remove_all() {
         let options = RemoveMembersFromConsumerGroupOptions::default();
         assert!(options.remove_all());
-        assert_eq!(options.reason_value(), None);
+        assert_eq!(options.reason(), None);
         assert_eq!(options.timeout_ms(), None);
     }
 
     #[test]
     fn reason_and_timeout_setters() {
         let mut options = RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("i")]).unwrap();
-        options.reason("because");
+        options.set_reason("because");
         let options = options.set_timeout_ms(Some(50));
-        assert_eq!(options.reason_value(), Some("because"));
+        assert_eq!(options.reason(), Some("because"));
         assert_eq!(options.timeout_ms(), Some(50));
     }
 }

@@ -524,7 +524,7 @@ async fn describe_producers_reports_no_active_producers<F: AdminBackendFactory>(
 
     let broker_id = broker_ids(&admin).await[0];
     let by_broker = admin
-        .describe_producers(partitions, DescribeProducersOptions::new().broker_id(broker_id))
+        .describe_producers(partitions, DescribeProducersOptions::new().set_broker_id(broker_id))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe producers on broker {broker_id}: {e}"));
     all_of_exactly(&admin, &by_broker, partitions, "describeProducers(brokerId)");

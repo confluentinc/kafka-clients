@@ -33,7 +33,7 @@ impl ListConsumerGroupOffsetsOptions {
 
     /// Sets an optional `requireStable` flag. Mirrors `requireStable(boolean)`.
     #[must_use]
-    pub fn require_stable(mut self, require_stable: bool) -> Self {
+    pub fn set_require_stable(mut self, require_stable: bool) -> Self {
         self.require_stable = require_stable;
         self
     }
@@ -46,7 +46,7 @@ impl ListConsumerGroupOffsetsOptions {
     }
 
     /// Whether stable offsets are required. Mirrors `requireStable()`.
-    pub fn should_require_stable(&self) -> bool {
+    pub fn require_stable(&self) -> bool {
         self.require_stable
     }
 
@@ -63,9 +63,9 @@ mod tests {
     #[test]
     fn defaults_and_setter() {
         let options = ListConsumerGroupOffsetsOptions::new();
-        assert!(!options.should_require_stable());
-        let options = options.require_stable(true).set_timeout_ms(Some(300));
-        assert!(options.should_require_stable());
+        assert!(!options.require_stable());
+        let options = options.set_require_stable(true).set_timeout_ms(Some(300));
+        assert!(options.require_stable());
         assert_eq!(options.timeout_ms(), Some(300));
     }
 }

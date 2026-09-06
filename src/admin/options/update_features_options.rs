@@ -50,7 +50,7 @@ impl UpdateFeaturesOptions {
     ///
     /// Mirrors `UpdateFeaturesOptions.validateOnly(boolean)`.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
@@ -58,7 +58,7 @@ impl UpdateFeaturesOptions {
     /// Whether the request should only be validated.
     ///
     /// Mirrors `UpdateFeaturesOptions.validateOnly()`.
-    pub fn get_validate_only(&self) -> bool {
+    pub fn validate_only(&self) -> bool {
         self.validate_only
     }
 }
@@ -71,13 +71,13 @@ mod tests {
     fn defaults_match_java() {
         let options = UpdateFeaturesOptions::new();
         assert_eq!(options.timeout_ms(), None);
-        assert!(!options.get_validate_only());
+        assert!(!options.validate_only());
     }
 
     #[test]
     fn fluent_setters() {
-        let options = UpdateFeaturesOptions::new().set_timeout_ms(Some(100)).validate_only(true);
+        let options = UpdateFeaturesOptions::new().set_timeout_ms(Some(100)).set_validate_only(true);
         assert_eq!(options.timeout_ms(), Some(100));
-        assert!(options.get_validate_only());
+        assert!(options.validate_only());
     }
 }

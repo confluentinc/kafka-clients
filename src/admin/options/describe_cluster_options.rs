@@ -48,26 +48,26 @@ impl DescribeClusterOptions {
 
     /// Set whether to include cluster authorized operations.
     #[must_use]
-    pub fn include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
+    pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
         self.include_authorized_operations = include_authorized_operations;
         self
     }
 
     /// Whether to include cluster authorized operations.
-    pub fn should_include_authorized_operations(&self) -> bool {
+    pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
     /// Set whether to include fenced brokers when they are not fenced from the
     /// cluster (only supported by the broker endpoint at DescribeCluster v2+).
     #[must_use]
-    pub fn include_fenced_brokers(mut self, include_fenced_brokers: bool) -> Self {
+    pub fn set_include_fenced_brokers(mut self, include_fenced_brokers: bool) -> Self {
         self.include_fenced_brokers = include_fenced_brokers;
         self
     }
 
     /// Whether to include fenced brokers.
-    pub fn should_include_fenced_brokers(&self) -> bool {
+    pub fn include_fenced_brokers(&self) -> bool {
         self.include_fenced_brokers
     }
 }
@@ -80,18 +80,18 @@ mod tests {
     fn defaults_match_java() {
         let options = DescribeClusterOptions::new();
         assert_eq!(options.timeout_ms(), None);
-        assert!(!options.should_include_authorized_operations());
-        assert!(!options.should_include_fenced_brokers());
+        assert!(!options.include_authorized_operations());
+        assert!(!options.include_fenced_brokers());
     }
 
     #[test]
     fn fluent_setters() {
         let options = DescribeClusterOptions::new()
-            .include_authorized_operations(true)
-            .include_fenced_brokers(true)
+            .set_include_authorized_operations(true)
+            .set_include_fenced_brokers(true)
             .set_timeout_ms(Some(1000));
-        assert!(options.should_include_authorized_operations());
-        assert!(options.should_include_fenced_brokers());
+        assert!(options.include_authorized_operations());
+        assert!(options.include_fenced_brokers());
         assert_eq!(options.timeout_ms(), Some(1000));
     }
 }

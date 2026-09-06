@@ -375,7 +375,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
         &admin,
         &group_id,
         ListConsumerGroupOffsetsSpec::new(),
-        ListConsumerGroupOffsetsOptions::new().require_stable(true),
+        ListConsumerGroupOffsetsOptions::new().set_require_stable(true),
         "require_stable=true",
     )
     .await;
