@@ -752,7 +752,7 @@ fn offset_and_timestamp_map_from_proto(
         .filter_map(|e| {
             let tp = tp_from_proto(e.partition?);
             let o = e.offset?;
-            let oat = OffsetAndTimestamp::with_leader_epoch(o.offset, o.timestamp, o.leader_epoch).ok()?;
+            let oat = OffsetAndTimestamp::new_leader_epoch(o.offset, o.timestamp, o.leader_epoch).ok()?;
             Some((tp, oat))
         })
         .collect()

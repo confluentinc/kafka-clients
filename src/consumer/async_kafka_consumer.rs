@@ -1458,7 +1458,7 @@ impl ConsumerStateNotifier {
         };
         let mut guard = self.group_metadata.lock().unwrap();
         #[allow(deprecated)]
-        let next = ConsumerGroupMetadata::with_details(
+        let next = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
             self.group_id.clone(),
             epoch,
             member_id.to_string(),
@@ -1496,7 +1496,7 @@ impl ConsumerStateNotifier {
             // build fresh metadata with UNKNOWN epoch + member, preserving
             // the old group_id + group_instance_id.
             #[allow(deprecated)]
-            let next = ConsumerGroupMetadata::with_details(
+            let next = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
                 old.group_id().to_string(),
                 -1, // JoinGroupRequest.UNKNOWN_GENERATION_ID
                 "", // JoinGroupRequest.UNKNOWN_MEMBER_ID
@@ -5125,7 +5125,7 @@ where
                 // `OffsetsForTimes`; see COMMENTS.DONE.1.md Issue 6
                 // for the regression where the `None`→drop filter
                 // silently elided every entry due to
-                // OffsetAndTimestamp::with_leader_epoch rejecting
+                // OffsetAndTimestamp::new_leader_epoch rejecting
                 // negative timestamps.
                 let mut out = HashMap::with_capacity(offsets_map.len());
                 for (tp, opt) in offsets_map {

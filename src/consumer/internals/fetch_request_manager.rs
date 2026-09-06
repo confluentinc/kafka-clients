@@ -801,7 +801,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header");
-        crate::client_response::ClientResponse::with_timeout(
+        crate::client_response::ClientResponse::new_timed_out(
             header,
             None,
             "0",

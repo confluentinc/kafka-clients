@@ -361,6 +361,14 @@ impl Completion {
 }
 
 impl<K, V> MockProducer<K, V> {
+    // Java's three `MockProducer` constructors (`MockProducer.java:113,137,149`)
+    // have an EMPTY parameter-name intersection, and the no-arg `:149` matches
+    // it — so that one owns the plain name and every sibling is suffixed with
+    // its full Rust parameter list (CLAUDE.md §2). Rust translates `:149` as
+    // [`Default`] rather than an inherent `new`, which is why no constructor
+    // here is called `new`. Java's `Partitioner` / `Serializer` parameters are
+    // Rust type parameters, so they contribute no name tokens.
+
     /// Create a mock producer.
     ///
     /// # Arguments
@@ -374,7 +382,7 @@ impl<K, V> MockProducer<K, V> {
     /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
     /// Serializer, Serializer)` constructor (without serializers or partitioner,
     /// since the Rust producer works with pre-serialized bytes).
-    pub fn new(cluster: Cluster, auto_complete: bool) -> Self {
+    pub fn new_cluster_auto_complete(cluster: Cluster, auto_complete: bool) -> Self {
         Self {
             inner: Mutex::new(MockProducerInner {
                 cluster,
@@ -410,12 +418,12 @@ impl<K, V> MockProducer<K, V> {
     /// Create a new mock producer with an empty cluster and the given
     /// `auto_complete` setting.
     ///
-    /// Equivalent to `MockProducer::new(Cluster::empty(), auto_complete)`.
+    /// Equivalent to `MockProducer::new_cluster_auto_complete(Cluster::empty(), auto_complete)`.
     ///
     /// Corresponds to Java's `MockProducer(boolean, Partitioner, Serializer,
     /// Serializer)`.
-    pub fn with_auto_complete(auto_complete: bool) -> Self {
-        Self::new(Cluster::empty(), auto_complete)
+    pub fn new_auto_complete(auto_complete: bool) -> Self {
+        Self::new_cluster_auto_complete(Cluster::empty(), auto_complete)
     }
 
     /// Get the list of sent records since the last call to [`clear()`](Self::clear).
@@ -741,7 +749,7 @@ impl<K, V> Default for MockProducer<K, V> {
     ///
     /// Corresponds to Java's no-arg `MockProducer()` constructor.
     fn default() -> Self {
-        Self::new(Cluster::empty(), false)
+        Self::new_cluster_auto_complete(Cluster::empty(), false)
     }
 }
 
@@ -1101,7 +1109,7 @@ mod tests {
     /// `MockSerializer`s the Rust mock has no counterpart for (it takes
     /// pre-serialized bytes — see [`MockProducer::new`]).
     fn build_mock_producer(auto_complete: bool) -> MockProducer<String, String> {
-        MockProducer::with_auto_complete(auto_complete)
+        MockProducer::new_auto_complete(auto_complete)
     }
 
     /// Java's `new ConsumerGroupMetadata(groupId)`. The Rust constructor carries
@@ -1201,7 +1209,7 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let producer: MockProducer<String, String> = MockProducer::new(cluster, true);
+        let producer: MockProducer<String, String> = MockProducer::new_cluster_auto_complete(cluster, true);
 
         // Send with explicit partition=1
         let record = ProducerRecord::new_partition_key(
@@ -2239,7 +2247,7 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let producer: MockProducer<String, String> = MockProducer::new(cluster, true);
+        let producer: MockProducer<String, String> = MockProducer::new_cluster_auto_complete(cluster, true);
 
         let partitions = producer.partitions_for("topic").await.unwrap();
         assert_eq!(2, partitions.len());
@@ -2627,7 +2635,7 @@ mod tests {
     //     finds nothing wrong with two lists that agree on `3`; only membership
     //     does. So the set is re-derived from the diff rather than from either
     //     list — normalise away this phase's two mechanical swaps
-    //     (`MockProducer::with_auto_complete(x)` → `build_mock_producer(x)`, and
+    //     (`MockProducer::new_auto_complete(x)` → `build_mock_producer(x)`, and
     //     `make_record("topic", "keyN", "valueN")` → `recordN()`), then compare
     //     every pre-Phase-7 test body at `82aa2da` against its current form. Six
     //     bodies differ before that normalisation and exactly these four after:

@@ -664,7 +664,7 @@ mod tests {
     }
 
     fn build_describe_groups_response(error: Errors, protocol_type: &str) -> ConcreteResponse {
-        let assignment_bytes = ConsumerProtocol::serialize_assignment(&Assignment::with_partitions(tps())).unwrap();
+        let assignment_bytes = ConsumerProtocol::serialize_assignment(&Assignment::new(tps())).unwrap();
         let mut member = DescribedGroupMember::new();
         member
             .set_client_host("host".to_string())

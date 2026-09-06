@@ -1554,7 +1554,7 @@ fn get_create_delegation_token_call(
             resp_handle.complete_with_error(Error::new(create_response.error()));
         } else {
             let data = create_response.data();
-            let token_info = TokenInformation::with_requester(
+            let token_info = TokenInformation::new_token_requester(
                 data.token_id.clone(),
                 KafkaPrincipal::new(data.principal_type.clone(), data.principal_name.clone()),
                 KafkaPrincipal::new(
@@ -2226,7 +2226,7 @@ fn log_dir_descriptions(response: &DescribeLogDirsResponse) -> HashMap<String, L
         }
         result.insert(
             log_dir_result.log_dir.clone(),
-            LogDirDescription::with_volume_bytes_and_cordoned(
+            LogDirDescription::new_total_bytes_usable_bytes_is_cordoned(
                 api_error_for_code(log_dir_result.error_code),
                 replica_info_map,
                 log_dir_result.total_bytes,
@@ -2473,12 +2473,7 @@ fn topic_description_from_cluster(
                 Some(node) if !node.is_empty() => Some(node.clone()),
                 _ => None,
             };
-            TopicPartitionInfo::with_leader_replicas_isr(
-                p.partition(),
-                leader,
-                p.replicas().to_vec(),
-                p.in_sync_replicas().to_vec(),
-            )
+            TopicPartitionInfo::new(p.partition(), leader, p.replicas().to_vec(), p.in_sync_replicas().to_vec())
         })
         .collect();
     partitions.sort_by_key(|p| p.partition());
@@ -4141,7 +4136,7 @@ impl Admin for KafkaAdminClient {
             };
             Some((
                 group.group_id.clone(),
-                ConsumerGroupListing::new(
+                ConsumerGroupListing::new_group_state_group_type(
                     group.group_id.clone(),
                     group_state,
                     group_type,
@@ -9257,7 +9252,14 @@ mod tests {
     // --- MockAdminClient log-dir methods -------------------------------------
 
     fn mock_topic_partition_info(partition: i32, leader: &Node, replicas: Vec<Node>) -> TopicPartitionInfo {
-        TopicPartitionInfo::new(partition, Some(leader.clone()), replicas, Vec::new(), Vec::new(), Vec::new())
+        TopicPartitionInfo::new_elr_last_known_elr(
+            partition,
+            Some(leader.clone()),
+            replicas,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     #[tokio::test]
@@ -11106,8 +11108,7 @@ mod tests {
                 TopicPartition::new("my_topic", 1),
                 TopicPartition::new("my_topic", 2),
             ];
-            let assignment_bytes =
-                ConsumerProtocol::serialize_assignment(&Assignment::with_partitions(topic_partitions)).unwrap();
+            let assignment_bytes = ConsumerProtocol::serialize_assignment(&Assignment::new(topic_partitions)).unwrap();
             let member_one = described_member("0", None, "clientId0", "clientHost", assignment_bytes.clone());
             let member_two = described_member("1", Some("static"), "clientId1", "clientHost", assignment_bytes.clone());
             let mut group = DescribedGroup::new();
@@ -11208,8 +11209,7 @@ mod tests {
                 TopicPartition::new("my_topic", 1),
                 TopicPartition::new("my_topic", 2),
             ];
-            let assignment_bytes =
-                ConsumerProtocol::serialize_assignment(&Assignment::with_partitions(topic_partitions)).unwrap();
+            let assignment_bytes = ConsumerProtocol::serialize_assignment(&Assignment::new(topic_partitions)).unwrap();
 
             let mut group0 = DescribedGroup::new();
             group0

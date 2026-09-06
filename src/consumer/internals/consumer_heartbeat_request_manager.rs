@@ -1597,7 +1597,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -1715,7 +1715,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -1902,7 +1902,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -2895,7 +2895,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::new_timed_out(
             header,
             None,
             "0",

@@ -45,7 +45,7 @@ fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, St
 /// - `clear()` empties the history
 #[tokio::test]
 async fn test_auto_complete_mock() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(true);
     let record1 = make_record("topic", "key1", "value1");
 
     let future = producer.send(record1.clone()).await.unwrap();
@@ -77,7 +77,7 @@ async fn test_auto_complete_mock() {
 /// - `flush()` completes remaining pending sends
 #[tokio::test]
 async fn test_manual_completion() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(false);
     let record1 = make_record("topic", "key1", "value1");
     let record2 = make_record("topic", "key2", "value2");
 
@@ -113,7 +113,7 @@ async fn test_manual_completion() {
 /// `flushed()` returns `true` before any sends (no pending completions).
 #[test]
 fn test_should_be_flushed_if_no_buffered_records() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(true);
     assert!(producer.flushed());
 }
 
@@ -124,7 +124,7 @@ fn test_should_be_flushed_if_no_buffered_records() {
 /// sends immediately without leaving pending completions.
 #[tokio::test]
 async fn test_should_be_flushed_with_auto_complete_if_buffered_records() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(true);
     producer.send(make_record("topic", "key1", "value1")).await.unwrap();
     assert!(producer.flushed());
 }
@@ -135,7 +135,7 @@ async fn test_should_be_flushed_with_auto_complete_if_buffered_records() {
 /// verifies that `flushed()` returns `false` because the send is pending.
 #[tokio::test]
 async fn test_should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(false);
     producer.send(make_record("topic", "key1", "value1")).await.unwrap();
     assert!(!producer.flushed());
 }
@@ -150,7 +150,7 @@ async fn test_should_not_be_flushed_with_no_auto_complete_if_buffered_records() 
 /// verifies not flushed, calls `flush()`, then verifies flushed.
 #[tokio::test]
 async fn test_should_be_flushed_after_flush() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(false);
     producer.send(make_record("topic", "key1", "value1")).await.unwrap();
     assert!(!producer.flushed(), "Should not be flushed with pending send");
     producer.flush().await.unwrap();
@@ -163,7 +163,7 @@ async fn test_should_be_flushed_after_flush() {
 /// the send returns `Err` with a message indicating the producer is closed.
 #[tokio::test]
 async fn test_should_throw_on_send_if_producer_is_closed() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(true);
     producer.close().await.unwrap();
     let result = producer.send(make_record("topic", "key1", "value1")).await;
     assert!(result.is_err());
@@ -181,7 +181,7 @@ async fn test_should_throw_on_send_if_producer_is_closed() {
 /// it returns `Err` with a message indicating the producer is closed.
 #[tokio::test]
 async fn test_should_throw_on_flush_if_producer_is_closed() {
-    let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
+    let producer: MockProducer<String, String> = MockProducer::new_auto_complete(true);
     producer.close().await.unwrap();
     let result = producer.flush().await;
     assert!(result.is_err());

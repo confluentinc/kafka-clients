@@ -2695,7 +2695,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header");
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -2719,7 +2719,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header");
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -2751,7 +2751,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header");
-        ClientResponse::with_timeout(header, None, "0", 0, 0, true, false, None, None, None)
+        ClientResponse::new_timed_out(header, None, "0", 0, 0, true, false, None, None, None)
     }
 
     /// Build a single-topic, multi-partition `ListOffsetsResponse` from a
@@ -4396,7 +4396,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header");
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -5092,7 +5092,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .expect("header");
-        let disconnect_response = ClientResponse::with_timeout(
+        let disconnect_response = ClientResponse::new_timed_out(
             disconnect_header,
             None,
             "0",

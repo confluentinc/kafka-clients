@@ -838,7 +838,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             return;
         }
 
-        let node_version_info = NodeApiVersions::new(
+        let node_version_info = NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
             &api_versions_response.data().api_keys.to_vec(),
             &api_versions_response.data().supported_features.to_vec(),
             &api_versions_response.data().finalized_features.to_vec(),

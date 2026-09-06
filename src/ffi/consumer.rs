@@ -1716,7 +1716,7 @@ fn box_group_metadata(meta: ConsumerGroupMetadata) -> *mut kafka_consumer_Consum
 /// - `group_id` and `member_id` must be valid NUL-terminated C strings.
 /// - `group_instance_id` must be null or a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-#[allow(deprecated)] // ConsumerGroupMetadata::with_details is deprecated in the public API but is the constructor the FFI must expose.
+#[allow(deprecated)] // ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     group_id: *const c_char,
     generation_id: i32,
@@ -1730,7 +1730,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     } else {
         Some(unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().to_string())
     };
-    let meta = ConsumerGroupMetadata::with_details(group_id, generation_id, member_id, group_instance_id);
+    let meta = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+        group_id,
+        generation_id,
+        member_id,
+        group_instance_id,
+    );
     box_group_metadata(meta)
 }
 

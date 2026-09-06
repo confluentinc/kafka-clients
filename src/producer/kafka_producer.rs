@@ -3509,7 +3509,10 @@ mod tests {
         finalized.set_max_version_level(level);
         finalized.set_min_version_level(level);
 
-        api_versions.update("0", NodeApiVersions::new(&[], &[supported], &[finalized], 0));
+        api_versions.update(
+            "0",
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(&[], &[supported], &[finalized], 0),
+        );
     }
 
     /// Shared mock clock, the same shape `SenderTest`'s uses.
@@ -4700,7 +4703,12 @@ mod tests {
         ctx.producer.begin_transaction().expect("beginTransaction");
 
         #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_details("group", 5, "member", Some("instance".to_string()));
+        let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+            "group",
+            5,
+            "member",
+            Some("instance".to_string()),
+        );
         drive(
             &mut ctx.sender,
             ctx.producer.send_offsets_to_transaction(HashMap::new(), group_metadata),
@@ -4737,7 +4745,7 @@ mod tests {
         ctx.producer.begin_transaction().expect("beginTransaction");
 
         #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_details(
+        let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
             "group",
             2,
             crate::common::requests::txn_offset_commit_request::UNKNOWN_MEMBER_ID,

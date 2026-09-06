@@ -32,7 +32,7 @@ use crate::common::TopicPartition;
 use crate::common::errors::SerializationError;
 use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
-use crate::consumer::consumer_partition_assignor::{Assignment, Subscription};
+use crate::consumer::consumer_partition_assignor::{Assignment, Subscription, SubscriptionOptions};
 use crate::consumer_protocol_assignment_data::{
     ConsumerProtocolAssignmentData, TopicPartition as AssignmentTopicPartition,
 };
@@ -207,12 +207,11 @@ impl ConsumerProtocol {
             _ => None,
         };
 
-        Ok(Subscription::new(
+        Ok(Subscription::new_user_data_owned_partitions_options(
             data.topics.clone(),
             data.user_data.clone(),
             owned_partitions,
-            data.generation_id,
-            rack_id,
+            SubscriptionOptions { generation_id: data.generation_id, rack_id },
         ))
     }
 
@@ -321,7 +320,7 @@ impl ConsumerProtocol {
             }
         }
 
-        Ok(Assignment::new(assigned_partitions, data.user_data.clone()))
+        Ok(Assignment::new_user_data(assigned_partitions, data.user_data.clone()))
     }
 
     /// Deserializes an assignment, reading the version header from the buffer.
@@ -466,7 +465,7 @@ mod tests {
     #[test]
     fn assignment_round_trip() {
         let partitions = vec![tp("foo", 0), tp("foo", 1), tp("bar", 2)];
-        let assignment = Assignment::with_partitions(partitions.clone());
+        let assignment = Assignment::new(partitions.clone());
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
 
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
@@ -481,7 +480,7 @@ mod tests {
     /// Round-trips an assignment carrying user data.
     #[test]
     fn assignment_round_trip_with_user_data() {
-        let assignment = Assignment::new(vec![tp("t", 3)], Some(vec![1, 2, 3, 4]));
+        let assignment = Assignment::new_user_data(vec![tp("t", 3)], Some(vec![1, 2, 3, 4]));
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
         assert_eq!(decoded.partitions(), &[tp("t", 3)]);
@@ -491,7 +490,7 @@ mod tests {
     /// An empty assignment decodes to no partitions.
     #[test]
     fn empty_assignment_round_trip() {
-        let assignment = Assignment::with_partitions(Vec::new());
+        let assignment = Assignment::new(Vec::new());
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
         assert!(decoded.partitions().is_empty());
@@ -500,12 +499,11 @@ mod tests {
     /// Round-trips a subscription including owned partitions and generation.
     #[test]
     fn subscription_round_trip() {
-        let subscription = Subscription::new(
+        let subscription = Subscription::new_user_data_owned_partitions_options(
             vec!["b".to_string(), "a".to_string()],
             None,
             vec![tp("a", 0), tp("a", 1)],
-            7,
-            Some("rack-1".to_string()),
+            SubscriptionOptions { generation_id: 7, rack_id: Some("rack-1".to_string()) },
         );
         let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
         let decoded = ConsumerProtocol::deserialize_subscription(&bytes).unwrap();
@@ -533,7 +531,7 @@ mod tests {
     /// the current format (mirrors Java's forward-compat behavior).
     #[test]
     fn serialize_assignment_clamps_high_version() {
-        let assignment = Assignment::with_partitions(vec![tp("t", 0)]);
+        let assignment = Assignment::new(vec![tp("t", 0)]);
         // Version 99 is clamped to HIGHEST_SUPPORTED_VERSION on both ends.
         let bytes = ConsumerProtocol::serialize_assignment_versioned(&assignment, 99).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
@@ -545,7 +543,7 @@ mod tests {
     #[test]
     fn consumer_protocol_assignment_data_round_trip() {
         // Serialize a normal assignment, then decode it as the raw data struct.
-        let assignment = Assignment::with_partitions(vec![tp("foo", 0), tp("foo", 1)]);
+        let assignment = Assignment::new(vec![tp("foo", 0), tp("foo", 1)]);
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
 
         let data = ConsumerProtocol::deserialize_consumer_protocol_assignment(&bytes).unwrap();
@@ -570,7 +568,12 @@ mod tests {
     /// `serialize_subscription` / `deserialize_consumer_protocol_subscription`.
     #[test]
     fn consumer_protocol_subscription_data_round_trip() {
-        let subscription = Subscription::new(vec!["b".to_string(), "a".to_string()], None, vec![tp("a", 0)], 3, None);
+        let subscription = Subscription::new_user_data_owned_partitions_options(
+            vec!["b".to_string(), "a".to_string()],
+            None,
+            vec![tp("a", 0)],
+            SubscriptionOptions { generation_id: 3, ..Default::default() },
+        );
         let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
 
         let data = ConsumerProtocol::deserialize_consumer_protocol_subscription(&bytes).unwrap();

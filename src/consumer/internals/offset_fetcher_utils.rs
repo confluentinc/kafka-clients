@@ -163,7 +163,7 @@ pub(crate) fn regroup_partition_map_by_node<T: Clone>(
 ///
 /// Mirrors COMMENTS.DONE.1.md Issue 6: a previous translation used the
 /// public-class constructor here and silently produced `None` for every
-/// `endOffsets(tp)` because `OffsetAndTimestamp::with_leader_epoch`
+/// `endOffsets(tp)` because `OffsetAndTimestamp::new_leader_epoch`
 /// rejected `timestamp == -1`.
 pub(crate) fn build_offsets_for_times_result(
     timestamps_to_search: &HashMap<TopicPartition, i64>,

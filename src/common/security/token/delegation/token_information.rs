@@ -51,7 +51,7 @@ impl TokenInformation {
         expiry_timestamp: i64,
     ) -> Self {
         let owner_clone = owner.clone();
-        Self::with_requester(
+        Self::new_token_requester(
             token_id,
             owner,
             owner_clone,
@@ -67,7 +67,7 @@ impl TokenInformation {
     /// Mirrors the
     /// `TokenInformation(tokenId, owner, tokenRequester, renewers, ...)`
     /// constructor.
-    pub fn with_requester(
+    pub fn new_token_requester(
         token_id: impl Into<String>,
         owner: KafkaPrincipal,
         token_requester: KafkaPrincipal,
@@ -99,7 +99,7 @@ impl TokenInformation {
         max_timestamp: i64,
         expiry_timestamp: i64,
     ) -> Self {
-        Self::with_requester(
+        Self::new_token_requester(
             token_id,
             owner,
             token_requester,
@@ -273,8 +273,15 @@ mod tests {
 
     #[test]
     fn owner_or_renewer_matches_owner_requester_and_renewers() {
-        let info =
-            TokenInformation::with_requester("id", user("alice"), user("requester"), vec![user("bob")], 1, 100, 50);
+        let info = TokenInformation::new_token_requester(
+            "id",
+            user("alice"),
+            user("requester"),
+            vec![user("bob")],
+            1,
+            100,
+            50,
+        );
         assert!(info.owner_or_renewer(&user("alice")));
         assert!(info.owner_or_renewer(&user("requester")));
         assert!(info.owner_or_renewer(&user("bob")));

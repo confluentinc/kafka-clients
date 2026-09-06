@@ -1092,7 +1092,7 @@ mod tests {
             RequestHeaderOptions::new(1),
         )
         .unwrap();
-        let response = ClientResponse::with_timeout(
+        let response = ClientResponse::new_timed_out(
             header,
             None,
             "0",

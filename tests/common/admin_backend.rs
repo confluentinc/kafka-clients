@@ -826,14 +826,14 @@ where
 // `ClientQuotaFilterComponent::{of_entity, of_default_entity, of_entity_type}`,
 // `ClientQuotaAlteration::new`, `Op::new`, `ScramCredentialInfo::new`,
 // `UserScramCredentialsDescription::new`, `FilterResult::new`,
-// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_requester`,
-// `KafkaPrincipal::with_token_authenticated`, `SupportedVersionRange::new` and
+// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::new_token_requester`,
+// `KafkaPrincipal::new_token_authenticated`, `SupportedVersionRange::new` and
 // `FinalizedVersionRange::new` are all public. (`ClientQuotaFilter::new` is
 // private, but it is an *input* the harness only reads, and its three public
 // factories cover both `strict` values.)
 //
 // Slice G4 added none either, for the same reason: `GroupListing::new`,
-// `ConsumerGroupListing::new`, `ConsumerGroupDescription::new`,
+// `ConsumerGroupListing::new_group_state_group_type`, `ConsumerGroupDescription::new`,
 // `ClassicGroupDescription::new`, `MemberDescription::new`,
 // `MemberAssignment::new`, `MemberToRemove::new` and
 // `OffsetAndMetadata::{new, new_metadata, new_leader_epoch_metadata}` are all public, so

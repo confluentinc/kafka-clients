@@ -20102,8 +20102,12 @@ mod tests {
     fn log_dir_description_carries_error_and_volume_bytes() {
         let mut replicas = HashMap::new();
         replicas.insert(TopicPartition::new("t".to_string(), 0), ReplicaInfo::new(100, 5, false));
-        let description =
-            LogDirDescription::with_volume_bytes(Some(Error::new(Errors::KafkaStorageError)), replicas, 2_000, 1_000);
+        let description = LogDirDescription::new_total_bytes_usable_bytes(
+            Some(Error::new(Errors::KafkaStorageError)),
+            replicas,
+            2_000,
+            1_000,
+        );
 
         let flat = LogDirDescriptionInner::new(&description);
 
@@ -21333,11 +21337,16 @@ mod tests {
     /// partition built with the four-argument constructor.
     #[test]
     fn elr_counts_are_never_negative_and_absence_is_a_separate_bit() {
-        let absent =
-            TopicPartitionInfoInner::new(&TopicPartitionInfo::with_leader_replicas_isr(0, None, vec![], vec![]));
-        let reported_empty =
-            TopicPartitionInfoInner::new(&TopicPartitionInfo::new(0, None, vec![], vec![], vec![], vec![]));
-        let reported = TopicPartitionInfoInner::new(&TopicPartitionInfo::new(
+        let absent = TopicPartitionInfoInner::new(&TopicPartitionInfo::new(0, None, vec![], vec![]));
+        let reported_empty = TopicPartitionInfoInner::new(&TopicPartitionInfo::new_elr_last_known_elr(
+            0,
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ));
+        let reported = TopicPartitionInfoInner::new(&TopicPartitionInfo::new_elr_last_known_elr(
             0,
             None,
             vec![],
@@ -21446,7 +21455,7 @@ mod tests {
     #[allow(deprecated)]
     fn list_consumer_groups_result_exposes_both_state_views() {
         let outcome = (
-            vec![ConsumerGroupListing::new(
+            vec![ConsumerGroupListing::new_group_state_group_type(
                 "cg1",
                 Some(GroupState::Stable),
                 Some(GroupType::Classic),
@@ -23152,7 +23161,7 @@ mod tests {
     fn delegation_token_handles_expose_the_whole_java_chain() {
         // The three principals are distinct, and the renewer list has two
         // entries, so a transposition of owner / requester / renewer is caught.
-        let info = TokenInformation::with_requester(
+        let info = TokenInformation::new_token_requester(
             "token-id-1".to_string(),
             KafkaPrincipal::new("User", "owner"),
             KafkaPrincipal::new("User", "requester"),

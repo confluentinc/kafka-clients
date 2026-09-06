@@ -178,7 +178,7 @@ impl DescribeDelegationTokenResponse {
                     .iter()
                     .map(|r| KafkaPrincipal::new(r.principal_type.clone(), r.principal_name.clone()))
                     .collect();
-                let info = TokenInformation::with_requester(
+                let info = TokenInformation::new_token_requester(
                     ddt.token_id.clone(),
                     KafkaPrincipal::new(ddt.principal_type.clone(), ddt.principal_name.clone()),
                     KafkaPrincipal::new(
@@ -243,7 +243,7 @@ mod tests {
     use super::*;
 
     fn token(id: &str) -> DelegationToken {
-        let info = TokenInformation::with_requester(
+        let info = TokenInformation::new_token_requester(
             id,
             KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice"),
             KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "requester"),

@@ -4853,7 +4853,7 @@ mod tests {
         let api_versions = Arc::new(ApiVersions::new());
         api_versions.update(
             "0",
-            NodeApiVersions::new(
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
                 &[
                     api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
                     api_version(
@@ -4920,7 +4920,7 @@ mod tests {
         init_producer_id.set_max_version(3);
         api_versions.update(
             "0",
-            NodeApiVersions::new(
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
                 &[init_producer_id],
                 &transaction_version_supported_features(level),
                 &transaction_version_finalized_features(level),
@@ -6986,7 +6986,7 @@ mod tests {
         let mut pending = PendingRequests::new();
         let mut coordinators = CoordinatorNodes::new();
         #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_details(
+        let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             fenced_member_id,
@@ -7056,7 +7056,12 @@ mod tests {
             let mut pending = PendingRequests::new();
             let mut coordinators = CoordinatorNodes::new();
             #[allow(deprecated)]
-            let group_metadata = ConsumerGroupMetadata::with_details(CONSUMER_GROUP_ID, generation_id, member_id, None);
+            let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+                CONSUMER_GROUP_ID,
+                generation_id,
+                member_id,
+                None,
+            );
             let partition = TopicPartition::new("foo".to_string(), 0);
             let send_offsets_result = send_offsets_and_discover_group_coordinator(
                 &mut manager,
@@ -9551,7 +9556,7 @@ mod tests {
                 .set_max_version(max_version);
             api_versions.update(
                 broker_node().id_string(),
-                NodeApiVersions::new(&[init_producer_id], &[], &[], 0),
+                NodeApiVersions::new_node_finalized_features_finalized_features_epoch(&[init_producer_id], &[], &[], 0),
             );
             let mut manager = TransactionManager::new(
                 LogContext::empty(),

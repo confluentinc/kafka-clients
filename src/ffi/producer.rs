@@ -936,7 +936,7 @@ pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut k
         .enable_all()
         .build()
         .expect("failed to create tokio runtime for MockProducer");
-    let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(auto_complete)), runtime);
+    let kind = ProducerKind::Mock(Box::new(MockProducer::new_auto_complete(auto_complete)), runtime);
     build_producer_handle(kind)
 }
 
@@ -4735,7 +4735,7 @@ mod tests {
     /// The caller reclaims the handle with `reclaim_producer_handle`.
     fn dead_submission_handle() -> *mut kafka_producer_Producer_t {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(true)), runtime);
+        let kind = ProducerKind::Mock(Box::new(MockProducer::new_auto_complete(true)), runtime);
         // A disconnected completion channel: nothing fires on the drain-failure path,
         // so the sender is never used, but the field must be present.
         let (completion_tx, _completion_rx) = std::sync::mpsc::channel::<CompletionJob>();

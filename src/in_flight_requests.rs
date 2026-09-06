@@ -164,7 +164,7 @@ impl InFlightRequest {
     ///
     /// A timed-out request is also considered disconnected.
     pub fn timed_out(&mut self, time_ms: i64) -> ClientResponse {
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             self.header.clone(),
             self.callback.take(),
             &self.destination,

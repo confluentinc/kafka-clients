@@ -176,7 +176,12 @@ mod tests {
 
         api_versions.update(
             "2",
-            NodeApiVersions::new(&default_versions, &[supported_feature.clone()], &[finalized_feature], 1),
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+                &default_versions,
+                &[supported_feature.clone()],
+                &[finalized_feature],
+                1,
+            ),
         );
 
         let info = api_versions.finalized_features_info();
@@ -193,7 +198,12 @@ mod tests {
 
         api_versions.update(
             "1",
-            NodeApiVersions::new(&default_versions, &[supported_feature], &[finalized_feature_stale], 0),
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+                &default_versions,
+                &[supported_feature],
+                &[finalized_feature_stale],
+                0,
+            ),
         );
 
         // The stale update should be fenced.

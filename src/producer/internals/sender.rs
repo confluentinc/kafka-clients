@@ -2963,7 +2963,15 @@ mod tests {
             .set_api_key(crate::common::protocol::ApiKeys::INIT_PRODUCER_ID.id())
             .set_min_version(0)
             .set_max_version(6);
-        api_versions.update("0", crate::NodeApiVersions::new(&[init_producer_id], &[], &[], 0));
+        api_versions.update(
+            "0",
+            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+                &[init_producer_id],
+                &[],
+                &[],
+                0,
+            ),
+        );
 
         Arc::new(Mutex::new(TransactionManager::new(
             LogContext::empty(),
@@ -9612,7 +9620,7 @@ mod tests {
         let api_versions = Arc::new(crate::ApiVersions::new());
         api_versions.update(
             "0",
-            crate::NodeApiVersions::new(
+            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
                 &[
                     api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
                     api_version(
@@ -10277,7 +10285,7 @@ mod tests {
     /// Optional.of(groupInstanceId))` (Java 2691).
     fn full_consumer_group_metadata() -> ConsumerGroupMetadata {
         #[allow(deprecated)]
-        ConsumerGroupMetadata::with_details(
+        ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             MEMBER_ID,
@@ -10386,9 +10394,10 @@ mod tests {
             .collect();
         let manager = ctx.transaction_manager();
         let manager = manager.lock().unwrap();
-        manager
-            .api_versions()
-            .update("0", crate::NodeApiVersions::new(&entries, &[], &[], 0));
+        manager.api_versions().update(
+            "0",
+            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(&entries, &[], &[], 0),
+        );
     }
 
     /// `verifyCommitOrAbortTransactionRetriable(firstTransactionResult,
@@ -13353,7 +13362,15 @@ mod tests {
             .set_min_version(0)
             .set_max_version(init_producer_id_max_version);
         let api_versions = Arc::new(crate::ApiVersions::new());
-        api_versions.update("0", crate::NodeApiVersions::new(&[init_producer_id], &[], &[], 0));
+        api_versions.update(
+            "0",
+            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+                &[init_producer_id],
+                &[],
+                &[],
+                0,
+            ),
+        );
 
         let manager = Arc::new(Mutex::new(TransactionManager::new(
             LogContext::empty(),

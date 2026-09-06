@@ -32,6 +32,35 @@ use crate::common::TopicPartition;
 /// Corresponds to `AbstractStickyAssignor.DEFAULT_GENERATION`.
 pub const DEFAULT_GENERATION: i32 = -1;
 
+/// Options carried by
+/// [`Subscription::new_user_data_owned_partitions_options`].
+///
+/// Java's widest `Subscription` constructor
+/// (`Subscription(List, ByteBuffer, List, int, Optional<String>)`,
+/// `ConsumerPartitionAssignor.java:113`) carries four parameters beyond the
+/// overload group's `{topics}` intersection, so CLAUDE.md §2 caps the derived
+/// name at three of them and moves the remainder here. This struct has no Java
+/// counterpart: it exists solely to satisfy that naming rule (DoD #7).
+///
+/// It is `#[non_exhaustive]`, so construct it with [`Default`] and assign the
+/// fields you need. The defaults are Java's — the values its narrower
+/// `Subscription` constructors pass on the caller's behalf
+/// (`ConsumerPartitionAssignor.java:122,126,130`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubscriptionOptions {
+    /// Java's `generationId`. Defaults to [`DEFAULT_GENERATION`].
+    pub generation_id: i32,
+    /// Java's `rackId`. Defaults to `None`.
+    pub rack_id: Option<String>,
+}
+
+impl Default for SubscriptionOptions {
+    fn default() -> Self {
+        Self { generation_id: DEFAULT_GENERATION, rack_id: None }
+    }
+}
+
 /// A consumer member's subscription.
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Subscription`.
@@ -46,17 +75,60 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Creates a subscription with all fields.
+    // Java's four `Subscription` constructors
+    // (`ConsumerPartitionAssignor.java:113,122,126,130`) intersect on
+    // `{topics}`, and `Subscription(List topics)` (`:130`) is exactly that — so
+    // it keeps the plain name `new` and the others carry their Rust parameters
+    // beyond it (CLAUDE.md §2). Only `:113` would need more than three
+    // parameters in its name, so it alone takes the `Options` shape: three
+    // named parameters plus [`SubscriptionOptions`] for the rest.
+
+    /// Creates a subscription from topics only.
     ///
-    /// A `generation_id` less than zero is mapped to `None`, matching Java's
-    /// `generationId < 0 ? Optional.empty() : Optional.of(generationId)`.
-    pub fn new(
+    /// Mirrors `Subscription(List)` (`:130`).
+    pub fn new(topics: Vec<String>) -> Self {
+        Self::new_user_data_owned_partitions_options(topics, None, Vec::new(), SubscriptionOptions::default())
+    }
+
+    /// Creates a subscription from topics and optional user data.
+    ///
+    /// Mirrors `Subscription(List, ByteBuffer)` (`:126`).
+    pub fn new_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
+        Self::new_user_data_owned_partitions_options(topics, user_data, Vec::new(), SubscriptionOptions::default())
+    }
+
+    /// Creates a subscription from topics, optional user data and owned
+    /// partitions (default generation, no rack).
+    ///
+    /// Mirrors `Subscription(List, ByteBuffer, List)` (`:122`).
+    pub fn new_user_data_owned_partitions(
         topics: Vec<String>,
         user_data: Option<Vec<u8>>,
         owned_partitions: Vec<TopicPartition>,
-        generation_id: i32,
-        rack_id: Option<String>,
     ) -> Self {
+        Self::new_user_data_owned_partitions_options(
+            topics,
+            user_data,
+            owned_partitions,
+            SubscriptionOptions::default(),
+        )
+    }
+
+    /// Creates a subscription with all fields.
+    ///
+    /// Mirrors `Subscription(List, ByteBuffer, List, int, Optional<String>)`
+    /// (`:113`); Java's `generationId` and `rackId` are carried by
+    /// [`SubscriptionOptions`] — see the note above this overload group.
+    ///
+    /// A `generation_id` less than zero is mapped to `None`, matching Java's
+    /// `generationId < 0 ? Optional.empty() : Optional.of(generationId)`.
+    pub fn new_user_data_owned_partitions_options(
+        topics: Vec<String>,
+        user_data: Option<Vec<u8>>,
+        owned_partitions: Vec<TopicPartition>,
+        options: SubscriptionOptions,
+    ) -> Self {
+        let SubscriptionOptions { generation_id, rack_id } = options;
         Self {
             topics,
             user_data,
@@ -65,32 +137,6 @@ impl Subscription {
             generation_id: if generation_id < 0 { None } else { Some(generation_id) },
             rack_id,
         }
-    }
-
-    /// Creates a subscription from topics, optional user data and owned
-    /// partitions (default generation, no rack).
-    ///
-    /// Mirrors `Subscription(List, ByteBuffer, List)`.
-    pub fn with_owned_partitions(
-        topics: Vec<String>,
-        user_data: Option<Vec<u8>>,
-        owned_partitions: Vec<TopicPartition>,
-    ) -> Self {
-        Self::new(topics, user_data, owned_partitions, DEFAULT_GENERATION, None)
-    }
-
-    /// Creates a subscription from topics and optional user data.
-    ///
-    /// Mirrors `Subscription(List, ByteBuffer)`.
-    pub fn with_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
-        Self::new(topics, user_data, Vec::new(), DEFAULT_GENERATION, None)
-    }
-
-    /// Creates a subscription from topics only.
-    ///
-    /// Mirrors `Subscription(List)`.
-    pub fn with_topics(topics: Vec<String>) -> Self {
-        Self::new(topics, None, Vec::new(), DEFAULT_GENERATION, None)
     }
 
     /// The subscribed topics.
@@ -139,16 +185,23 @@ pub struct Assignment {
 }
 
 impl Assignment {
-    /// Creates an assignment with partitions and optional user data.
-    pub fn new(partitions: Vec<TopicPartition>, user_data: Option<Vec<u8>>) -> Self {
-        Self { partitions, user_data }
-    }
+    // Java's two `Assignment` constructors
+    // (`ConsumerPartitionAssignor.java:179,184`) intersect on `{partitions}`,
+    // and `Assignment(List partitions)` (`:184`) is exactly that — so it keeps
+    // the plain name `new` (CLAUDE.md §2).
 
     /// Creates an assignment from partitions only.
     ///
-    /// Mirrors `Assignment(List)`.
-    pub fn with_partitions(partitions: Vec<TopicPartition>) -> Self {
-        Self::new(partitions, None)
+    /// Mirrors `Assignment(List)` (`:184`).
+    pub fn new(partitions: Vec<TopicPartition>) -> Self {
+        Self::new_user_data(partitions, None)
+    }
+
+    /// Creates an assignment with partitions and optional user data.
+    ///
+    /// Mirrors `Assignment(List, ByteBuffer)` (`:179`).
+    pub fn new_user_data(partitions: Vec<TopicPartition>, user_data: Option<Vec<u8>>) -> Self {
+        Self { partitions, user_data }
     }
 
     /// The assigned partitions.
@@ -168,20 +221,30 @@ mod tests {
 
     #[test]
     fn subscription_negative_generation_is_none() {
-        let s = Subscription::new(vec!["t".to_string()], None, Vec::new(), -1, None);
+        let s = Subscription::new_user_data_owned_partitions_options(
+            vec!["t".to_string()],
+            None,
+            Vec::new(),
+            SubscriptionOptions { generation_id: -1, ..Default::default() },
+        );
         assert_eq!(s.generation_id(), None);
     }
 
     #[test]
     fn subscription_non_negative_generation_is_some() {
-        let s = Subscription::new(vec!["t".to_string()], None, Vec::new(), 5, Some("r".to_string()));
+        let s = Subscription::new_user_data_owned_partitions_options(
+            vec!["t".to_string()],
+            None,
+            Vec::new(),
+            SubscriptionOptions { generation_id: 5, rack_id: Some("r".to_string()) },
+        );
         assert_eq!(s.generation_id(), Some(5));
         assert_eq!(s.rack_id(), Some("r"));
     }
 
     #[test]
     fn subscription_defaults() {
-        let s = Subscription::with_topics(vec!["a".to_string(), "b".to_string()]);
+        let s = Subscription::new(vec!["a".to_string(), "b".to_string()]);
         assert_eq!(s.topics(), &["a".to_string(), "b".to_string()]);
         assert!(s.user_data().is_none());
         assert!(s.owned_partitions().is_empty());
@@ -190,7 +253,7 @@ mod tests {
 
     #[test]
     fn assignment_accessors() {
-        let a = Assignment::with_partitions(vec![TopicPartition::new("t", 0)]);
+        let a = Assignment::new(vec![TopicPartition::new("t", 0)]);
         assert_eq!(a.partitions().len(), 1);
         assert!(a.user_data().is_none());
     }

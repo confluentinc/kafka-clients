@@ -726,7 +726,7 @@ impl Admin for MockAdminClient {
             }
             let partitions: Vec<TopicPartitionInfo> = (0..number_of_partitions)
                 .map(|i| {
-                    TopicPartitionInfo::new(
+                    TopicPartitionInfo::new_elr_last_known_elr(
                         i,
                         Some(leader.clone()),
                         replicas.clone(),
@@ -1259,7 +1259,7 @@ impl Admin for MockAdminClient {
                     );
                     map.insert(
                         log_dir.clone(),
-                        LogDirDescription::with_volume_bytes(
+                        LogDirDescription::new_total_bytes_usable_bytes(
                             existing.error().cloned(),
                             replica_infos,
                             existing.total_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
@@ -1526,7 +1526,7 @@ impl Admin for MockAdminClient {
         let listings: Vec<Result<ConsumerGroupListing, Error>> = state
             .group_configs
             .keys()
-            .map(|g| Ok(ConsumerGroupListing::new(g.clone(), None, None, false)))
+            .map(|g| Ok(ConsumerGroupListing::new_group_state_group_type(g.clone(), None, None, false)))
             .collect();
         let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
@@ -3044,7 +3044,7 @@ mod tests {
     /// Builds a `TopicPartitionInfo` with the given leader / replicas / isr and
     /// no offline, ELR or last-known-ELR replicas.
     fn partition_info(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> TopicPartitionInfo {
-        TopicPartitionInfo::new(partition, leader, replicas, isr, Vec::new(), Vec::new())
+        TopicPartitionInfo::new_elr_last_known_elr(partition, leader, replicas, isr, Vec::new(), Vec::new())
     }
 
     /// The nodes `MockAdminClient::create` seeds, so a test can name a broker

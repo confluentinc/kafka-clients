@@ -409,7 +409,7 @@ fn record_metadata_from_proto(m: proto::RecordMetadata) -> RecordMetadata {
 }
 
 pub(crate) fn partition_info_from_proto(p: proto::PartitionInfo) -> PartitionInfo {
-    PartitionInfo::with_offline_replicas(
+    PartitionInfo::new_offline_replicas(
         p.topic,
         p.partition,
         p.leader.map(node_from_proto),

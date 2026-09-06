@@ -487,8 +487,9 @@ where
 
     fn group_metadata(&self) -> ConsumerGroupMetadata {
         // Java line 692-693: hard-coded sentinel values.
-        #[allow(deprecated)] // ConsumerGroupMetadata::with_details is the only way to set the fields.
-        ConsumerGroupMetadata::with_details("dummy.group.id", 1, "1", None)
+        #[allow(deprecated)]
+        // ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id is the only way to set the fields.
+        ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id("dummy.group.id", 1, "1", None)
     }
 
     fn client_id(&self) -> &str {

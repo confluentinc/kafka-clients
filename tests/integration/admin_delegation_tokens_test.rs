@@ -208,7 +208,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     let info = token.token_info();
     assert_eq!(info.owner(), &alice, "{backend} backend: the mock makes renewers[0] the owner");
     // `TokenInformation::new` sets the requester equal to the owner, and the
-    // harness rebuilds through `with_requester`, so this pins that the requester
+    // harness rebuilds through `new_token_requester`, so this pins that the requester
     // crossed as its own field rather than being re-derived from the owner.
     assert_eq!(
         info.token_requester(),

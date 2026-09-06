@@ -206,7 +206,7 @@ impl MetadataResponse {
         let isr = convert_to_node_vec(&metadata.in_sync_replica_ids, nodes_by_id);
         let offline = convert_to_node_vec(&metadata.offline_replica_ids, nodes_by_id);
 
-        PartitionInfo::with_offline_replicas(
+        PartitionInfo::new_offline_replicas(
             metadata.topic_partition.topic().to_string(),
             metadata.topic_partition.partition(),
             leader,

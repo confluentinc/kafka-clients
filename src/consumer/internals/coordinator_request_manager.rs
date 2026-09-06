@@ -516,7 +516,7 @@ mod tests {
         )
         .expect("header ok");
         let response_body = FindCoordinatorResponse::prepare_response(error, GROUP_ID, &node());
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             header,
             None,
             "1",

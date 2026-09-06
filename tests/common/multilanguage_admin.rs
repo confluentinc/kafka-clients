@@ -350,16 +350,12 @@ impl MultilanguageAdmin {
     /// hand-written `PartialEq` for `KafkaPrincipal` ignores it (as Java's
     /// `equals` does), so a comparison of whole principals could not see it.
     fn kafka_principal(&self, principal: proto::KafkaPrincipal) -> KafkaPrincipal {
-        KafkaPrincipal::with_token_authenticated(
-            principal.principal_type,
-            principal.name,
-            principal.token_authenticated,
-        )
+        KafkaPrincipal::new_token_authenticated(principal.principal_type, principal.name, principal.token_authenticated)
     }
 
     /// Rebuilds a [`TokenInformation`].
     ///
-    /// `with_requester` rather than `new`: `new` sets the requester equal to the
+    /// `new_token_requester` rather than `new`: `new` sets the requester equal to the
     /// owner, which would silently repair a backend that dropped or transposed the
     /// requester.
     fn token_information(&self, info: proto::TokenInformation) -> Result<TokenInformation, Error> {
@@ -369,7 +365,7 @@ impl MultilanguageAdmin {
         let requester = info
             .token_requester
             .ok_or_else(|| self.protocol_error("TokenInformation with no token_requester"))?;
-        Ok(TokenInformation::with_requester(
+        Ok(TokenInformation::new_token_requester(
             info.token_id,
             self.kafka_principal(owner),
             self.kafka_principal(requester),
@@ -500,7 +496,7 @@ impl MultilanguageAdmin {
             );
         }
         // `LogDirDescription::new` is the two-argument Java constructor, which
-        // records both volume sizes as absent; `with_volume_bytes` is the
+        // records both volume sizes as absent; `new_total_bytes_usable_bytes` is the
         // four-argument one. Java has no constructor for one present and the
         // other absent, and no broker sends that, so the mixed case is a
         // protocol error rather than a guess.
@@ -509,7 +505,7 @@ impl MultilanguageAdmin {
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::with_volume_bytes(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::new_total_bytes_usable_bytes(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
@@ -606,7 +602,7 @@ impl MultilanguageAdmin {
             Some(name) => Some(self.group_type(name, "ConsumerGroupListing.group_type")?),
             None => None,
         };
-        let rebuilt = ConsumerGroupListing::new(
+        let rebuilt = ConsumerGroupListing::new_group_state_group_type(
             listing.group_id.clone(),
             group_state,
             group_type,
@@ -1060,8 +1056,8 @@ fn partition_info_from_proto(
     let isr = info.isr.into_iter().map(node_from_proto).collect();
     let nodes = |list: proto::NodeList| list.nodes.into_iter().map(node_from_proto).collect::<Vec<_>>();
     match (info.elr, info.last_known_elr) {
-        (None, None) => Ok(TopicPartitionInfo::with_leader_replicas_isr(partition, leader, replicas, isr)),
-        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::new(
+        (None, None) => Ok(TopicPartitionInfo::new(partition, leader, replicas, isr)),
+        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::new_elr_last_known_elr(
             partition,
             leader,
             replicas,

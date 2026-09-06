@@ -1143,7 +1143,7 @@ mod tests {
         mock.add_topic(
             false,
             "topic",
-            vec![TopicPartitionInfo::new(
+            vec![TopicPartitionInfo::new_elr_last_known_elr(
                 0,
                 Some(leader.clone()),
                 vec![leader.clone()],

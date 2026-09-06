@@ -387,7 +387,7 @@ impl FutureCompletionHandler {
         let version_mismatch = response.version_mismatch().map(|s| s.to_string());
         let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
-        let owned = ClientResponse::with_timeout(
+        let owned = ClientResponse::new_timed_out(
             request_header,
             None,
             &destination,
@@ -1149,7 +1149,7 @@ mod tests {
         )
         .expect("header ok");
         let body = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
-        let response = ClientResponse::with_timeout(
+        let response = ClientResponse::new_timed_out(
             header,
             None,
             "0",
