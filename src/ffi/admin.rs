@@ -21214,7 +21214,7 @@ mod tests {
     #[test]
     fn authorized_operation_counts_are_never_negative_and_absence_is_a_separate_bit() {
         let topic = |ops: Option<BTreeSet<AclOperation>>| {
-            TopicDescriptionInner::new(&TopicDescription::with_authorized_operations(
+            TopicDescriptionInner::new(&TopicDescription::new_authorized_operations_topic_id(
                 "t",
                 false,
                 vec![],

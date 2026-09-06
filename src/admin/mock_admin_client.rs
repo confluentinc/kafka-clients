@@ -871,7 +871,7 @@ impl Admin for MockAdminClient {
                     }
                     match state.all_topics.get(requested) {
                         Some(metadata) if !metadata.marked_for_deletion => {
-                            handle.complete(TopicDescription::with_authorized_operations(
+                            handle.complete(TopicDescription::new_authorized_operations_topic_id(
                                 requested.clone(),
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
@@ -912,7 +912,7 @@ impl Admin for MockAdminClient {
                         .filter(|(_, m)| !m.marked_for_deletion);
                     match found {
                         Some((name, metadata)) => {
-                            handle.complete(TopicDescription::with_authorized_operations(
+                            handle.complete(TopicDescription::new_authorized_operations_topic_id(
                                 name,
                                 metadata.is_internal,
                                 metadata.partitions.clone(),

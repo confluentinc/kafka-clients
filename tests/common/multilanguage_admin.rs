@@ -904,7 +904,7 @@ impl MultilanguageAdmin {
             .into_iter()
             .map(|info| partition_info_from_proto(self.backend, info))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(TopicDescription::with_authorized_operations(
+        Ok(TopicDescription::new_authorized_operations_topic_id(
             description.name,
             description.is_internal,
             partitions,

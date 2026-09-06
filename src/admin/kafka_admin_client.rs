@@ -2482,7 +2482,7 @@ fn topic_description_from_cluster(
         })
         .collect();
     partitions.sort_by_key(|p| p.partition());
-    TopicDescription::with_authorized_operations(
+    TopicDescription::new_authorized_operations_topic_id(
         topic_name,
         is_internal,
         partitions,
