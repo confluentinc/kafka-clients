@@ -308,7 +308,7 @@ mod tests {
     fn metrics_with_client_id() -> Arc<Metrics> {
         let mut tags = BTreeMap::new();
         tags.insert("client-id".to_string(), "clientA".to_string());
-        let config = MetricConfig::new().with_tags(tags);
+        let config = MetricConfig::new().set_tags(tags);
         Arc::new(Metrics::new_default_config(Arc::new(config)))
     }
 

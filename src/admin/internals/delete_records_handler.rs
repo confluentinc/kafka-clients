@@ -79,7 +79,7 @@ impl DeleteRecordsHandler {
         let mut deletions_for_topic: HashMap<String, DeleteRecordsTopic> = HashMap::new();
         for topic_partition in keys {
             let to_delete = self.records_to_delete.get(topic_partition);
-            let offset = to_delete.map(RecordsToDelete::before_offset_value).unwrap_or(-1);
+            let offset = to_delete.map(RecordsToDelete::before_offset).unwrap_or(-1);
             let topic = deletions_for_topic
                 .entry(topic_partition.topic().to_string())
                 .or_insert_with(|| {
@@ -235,7 +235,7 @@ mod tests {
     fn records_to_delete() -> HashMap<TopicPartition, RecordsToDelete> {
         [tp(0), tp(1), tp(2), tp(3)]
             .into_iter()
-            .map(|k| (k, RecordsToDelete::before_offset(10)))
+            .map(|k| (k, RecordsToDelete::new_before_offset(10)))
             .collect()
     }
 

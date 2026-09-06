@@ -768,7 +768,7 @@ mod tests {
         let mut child_tags = BTreeMap::new();
         child_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
 
-        let inherited = Metrics::new_default_config(Arc::new(MetricConfig::new().with_tags(parent_tags.clone())));
+        let inherited = Metrics::new_default_config(Arc::new(MetricConfig::new().set_tags(parent_tags.clone())));
         let mut inherited_tag_names = IndexSet::new();
         inherited_tag_names.insert("parent-tag".to_string());
         inherited_tag_names.insert("child-tag".to_string());
@@ -1258,7 +1258,7 @@ mod tests {
 
         let time = Arc::new(MockTime::new());
         // Use the default time window. Set 3 samples.
-        let cfg = Arc::new(MetricConfig::new().with_samples(3));
+        let cfg = Arc::new(MetricConfig::new().set_samples(3));
         let metrics = Metrics::new_default_config_reporters_time(
             Arc::clone(&cfg),
             Vec::new(),
@@ -1388,7 +1388,7 @@ mod tests {
     // Metrics(MetricConfig defaultConfig, Time time) -> Metrics.java:101
     #[test]
     fn test_new_default_config_time_forwards() {
-        let config = Arc::new(MetricConfig::new().with_samples(7));
+        let config = Arc::new(MetricConfig::new().set_samples(7));
         let time = Arc::new(MockTime::new());
         let metrics = Metrics::new_default_config_time(Arc::clone(&config), Arc::clone(&time) as Arc<dyn Time>);
 
@@ -1411,7 +1411,7 @@ mod tests {
     fn test_metric_name_description_forwards() {
         let mut default_tags = BTreeMap::new();
         default_tags.insert("client-id".to_string(), "c1".to_string());
-        let metrics = Metrics::new_default_config(Arc::new(MetricConfig::new().with_tags(default_tags)));
+        let metrics = Metrics::new_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
 
         let added = metrics.metric_name_description("n", "g", "the description");
         let forwarded = metrics.metric_name_description_tags("n", "g", "the description", BTreeMap::new());
@@ -1429,7 +1429,7 @@ mod tests {
     fn test_metric_name_tags_forwards() {
         let mut default_tags = BTreeMap::new();
         default_tags.insert("client-id".to_string(), "c1".to_string());
-        let metrics = Metrics::new_default_config(Arc::new(MetricConfig::new().with_tags(default_tags)));
+        let metrics = Metrics::new_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
 
         let mut tags = BTreeMap::new();
         tags.insert("node-id".to_string(), "n7".to_string());
@@ -1452,7 +1452,7 @@ mod tests {
     #[test]
     fn test_sensor_forwarding_overloads() {
         let (metrics, time) = metrics_with_mock();
-        let config = Arc::new(MetricConfig::new().with_samples(9));
+        let config = Arc::new(MetricConfig::new().set_samples(9));
         let parent = metrics.sensor("parent").unwrap();
 
         // :360 — recording level and parents, default config, no expiry.

@@ -341,7 +341,7 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
         .create_topics(
             &[
                 NewTopic::new_num_partitions_replication_factor(topic.clone(), Some(2), Some(1))
-                    .configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())])),
+                    .set_configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())])),
             ],
             CreateTopicsOptions::new(),
         )

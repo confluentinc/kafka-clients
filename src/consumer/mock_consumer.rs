@@ -1060,7 +1060,7 @@ where
     async fn close(&mut self) -> Result<(), Error> {
         // Java line 574-576: `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
-        self.close_options(CloseOptions::timeout(Duration::from_millis(
+        self.close_options(CloseOptions::new_timeout(Duration::from_millis(
             crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS,
         )))
         .await

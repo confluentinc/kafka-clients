@@ -493,7 +493,7 @@ fn find_partition_reassignment(
 
 fn config_from_new_topic(new_topic: &NewTopic) -> Config {
     let entries = new_topic
-        .config_map()
+        .configs()
         .map(|configs| {
             configs
                 .iter()
@@ -752,7 +752,7 @@ impl Admin for MockAdminClient {
                     is_internal: false,
                     partitions,
                     partition_log_dirs,
-                    configs: new_topic.config_map().cloned(),
+                    configs: new_topic.configs().cloned(),
                     marked_for_deletion: false,
                     fetches_remaining_until_visible: 0,
                 },
@@ -1584,7 +1584,7 @@ impl Admin for MockAdminClient {
 
         let (group, spec) = group_specs.iter().next().expect("exactly one group");
         // `None` topic partitions (or an empty list) means "all partitions".
-        let include_all = spec.get_topic_partitions().is_none_or(<[_]>::is_empty);
+        let include_all = spec.topic_partitions().is_none_or(<[_]>::is_empty);
         let state = self.state.lock().unwrap();
         // Java builds each row with `new OffsetAndMetadata(entry.getValue())`
         // inline in the collect (MockAdminClient.java:756), and that constructor
@@ -1602,7 +1602,7 @@ impl Admin for MockAdminClient {
         let offsets: Result<GroupOffsets, Error> = state
             .committed_offsets
             .iter()
-            .filter(|(tp, _)| include_all || spec.get_topic_partitions().is_some_and(|tps| tps.contains(tp)))
+            .filter(|(tp, _)| include_all || spec.topic_partitions().is_some_and(|tps| tps.contains(tp)))
             .map(|(tp, &offset)| OffsetAndMetadata::new(offset).map(|committed| (tp.clone(), Some(committed))))
             .collect();
         drop(state);
@@ -2397,7 +2397,7 @@ mod tests {
         let client = admin();
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
-        let new_topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).configs(configs);
+        let new_topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs);
         client
             .create_topics(&[new_topic], CreateTopicsOptions::new())
             .all()
@@ -3193,7 +3193,7 @@ mod tests {
 
         let specs = HashMap::from([(
             "group".to_string(),
-            ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![selected.clone()])),
+            ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![selected.clone()])),
         )]);
         let offsets = mock
             .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())

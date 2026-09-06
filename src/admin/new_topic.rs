@@ -112,14 +112,14 @@ impl NewTopic {
     /// Set the configuration to use on the new topic. Returns `self` for
     /// chaining, mirroring Java's fluent `configs(...)`.
     #[must_use]
-    pub fn configs(mut self, configs: BTreeMap<String, String>) -> Self {
+    pub fn set_configs(mut self, configs: BTreeMap<String, String>) -> Self {
         self.configs = Some(configs);
         self
     }
 
     /// The configuration for the new topic or `None` if no configs were ever
     /// specified.
-    pub fn config_map(&self) -> Option<&BTreeMap<String, String>> {
+    pub fn configs(&self) -> Option<&BTreeMap<String, String>> {
         self.configs.as_ref()
     }
 
@@ -199,8 +199,8 @@ mod tests {
     fn configs_builder_is_fluent() {
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
-        let topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).configs(configs.clone());
-        assert_eq!(topic.config_map(), Some(&configs));
+        let topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs.clone());
+        assert_eq!(topic.configs(), Some(&configs));
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
         let mut configs = BTreeMap::new();
         configs.insert("cleanup.policy".to_string(), "compact".to_string());
         let creatable = NewTopic::new_replicas_assignments("t", assignments)
-            .configs(configs)
+            .set_configs(configs)
             .convert_to_creatable_topic();
         assert_eq!(creatable.num_partitions, NO_NUM_PARTITIONS);
         assert_eq!(creatable.assignments.len(), 1);

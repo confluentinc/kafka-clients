@@ -1001,7 +1001,7 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        configs: topic.config_map().cloned().unwrap_or_default().into_iter().collect(),
+        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {
@@ -1501,7 +1501,7 @@ impl AdminBackend for MultilanguageAdmin {
                 .iter()
                 .map(|(tp, records)| proto::RecordsToDelete {
                     partition: Some(tp_to_proto(tp)),
-                    before_offset: records.before_offset_value(),
+                    before_offset: records.before_offset(),
                 })
                 .collect(),
             timeout_ms: options.timeout_ms(),
@@ -1990,7 +1990,7 @@ impl AdminBackend for MultilanguageAdmin {
                     // the two apart with an explicit discriminant (the C entry
                     // point's `all_partitions[i]`, `admin.py`'s
                     // `partitions is None` column).
-                    topic_partitions: spec.get_topic_partitions().map(|partitions| proto::TopicPartitionList {
+                    topic_partitions: spec.topic_partitions().map(|partitions| proto::TopicPartitionList {
                         partitions: partitions.iter().map(tp_to_proto).collect(),
                     }),
                 })

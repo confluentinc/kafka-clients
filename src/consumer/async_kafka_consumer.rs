@@ -2543,10 +2543,10 @@ where
 
         let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
         let metric_config = MetricConfig::new()
-            .with_samples(config.metrics_num_samples)
+            .set_samples(config.metrics_num_samples)
             .with_time_window_ms(config.metrics_sample_window_ms)
-            .with_record_level(recording_level)
-            .with_tags(tags);
+            .set_record_level(recording_level)
+            .set_tags(tags);
 
         let metrics = Arc::new(Metrics::new_default_config(Arc::new(metric_config)));
 
@@ -5470,16 +5470,15 @@ where
     /// (`AsyncKafkaConsumer.java:1543-1545`).
     #[deprecated(note = "mirroring Java's @Deprecated close(Duration); use close_options with CloseOptions::timeout")]
     pub async fn close_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        self.close_options(crate::consumer::CloseOptions::timeout(timeout)).await
+        self.close_options(crate::consumer::CloseOptions::new_timeout(timeout)).await
     }
 
     /// Java: `void close(CloseOptions options)`.
     pub async fn close_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         let timeout = options
-            .timeout_value()
+            .timeout()
             .unwrap_or_else(|| Duration::from_millis(crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS));
-        self.close_internal(timeout, options.group_membership_operation_value(), false)
-            .await
+        self.close_internal(timeout, options.group_membership_operation(), false).await
     }
 
     /// Translates Java's
@@ -9746,7 +9745,7 @@ mod tests {
             }
         });
         consumer
-            .close_options(CloseOptions::timeout(Duration::from_millis(0)))
+            .close_options(CloseOptions::new_timeout(Duration::from_millis(0)))
             .await
             .expect("ok");
         assert!(consumer.is_closed());
@@ -9806,7 +9805,7 @@ mod tests {
         }
 
         let via_options =
-            deadline_delta_for(async |c| c.close_options(CloseOptions::timeout(user_timeout)).await).await;
+            deadline_delta_for(async |c| c.close_options(CloseOptions::new_timeout(user_timeout)).await).await;
         let via_timeout = deadline_delta_for(async |c| {
             #[allow(deprecated)]
             c.close_timeout(user_timeout).await
@@ -9819,7 +9818,7 @@ mod tests {
         );
         assert!(
             (via_timeout - via_options).abs() <= 100,
-            "close_timeout must forward to close_options(CloseOptions::timeout(..)) \
+            "close_timeout must forward to close_options(CloseOptions::new_timeout(..)) \
              (via_timeout={via_timeout}, via_options={via_options})"
         );
     }
@@ -9870,7 +9869,7 @@ mod tests {
 
         let now_before = consumer.time.milliseconds();
         consumer
-            .close_options(CloseOptions::timeout(Duration::from_secs(300)))
+            .close_options(CloseOptions::new_timeout(Duration::from_secs(300)))
             .await
             .expect("close ok");
         drop(drainer);
@@ -10233,7 +10232,7 @@ mod tests {
         // variants.
         consumer.close().await.expect("idempotent close");
         consumer
-            .close_options(CloseOptions::timeout(Duration::from_millis(0)))
+            .close_options(CloseOptions::new_timeout(Duration::from_millis(0)))
             .await
             .expect("idempotent close_options");
 
@@ -10418,7 +10417,7 @@ mod tests {
         });
 
         consumer
-            .close_options(crate::consumer::CloseOptions::timeout(Duration::from_millis(timeout_ms)))
+            .close_options(crate::consumer::CloseOptions::new_timeout(Duration::from_millis(timeout_ms)))
             .await
             .expect("close ok");
 

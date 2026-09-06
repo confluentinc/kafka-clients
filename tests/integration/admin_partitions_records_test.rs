@@ -316,7 +316,7 @@ async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut
 
     // Delete everything before offset 5; the low watermark advances to 5.
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset(5))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::new_before_offset(5))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -347,7 +347,7 @@ async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &
     produce_records(&bootstrap, &topic, 0, 5).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset(1000))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::new_before_offset(1000))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -384,7 +384,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
 
     // Partition 5 does not exist (topic has only partition 0).
     let tp = TopicPartition::new(topic.clone(), 5);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset(0))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::new_before_offset(0))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await

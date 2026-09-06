@@ -654,8 +654,8 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     }
 
     async fn close_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
-        // CloseOptions has no public timeout getter, and the server's close
-        // ignores per-call timeouts anyway, so map to a plain close.
+        // The server-side close ignores per-call timeouts, so `CloseOptions::timeout`
+        // is deliberately not forwarded and this maps to a plain close.
         let mut client = self.client.clone();
         self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: None }))
             .await

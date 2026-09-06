@@ -97,7 +97,7 @@ impl ListConsumerGroupOffsetsHandler {
                     .group_specs
                     .get(&group_id.id_value)
                     .expect("validated: key belongs to a spec");
-                let topics = spec.get_topic_partitions().map(|partitions| {
+                let topics = spec.topic_partitions().map(|partitions| {
                     let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
                     for tp in partitions {
                         by_topic.entry(tp.topic().to_string()).or_default().push(tp.partition());
@@ -301,7 +301,7 @@ mod tests {
     }
 
     fn spec(partitions: &[TopicPartition]) -> ListConsumerGroupOffsetsSpec {
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(partitions.to_vec()))
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(partitions.to_vec()))
     }
 
     fn single_group_spec() -> HashMap<String, ListConsumerGroupOffsetsSpec> {

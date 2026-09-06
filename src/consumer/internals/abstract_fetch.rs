@@ -317,7 +317,7 @@ impl AbstractFetch {
         )
         .isolation_level(self.fetch_config.isolation_level)
         .set_max_bytes(self.fetch_config.max_bytes)
-        .metadata(request_data.metadata)
+        .set_metadata(request_data.metadata)
         .removed(request_data.to_forget.clone())
         .replaced(request_data.to_replace.clone())
         .rack_id(self.fetch_config.client_rack_id.clone());

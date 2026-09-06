@@ -535,13 +535,13 @@ mod tests {
     }
 
     fn info_config() -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info))
+        Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info))
     }
     fn debug_config() -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Debug))
+        Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Debug))
     }
     fn trace_config() -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Trace))
+        Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Trace))
     }
 
     fn standalone(config: Arc<MetricConfig>, expiration_secs: i64, level: RecordingLevel) -> Sensor {
@@ -553,7 +553,7 @@ mod tests {
     }
 
     fn quota_config(quota: Quota) -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_quota(quota).with_record_level(RecordingLevel::Info))
+        Arc::new(MetricConfig::new().set_quota(quota).set_record_level(RecordingLevel::Info))
     }
 
     /// `SensorTest.testStrictQuotaEnforcement`, reduced to the check itself:

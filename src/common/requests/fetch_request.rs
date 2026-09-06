@@ -293,12 +293,12 @@ impl FetchRequestBuilder {
     }
 
     /// Returns the current metadata. Visible for testing.
-    pub fn metadata_value(&self) -> FetchMetadata {
+    pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
 
     /// Sets the fetch session metadata.
-    pub fn metadata(mut self, metadata: FetchMetadata) -> Self {
+    pub fn set_metadata(mut self, metadata: FetchMetadata) -> Self {
         self.metadata = metadata;
         self
     }
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn test_metadata_round_trip() {
         let builder =
-            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).metadata(FetchMetadata::new(42, 7));
+            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
         let req = builder.build_version(15);
         assert_eq!(FetchMetadata::new(42, 7), req.metadata());
     }

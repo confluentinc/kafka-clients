@@ -1121,7 +1121,7 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
 
     let start = Instant::now();
     consumer
-        .close_options(confluent_kafka::consumer::CloseOptions::timeout(Duration::from_millis(500)))
+        .close_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_millis(500)))
         .await
         .expect("close should complete");
     let close_duration = start.elapsed();

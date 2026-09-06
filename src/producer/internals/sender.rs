@@ -3129,7 +3129,7 @@ mod tests {
             let mut client_tags = std::collections::BTreeMap::new();
             client_tags.insert("client-id".to_string(), "clientA".to_string());
             let metrics = Arc::new(Metrics::new_default_config(Arc::new(
-                crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+                crate::common::metrics::MetricConfig::new().set_tags(client_tags),
             )));
             let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
 
@@ -4972,7 +4972,7 @@ mod tests {
         let mut client_tags = std::collections::BTreeMap::new();
         client_tags.insert("client-id".to_string(), "clientA".to_string());
         let metrics = Arc::new(Metrics::new_default_config(Arc::new(
-            crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+            crate::common::metrics::MetricConfig::new().set_tags(client_tags),
         )));
         let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
         let metadata = Arc::new(ProducerMetadata::new(

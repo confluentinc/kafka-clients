@@ -332,7 +332,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let only_zero = with_spec(
         &admin,
         &group_id,
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![tp0.clone()])),
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![tp0.clone()])),
         ListConsumerGroupOffsetsOptions::new(),
         "explicit selection of partition 0",
     )
@@ -358,7 +358,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let none_selected = with_spec(
         &admin,
         &group_id,
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(Vec::new())),
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(Vec::new())),
         ListConsumerGroupOffsetsOptions::new(),
         "explicitly empty partition selection",
     )

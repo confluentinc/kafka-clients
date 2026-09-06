@@ -65,8 +65,8 @@ impl CloseOptions {
     /// accepts a nullable `Duration` here and internally wraps it via
     /// `Optional.ofNullable`; Rust's type system makes `Duration` non-null,
     /// so for "no timeout, use default" callers should use
-    /// [`CloseOptions::default`] (or omit the call to `timeout`).
-    pub fn timeout(timeout: Duration) -> Self {
+    /// [`CloseOptions::default`] (or omit the call to `new_timeout`).
+    pub fn new_timeout(timeout: Duration) -> Self {
         Self::empty().with_timeout(timeout)
     }
 
@@ -75,7 +75,7 @@ impl CloseOptions {
     ///
     /// Corresponds to Java's static
     /// `CloseOptions.groupMembershipOperation(GroupMembershipOperation)`.
-    pub fn group_membership_operation(operation: GroupMembershipOperation) -> Self {
+    pub fn new_group_membership_operation(operation: GroupMembershipOperation) -> Self {
         Self::empty().with_group_membership_operation(operation)
     }
 
@@ -103,14 +103,14 @@ impl CloseOptions {
     }
 
     /// The group membership operation to apply upon shutdown.
-    pub fn group_membership_operation_value(&self) -> GroupMembershipOperation {
+    pub fn group_membership_operation(&self) -> GroupMembershipOperation {
         self.operation
     }
 
     /// The maximum time to wait for the close process to complete.
     ///
     /// `None` means the default timeout will be used.
-    pub fn timeout_value(&self) -> Option<Duration> {
+    pub fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
 }
@@ -128,21 +128,21 @@ mod tests {
     #[test]
     fn test_default_values() {
         let opts = CloseOptions::default();
-        assert_eq!(opts.group_membership_operation_value(), GroupMembershipOperation::Default);
-        assert_eq!(opts.timeout_value(), None);
+        assert_eq!(opts.group_membership_operation(), GroupMembershipOperation::Default);
+        assert_eq!(opts.timeout(), None);
     }
 
     #[test]
     fn test_timeout_constructor() {
-        let opts = CloseOptions::timeout(Duration::from_secs(1));
-        assert_eq!(opts.timeout_value(), Some(Duration::from_secs(1)));
-        assert_eq!(opts.group_membership_operation_value(), GroupMembershipOperation::Default);
+        let opts = CloseOptions::new_timeout(Duration::from_secs(1));
+        assert_eq!(opts.timeout(), Some(Duration::from_secs(1)));
+        assert_eq!(opts.group_membership_operation(), GroupMembershipOperation::Default);
     }
 
     #[test]
     fn test_group_membership_operation_constructor() {
-        let opts = CloseOptions::group_membership_operation(GroupMembershipOperation::LeaveGroup);
-        assert_eq!(opts.group_membership_operation_value(), GroupMembershipOperation::LeaveGroup);
-        assert_eq!(opts.timeout_value(), None);
+        let opts = CloseOptions::new_group_membership_operation(GroupMembershipOperation::LeaveGroup);
+        assert_eq!(opts.group_membership_operation(), GroupMembershipOperation::LeaveGroup);
+        assert_eq!(opts.timeout(), None);
     }
 }

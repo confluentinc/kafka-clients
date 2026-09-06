@@ -4135,7 +4135,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
     timeout_ms: i64,
 ) -> *mut kafka_common_Error_t {
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-    let options = CloseOptions::timeout(timeout);
+    let options = CloseOptions::new_timeout(timeout);
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_options(options))) }
 }
 

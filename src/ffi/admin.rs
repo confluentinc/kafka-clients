@@ -1041,7 +1041,7 @@ impl NewTopicBuilder {
         if self.configs.is_empty() {
             topic
         } else {
-            topic.configs(self.configs.clone())
+            topic.set_configs(self.configs.clone())
         }
     }
 }
@@ -1399,7 +1399,7 @@ unsafe fn read_records_to_delete(
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
         let partition = unsafe { *partitions.add(i) };
         let offset = unsafe { *before_offsets.add(i) };
-        out.insert(TopicPartition::new(name, partition), RecordsToDelete::before_offset(offset));
+        out.insert(TopicPartition::new(name, partition), RecordsToDelete::new_before_offset(offset));
     }
     out
 }
@@ -9978,7 +9978,7 @@ unsafe fn read_group_offsets_specs(
                 unsafe { *partitions.add(i) }
             };
             ListConsumerGroupOffsetsSpec::new()
-                .topic_partitions(Some(unsafe { read_topic_partitions(group_topics, group_partitions, count) }))
+                .set_topic_partitions(Some(unsafe { read_topic_partitions(group_topics, group_partitions, count) }))
         };
         if specs.insert(group_id.clone(), spec).is_some() {
             return Err(Error::local_illegal_argument(format!(
@@ -20742,9 +20742,9 @@ mod tests {
         .expect("well-formed request");
         assert_eq!(specs.len(), 2);
         // Java's unset `topicPartitions()`: every partition.
-        assert_eq!(specs["g-all"].get_topic_partitions(), None);
+        assert_eq!(specs["g-all"].topic_partitions(), None);
         assert_eq!(
-            specs["g-some"].get_topic_partitions(),
+            specs["g-some"].topic_partitions(),
             Some([TopicPartition::new("t1", 3), TopicPartition::new("t2", 4)].as_slice())
         );
     }

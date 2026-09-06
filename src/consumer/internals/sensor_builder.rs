@@ -170,7 +170,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn metrics() -> Arc<Metrics> {
-        let config = Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info));
+        let config = Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info));
         Arc::new(Metrics::new_default_config_reporters_time(
             config,
             Vec::new(),

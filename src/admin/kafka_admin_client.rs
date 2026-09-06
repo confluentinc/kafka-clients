@@ -7418,10 +7418,10 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::before_offset(3));
-        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::new_before_offset(3));
+        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::new_before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::new_before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::new_before_offset(10));
         let result = admin.delete_records(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7454,7 +7454,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::new_before_offset(10));
         let result = admin.delete_records(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7489,8 +7489,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::before_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::new_before_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::new_before_offset(10));
         let result = admin.delete_records(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -11398,7 +11398,7 @@ mod tests {
     fn single_spec(partitions: &[TopicPartition]) -> HashMap<String, ListConsumerGroupOffsetsSpec> {
         HashMap::from([(
             GROUP_ID.to_string(),
-            ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(partitions.to_vec())),
+            ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(partitions.to_vec())),
         )])
     }
 
@@ -11491,11 +11491,11 @@ mod tests {
         HashMap::from([
             (
                 "groupA".to_string(),
-                ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![TopicPartition::new("A", 1)])),
+                ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![TopicPartition::new("A", 1)])),
             ),
             (
                 "groupB".to_string(),
-                ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![TopicPartition::new("B", 2)])),
+                ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![TopicPartition::new("B", 2)])),
             ),
         ])
     }

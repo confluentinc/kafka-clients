@@ -483,7 +483,7 @@ async fn close_overloads_all_mark_the_consumer_closed() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     assert!(!consumer.closed());
     consumer
-        .close_options(CloseOptions::timeout(std::time::Duration::from_secs(1)))
+        .close_options(CloseOptions::new_timeout(std::time::Duration::from_secs(1)))
         .await
         .expect("close_options");
     assert!(consumer.closed(), "close_options(..) closes");
