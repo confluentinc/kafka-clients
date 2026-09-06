@@ -654,7 +654,7 @@ impl KafkaAdminClient {
             handles.iter().map(|(k, v)| (k.clone(), v.future())).collect();
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let validate_only = options.should_validate_only();
 
         // Build the request data from the admin `ConfigResource`/`AlterConfigOp`
@@ -3005,7 +3005,7 @@ fn get_delete_topics_with_ids_call(
 impl Admin for KafkaAdminClient {
     fn create_topics(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let mut handles: HashMap<String, KafkaFutureImpl<TopicMetadataAndConfig>> = HashMap::new();
         let mut topics_by_name: HashMap<String, CreatableTopic> = HashMap::new();
@@ -3047,7 +3047,7 @@ impl Admin for KafkaAdminClient {
 
     fn delete_topics(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
             TopicCollection::TopicNames(names) => {
                 let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
@@ -3119,7 +3119,7 @@ impl Admin for KafkaAdminClient {
 
     fn list_topics(&self, options: ListTopicsOptions) -> ListTopicsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<HashMap<String, TopicListing>> = KafkaFutureImpl::new();
         let public = handle.future();
         let list_internal = options.should_list_internal();
@@ -3170,7 +3170,7 @@ impl Admin for KafkaAdminClient {
 
     fn describe_topics(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
             TopicCollection::TopicNames(names) => {
                 let mut handles: HashMap<String, KafkaFutureImpl<TopicDescription>> = HashMap::new();
@@ -3265,7 +3265,7 @@ impl Admin for KafkaAdminClient {
 
         if !topics_by_name.is_empty() {
             let now = self.now();
-            let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+            let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
             let names: Vec<String> = topics_by_name.keys().cloned().collect();
             let call = get_create_partitions_call(
                 self.shared.metadata_manager.clone(),
@@ -3293,7 +3293,7 @@ impl Admin for KafkaAdminClient {
         let future = DeleteRecordsHandler::new_future(keys, Arc::clone(&self.shared.partition_leader_cache));
         let result_map = future.all();
 
-        let timeout_ms = options.timeout().unwrap_or(self.shared.default_api_timeout_ms);
+        let timeout_ms = options.timeout_ms().unwrap_or(self.shared.default_api_timeout_ms);
         let handler = DeleteRecordsHandler::new(
             records_to_delete.clone(),
             LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
@@ -3303,7 +3303,7 @@ impl Admin for KafkaAdminClient {
         let now = self.now();
         // Java calc: calcDeadlineMs(now, options.timeoutMs()) — the raw option
         // (which may be null → default), not the resolved handler timeout.
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = ExponentialBackoff::new(
             self.shared.retry_backoff_ms,
             RETRY_BACKOFF_EXP_BASE,
@@ -3336,7 +3336,7 @@ impl Admin for KafkaAdminClient {
         let handler = DescribeProducersHandler::new(options.clone(), log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -3357,7 +3357,7 @@ impl Admin for KafkaAdminClient {
         let handler = AbortTransactionHandler::new(spec, log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -3376,7 +3376,7 @@ impl Admin for KafkaAdminClient {
         let handler = DescribeTransactionsHandler::new(log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -3391,7 +3391,7 @@ impl Admin for KafkaAdminClient {
         let handler = FenceProducersHandler::new(&options, log_context.clone(), self.shared.request_timeout_ms);
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -3405,7 +3405,7 @@ impl Admin for KafkaAdminClient {
         let result_future = future.all();
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handler = ListTransactionsHandler::new(options, log_context.clone());
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
@@ -3422,8 +3422,8 @@ impl Admin for KafkaAdminClient {
         // Simply leverage the existing fenceProducers implementation with a
         // single transactional id (mirrors Java's forceTerminateTransaction).
         let mut fence_options = FenceProducersOptions::new();
-        if options.timeout().is_some() {
-            fence_options = fence_options.timeout_ms(options.timeout());
+        if options.timeout_ms().is_some() {
+            fence_options = fence_options.set_timeout_ms(options.timeout_ms());
         }
         let ids = vec![transactional_id.to_string()];
         let fence_result = self.fence_producers(&ids, fence_options);
@@ -3439,7 +3439,7 @@ impl Admin for KafkaAdminClient {
 
     fn describe_cluster(&self, options: DescribeClusterOptions) -> DescribeClusterResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let nodes_handle: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller_handle: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
@@ -3590,7 +3590,7 @@ impl Admin for KafkaAdminClient {
         }
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let include_synonyms = options.should_include_synonyms();
         let include_documentation = options.should_include_documentation();
 
@@ -3662,7 +3662,7 @@ impl Admin for KafkaAdminClient {
         options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<Vec<ConfigResource>> = KafkaFutureImpl::new();
         let public = handle.future();
 
@@ -3711,7 +3711,7 @@ impl Admin for KafkaAdminClient {
         options: ListClientMetricsResourcesOptions,
     ) -> ListClientMetricsResourcesResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<Vec<ClientMetricsResourceListing>> = KafkaFutureImpl::new();
         let public = handle.future();
 
@@ -3765,7 +3765,7 @@ impl Admin for KafkaAdminClient {
 
     fn describe_log_dirs(&self, brokers: &[i32], options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let mut public: HashMap<i32, KafkaFuture<HashMap<String, LogDirDescription>>> = HashMap::new();
         for &broker_id in brokers {
@@ -3816,7 +3816,7 @@ impl Admin for KafkaAdminClient {
         }
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let public: HashMap<TopicPartitionReplica, KafkaFuture<()>> =
             futures.iter().map(|(k, v)| (k.clone(), v.future())).collect();
@@ -3858,7 +3858,7 @@ impl Admin for KafkaAdminClient {
         }
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let public: HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> =
             futures.iter().map(|(k, v)| (k.clone(), v.future())).collect();
@@ -3893,7 +3893,7 @@ impl Admin for KafkaAdminClient {
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
         let public = handle.future();
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         // Preserve the caller's null-means-all semantics: `None` requests
         // election for all partitions.
@@ -3984,7 +3984,7 @@ impl Admin for KafkaAdminClient {
 
         if !topics_to_reassignments.is_empty() {
             let now = self.now();
-            let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+            let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
             let allow_replication_factor_change = options.should_allow_replication_factor_change();
             let expected_responses_count: usize =
                 topics_to_reassignments.values().map(std::collections::BTreeMap::len).sum();
@@ -4031,7 +4031,7 @@ impl Admin for KafkaAdminClient {
 
         let public = handle.future();
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let request_partitions: Option<Vec<TopicPartition>> = partitions.map(|set| set.into_iter().collect());
         let call = get_list_partition_reassignments_call(
             self.shared.metadata_manager.clone(),
@@ -4065,7 +4065,7 @@ impl Admin for KafkaAdminClient {
         );
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = ExponentialBackoff::new(
             self.shared.retry_backoff_ms,
             RETRY_BACKOFF_EXP_BASE,
@@ -4087,7 +4087,7 @@ impl Admin for KafkaAdminClient {
 
     fn list_groups(&self, options: ListGroupsOptions) -> ListGroupsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
         let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
         let protocol_types: HashSet<String> = options.protocol_types().clone();
@@ -4117,7 +4117,7 @@ impl Admin for KafkaAdminClient {
     #[allow(deprecated)]
     fn list_consumer_groups(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
         let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
 
@@ -4160,7 +4160,7 @@ impl Admin for KafkaAdminClient {
             DescribeConsumerGroupsHandler::new(options.should_include_authorized_operations(), log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -4180,7 +4180,7 @@ impl Admin for KafkaAdminClient {
             DescribeClassicGroupsHandler::new(options.should_include_authorized_operations(), log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -4204,7 +4204,7 @@ impl Admin for KafkaAdminClient {
         );
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -4225,7 +4225,7 @@ impl Admin for KafkaAdminClient {
         let handler = AlterConsumerGroupOffsetsHandler::new(group_id, offsets.clone(), log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -4246,7 +4246,7 @@ impl Admin for KafkaAdminClient {
         let handler = DeleteConsumerGroupOffsetsHandler::new(group_id, partitions.clone(), log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -4268,7 +4268,7 @@ impl Admin for KafkaAdminClient {
         let handler = DeleteConsumerGroupsHandler::new(log_context.clone());
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
         invoke_driver(driver, self.driver_context(), now);
@@ -4293,7 +4293,7 @@ impl Admin for KafkaAdminClient {
         let group_future = result_map.get(&key).expect("future exists for the group key").clone();
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let retry_backoff = self.retry_backoff();
         let ctx = self.driver_context();
 
@@ -4306,9 +4306,9 @@ impl Admin for KafkaAdminClient {
             // `DescribeConsumerGroupsOptions` (Java `KafkaAdminClient.java:4172`),
             // whose `timeoutMs` is `null`. Its deadline is therefore
             // `now + defaultApiTimeoutMs`, independent of the removeMembers
-            // request's `options.timeout()`.
+            // request's `options.timeout_ms()`.
             let default_api_timeout_ms = self.shared.default_api_timeout_ms;
-            let options_timeout = options.timeout();
+            let options_timeout = options.timeout_ms();
             let describe_deadline = calc_deadline_ms(now, None, default_api_timeout_ms);
 
             let describe_group_ids = vec![group_id.to_string()];
@@ -4404,7 +4404,7 @@ impl Admin for KafkaAdminClient {
 
     fn create_acls(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let mut handles: HashMap<AclBinding, KafkaFutureImpl<()>> = HashMap::new();
         let mut acl_creations: Vec<AclCreation> = Vec::new();
@@ -4455,7 +4455,7 @@ impl Admin for KafkaAdminClient {
         }
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
         let public = handle.future();
         let call = get_describe_acls_call(filter.clone(), handle, deadline);
@@ -4465,7 +4465,7 @@ impl Admin for KafkaAdminClient {
 
     fn delete_acls(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         let mut handles: HashMap<AclBindingFilter, KafkaFutureImpl<FilterResults>> = HashMap::new();
         let mut acl_binding_filters_sent: Vec<AclBindingFilter> = Vec::new();
@@ -4497,7 +4497,7 @@ impl Admin for KafkaAdminClient {
         options: DescribeClientQuotasOptions,
     ) -> DescribeClientQuotasResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
         let public = handle.future();
         let call = get_describe_client_quotas_call(filter.clone(), handle, deadline);
@@ -4511,7 +4511,7 @@ impl Admin for KafkaAdminClient {
         options: AlterClientQuotasOptions,
     ) -> AlterClientQuotasResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         // Mirrors Java: one future per entity (later entries with the same
         // entity share the single future for that entity).
@@ -4534,7 +4534,7 @@ impl Admin for KafkaAdminClient {
         options: DescribeUserScramCredentialsOptions,
     ) -> DescribeUserScramCredentialsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
         let public = handle.future();
         let call = get_describe_user_scram_credentials_call(users.to_vec(), handle, deadline);
@@ -4548,7 +4548,7 @@ impl Admin for KafkaAdminClient {
         options: AlterUserScramCredentialsOptions,
     ) -> AlterUserScramCredentialsResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         // Mirrors Java: one future per user.
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
@@ -4656,7 +4656,7 @@ impl Admin for KafkaAdminClient {
 
     fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
         let public = handle.future();
         let call = get_create_delegation_token_call(options, handle, deadline);
@@ -4666,7 +4666,7 @@ impl Admin for KafkaAdminClient {
 
     fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
         let public = handle.future();
         let call = get_renew_delegation_token_call(hmac.to_vec(), options.get_renew_time_period_ms(), handle, deadline);
@@ -4680,7 +4680,7 @@ impl Admin for KafkaAdminClient {
         options: ExpireDelegationTokenOptions,
     ) -> ExpireDelegationTokenResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
         let public = handle.future();
         let call =
@@ -4691,7 +4691,7 @@ impl Admin for KafkaAdminClient {
 
     fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult {
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
         let public = handle.future();
         let owners = options.get_owners().map(<[KafkaPrincipal]>::to_vec);
@@ -4704,7 +4704,7 @@ impl Admin for KafkaAdminClient {
         let handle: KafkaFutureImpl<FeatureMetadata> = KafkaFutureImpl::new();
         let public = handle.future();
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         // Mirrors Java: a set nodeId routes to that specific broker via
         // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
@@ -4775,7 +4775,7 @@ impl Admin for KafkaAdminClient {
             .collect();
 
         let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
         // Snapshot the updates for the (possibly retried) request builder.
         let updates_for_request: Vec<(String, FeatureUpdate)> = feature_updates
@@ -7619,7 +7619,7 @@ mod tests {
                     .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
             }
 
-            let options = DescribeProducersOptions::new().timeout_ms(Some(request_timeout_ms));
+            let options = DescribeProducersOptions::new().set_timeout_ms(Some(request_timeout_ms));
             let result = admin.describe_producers(std::slice::from_ref(&tp), options);
             let all = result.all();
             // Drain whatever is prepared, then confirm the request has not
@@ -8026,7 +8026,7 @@ mod tests {
             .client_mut()
             .prepare_response_from(init_producer_id_resp(Errors::None, 9012, 456), coordinator);
 
-        let options = TerminateTransactionOptions::new().timeout_ms(Some(10000));
+        let options = TerminateTransactionOptions::new().set_timeout_ms(Some(10000));
         let result = admin.force_terminate_transaction(transactional_id, options);
         let future = result.result();
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
@@ -9450,7 +9450,7 @@ mod tests {
             let result = admin.elect_leaders(
                 election_type,
                 Some(partitions),
-                ElectLeadersOptions::new().timeout_ms(Some(100)),
+                ElectLeadersOptions::new().set_timeout_ms(Some(100)),
             );
             pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
             time.sleep(200);
@@ -9533,7 +9533,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(api_versions_feature_response(Errors::None));
-        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
         assert_eq!(metadata, default_feature_metadata());
@@ -9546,7 +9546,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(api_versions_feature_response(Errors::InvalidRequest));
-        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)));
         pump(&mut runnable, 5).await;
         let err = result.feature_metadata().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
@@ -9560,7 +9560,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[0]);
-        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)).node_id(0));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(10000)).node_id(0));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
         assert_eq!(metadata, default_feature_metadata());
@@ -9575,7 +9575,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[1]);
-        let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(1000)).node_id(0));
+        let result = admin.describe_features(DescribeFeaturesOptions::new().set_timeout_ms(Some(1000)).node_id(0));
         pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
         time.sleep(2000);
         pump_until(&mut runnable, 30, |_r| result.feature_metadata().is_done()).await;
@@ -9599,7 +9599,7 @@ mod tests {
                 .prepare_response(update_features_response(Errors::None, None, &features));
             let updates = make_test_feature_updates();
             let result = admin
-                .update_features(&updates, UpdateFeaturesOptions::new().timeout_ms(Some(10000)))
+                .update_features(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
                 .unwrap();
             pump(&mut runnable, 5).await;
             for future in result.values().values() {
@@ -9617,7 +9617,7 @@ mod tests {
             .prepare_response(update_features_response(Errors::InvalidRequest, None, &[]));
         let updates = make_test_feature_updates();
         let result = admin
-            .update_features(&updates, UpdateFeaturesOptions::new().timeout_ms(Some(10000)))
+            .update_features(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
             .unwrap();
         pump(&mut runnable, 5).await;
         for future in result.values().values() {
@@ -9659,7 +9659,7 @@ mod tests {
                 .prepare_response(update_features_response(Errors::None, None, &features));
             let updates = make_test_feature_updates();
             let result = admin
-                .update_features(&updates, UpdateFeaturesOptions::new().timeout_ms(Some(10000)))
+                .update_features(&updates, UpdateFeaturesOptions::new().set_timeout_ms(Some(10000)))
                 .unwrap();
             // The NOT_CONTROLLER retry is gated by retry-backoff, so advance the
             // mock clock until every future resolves.
@@ -11632,7 +11632,7 @@ mod tests {
 
         let options = ListConsumerGroupOffsetsOptions::new()
             .require_stable(true)
-            .timeout_ms(Some(300));
+            .set_timeout_ms(Some(300));
         let _result = admin.list_consumer_group_offsets(&single_spec(&[TopicPartition::new("A", 0)]), options);
 
         // Pump until the `OffsetFetch` request is queued. The `FindCoordinator`
@@ -12306,10 +12306,10 @@ mod tests {
     /// .singleton(groupId))` with a *default* `DescribeConsumerGroupsOptions`
     /// (its `timeoutMs` is `null`), so the describe driver's deadline is
     /// `now + defaultApiTimeoutMs` — INDEPENDENT of the removeMembers request's
-    /// `options.timeout()` (`KafkaAdminClient.java:4172`). This asserts the first
+    /// `options.timeout_ms()` (`KafkaAdminClient.java:4172`). This asserts the first
     /// describe request (the coordinator lookup) carries the default-API-timeout
-    /// budget, not the small `options.timeout()` budget, and so fails against
-    /// code that ties the describe deadline to `options.timeout()`.
+    /// budget, not the small `options.timeout_ms()` budget, and so fails against
+    /// code that ties the describe deadline to `options.timeout_ms()`.
     #[tokio::test]
     async fn test_remove_all_describe_uses_default_api_timeout() {
         use crate::common::protocol::ApiKeys;
@@ -12324,7 +12324,7 @@ mod tests {
         ]);
         // No responses prepared: the describe coordinator-lookup request is sent
         // but stays queued (unanswered), ready for inspection.
-        let options = RemoveMembersFromConsumerGroupOptions::default().timeout_ms(Some(5000));
+        let options = RemoveMembersFromConsumerGroupOptions::default().set_timeout_ms(Some(5000));
         assert!(options.remove_all());
         let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
 
@@ -12380,7 +12380,7 @@ mod tests {
             .client_mut()
             .prepare_response(consumer_group_describe_members_resp(GROUP_ID, &["instance-1"]));
 
-        let options = RemoveMembersFromConsumerGroupOptions::default().timeout_ms(Some(5000));
+        let options = RemoveMembersFromConsumerGroupOptions::default().set_timeout_ms(Some(5000));
         assert!(options.remove_all());
         let _result = admin.remove_members_from_consumer_group(GROUP_ID, options);
 

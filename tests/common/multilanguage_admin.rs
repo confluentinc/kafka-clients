@@ -875,7 +875,7 @@ impl MultilanguageAdmin {
         proto::DescribeTopicsRequest {
             admin_id: self.admin_id,
             topics: Some(topics),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             include_authorized_operations: options.should_include_authorized_operations(),
             partition_size_limit_per_response: Some(options.partition_size_limit()),
         }
@@ -1358,7 +1358,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::CreateTopicsRequest {
             admin_id: self.admin_id,
             topics: new_topics.iter().map(new_topic_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             validate_only: options.should_validate_only(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
@@ -1384,7 +1384,7 @@ impl AdminBackend for MultilanguageAdmin {
             topics: Some(proto::delete_topics_request::Topics::Names(proto::StringList {
                 values: names.to_vec(),
             })),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
         let response = self.call(|mut c| async move { c.delete_topics(request).await }).await?;
@@ -1403,7 +1403,7 @@ impl AdminBackend for MultilanguageAdmin {
             topics: Some(proto::delete_topics_request::Topics::TopicIds(proto::StringList {
                 values: topic_ids.iter().map(Uuid::to_string).collect(),
             })),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
         let response = self.call(|mut c| async move { c.delete_topics(request).await }).await?;
@@ -1415,7 +1415,7 @@ impl AdminBackend for MultilanguageAdmin {
     async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, Error> {
         let request = proto::AdminListTopicsRequest {
             admin_id: self.admin_id,
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             list_internal: options.should_list_internal(),
         };
         let response = self.call(|mut c| async move { c.list_topics(request).await }).await?;
@@ -1480,7 +1480,7 @@ impl AdminBackend for MultilanguageAdmin {
                 .iter()
                 .map(|(topic, np)| new_partitions_to_proto(topic, np))
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             validate_only: options.should_validate_only(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
@@ -1504,7 +1504,7 @@ impl AdminBackend for MultilanguageAdmin {
                     before_offset: records.before_offset_value(),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.delete_records(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -1521,7 +1521,7 @@ impl AdminBackend for MultilanguageAdmin {
     async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, Error> {
         let request = proto::DescribeClusterRequest {
             admin_id: self.admin_id,
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             include_authorized_operations: options.should_include_authorized_operations(),
             include_fenced_brokers: options.should_include_fenced_brokers(),
         };
@@ -1550,7 +1550,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeConfigsRequest {
             admin_id: self.admin_id,
             resources: resources.iter().map(config_resource_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             include_synonyms: options.should_include_synonyms(),
             include_documentation: options.should_include_documentation(),
         };
@@ -1590,7 +1590,7 @@ impl AdminBackend for MultilanguageAdmin {
                         .collect(),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             validate_only: options.should_validate_only(),
         };
         let response = self
@@ -1612,7 +1612,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::ListConfigResourcesRequest {
             admin_id: self.admin_id,
             resource_types: config_resource_types.iter().map(|t| i32::from(t.id())).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_config_resources(request).await }).await?;
         if let Some(err) = response.error {
@@ -1631,7 +1631,7 @@ impl AdminBackend for MultilanguageAdmin {
         options: ListClientMetricsResourcesOptions,
     ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
         let request =
-            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout() };
+            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout_ms() };
         let response = self
             .call(|mut c| async move { c.list_client_metrics_resources(request).await })
             .await?;
@@ -1653,7 +1653,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeLogDirsRequest {
             admin_id: self.admin_id,
             brokers: brokers.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_log_dirs(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -1696,7 +1696,7 @@ impl AdminBackend for MultilanguageAdmin {
                     log_dir: log_dir.clone(),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.alter_replica_log_dirs(request).await })
@@ -1714,7 +1714,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeReplicaLogDirsRequest {
             admin_id: self.admin_id,
             replicas: replicas.iter().map(replica_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_replica_log_dirs(request).await })
@@ -1746,7 +1746,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Java's public `byte value` field, which is what both bindings take.
             election_type: i32::from(election_type.value()),
             partitions: optional_partitions_to_proto(partitions),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.elect_leaders(request).await }).await?;
         // A VoidKeyedResponse, but note what its two error levels mean here: the
@@ -1780,7 +1780,7 @@ impl AdminBackend for MultilanguageAdmin {
                         .map(|r| proto::NewPartitionReassignment { target_replicas: r.target_replicas().to_vec() }),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             // Java's default is true, so this is optional on the wire.
             allow_replication_factor_change: Some(options.should_allow_replication_factor_change()),
         };
@@ -1803,7 +1803,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::ListPartitionReassignmentsRequest {
             admin_id: self.admin_id,
             partitions: optional_partitions_to_proto(partitions),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.list_partition_reassignments(request).await })
@@ -1847,7 +1847,7 @@ impl AdminBackend for MultilanguageAdmin {
                     spec: Some(offset_spec_to_proto(*spec)),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             // Java's `IsolationLevel.id()` wire code.
             isolation_level: i32::from(options.isolation_level().id()),
         };
@@ -1876,7 +1876,7 @@ impl AdminBackend for MultilanguageAdmin {
             group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
             protocol_types: options.protocol_types().iter().cloned().collect(),
             types: options.types().iter().map(|t| t.name().to_string()).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_groups(request).await }).await?;
         // A whole-value response whose value is Java's valid()/errors() split.
@@ -1905,7 +1905,7 @@ impl AdminBackend for MultilanguageAdmin {
             // single `group_states` field serves both spellings.
             group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
             types: options.types().iter().map(|t| t.name().to_string()).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_consumer_groups(request).await }).await?;
         if let Some(err) = response.error {
@@ -1929,7 +1929,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeConsumerGroupsRequest {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             include_authorized_operations: options.should_include_authorized_operations(),
         };
         let response = self
@@ -1956,7 +1956,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeClassicGroupsRequest {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             include_authorized_operations: options.should_include_authorized_operations(),
         };
         let response = self
@@ -1995,7 +1995,7 @@ impl AdminBackend for MultilanguageAdmin {
                     }),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             require_stable: options.should_require_stable(),
         };
         let response = self
@@ -2028,7 +2028,7 @@ impl AdminBackend for MultilanguageAdmin {
                     offset: Some(offset_and_metadata_to_proto(offset)),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.alter_consumer_group_offsets(request).await })
@@ -2054,7 +2054,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             group_id: group_id.to_string(),
             partitions: partitions.iter().map(tp_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.delete_consumer_group_offsets(request).await })
@@ -2075,7 +2075,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DeleteConsumerGroupsRequest {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.delete_consumer_groups(request).await })
@@ -2116,7 +2116,7 @@ impl AdminBackend for MultilanguageAdmin {
                 })
             },
             reason: options.reason_value().map(str::to_string),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.remove_members_from_consumer_group(request).await })
@@ -2139,7 +2139,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::CreateAclsRequest {
             admin_id: self.admin_id,
             acls: acls.iter().map(acl_binding_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.create_acls(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2156,7 +2156,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeAclsRequest {
             admin_id: self.admin_id,
             filter: Some(acl_binding_filter_to_proto(filter)),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_acls(request).await }).await?;
         // Whole-value: one future for the whole call, so a failure is the outer
@@ -2175,7 +2175,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DeleteAclsRequest {
             admin_id: self.admin_id,
             filters: filters.iter().map(acl_binding_filter_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.delete_acls(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2200,7 +2200,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             components: filter.components().iter().map(quota_filter_component_to_proto).collect(),
             strict: filter.strict(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_client_quotas(request).await })
@@ -2228,7 +2228,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             entries: entries.iter().map(quota_alteration_to_proto).collect(),
             validate_only: options.is_validate_only(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.alter_client_quotas(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2245,7 +2245,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeUserScramCredentialsRequest {
             admin_id: self.admin_id,
             users: users.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
@@ -2269,7 +2269,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::AlterUserScramCredentialsRequest {
             admin_id: self.admin_id,
             alterations: alterations.iter().map(scram_alteration_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.alter_user_scram_credentials(request).await })
@@ -2288,7 +2288,7 @@ impl AdminBackend for MultilanguageAdmin {
             // the owner; both halves of the principal are absent together.
             owner: options.get_owner().map(kafka_principal_to_proto),
             max_lifetime_ms: options.get_max_lifetime_ms(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.create_delegation_token(request).await })
@@ -2307,7 +2307,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             hmac: hmac.to_vec(),
             renew_time_period_ms: options.get_renew_time_period_ms(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.renew_delegation_token(request).await })
@@ -2323,7 +2323,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             hmac: hmac.to_vec(),
             expiry_time_period_ms: options.get_expiry_time_period_ms(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.expire_delegation_token(request).await })
@@ -2346,7 +2346,7 @@ impl AdminBackend for MultilanguageAdmin {
             owners: options.get_owners().map(|owners| proto::KafkaPrincipalList {
                 principals: owners.iter().map(kafka_principal_to_proto).collect(),
             }),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_delegation_token(request).await })
@@ -2363,7 +2363,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Absent is Java's empty `OptionalInt`; node id 0 is a legal broker,
             // so the absence cannot be encoded as a value.
             node_id: options.get_node_id(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_features(request).await }).await?;
         if let Some(err) = response.error {
@@ -2387,7 +2387,7 @@ impl AdminBackend for MultilanguageAdmin {
                 .map(|(feature, update)| (feature.clone(), feature_update_to_proto(update)))
                 .collect(),
             validate_only: options.get_validate_only(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.update_features(request).await }).await?;
         // The top-level error also carries the *synchronous* rejection Java throws
@@ -2409,7 +2409,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Absent is Java's empty `OptionalInt` (query each partition's
             // leader); broker id 0 is legal, so the absence is its own state.
             broker_id: options.broker_id_opt(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_producers(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2431,7 +2431,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::DescribeTransactionsRequest {
             admin_id: self.admin_id,
             transactional_ids: transactional_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_transactions(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2456,7 +2456,7 @@ impl AdminBackend for MultilanguageAdmin {
             producer_id: spec.producer_id(),
             producer_epoch: spec.producer_epoch() as i32,
             coordinator_epoch: spec.coordinator_epoch(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.abort_transaction(request).await }).await?;
         void_outcome(response.error)
@@ -2470,7 +2470,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::ForceTerminateTransactionRequest {
             admin_id: self.admin_id,
             transactional_id: transactional_id.to_string(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.force_terminate_transaction(request).await })
@@ -2491,7 +2491,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Java's own -1 sentinel: negative means no duration filter.
             duration_ms: options.filtered_duration(),
             transactional_id_pattern: options.filtered_transactional_id_pattern().map(str::to_string),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_transactions(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2518,7 +2518,7 @@ impl AdminBackend for MultilanguageAdmin {
         let request = proto::FenceProducersRequest {
             admin_id: self.admin_id,
             transactional_ids: transactional_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.fence_producers(request).await }).await?;
         keyed(response.error, response.entries, |entry| {

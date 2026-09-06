@@ -59,14 +59,14 @@ impl RenewDelegationTokenOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -80,8 +80,8 @@ mod tests {
         assert_eq!(RenewDelegationTokenOptions::new().get_renew_time_period_ms(), -1);
         let options = RenewDelegationTokenOptions::new()
             .renew_time_period_ms(1000)
-            .timeout_ms(Some(5000));
+            .set_timeout_ms(Some(5000));
         assert_eq!(options.get_renew_time_period_ms(), 1000);
-        assert_eq!(options.timeout(), Some(5000));
+        assert_eq!(options.timeout_ms(), Some(5000));
     }
 }

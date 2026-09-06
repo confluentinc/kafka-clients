@@ -58,7 +58,7 @@ impl FenceProducersHandler {
     /// Creates a handler. The transaction timeout is the option's timeout when
     /// set, otherwise the client's request timeout.
     pub(crate) fn new(options: &FenceProducersOptions, log_context: LogContext, request_timeout_ms: i32) -> Self {
-        let txn_timeout_ms = options.timeout().unwrap_or(request_timeout_ms);
+        let txn_timeout_ms = options.timeout_ms().unwrap_or(request_timeout_ms);
         Self {
             lookup_strategy: CoordinatorStrategy::new(CoordinatorType::Transaction, log_context.clone()),
             log_context,
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn build_request_options_timeout() {
         let options_timeout_ms = 50000;
-        let h = handler(FenceProducersOptions::new().timeout_ms(Some(options_timeout_ms)));
+        let h = handler(FenceProducersOptions::new().set_timeout_ms(Some(options_timeout_ms)));
         for id in ["foo", "bar", "baz"] {
             let data = h.build_single_request(&key(id));
             assert_eq!(data.transactional_id.as_deref(), Some(id));

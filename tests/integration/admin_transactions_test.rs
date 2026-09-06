@@ -670,7 +670,7 @@ async fn describe_transactions_reports_a_fenced_transaction<F: AdminBackendFacto
     let fenced = admin
         .fence_producers(
             std::slice::from_ref(&transactional_id),
-            FenceProducersOptions::new().timeout_ms(Some(TXN_TIMEOUT_MS)),
+            FenceProducersOptions::new().set_timeout_ms(Some(TXN_TIMEOUT_MS)),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: fence producers: {e}"));

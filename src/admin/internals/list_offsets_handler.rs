@@ -120,7 +120,7 @@ impl ListOffsetsHandler {
             .iter()
             .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&EARLIEST_PENDING_UPLOAD_TIMESTAMP));
 
-        let timeout_ms = self.options.timeout().unwrap_or(self.default_api_timeout_ms);
+        let timeout_ms = self.options.timeout_ms().unwrap_or(self.default_api_timeout_ms);
         let mut builder = ListOffsetsRequestBuilder::for_consumer_require_max_timestamp_options(
             true,
             self.options.isolation_level(),
@@ -572,7 +572,7 @@ mod tests {
     /// Mirrors `testBuildRequestWithTimeoutMs`.
     #[test]
     fn build_request_with_timeout_ms() {
-        let handler = handler(ListOffsetsOptions::new().timeout_ms(Some(200)));
+        let handler = handler(ListOffsetsOptions::new().set_timeout_ms(Some(200)));
         let keys: HashSet<TopicPartition> = [tp("t0", 0), tp("t0", 1)].into_iter().collect();
         let builder = handler.build_batched_request(node().id(), &keys);
         assert_eq!(builder.data().timeout_ms, 200);

@@ -1067,8 +1067,8 @@ impl Admin for MockAdminClient {
         // "Not implemented yet" — so the resulting future carries the same
         // "unsupported" error Java's mock throws, by a different route.
         let mut fence_options = FenceProducersOptions::new();
-        if options.timeout().is_some() {
-            fence_options = fence_options.timeout_ms(options.timeout());
+        if options.timeout_ms().is_some() {
+            fence_options = fence_options.set_timeout_ms(options.timeout_ms());
         }
         let ids = vec![transactional_id.to_string()];
         let fence_result = self.fence_producers(&ids, fence_options);

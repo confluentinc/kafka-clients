@@ -40,7 +40,7 @@ impl ListConsumerGroupOffsetsOptions {
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
@@ -51,7 +51,7 @@ impl ListConsumerGroupOffsetsOptions {
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -64,8 +64,8 @@ mod tests {
     fn defaults_and_setter() {
         let options = ListConsumerGroupOffsetsOptions::new();
         assert!(!options.should_require_stable());
-        let options = options.require_stable(true).timeout_ms(Some(300));
+        let options = options.require_stable(true).set_timeout_ms(Some(300));
         assert!(options.should_require_stable());
-        assert_eq!(options.timeout(), Some(300));
+        assert_eq!(options.timeout_ms(), Some(300));
     }
 }

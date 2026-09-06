@@ -3331,7 +3331,7 @@ unsafe fn finish_sync<T, R>(
 /// `timeout_ms` leaves `timeoutMs` unset so `default.api.timeout.ms` applies.
 fn create_topics_options(timeout_ms: i32, validate_only: bool, retry_on_quota_violation: bool) -> CreateTopicsOptions {
     CreateTopicsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .validate_only(validate_only)
         .retry_on_quota_violation(retry_on_quota_violation)
 }
@@ -3440,7 +3440,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
 /// Builds `DeleteTopicsOptions` from the flat C option parameters.
 fn delete_topics_options(timeout_ms: i32, retry_on_quota_violation: bool) -> DeleteTopicsOptions {
     DeleteTopicsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .retry_on_quota_violation(retry_on_quota_violation)
 }
 
@@ -3646,7 +3646,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
     out_result: *mut *mut kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_Error_t {
     let options = ListTopicsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .list_internal(list_internal);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_topics(options).names_to_listings())) };
     unsafe { finish_sync(outcome, out_result, box_list_topics_result) }
@@ -3681,7 +3681,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics_async(
     user_data: *mut c_void,
 ) {
     let options = ListTopicsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .list_internal(list_internal);
     unsafe {
         admin_async_value_op(
@@ -3711,7 +3711,7 @@ fn describe_topics_options(
     partition_size_limit_per_response: i32,
 ) -> DescribeTopicsOptions {
     let options = DescribeTopicsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .include_authorized_operations(include_authorized_operations);
     if partition_size_limit_per_response < 0 {
         options
@@ -3900,7 +3900,7 @@ fn create_partitions_options(
     retry_on_quota_violation: bool,
 ) -> CreatePartitionsOptions {
     CreatePartitionsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .validate_only(validate_only)
         .retry_on_quota_violation(retry_on_quota_violation)
 }
@@ -4062,7 +4062,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     out_result: *mut *mut kafka_admin_DeleteRecordsResult_t,
 ) -> *mut kafka_common_Error_t {
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
-    let options = DeleteRecordsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DeleteRecordsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_records(a, &records, options))) };
     unsafe { finish_sync(outcome, out_result, box_delete_records_result) }
 }
@@ -4100,7 +4100,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
     user_data: *mut c_void,
 ) {
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
-    let options = DeleteRecordsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DeleteRecordsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_value_op(
             admin,
@@ -4900,7 +4900,7 @@ fn describe_cluster_options(
     include_fenced_brokers: bool,
 ) -> DescribeClusterOptions {
     DescribeClusterOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .include_authorized_operations(include_authorized_operations)
         .include_fenced_brokers(include_fenced_brokers)
 }
@@ -5175,7 +5175,7 @@ fn describe_configs_options(
     include_documentation: bool,
 ) -> DescribeConfigsOptions {
     DescribeConfigsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .include_synonyms(include_synonyms)
         .include_documentation(include_documentation)
 }
@@ -5483,7 +5483,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
         Err(e) => return box_error(e),
     };
     let options = AlterConfigsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .validate_only(validate_only);
     let outcome =
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_incremental_alter_configs(a, &configs, options))) };
@@ -5529,7 +5529,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
     let parsed =
         unsafe { read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count) };
     let options = AlterConfigsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .validate_only(validate_only);
     unsafe {
         admin_async_value_op(
@@ -5690,7 +5690,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     out_result: *mut *mut kafka_admin_ListConfigResourcesResult_t,
 ) -> *mut kafka_common_Error_t {
     let types = unsafe { read_config_resource_types(resource_types, count) };
-    let options = ListConfigResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = ListConfigResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources(&types, options).all())) };
     unsafe { finish_sync(outcome, out_result, box_list_config_resources_result) }
 }
@@ -5726,7 +5726,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
     user_data: *mut c_void,
 ) {
     let types = unsafe { read_config_resource_types(resource_types, count) };
-    let options = ListConfigResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = ListConfigResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_value_op(
             admin,
@@ -5869,7 +5869,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListClientMetricsResourcesResult_t,
 ) -> *mut kafka_common_Error_t {
-    let options = ListClientMetricsResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = ListClientMetricsResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_client_metrics_resources(options).all())) };
     unsafe { finish_sync(outcome, out_result, box_list_client_metrics_resources_result) }
 }
@@ -5902,7 +5902,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources_a
     callback: kafka_admin_AdminClient_list_client_metrics_resources_callback_t,
     user_data: *mut c_void,
 ) {
-    let options = ListClientMetricsResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = ListClientMetricsResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_value_op(
             admin,
@@ -6113,7 +6113,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     out_result: *mut *mut kafka_admin_DescribeLogDirsResult_t,
 ) -> *mut kafka_common_Error_t {
     let broker_ids = unsafe { read_i32s(brokers, count) };
-    let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DescribeLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options))) };
     unsafe { finish_sync(outcome, out_result, box_describe_log_dirs_result) }
 }
@@ -6148,7 +6148,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let broker_ids = unsafe { read_i32s(brokers, count) };
-    let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DescribeLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_value_op(
             admin,
@@ -6415,7 +6415,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     out_result: *mut *mut kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> *mut kafka_common_Error_t {
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
-    let options = AlterReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = AlterReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome =
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options))) };
     unsafe { finish_sync(outcome, out_result, box_alter_replica_log_dirs_result) }
@@ -6455,7 +6455,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
-    let options = AlterReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = AlterReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_value_op(
             admin,
@@ -6735,7 +6735,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     out_result: *mut *mut kafka_admin_DescribeReplicaLogDirsResult_t,
 ) -> *mut kafka_common_Error_t {
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
-    let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome =
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options))) };
     unsafe { finish_sync(outcome, out_result, box_describe_replica_log_dirs_result) }
@@ -6774,7 +6774,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
     user_data: *mut c_void,
 ) {
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
-    let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_value_op(
             admin,
@@ -7227,7 +7227,7 @@ fn offset_spec_for_sentinel(value: i64) -> Option<OffsetSpec> {
 
 /// Builds the `ElectLeadersOptions` for an `electLeaders` call.
 fn elect_leaders_options(timeout_ms: i32) -> ElectLeadersOptions {
-    ElectLeadersOptions::new().timeout_ms(option_timeout(timeout_ms))
+    ElectLeadersOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds the `AlterPartitionReassignmentsOptions` for an
@@ -7237,14 +7237,14 @@ fn alter_partition_reassignments_options(
     allow_replication_factor_change: bool,
 ) -> AlterPartitionReassignmentsOptions {
     AlterPartitionReassignmentsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .allow_replication_factor_change(allow_replication_factor_change)
 }
 
 /// Builds the `ListPartitionReassignmentsOptions` for a
 /// `listPartitionReassignments` call.
 fn list_partition_reassignments_options(timeout_ms: i32) -> ListPartitionReassignmentsOptions {
-    ListPartitionReassignmentsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    ListPartitionReassignmentsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds the `ListOffsetsOptions` for a `listOffsets` call.
@@ -7260,7 +7260,7 @@ fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOff
     let level = u8::try_from(isolation_level)
         .map_err(|_| Error::local_illegal_argument(format!("Unknown isolation level {isolation_level}")))
         .and_then(IsolationLevel::for_id)?;
-    Ok(ListOffsetsOptions::with_isolation_level(level).timeout_ms(option_timeout(timeout_ms)))
+    Ok(ListOffsetsOptions::with_isolation_level(level).set_timeout_ms(option_timeout(timeout_ms)))
 }
 
 // ---------------------------------------------------------------------------
@@ -9811,7 +9811,7 @@ unsafe fn list_groups_options(
                 .collect(),
         )
         .with_types(unsafe { read_group_types(types, type_count) })
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds `ListConsumerGroupsOptions` from the flat C option parameters.
@@ -9836,7 +9836,7 @@ unsafe fn list_consumer_groups_options(
     ListConsumerGroupsOptions::new()
         .in_group_states(unsafe { read_group_states(group_states, group_state_count) })
         .with_types(unsafe { read_group_types(types, type_count) })
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds `DescribeConsumerGroupsOptions` from the flat C option parameters.
@@ -9845,7 +9845,7 @@ fn describe_consumer_groups_options(
     include_authorized_operations: bool,
 ) -> DescribeConsumerGroupsOptions {
     DescribeConsumerGroupsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .include_authorized_operations(include_authorized_operations)
 }
 
@@ -9855,30 +9855,30 @@ fn describe_classic_groups_options(
     include_authorized_operations: bool,
 ) -> DescribeClassicGroupsOptions {
     DescribeClassicGroupsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .include_authorized_operations(include_authorized_operations)
 }
 
 /// Builds `ListConsumerGroupOffsetsOptions` from the flat C option parameters.
 fn list_consumer_group_offsets_options(timeout_ms: i32, require_stable: bool) -> ListConsumerGroupOffsetsOptions {
     ListConsumerGroupOffsetsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .require_stable(require_stable)
 }
 
 /// Builds `AlterConsumerGroupOffsetsOptions` from the flat C option parameters.
 fn alter_consumer_group_offsets_options(timeout_ms: i32) -> AlterConsumerGroupOffsetsOptions {
-    AlterConsumerGroupOffsetsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    AlterConsumerGroupOffsetsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds `DeleteConsumerGroupOffsetsOptions` from the flat C option parameters.
 fn delete_consumer_group_offsets_options(timeout_ms: i32) -> DeleteConsumerGroupOffsetsOptions {
-    DeleteConsumerGroupOffsetsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DeleteConsumerGroupOffsetsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds `DeleteConsumerGroupsOptions` from the flat C option parameters.
 fn delete_consumer_groups_options(timeout_ms: i32) -> DeleteConsumerGroupsOptions {
-    DeleteConsumerGroupsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DeleteConsumerGroupsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds `RemoveMembersFromConsumerGroupOptions` from the flat C option
@@ -9917,7 +9917,7 @@ unsafe fn remove_members_options(
     if !reason.is_null() {
         options.reason(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string());
     }
-    Ok(options.timeout_ms(option_timeout(timeout_ms)))
+    Ok(options.set_timeout_ms(option_timeout(timeout_ms)))
 }
 
 /// Reads the per-group `ListConsumerGroupOffsetsSpec` map that
@@ -14084,7 +14084,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_destroy(
 
 /// Builds `CreateAclsOptions` from the flat C option parameters.
 fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
-    CreateAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    CreateAclsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for [`kafka_admin_AdminClient_create_acls_async`].
@@ -14240,7 +14240,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
 
 /// Builds `DescribeAclsOptions` from the flat C option parameters.
 fn describe_acls_options(timeout_ms: i32) -> DescribeAclsOptions {
-    DescribeAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DescribeAclsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for [`kafka_admin_AdminClient_describe_acls_async`].
@@ -14383,7 +14383,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
 
 /// Builds `DeleteAclsOptions` from the flat C option parameters.
 fn delete_acls_options(timeout_ms: i32) -> DeleteAclsOptions {
-    DeleteAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DeleteAclsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for [`kafka_admin_AdminClient_delete_acls_async`].
@@ -14519,7 +14519,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
 
 /// Builds `DescribeClientQuotasOptions` from the flat C option parameters.
 fn describe_client_quotas_options(timeout_ms: i32) -> DescribeClientQuotasOptions {
-    DescribeClientQuotasOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DescribeClientQuotasOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for
@@ -14643,7 +14643,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
 /// Builds `AlterClientQuotasOptions` from the flat C option parameters.
 fn alter_client_quotas_options(timeout_ms: i32, validate_only: bool) -> AlterClientQuotasOptions {
     AlterClientQuotasOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .validate_only(validate_only)
 }
 
@@ -15845,7 +15845,7 @@ fn submit_update_features(
 /// Builds `DescribeUserScramCredentialsOptions` from the flat C option
 /// parameters.
 fn describe_user_scram_credentials_options(timeout_ms: i32) -> DescribeUserScramCredentialsOptions {
-    DescribeUserScramCredentialsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DescribeUserScramCredentialsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for
@@ -15950,7 +15950,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
 
 /// Builds `AlterUserScramCredentialsOptions` from the flat C option parameters.
 fn alter_user_scram_credentials_options(timeout_ms: i32) -> AlterUserScramCredentialsOptions {
-    AlterUserScramCredentialsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    AlterUserScramCredentialsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for
@@ -16156,7 +16156,7 @@ fn create_delegation_token_options(
     let options = CreateDelegationTokenOptions::new()
         .renewers(renewers)
         .max_lifetime_ms(max_lifetime_ms)
-        .timeout_ms(option_timeout(timeout_ms));
+        .set_timeout_ms(option_timeout(timeout_ms));
     match owner {
         Some(owner) => options.owner(owner),
         None => options,
@@ -16312,7 +16312,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
 fn renew_delegation_token_options(renew_time_period_ms: i64, timeout_ms: i32) -> RenewDelegationTokenOptions {
     RenewDelegationTokenOptions::new()
         .renew_time_period_ms(renew_time_period_ms)
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for
@@ -16421,7 +16421,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token_async(
 fn expire_delegation_token_options(expiry_time_period_ms: i64, timeout_ms: i32) -> ExpireDelegationTokenOptions {
     ExpireDelegationTokenOptions::new()
         .expiry_time_period_ms(expiry_time_period_ms)
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for
@@ -16540,7 +16540,7 @@ fn describe_delegation_token_options(
     let owners = if has_owners_filter { Some(owners) } else { None };
     DescribeDelegationTokenOptions::new()
         .owners(owners)
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for
@@ -16663,7 +16663,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async
 /// `has_node_id` is the discriminant Java's `OptionalInt nodeId()` needs: node
 /// id 0 is a legal broker, so no sentinel would work.
 fn describe_features_options(node_id: i32, has_node_id: bool, timeout_ms: i32) -> DescribeFeaturesOptions {
-    let options = DescribeFeaturesOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DescribeFeaturesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     if has_node_id { options.node_id(node_id) } else { options }
 }
 
@@ -16763,7 +16763,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features_async(
 fn update_features_options(timeout_ms: i32, validate_only: bool) -> UpdateFeaturesOptions {
     UpdateFeaturesOptions::new()
         .validate_only(validate_only)
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Completion callback for [`kafka_admin_AdminClient_update_features_async`].
@@ -17858,7 +17858,7 @@ unsafe fn read_abort_transaction_spec(
 /// is only *conventionally* non-negative, and Java's own `brokerId(int)` setter
 /// does not range-check it.
 fn describe_producers_options(timeout_ms: i32, has_broker_id: bool, broker_id: i32) -> DescribeProducersOptions {
-    let options = DescribeProducersOptions::new().timeout_ms(option_timeout(timeout_ms));
+    let options = DescribeProducersOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     if has_broker_id {
         options.broker_id(broker_id)
     } else {
@@ -17868,22 +17868,22 @@ fn describe_producers_options(timeout_ms: i32, has_broker_id: bool, broker_id: i
 
 /// Builds [`DescribeTransactionsOptions`] from the C arguments.
 fn describe_transactions_options(timeout_ms: i32) -> DescribeTransactionsOptions {
-    DescribeTransactionsOptions::new().timeout_ms(option_timeout(timeout_ms))
+    DescribeTransactionsOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds [`AbortTransactionOptions`] from the C arguments.
 fn abort_transaction_options(timeout_ms: i32) -> AbortTransactionOptions {
-    AbortTransactionOptions::new().timeout_ms(option_timeout(timeout_ms))
+    AbortTransactionOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds [`TerminateTransactionOptions`] from the C arguments.
 fn terminate_transaction_options(timeout_ms: i32) -> TerminateTransactionOptions {
-    TerminateTransactionOptions::new().timeout_ms(option_timeout(timeout_ms))
+    TerminateTransactionOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds [`FenceProducersOptions`] from the C arguments.
 fn fence_producers_options(timeout_ms: i32) -> FenceProducersOptions {
-    FenceProducersOptions::new().timeout_ms(option_timeout(timeout_ms))
+    FenceProducersOptions::new().set_timeout_ms(option_timeout(timeout_ms))
 }
 
 /// Builds [`ListTransactionsOptions`] from the C arguments.
@@ -17919,7 +17919,7 @@ unsafe fn list_transactions_options(
     transactional_id_pattern: *const c_char,
 ) -> ListTransactionsOptions {
     ListTransactionsOptions::new()
-        .timeout_ms(option_timeout(timeout_ms))
+        .set_timeout_ms(option_timeout(timeout_ms))
         .filter_states(unsafe { read_transaction_states(states.0, states.1) })
         .filter_producer_ids(unsafe { read_i64s(producer_ids.0, producer_ids.1) })
         .filter_on_duration(duration_ms)
@@ -19885,13 +19885,13 @@ mod tests {
     #[test]
     fn describe_cluster_options_maps_each_flag_to_its_own_field() {
         let options = describe_cluster_options(1_000, true, false);
-        assert_eq!(options.timeout(), Some(1_000));
+        assert_eq!(options.timeout_ms(), Some(1_000));
         assert!(options.should_include_authorized_operations());
         assert!(!options.should_include_fenced_brokers());
 
         // Reversed, so a transposition cannot satisfy both cases.
         let options = describe_cluster_options(-1, false, true);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_include_authorized_operations());
         assert!(options.should_include_fenced_brokers());
     }
@@ -19899,12 +19899,12 @@ mod tests {
     #[test]
     fn describe_configs_options_maps_each_flag_to_its_own_field() {
         let options = describe_configs_options(2_000, true, false);
-        assert_eq!(options.timeout(), Some(2_000));
+        assert_eq!(options.timeout_ms(), Some(2_000));
         assert!(options.should_include_synonyms());
         assert!(!options.should_include_documentation());
 
         let options = describe_configs_options(-1, false, true);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_include_synonyms());
         assert!(options.should_include_documentation());
     }
@@ -19912,7 +19912,7 @@ mod tests {
     #[test]
     fn describe_topics_options_maps_each_flag_to_its_own_field() {
         let options = describe_topics_options(3_000, true, 25);
-        assert_eq!(options.timeout(), Some(3_000));
+        assert_eq!(options.timeout_ms(), Some(3_000));
         assert!(options.should_include_authorized_operations());
         assert_eq!(options.partition_size_limit(), 25);
 
@@ -19920,7 +19920,7 @@ mod tests {
         // than forwarding the sentinel to the setter.
         let default_limit = DescribeTopicsOptions::new().partition_size_limit();
         let options = describe_topics_options(-1, false, -1);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_include_authorized_operations());
         assert_eq!(options.partition_size_limit(), default_limit);
     }
@@ -19928,12 +19928,12 @@ mod tests {
     #[test]
     fn create_topics_options_maps_each_flag_to_its_own_field() {
         let options = create_topics_options(4_000, true, false);
-        assert_eq!(options.timeout(), Some(4_000));
+        assert_eq!(options.timeout_ms(), Some(4_000));
         assert!(options.should_validate_only());
         assert!(!options.should_retry_on_quota_violation());
 
         let options = create_topics_options(-1, false, true);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_validate_only());
         assert!(options.should_retry_on_quota_violation());
     }
@@ -19941,12 +19941,12 @@ mod tests {
     #[test]
     fn create_partitions_options_maps_each_flag_to_its_own_field() {
         let options = create_partitions_options(5_000, true, false);
-        assert_eq!(options.timeout(), Some(5_000));
+        assert_eq!(options.timeout_ms(), Some(5_000));
         assert!(options.should_validate_only());
         assert!(!options.should_retry_on_quota_violation());
 
         let options = create_partitions_options(-1, false, true);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_validate_only());
         assert!(options.should_retry_on_quota_violation());
     }
@@ -19954,11 +19954,11 @@ mod tests {
     #[test]
     fn delete_topics_options_maps_each_flag_to_its_own_field() {
         let options = delete_topics_options(6_000, true);
-        assert_eq!(options.timeout(), Some(6_000));
+        assert_eq!(options.timeout_ms(), Some(6_000));
         assert!(options.should_retry_on_quota_violation());
 
         let options = delete_topics_options(-1, false);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_retry_on_quota_violation());
     }
 
@@ -20181,38 +20181,38 @@ mod tests {
 
     #[test]
     fn elect_leaders_options_maps_the_timeout() {
-        assert_eq!(elect_leaders_options(1_500).timeout(), Some(1_500));
-        assert_eq!(elect_leaders_options(-1).timeout(), None);
+        assert_eq!(elect_leaders_options(1_500).timeout_ms(), Some(1_500));
+        assert_eq!(elect_leaders_options(-1).timeout_ms(), None);
     }
 
     #[test]
     fn alter_partition_reassignments_options_maps_each_flag_to_its_own_field() {
         let options = alter_partition_reassignments_options(2_500, false);
-        assert_eq!(options.timeout(), Some(2_500));
+        assert_eq!(options.timeout_ms(), Some(2_500));
         assert!(!options.should_allow_replication_factor_change());
 
         // Reversed, so a transposition cannot satisfy both cases.
         let options = alter_partition_reassignments_options(-1, true);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(options.should_allow_replication_factor_change());
     }
 
     #[test]
     fn list_partition_reassignments_options_maps_the_timeout() {
-        assert_eq!(list_partition_reassignments_options(3_500).timeout(), Some(3_500));
-        assert_eq!(list_partition_reassignments_options(-7).timeout(), None);
+        assert_eq!(list_partition_reassignments_options(3_500).timeout_ms(), Some(3_500));
+        assert_eq!(list_partition_reassignments_options(-7).timeout_ms(), None);
     }
 
     #[test]
     fn list_offsets_options_maps_each_field_to_its_own_slot() {
         let options = list_offsets_options(4_500, 1).unwrap();
-        assert_eq!(options.timeout(), Some(4_500));
+        assert_eq!(options.timeout_ms(), Some(4_500));
         assert_eq!(options.isolation_level(), IsolationLevel::ReadCommitted);
 
         // Reversed, so wiring the timeout into the isolation level (or vice
         // versa) cannot satisfy both cases.
         let options = list_offsets_options(-1, 0).unwrap();
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert_eq!(options.isolation_level(), IsolationLevel::ReadUncommitted);
     }
 
@@ -20584,14 +20584,14 @@ mod tests {
             options.types(),
             &HashSet::from([GroupType::Classic, GroupType::Consumer, GroupType::Share])
         );
-        assert_eq!(options.timeout(), Some(7_000));
+        assert_eq!(options.timeout_ms(), Some(7_000));
 
         // Null arrays leave every filter empty, i.e. "everything".
         let options = unsafe { list_groups_options(std::ptr::null(), 0, std::ptr::null(), 0, std::ptr::null(), 0, -1) };
         assert!(options.group_states().is_empty());
         assert!(options.protocol_types().is_empty());
         assert!(options.types().is_empty());
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
     }
 
     #[test]
@@ -20604,7 +20604,7 @@ mod tests {
         let options = unsafe { list_consumer_groups_options(sp.as_ptr(), 1, tp.as_ptr(), 2, 8_000) };
         assert_eq!(options.group_states(), &HashSet::from([GroupState::Empty]));
         assert_eq!(options.types(), &HashSet::from([GroupType::Consumer, GroupType::Classic]));
-        assert_eq!(options.timeout(), Some(8_000));
+        assert_eq!(options.timeout_ms(), Some(8_000));
     }
 
     #[test]
@@ -20639,39 +20639,39 @@ mod tests {
     #[test]
     fn describe_group_options_map_each_flag_to_its_own_field() {
         let options = describe_consumer_groups_options(1_500, true);
-        assert_eq!(options.timeout(), Some(1_500));
+        assert_eq!(options.timeout_ms(), Some(1_500));
         assert!(options.should_include_authorized_operations());
         let options = describe_consumer_groups_options(-1, false);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_include_authorized_operations());
 
         let options = describe_classic_groups_options(2_500, true);
-        assert_eq!(options.timeout(), Some(2_500));
+        assert_eq!(options.timeout_ms(), Some(2_500));
         assert!(options.should_include_authorized_operations());
         let options = describe_classic_groups_options(-1, false);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_include_authorized_operations());
     }
 
     #[test]
     fn list_consumer_group_offsets_options_maps_each_flag_to_its_own_field() {
         let options = list_consumer_group_offsets_options(9_000, true);
-        assert_eq!(options.timeout(), Some(9_000));
+        assert_eq!(options.timeout_ms(), Some(9_000));
         assert!(options.should_require_stable());
 
         let options = list_consumer_group_offsets_options(-1, false);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_require_stable());
     }
 
     #[test]
     fn single_field_group_options_carry_only_the_timeout() {
-        assert_eq!(alter_consumer_group_offsets_options(11_000).timeout(), Some(11_000));
-        assert_eq!(alter_consumer_group_offsets_options(-1).timeout(), None);
-        assert_eq!(delete_consumer_group_offsets_options(12_000).timeout(), Some(12_000));
-        assert_eq!(delete_consumer_group_offsets_options(-1).timeout(), None);
-        assert_eq!(delete_consumer_groups_options(13_000).timeout(), Some(13_000));
-        assert_eq!(delete_consumer_groups_options(-1).timeout(), None);
+        assert_eq!(alter_consumer_group_offsets_options(11_000).timeout_ms(), Some(11_000));
+        assert_eq!(alter_consumer_group_offsets_options(-1).timeout_ms(), None);
+        assert_eq!(delete_consumer_group_offsets_options(12_000).timeout_ms(), Some(12_000));
+        assert_eq!(delete_consumer_group_offsets_options(-1).timeout_ms(), None);
+        assert_eq!(delete_consumer_groups_options(13_000).timeout_ms(), Some(13_000));
+        assert_eq!(delete_consumer_groups_options(-1).timeout_ms(), None);
     }
 
     #[test]
@@ -20688,7 +20688,7 @@ mod tests {
             &HashSet::from([MemberToRemove::new("instance-1"), MemberToRemove::new("instance-2")])
         );
         assert_eq!(options.reason_value(), Some("rolling restart"));
-        assert_eq!(options.timeout(), Some(14_000));
+        assert_eq!(options.timeout_ms(), Some(14_000));
 
         // `remove_all` ignores the member array entirely: Java's no-argument
         // constructor. A NULL reason leaves it unset.
@@ -20697,7 +20697,7 @@ mod tests {
         assert!(options.remove_all());
         assert!(options.members().is_empty());
         assert_eq!(options.reason_value(), None);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
     }
 
     #[test]
@@ -21668,25 +21668,25 @@ mod tests {
 
     #[test]
     fn acl_and_quota_options_map_the_timeout_to_its_own_field() {
-        assert_eq!(create_acls_options(1_000).timeout(), Some(1_000));
-        assert_eq!(create_acls_options(-1).timeout(), None);
-        assert_eq!(describe_acls_options(2_000).timeout(), Some(2_000));
-        assert_eq!(describe_acls_options(-1).timeout(), None);
-        assert_eq!(delete_acls_options(3_000).timeout(), Some(3_000));
-        assert_eq!(delete_acls_options(-1).timeout(), None);
-        assert_eq!(describe_client_quotas_options(4_000).timeout(), Some(4_000));
-        assert_eq!(describe_client_quotas_options(-1).timeout(), None);
+        assert_eq!(create_acls_options(1_000).timeout_ms(), Some(1_000));
+        assert_eq!(create_acls_options(-1).timeout_ms(), None);
+        assert_eq!(describe_acls_options(2_000).timeout_ms(), Some(2_000));
+        assert_eq!(describe_acls_options(-1).timeout_ms(), None);
+        assert_eq!(delete_acls_options(3_000).timeout_ms(), Some(3_000));
+        assert_eq!(delete_acls_options(-1).timeout_ms(), None);
+        assert_eq!(describe_client_quotas_options(4_000).timeout_ms(), Some(4_000));
+        assert_eq!(describe_client_quotas_options(-1).timeout_ms(), None);
     }
 
     #[test]
     fn alter_client_quotas_options_maps_each_flag_to_its_own_field() {
         let options = alter_client_quotas_options(5_000, true);
-        assert_eq!(options.timeout(), Some(5_000));
+        assert_eq!(options.timeout_ms(), Some(5_000));
         assert!(options.is_validate_only());
 
         // Reversed, so a transposition cannot satisfy both cases.
         let options = alter_client_quotas_options(-1, false);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.is_validate_only());
     }
 
@@ -22488,10 +22488,10 @@ mod tests {
 
     #[test]
     fn describe_user_scram_credentials_options_maps_its_timeout() {
-        assert_eq!(describe_user_scram_credentials_options(4_100).timeout(), Some(4_100));
-        assert_eq!(describe_user_scram_credentials_options(-1).timeout(), None);
-        assert_eq!(alter_user_scram_credentials_options(4_200).timeout(), Some(4_200));
-        assert_eq!(alter_user_scram_credentials_options(-1).timeout(), None);
+        assert_eq!(describe_user_scram_credentials_options(4_100).timeout_ms(), Some(4_100));
+        assert_eq!(describe_user_scram_credentials_options(-1).timeout_ms(), None);
+        assert_eq!(alter_user_scram_credentials_options(4_200).timeout_ms(), Some(4_200));
+        assert_eq!(alter_user_scram_credentials_options(-1).timeout_ms(), None);
     }
 
     #[test]
@@ -22511,14 +22511,14 @@ mod tests {
         assert_eq!(options.get_renewers()[1].name(), "renewer-2");
         assert_eq!(options.get_owner().map(|o| o.name().to_string()), Some("owner".to_string()));
         assert_eq!(options.get_max_lifetime_ms(), 86_400_000);
-        assert_eq!(options.timeout(), Some(4_300));
+        assert_eq!(options.timeout_ms(), Some(4_300));
 
         // No owner leaves Java's field empty, which makes the requesting
         // principal the owner; a negative lifetime keeps Java's -1 sentinel.
         let defaulted = create_delegation_token_options(Vec::new(), None, -1, -1);
         assert!(defaulted.get_owner().is_none());
         assert_eq!(defaulted.get_max_lifetime_ms(), -1);
-        assert_eq!(defaulted.timeout(), None);
+        assert_eq!(defaulted.timeout_ms(), None);
     }
 
     #[test]
@@ -22528,11 +22528,11 @@ mod tests {
         // values here to catch a wire-up crossing them.
         let renew = renew_delegation_token_options(60_000, 4_400);
         assert_eq!(renew.get_renew_time_period_ms(), 60_000);
-        assert_eq!(renew.timeout(), Some(4_400));
+        assert_eq!(renew.timeout_ms(), Some(4_400));
 
         let expire = expire_delegation_token_options(-1, 4_500);
         assert_eq!(expire.get_expiry_time_period_ms(), -1);
-        assert_eq!(expire.timeout(), Some(4_500));
+        assert_eq!(expire.timeout_ms(), Some(4_500));
     }
 
     #[test]
@@ -22542,7 +22542,7 @@ mod tests {
         // apart, so the flag is load-bearing.
         let unfiltered = describe_delegation_token_options(Vec::new(), false, 4_600);
         assert_eq!(unfiltered.get_owners(), None);
-        assert_eq!(unfiltered.timeout(), Some(4_600));
+        assert_eq!(unfiltered.timeout_ms(), Some(4_600));
 
         let empty_filter = describe_delegation_token_options(Vec::new(), true, -1);
         assert_eq!(empty_filter.get_owners().map(<[KafkaPrincipal]>::len), Some(0));
@@ -22557,19 +22557,19 @@ mod tests {
         // Node id 0 is a legal broker, so the flag is what carries absence.
         let unpinned = describe_features_options(0, false, 4_700);
         assert_eq!(unpinned.get_node_id(), None);
-        assert_eq!(unpinned.timeout(), Some(4_700));
+        assert_eq!(unpinned.timeout_ms(), Some(4_700));
 
         let pinned = describe_features_options(0, true, -1);
         assert_eq!(pinned.get_node_id(), Some(0));
-        assert_eq!(pinned.timeout(), None);
+        assert_eq!(pinned.timeout_ms(), None);
 
         // Asymmetric: a set timeout with validate_only false, and the reverse.
         let applying = update_features_options(4_800, false);
-        assert_eq!(applying.timeout(), Some(4_800));
+        assert_eq!(applying.timeout_ms(), Some(4_800));
         assert!(!applying.get_validate_only());
 
         let validating = update_features_options(-1, true);
-        assert_eq!(validating.timeout(), None);
+        assert_eq!(validating.timeout_ms(), None);
         assert!(validating.get_validate_only());
     }
 
@@ -23285,15 +23285,15 @@ mod tests {
         // `int`, so the flag has to be explicit -- 0 and -1 are both values a
         // caller could legitimately pass.
         let options = describe_producers_options(1_100, true, 0);
-        assert_eq!(options.timeout(), Some(1_100));
+        assert_eq!(options.timeout_ms(), Some(1_100));
         assert_eq!(options.broker_id_opt(), Some(0));
 
         let options = describe_producers_options(-1, false, 7);
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert_eq!(options.broker_id_opt(), None, "the id must be ignored when the flag is false");
 
         let options = describe_producers_options(0, true, -3);
-        assert_eq!(options.timeout(), Some(0));
+        assert_eq!(options.timeout_ms(), Some(0));
         assert_eq!(options.broker_id_opt(), Some(-3));
     }
 
@@ -23302,14 +23302,14 @@ mod tests {
         // Four B6 options types whose only field is the inherited timeout. Each
         // is checked with a distinct value so wiring one builder to another's
         // timeout would still be caught by the pair below.
-        assert_eq!(describe_transactions_options(4_100).timeout(), Some(4_100));
-        assert_eq!(describe_transactions_options(-1).timeout(), None);
-        assert_eq!(abort_transaction_options(4_200).timeout(), Some(4_200));
-        assert_eq!(abort_transaction_options(-1).timeout(), None);
-        assert_eq!(terminate_transaction_options(4_300).timeout(), Some(4_300));
-        assert_eq!(terminate_transaction_options(-1).timeout(), None);
-        assert_eq!(fence_producers_options(4_400).timeout(), Some(4_400));
-        assert_eq!(fence_producers_options(-1).timeout(), None);
+        assert_eq!(describe_transactions_options(4_100).timeout_ms(), Some(4_100));
+        assert_eq!(describe_transactions_options(-1).timeout_ms(), None);
+        assert_eq!(abort_transaction_options(4_200).timeout_ms(), Some(4_200));
+        assert_eq!(abort_transaction_options(-1).timeout_ms(), None);
+        assert_eq!(terminate_transaction_options(4_300).timeout_ms(), Some(4_300));
+        assert_eq!(terminate_transaction_options(-1).timeout_ms(), None);
+        assert_eq!(fence_producers_options(4_400).timeout_ms(), Some(4_400));
+        assert_eq!(fence_producers_options(-1).timeout_ms(), None);
     }
 
     #[test]
@@ -23332,7 +23332,7 @@ mod tests {
                 pattern.as_ptr(),
             )
         };
-        assert_eq!(options.timeout(), Some(5_100));
+        assert_eq!(options.timeout_ms(), Some(5_100));
         assert_eq!(
             options.filtered_states(),
             &HashSet::from([TransactionState::Ongoing, TransactionState::PrepareAbort])
@@ -23346,7 +23346,7 @@ mod tests {
         let options = unsafe {
             list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), -1, std::ptr::null())
         };
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(options.filtered_states().is_empty());
         assert!(options.filtered_producer_ids().is_empty());
         assert_eq!(options.filtered_duration(), -1);
