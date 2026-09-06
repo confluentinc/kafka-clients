@@ -19,7 +19,12 @@ blocks in Java:
   - `async fn position(...)`, `async fn committed(...)`
   - `async fn beginning_offsets(...)`, `async fn end_offsets(...)`,
     `async fn offsets_for_times(...)`
-  - `async fn subscribe(...)`, `async fn unsubscribe()`, `async fn close(...)`
+  - `async fn subscribe_topics(...)`, `async fn subscribe_topics_listener(...)`,
+    `async fn subscribe_pattern(...)`, `async fn subscribe_pattern_listener(...)`,
+    `async fn subscribe_subscription_pattern(...)`,
+    `async fn subscribe_subscription_pattern_listener(...)`
+  - `async fn unsubscribe()`, `async fn close()`, `async fn close_timeout(...)`,
+    `async fn close_options(...)`
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
 
 Java methods that do not block remain synchronous:
@@ -64,10 +69,25 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         // Blocking-in-Java methods become async (see §1).
         async fn poll(&mut self, timeout: Duration)
             -> Result<ConsumerRecords<K, V>, Error>;
-        async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error>;
-        async fn subscribe_with_listener(
+        async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
+        async fn subscribe_topics_listener(
             &mut self,
             topics: Vec<String>,
+            listener: Arc<dyn ConsumerRebalanceListener>,
+        ) -> Result<(), Error>;
+        async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), Error>;
+        async fn subscribe_pattern_listener(
+            &mut self,
+            pattern: Regex,
+            listener: Arc<dyn ConsumerRebalanceListener>,
+        ) -> Result<(), Error>;
+        async fn subscribe_subscription_pattern(
+            &mut self,
+            pattern: SubscriptionPattern,
+        ) -> Result<(), Error>;
+        async fn subscribe_subscription_pattern_listener(
+            &mut self,
+            pattern: SubscriptionPattern,
             listener: Arc<dyn ConsumerRebalanceListener>,
         ) -> Result<(), Error>;
         async fn unsubscribe(&mut self) -> Result<(), Error>;
@@ -76,7 +96,7 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
         async fn committed(&mut self, partitions: &HashSet<TopicPartition>)
             -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
-        async fn close(&mut self, options: CloseOptions) -> Result<(), Error>;
+        async fn close_options(&mut self, options: CloseOptions) -> Result<(), Error>;
         // ... other methods that block in Java ...
 
         // Methods that do not block in Java stay sync.
@@ -402,7 +422,7 @@ Match Java behavior. Specifically:
     explicitly). Resolve by reading the Java source during planning.
   - `partition.assignment.strategy` and other classic-protocol-only config
     keys: accept silently as Java does. Do NOT add Rust-side rejection.
-  - `enforce_rebalance(reason)`: match Java's `AsyncKafkaConsumer`
+  - `enforce_rebalance_reason(reason)`: match Java's `AsyncKafkaConsumer`
     behavior (Java javadoc says it is classic-only; the AsyncKafkaConsumer
     implementation is the source of truth for the exact exception type).
 
@@ -429,7 +449,7 @@ send path. The symmetric rule on the receive path:
 
     pub trait Deserializer<T>: Send + Sync + 'static {
         fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
-        fn deserialize_with_headers(
+        fn deserialize_headers(
             &self,
             topic: &str,
             headers: &Headers,
