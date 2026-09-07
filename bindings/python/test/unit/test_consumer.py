@@ -23,6 +23,7 @@ import time
 import pytest
 from consumer import (
     MockConsumer, AsyncMockConsumer, TopicPartition, OffsetAndMetadata,
+    ConsumerGroupMetadata,
 )
 from producer import KafkaError
 
@@ -308,3 +309,54 @@ async def test_async_poll_cancel_then_reusable():
         c.add_record("t", 0, 0, b"k", b"v")
         recs = await c.poll(POLL_TIMEOUT)
         assert len(recs) == 1
+
+
+# -- ConsumerGroupMetadata constructor ---------------------------------------
+#
+# ConsumerGroupMetadata is normally obtained from Consumer.group_metadata(), but
+# it is also directly constructible from its four fields so a caller holding the
+# raw values (e.g. a gRPC server rebuilding it from the wire to feed
+# Producer.send_offsets_to_transaction) can synthesise the handle. It owns a live
+# Rust handle freed in tp_dealloc; the tests below also assert it survives GC.
+
+def test_group_metadata_constructor_static_member():
+    gm = ConsumerGroupMetadata("g1", 7, "member-42", "instance-a")
+    assert gm.group_id == "g1"
+    assert gm.generation_id == 7
+    assert gm.member_id == "member-42"
+    assert gm.group_instance_id == "instance-a"
+
+
+def test_group_metadata_constructor_no_instance_id():
+    # An absent / None group_instance_id (a non-static member) maps to None,
+    # mirroring Java's Optional.empty(). Both the explicit-None and the
+    # defaulted-argument forms behave identically.
+    gm = ConsumerGroupMetadata("g2", -1, "member-1", None)
+    assert gm.group_id == "g2"
+    assert gm.generation_id == -1
+    assert gm.member_id == "member-1"
+    assert gm.group_instance_id is None
+
+    defaulted = ConsumerGroupMetadata("g2", -1, "member-1")
+    assert defaulted.group_instance_id is None
+
+
+def test_group_metadata_constructor_repr_and_destruction():
+    gm = ConsumerGroupMetadata("g3", 3, "m3", None)
+    # repr matches the surface the former pure-Python dataclass produced.
+    assert repr(gm) == (
+        "ConsumerGroupMetadata(group_id='g3', generation_id=3, "
+        "member_id='m3', group_instance_id=None)")
+    # Dropping the only reference must free the owned handle without crashing.
+    del gm
+    gc.collect()
+
+
+def test_group_metadata_constructor_keyword_args():
+    gm = ConsumerGroupMetadata(
+        group_id="g4", generation_id=11, member_id="m4",
+        group_instance_id="static-4")
+    assert gm.group_id == "g4"
+    assert gm.generation_id == 11
+    assert gm.member_id == "m4"
+    assert gm.group_instance_id == "static-4"

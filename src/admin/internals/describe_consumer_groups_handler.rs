@@ -259,7 +259,7 @@ impl DescribeConsumerGroupsHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(error, error_msg));
+                failed.insert(group_id.clone(), error.exception(error_msg));
             },
             Errors::CoordinatorLoadInProgress => {
                 kafka_debug!(
@@ -296,7 +296,7 @@ impl DescribeConsumerGroupsHandler {
                         api_name,
                         group_id.id_value
                     );
-                    failed.insert(group_id.clone(), exception_with_optional_message(error, error_msg));
+                    failed.insert(group_id.clone(), error.exception(error_msg));
                 }
             },
             Errors::GroupIdNotFound => {
@@ -329,7 +329,7 @@ impl DescribeConsumerGroupsHandler {
                         .get(&group_id.id_value)
                         .cloned();
                     let message = preferred.or_else(|| error_msg.map(str::to_string));
-                    failed.insert(group_id.clone(), exception_with_optional_message(error, message.as_deref()));
+                    failed.insert(group_id.clone(), error.exception(message.as_deref()));
                 }
             },
             other => {
@@ -340,19 +340,9 @@ impl DescribeConsumerGroupsHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(other, error_msg));
+                failed.insert(group_id.clone(), other.exception(error_msg));
             },
         }
-    }
-}
-
-/// Builds a `KafkaError` for `error`, using `message` when present (mirrors
-/// Java's `Errors.exception(String)`, which falls back to the default text when
-/// the message is null).
-fn exception_with_optional_message(error: Errors, message: Option<&str>) -> KafkaError {
-    match message {
-        Some(msg) if !msg.is_empty() => KafkaError::with_message(error, msg.to_string()),
-        _ => KafkaError::new(error),
     }
 }
 
@@ -613,6 +603,10 @@ mod tests {
             .set_group_epoch(10)
             .set_assignment_epoch(10)
             .set_assignor_name("range".to_string())
+            // Java: `.setAuthorizedOperations(Utils.to32BitField(emptySet()))`.
+            // 0 is a reported-but-empty set, NOT the omitted sentinel, so the
+            // expectation below is `Some(empty)` rather than `None`.
+            .set_authorized_operations(0)
             .set_members(vec![m1, m2]);
         let mut data = ConsumerGroupDescribeResponseData::new();
         data.set_groups(vec![group]);
@@ -655,7 +649,7 @@ mod tests {
             GroupType::Consumer,
             GroupState::Stable,
             Some(coordinator()),
-            std::collections::BTreeSet::new(),
+            Some(std::collections::BTreeSet::new()),
             Some(10),
             Some(10),
         );
@@ -677,6 +671,8 @@ mod tests {
             .set_group_state(GroupState::Stable.to_string())
             .set_protocol_type(protocol_type.to_string())
             .set_protocol_data("assignor".to_string())
+            // Java: `.setAuthorizedOperations(Utils.to32BitField(emptySet()))`.
+            .set_authorized_operations(0)
             .set_members(vec![member]);
         let mut data = DescribeGroupsResponseData::new();
         data.set_groups(vec![group]);
@@ -779,7 +775,7 @@ mod tests {
             GroupType::Classic,
             GroupState::Stable,
             Some(coordinator()),
-            std::collections::BTreeSet::new(),
+            Some(std::collections::BTreeSet::new()),
             None,
             None,
         );

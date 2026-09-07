@@ -107,6 +107,43 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Subscribes to <paramref name="topics"/> with a rebalance listener (Java
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>). Blocks in Java, so it returns
+    /// a <see cref="Task"/> here. The listener then fires on every subsequent rebalance until
+    /// the registration is replaced.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Java has two <c>subscribe</c> overloads and C#'s idiom is overloads, so this is an
+    /// overload rather than an optional parameter (declared divergence D2; Python's
+    /// <c>listener=None</c> is a Python idiom, not the Java shape).
+    /// </para>
+    /// <para>
+    /// <b>Registration lifetime.</b> A <b>replacing</b> subscribe releases the previous
+    /// listener — including the listener-less
+    /// <see cref="Subscribe(IReadOnlyCollection{string}, CancellationToken)"/>, which is how
+    /// you deregister — as does disposing the consumer. <see cref="Unsubscribe"/> and
+    /// <c>Close</c> deliberately keep it, matching Java's
+    /// <c>SubscriptionState.unsubscribe()</c>.
+    /// </para>
+    /// <para>
+    /// See <see cref="IConsumerRebalanceListener"/> for the threading contract (the listener
+    /// is <b>synchronous</b> and runs on the core's dispatcher thread), the consequence of
+    /// throwing, and why a listener must not call back into its own consumer.
+    /// </para>
+    /// </remarks>
+    /// <param name="topics">The topics to subscribe to.</param>
+    /// <param name="listener">The rebalance listener to register.</param>
+    /// <param name="cancellationToken">Best-effort cancellation.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    Task Subscribe(
+        IReadOnlyCollection<string> topics,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>). Blocks
     /// in Java (a cross-thread <c>addAndGet</c>), so it returns a <see cref="Task"/> here.
     /// </summary>
@@ -246,7 +283,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="KafkaException"/> on failure.
     /// </summary>
     /// <remarks>
-    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync"/> (Java
+    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync()"/> (Java
     /// <c>commitAsync()</c>): this one confirms — you can <c>await</c> it to know the commit
     /// landed. The <paramref name="cancellationToken"/> is user-initiated cancellation
     /// (mapped to <c>wakeup()</c>), <b>not</b> a timeout; a pre-canceled token throws

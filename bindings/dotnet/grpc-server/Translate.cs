@@ -39,6 +39,97 @@ namespace Confluent.Kafka.GrpcServer;
 internal static class Translate
 {
     /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <c>IConsumerRebalanceListener.OnPartitionsAssigned</c>.
+    /// </summary>
+    /// <remarks>
+    /// The <c>kind</c> values are a cross-backend wire contract — <c>producer_service.proto</c>'s
+    /// <c>CallbackLogEntry</c> table (<c>:214-222</c>): every server must emit the identical
+    /// lowercase string or the one shared Rust test body fails on this backend alone. This
+    /// assembly hosts <em>both</em> gRPC services (Program.cs), so every value in that table is
+    /// defined here: the rebalance kinds and <see cref="KindCommit"/> are emitted by the consumer
+    /// servicers, and <see cref="KindDelivery"/> by the producer servicers (M14/P2).
+    /// <para>
+    /// This remark used to say <c>"delivery"</c> was "deliberately not defined here" because
+    /// "there is no .NET producer backend". That stopped being true when M12/P1 added the two
+    /// producer servicers, and it stayed stale until M14/P2 gave them a real
+    /// <see cref="IDeliveryCallback"/> to log.
+    /// </para>
+    /// </remarks>
+    internal const string KindAssigned = "assigned";
+
+    /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <c>IConsumerRebalanceListener.OnPartitionsRevoked</c>.
+    /// </summary>
+    internal const string KindRevoked = "revoked";
+
+    /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <c>IConsumerRebalanceListener.OnPartitionsLost</c>.
+    /// </summary>
+    internal const string KindLost = "lost";
+
+    /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <c>IOffsetCommitCallback.OnComplete</c>.
+    /// </summary>
+    internal const string KindCommit = "commit";
+
+    /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <see cref="IDeliveryCallback.OnCompletion"/> — the
+    /// producer's delivery callback, emitted by both producer servicers when
+    /// <c>SendRequest.with_callback</c> is set (M14/P2).
+    /// </summary>
+    internal const string KindDelivery = "delivery";
+
+    /// <summary>
+    /// The <c>CallbackLogEntry.offsets</c> key for a partition:
+    /// <c>"&lt;topic&gt;-&lt;partition&gt;"</c> with a plain hyphen (e.g. <c>"my-topic-0"</c>) —
+    /// the port of <c>grpc_translate.py</c>'s <c>_offset_key</c> (<c>:282-284</c>) and C's
+    /// <c>offset_key</c> (<c>server.cc:209-211</c>). Part of the cross-backend wire contract; the
+    /// Rust harness rebuilds the same key in <c>CallbackLogEntry::offset_key</c>.
+    /// </summary>
+    internal static string OffsetKey(string topic, int partition) => $"{topic}-{partition}";
+
+    /// <summary>
+    /// Binding <see cref="TopicPartition"/> -&gt; proto <c>CallbackLogPartition</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Deliberately <b>not</b> <see cref="TpToProto"/>: a <c>CallbackLogEntry</c> carries
+    /// <c>CallbackLogPartition</c>, a distinct message declared in <c>producer_service.proto</c>
+    /// rather than <c>consumer_service.proto</c>'s <c>TopicPartition</c>. The two are
+    /// field-identical but not interchangeable — the entry types are shared by both services and
+    /// live in the imported proto, which cannot reference the importing one (that would be a
+    /// cycle).
+    /// </remarks>
+    internal static Proto.CallbackLogPartition CallbackLogPartitionToProto(TopicPartition partition) =>
+        new Proto.CallbackLogPartition
+        {
+            Topic = partition.Topic,
+            Partition = partition.Partition,
+        };
+
+    /// <summary>
+    /// Proto <c>OffsetMapEntry</c> list -&gt; the binding's commit-offsets dictionary — the port
+    /// of <c>grpc_translate.py</c>'s <c>_proto_offsets_to_dict</c>. <c>leader_epoch</c> uses
+    /// proto3 optional-presence: forwarded when present, <see langword="null"/> when absent.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <c>CommitSync</c> and <c>CommitAsync</c> in both servicers (Python shares the
+    /// same helper between its two commit handlers). It was inlined in <c>CommitSync</c> until
+    /// M9/P9 hoisted it here rather than copy-pasting it into a third and fourth site.
+    /// </remarks>
+    internal static Dictionary<TopicPartition, OffsetAndMetadata> ProtoOffsetsToDictionary(
+        IEnumerable<Proto.OffsetMapEntry> offsets)
+    {
+        Dictionary<TopicPartition, OffsetAndMetadata> result = new Dictionary<TopicPartition, OffsetAndMetadata>();
+        foreach (Proto.OffsetMapEntry entry in offsets)
+        {
+            int? leaderEpoch = entry.Offset.HasLeaderEpoch ? entry.Offset.LeaderEpoch : (int?)null;
+            result[Tp(entry.Partition)] = new OffsetAndMetadata(entry.Offset.Offset, entry.Offset.Metadata, leaderEpoch);
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Infers the proto <c>KafkaError.Variant</c> from a <see cref="KafkaException"/>
     /// message — an exact, ordered, first-match-wins port of
     /// <c>grpc_translate.py</c>'s <c>_guess_variant</c> over

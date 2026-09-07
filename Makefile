@@ -137,7 +137,20 @@ init:
 test: test-rust-all-features test-c test-python
 
 test-rust: build-rust
-	cargo test
+	# --workspace, not the root package alone: `cargo test` from the root only
+	# builds and tests `confluent-kafka-rust`, so `generator` (the wire-protocol
+	# code generator, 57 tests), `xtask`, `consumer-perf` and
+	# `multilanguage-test-server` were never exercised by any gate. Feature
+	# unification is not a hazard here: only `consumer-perf` depends on the root
+	# package and it takes default features, so neither `integration-tests` nor
+	# `ffi` is activated by the extra members.
+	cargo test --workspace
+	# And once more with `ffi` on: `src/ffi` is behind `#[cfg(feature = "ffi")]`,
+	# so the C FFI modules' own unit tests (~500 across producer, consumer and
+	# admin) are invisible to the run above. Not `--workspace --features ffi`:
+	# `ffi` is a root-package feature the other members do not declare, so a
+	# second root-only invocation is both simpler and sufficient.
+	cargo test --features ffi
 
 # The whole Rust test suite, compiled with every feature but running only the
 # native-Rust tests: unit tests, the functional integration suite, and the
@@ -272,6 +285,26 @@ test-integration-c-macos: build-grpc-images-c-macos
 # that SIGSEGVs during C# codegen, so the images cannot be built on an arm64
 # host at all. Skipping is the only option here; the container arm runs in CI's
 # amd64 Linux verify-dotnet job (see .semaphore/semaphore.yml).
+#
+# THREE TESTS ARE SKIPPED FOR .NET ONLY -- the producer transaction arms.
+# `multilanguage_test!` emits one arm per backend for every test it wraps, so the
+# three transaction tests in tests/integration/producer_transactions_test.rs
+# generate __grpc_dotnet / __grpc_dotnet_async arms like every other backend. The
+# .NET gRPC server cannot serve them: ProducerServiceImpl /
+# AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
+# transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
+# AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
+# so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
+# at all yet -- IAsyncProducer's own docs record it as deferred.
+#
+# The skip is scoped to THIS target, which only ever runs __grpc_dotnet*, so no
+# other backend loses coverage: python / c / rust still run all three.
+#
+# REMOVE THESE THREE LINES when the .NET producer reaches transaction parity with
+# Python (the 10 transaction P/Invokes, the public surface on
+# IProducer/IAsyncProducer and the four producer types, the three MockProducer
+# transaction controls, and the five RPCs in both producer servicers). Deleting
+# them is the last step of that phase, not a follow-up to it.
 test-integration-dotnet:
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 		printf '\n========================================================================\n'; \
@@ -288,7 +321,10 @@ test-integration-dotnet:
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-dotnet && \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet; \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+			--skip test_transactional_records_are_visible_only_after_commit \
+			--skip test_aborted_transaction_records_are_discarded \
+			--skip test_consume_transform_produce_with_offsets; \
 	fi
 
 # ── Performance integration tests ────────────────────────────────────────
@@ -400,13 +436,13 @@ test-python-macos-docker: build-python
 	python -m pytest test/unit -v)
 	$(MAKE) test-integration-python-macos
 
-verify: build format-check lint test
+verify: build format-check lint test check-bindings
 
 verify-c: test-c
 
 verify-c-macos-docker: test-c-macos-docker
 
-verify-python: test-python
+verify-python: test-python check-bindings
 	$(MAKE) test-integration-perf-python
 
 # verify-dotnet = build + format + unit(net8+net10) + integration(__grpc_dotnet
@@ -444,6 +480,23 @@ format-check:
 
 lint:
 	cargo xtask lint
+
+# Static arity check of the hand-written CPython extension's variadic calls.
+# A Py_BuildValue / PyArg_Parse* format one unit short of its argument list
+# compiles silently and reads a garbage pointer at run time; for every admin
+# RPC that Java's MockAdminClient leaves unsupported, the affected drain's
+# success path is unreachable from the test suite, so this defect class must
+# be caught statically. Needs no build artifacts, so it is cheap to run.
+#
+# The scanner's own unit tests run first: `cargo test` at the workspace root
+# only tests the root package, so nothing else exercises them, and a gate is
+# only worth as much as the parser behind it.
+check-bindings:
+	# Kept even though `test-rust` is now `--workspace`, so that
+	# `make check-bindings` on its own still exercises the scanner's own tests
+	# before trusting its verdict.
+	cargo test -p xtask
+	cargo xtask check-bindings
 
 clean:
 	cargo clean

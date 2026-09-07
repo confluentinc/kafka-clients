@@ -52,7 +52,10 @@ public sealed class SendCompletionPumpGateTests
 
             TaskCompletionSource<RecordMetadata> completion =
                 new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-            pump.Enqueue(IntPtr.Zero, completion);
+
+            // delivery: null — the plain Send(record) shape. The delivery-callback carrier (M14/P1)
+            // is deliberately NOT fired on this fault-in-place branch; see Enqueue's remarks.
+            pump.Enqueue(IntPtr.Zero, completion, delivery: null);
 
             // Synchronously faulted: the gate is closed, so Enqueue never handed this to the loop.
             Assert.True(completion.Task.IsFaulted);
@@ -75,7 +78,7 @@ public sealed class SendCompletionPumpGateTests
             new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            pump.Enqueue(IntPtr.Zero, completion);
+            pump.Enqueue(IntPtr.Zero, completion, delivery: null);
             Assert.False(completion.Task.IsFaulted);
         }
         finally

@@ -1,4 +1,21 @@
-# Current Status: Milestones 1-10 complete; Milestone 11 tracks — Producer Transactions (complete) and AdminClient (Tier 1 complete)
+# Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
+
+> **Current state (2026-08-26):** the Rust client is up to **Apache Kafka
+> 4.3.1**. Milestone 13 bumped the `kafka/` submodule reference from 4.2.0
+> (`a18251b`) to 4.3.1 (`26b251a451`), synced the wire-spec corpus
+> (`generator/messages/`) to the 4.3.1 specs, and translated the 4.2.0→4.3.1
+> Java clients delta for every file with a Rust counterpart. Its headline change
+> is the KIP-848 consumer rebalance-handshake reshape (`PartitionsAssignedEvent`
+> + awaited `ApplyAssignmentEvent`), plus the `common/record`→`common/record/internal`
+> module move, `OffsetFetch` retriable-partition-error handling, AdminClient
+> stale-leader retry + cordoned log dirs, and the producer 2PC public-API revert.
+> The Phase-6 close-out audited all 176 changed main files and 81 in-scope
+> commits to a phase or explicit skip-with-reason with **zero uncovered in-scope
+> residue** — see `design/history/Milestone-13/{PLAN.md §6, sweep.md}` and
+> `design/history/MILESTONES.md`. Milestone 12 (producer metrics) also landed on
+> this branch. The **current Java reference is Apache Kafka 4.3.1**; the sections
+> below (Milestone 11 and earlier) are retained as historical per-milestone detail
+> and still cite 4.2.0 where they were written against it.
 
 <!-- Two workstreams both carry the "Milestone 11" label; both summaries kept below. -->
 
