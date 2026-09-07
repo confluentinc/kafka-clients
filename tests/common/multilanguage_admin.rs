@@ -915,7 +915,7 @@ impl MultilanguageAdmin {
     fn topic_metadata_and_config(&self, value: proto::TopicMetadataAndConfig) -> Result<TopicMetadataAndConfig, Error> {
         match value.result {
             Some(proto::topic_metadata_and_config::Result::Error(e)) => {
-                Ok(TopicMetadataAndConfig::with_error(kafka_error_from_proto(e)))
+                Ok(TopicMetadataAndConfig::new_error(kafka_error_from_proto(e)))
             },
             Some(proto::topic_metadata_and_config::Result::Metadata(m)) => {
                 let topic_id = self.parse_uuid(&m.topic_id, "TopicMetadata.topic_id")?;

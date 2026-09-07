@@ -201,7 +201,7 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
     // 1 -> 2 partitions, so exactly one assignment for the one new partition.
     let counts = HashMap::from([(
         topic.clone(),
-        NewPartitions::increase_to_with_assignments(2, vec![vec![broker_id]]),
+        NewPartitions::increase_to_new_assignments(2, vec![vec![broker_id]]),
     )]);
     let created = admin
         .create_partitions(&counts, CreatePartitionsOptions::new())
@@ -232,7 +232,7 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
     ctx.cleanup().await;
 }
 
-/// `increase_to_with_assignments(n, vec![])` — Java's legal
+/// `increase_to_new_assignments(n, vec![])` — Java's legal
 /// `NewPartitions.increaseTo(int, emptyList())` — is a **different** request from
 /// `increase_to(n)`, and the broker rejects it.
 ///
@@ -265,13 +265,13 @@ async fn create_partitions_with_an_empty_assignment_list_is_rejected<F: AdminBac
 
     // 1 -> 3 partitions with an *empty* assignment list: two partitions are being
     // added but zero assignments are supplied, so the controller refuses.
-    let counts = HashMap::from([(topic.clone(), NewPartitions::increase_to_with_assignments(3, Vec::new()))]);
+    let counts = HashMap::from([(topic.clone(), NewPartitions::increase_to_new_assignments(3, Vec::new()))]);
     let created = admin
         .create_partitions(&counts, CreatePartitionsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create partitions: {e}"));
     let err = created[&topic].as_ref().expect_err(&format!(
-        "{backend} backend: increase_to_with_assignments(3, []) must be rejected, not treated as increase_to(3)"
+        "{backend} backend: increase_to_new_assignments(3, []) must be rejected, not treated as increase_to(3)"
     ));
     assert_eq!(
         err.error(),

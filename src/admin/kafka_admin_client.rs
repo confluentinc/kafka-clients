@@ -2552,11 +2552,11 @@ fn get_create_topics_call(
                     future.complete_with_error(api_error(result.error_code, &result.error_message));
                 }
             } else if result.topic_config_error_code != Errors::None.code() {
-                future.complete(TopicMetadataAndConfig::with_error(Error::new(Errors::for_code(
+                future.complete(TopicMetadataAndConfig::new_error(Error::new(Errors::for_code(
                     result.topic_config_error_code,
                 ))));
             } else if result.num_partitions == crate::admin::create_topics_result::UNKNOWN {
-                future.complete(TopicMetadataAndConfig::with_error(Error::unsupported_version(
+                future.complete(TopicMetadataAndConfig::new_error(Error::unsupported_version(
                     "Topic metadata and configs in CreateTopics response not supported",
                 )));
             } else {
@@ -7204,7 +7204,7 @@ mod tests {
         counts.insert("my_topic".to_string(), NewPartitions::increase_to(3));
         counts.insert(
             "other_topic".to_string(),
-            NewPartitions::increase_to_with_assignments(3, vec![vec![2], vec![3]]),
+            NewPartitions::increase_to_new_assignments(3, vec![vec![2], vec![3]]),
         );
         counts
     }

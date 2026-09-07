@@ -588,11 +588,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.max_poll_records.map_or("default".to_string(), |v| v.to_string()),
     );
     let config = ConsumerConfig::from_properties(&props)?
-        .with_client_id("consumer-perf")
-        .with_group_id(args.group_id.clone())
-        .with_group_protocol("consumer")
-        .with_auto_offset_reset(args.offset_reset.clone())
-        .with_enable_auto_commit(true);
+        .set_client_id("consumer-perf")
+        .set_group_id(args.group_id.clone())
+        .set_group_protocol("consumer")
+        .set_auto_offset_reset(args.offset_reset.clone())
+        .set_enable_auto_commit(true);
 
     let mut consumer: Box<dyn Consumer<usize, usize>> =
         new_consumer::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;

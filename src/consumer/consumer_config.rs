@@ -521,54 +521,54 @@ impl ConsumerConfig {
     // -------- Fluent setters --------
 
     /// Set `bootstrap.servers`.
-    pub fn with_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
+    pub fn set_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
         self.bootstrap_servers = bootstrap_servers;
         self
     }
     /// Set `client.id`.
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+    pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = client_id.into();
         self
     }
     /// Set `group.id`.
-    pub fn with_group_id(mut self, group_id: impl Into<String>) -> Self {
+    pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
         self.group_id = Some(group_id.into());
         self
     }
     /// Set `group.protocol`.
-    pub fn with_group_protocol(mut self, protocol: impl Into<String>) -> Self {
+    pub fn set_group_protocol(mut self, protocol: impl Into<String>) -> Self {
         self.group_protocol = protocol.into();
         self
     }
     /// Set `auto.offset.reset`.
-    pub fn with_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
+    pub fn set_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
         self.auto_offset_reset = value.into();
         self
     }
     /// Set `enable.auto.commit`.
-    pub fn with_enable_auto_commit(mut self, value: bool) -> Self {
+    pub fn set_enable_auto_commit(mut self, value: bool) -> Self {
         self.enable_auto_commit = value;
         self
     }
     /// Set `key.deserializer`.
-    pub fn with_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
+    pub fn set_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.key_deserializer_class = Some(class.into());
         self
     }
     /// Set `value.deserializer`.
-    pub fn with_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
+    pub fn set_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.value_deserializer_class = Some(class.into());
         self
     }
 
     /// Set `request.timeout.ms`.
-    pub fn with_request_timeout_ms(mut self, value: i32) -> Self {
+    pub fn set_request_timeout_ms(mut self, value: i32) -> Self {
         self.request_timeout_ms = value;
         self
     }
 
     /// Set `retry.backoff.ms`.
-    pub fn with_retry_backoff_ms(mut self, value: i64) -> Self {
+    pub fn set_retry_backoff_ms(mut self, value: i64) -> Self {
         self.retry_backoff_ms = value;
         self
     }

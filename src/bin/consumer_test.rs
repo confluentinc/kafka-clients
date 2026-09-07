@@ -69,12 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // KIP-848 ("consumer") group protocol — the only protocol this client
     // supports today. The default ("classic") is rejected by the factory.
     let config = ConsumerConfig::new(vec![BOOTSTRAP_SERVERS.to_string()])
-        .with_client_id("consumer-test")
-        .with_group_id(GROUP_ID)
-        .with_group_protocol("consumer")
-        .with_auto_offset_reset("earliest")
+        .set_client_id("consumer-test")
+        .set_group_id(GROUP_ID)
+        .set_group_protocol("consumer")
+        .set_auto_offset_reset("earliest")
         // Commit explicitly after each batch instead of on a timer.
-        .with_enable_auto_commit(false);
+        .set_enable_auto_commit(false);
 
     let mut consumer =
         new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;

@@ -1230,7 +1230,7 @@ impl NewPartitionsBuilder {
     /// succeeds.
     fn build(&self) -> NewPartitions {
         if self.has_assignments {
-            NewPartitions::increase_to_with_assignments(self.total_count, self.new_assignments.clone())
+            NewPartitions::increase_to_new_assignments(self.total_count, self.new_assignments.clone())
         } else {
             NewPartitions::increase_to(self.total_count)
         }

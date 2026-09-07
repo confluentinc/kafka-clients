@@ -901,9 +901,9 @@ mod tests {
 
     fn test_config() -> ConsumerConfig {
         ConsumerConfig::new(vec!["localhost:9092".to_string()])
-            .with_client_id("test-client")
-            .with_group_id(GROUP_ID)
-            .with_request_timeout_ms(REQUEST_TIMEOUT_MS)
+            .set_client_id("test-client")
+            .set_group_id(GROUP_ID)
+            .set_request_timeout_ms(REQUEST_TIMEOUT_MS)
     }
 
     /// Helper builder for a `FindCoordinator` `UnsentRequest` targeting

@@ -1840,7 +1840,7 @@ async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataA
         },
         // Any accessor failing means the object carries an exception. Report the
         // first one so the harness sees the same error a Java caller would.
-        (id, partitions, replication, config) => TopicMetadataAndConfig::with_error(
+        (id, partitions, replication, config) => TopicMetadataAndConfig::new_error(
             id.err()
                 .or_else(|| partitions.err())
                 .or_else(|| replication.err())

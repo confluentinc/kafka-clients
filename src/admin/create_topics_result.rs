@@ -46,7 +46,7 @@ impl TopicMetadataAndConfig {
 
     /// Creates a holder representing a failure; every accessor returns the
     /// error.
-    pub fn with_error(error: Error) -> Self {
+    pub fn new_error(error: Error) -> Self {
         Self {
             error: Some(error),
             topic_id: Uuid::zero(),
@@ -240,7 +240,7 @@ mod tests {
         futures.insert("t".to_string(), handle.future());
         let result = CreateTopicsResult::new(futures);
 
-        handle.complete(TopicMetadataAndConfig::with_error(Error::local_illegal_state("unsupported")));
+        handle.complete(TopicMetadataAndConfig::new_error(Error::local_illegal_state("unsupported")));
 
         assert!(matches!(result.config("t").get().await, Err(Error::LocalIllegalState(_))));
         assert!(matches!(result.topic_id("t").get().await, Err(Error::LocalIllegalState(_))));
