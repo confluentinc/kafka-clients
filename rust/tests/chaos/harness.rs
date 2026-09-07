@@ -34,6 +34,52 @@ use super::common::kafka_cluster::KafkaCluster;
 use super::verifier::{ConservationVerifier, ExpectedLossHint, Verifier};
 use super::workload::{CommitMode, Role, Workload, WorkloadContext, WorkloadSpec, build_workload};
 
+/// Drain-settle signal shared between [`ChaosHarness::recreate_topic`] and the
+/// drain loop (`drain_wait`).
+///
+/// A topic recreate causes a legitimate, transient consumption stall: the
+/// consumer must re-discover the recreated topic (a truncation-rewind / reset to
+/// EARLIEST on a same-id immediate recreate, or a fresh subscription on a new-id
+/// one) and then re-read it before it resumes on that topic. During that stall
+/// the recreated topic's consumption is momentarily flat, which the idle-based
+/// early-drain would otherwise misread as "consumers caught up" and end the
+/// drain prematurely — dropping the just-recreated topic's tail as false loss
+/// (the Issue-1 multi-topic failure).
+///
+/// The GLOBAL consume-progress signal cannot catch this: while the recreated
+/// topic is rewinding, the OTHER topics keep being consumed, so the global
+/// counter keeps climbing and looks like "resumed". So the settle records, PER
+/// recreated topic, the topic's per-topic consume count at recreate time
+/// (`baseline`); the drain must not quiesce until that topic's per-topic
+/// progress has climbed past its baseline (proof the recreated topic itself
+/// resumed) AND then gone flat for the idle threshold. Multiple recreates of the
+/// same topic keep the latest (highest) baseline.
+#[derive(Default)]
+pub struct RecreateSettle {
+    /// topic -> per-topic consume count captured at that topic's most recent
+    /// recreate. The drain requires the topic's live per-topic progress to
+    /// exceed this before it may quiesce.
+    baselines: std::sync::Mutex<HashMap<String, u64>>,
+}
+
+impl RecreateSettle {
+    /// Record that `topic` was just recreated, capturing its per-topic consume
+    /// count at this instant as the resume baseline.
+    fn note_recreate(&self, topic: &str, baseline: u64) {
+        self.baselines
+            .lock()
+            .expect("recreate-settle poisoned")
+            .insert(topic.to_string(), baseline);
+    }
+
+    /// Snapshot of the per-topic resume baselines — the drain reads this to know
+    /// which topics were recreated and the progress each must exceed to count as
+    /// resumed.
+    pub fn baselines(&self) -> HashMap<String, u64> {
+        self.baselines.lock().expect("recreate-settle poisoned").clone()
+    }
+}
+
 /// A running chaos harness for one scenario.
 ///
 /// Holds its **own** [`KafkaCluster`] (never the pooled one — chaos
@@ -42,14 +88,29 @@ use super::workload::{CommitMode, Role, Workload, WorkloadContext, WorkloadSpec,
 pub struct ChaosHarness {
     cluster: KafkaCluster,
     admin: Box<dyn Admin>,
-    topic: String,
+    /// All topics in the run (`--num-topics`). A single-topic run has one
+    /// entry; `topics[0]` is the primary/prefix topic.
+    topics: Vec<String>,
     partitions: i32,
-    /// Current topic id, for the physical verification key. Re-resolved after
-    /// a topic recreate (the id changes). `Uuid::zero()` if unresolved.
-    topic_id: std::sync::Mutex<Uuid>,
+    /// Replication factor for every topic. `min(brokers, 3)` unless overridden
+    /// by `--replication-factor`.
+    replication: i16,
+    /// Per-topic current topic id, for the physical verification key.
+    /// Re-resolved after a topic recreate (the id changes). Missing / absent =
+    /// unresolved (treated as `Uuid::zero()`).
+    topic_ids: std::sync::Mutex<HashMap<String, Uuid>>,
+    /// Drain-settle signal: per-topic resume baselines captured at each recreate.
+    /// `recreate_topic` records one; the drain reads them (via
+    /// [`Self::recreate_settle`]) to suppress idle-quiescence until every
+    /// just-recreated topic's own consume progress has climbed past its baseline
+    /// (proof that topic's consumer resumed re-reading the new generation). See
+    /// [`RecreateSettle`] and `drain_wait`.
+    recreate_settle: Arc<RecreateSettle>,
     /// Producer rate and consumer commit mode captured at `build_workloads`,
     /// so the runtime [`WorkloadPool`] can build matching consumers.
     rps: std::sync::atomic::AtomicU32,
+    /// Producer value payload size in bytes, captured at `build_workloads`.
+    msg_size: std::sync::atomic::AtomicU32,
     commit_mode: std::sync::Mutex<CommitMode>,
     /// The pluggable verifier every workload writes into (default:
     /// conservation). Swap this to check something else (e.g. share-consumer
@@ -58,8 +119,8 @@ pub struct ChaosHarness {
 }
 
 impl ChaosHarness {
-    /// Stand up a dedicated `brokers`-broker KIP-848 cluster and create the
-    /// chaos topic with `partitions` partitions at replication factor 3.
+    /// Stand up a dedicated `brokers`-broker KIP-848 cluster and create a single
+    /// chaos topic with `partitions` partitions at replication `min(brokers, 3)`.
     pub async fn start(topic: &str, brokers: u16, partitions: i32) -> Self {
         Self::start_with_verifier(topic, brokers, partitions, Arc::new(ConservationVerifier::new())).await
     }
@@ -67,7 +128,33 @@ impl ChaosHarness {
     /// Like [`Self::start`] but with a caller-supplied verifier — the seam a
     /// future share consumer uses to plug in a `ShareAckVerifier`.
     pub async fn start_with_verifier(topic: &str, brokers: u16, partitions: i32, verifier: Arc<dyn Verifier>) -> Self {
+        Self::start_with_topics(&[topic.to_string()], brokers, partitions, None, verifier).await
+    }
+
+    /// The multi-topic entry point used by the flag-driven runner. Creates every
+    /// topic in `topics` with `partitions` partitions at `replication` (or
+    /// `min(brokers, 3)` when `None`). Panics (librdkafka's FATAL) if an explicit
+    /// replication exceeds the broker count.
+    pub async fn start_with_topics(
+        topics: &[String],
+        brokers: u16,
+        partitions: i32,
+        replication: Option<i16>,
+        verifier: Arc<dyn Verifier>,
+    ) -> Self {
         assert!(brokers >= 1, "chaos cluster needs >= 1 broker");
+        assert!(!topics.is_empty(), "chaos run needs >= 1 topic");
+        let replication = match replication {
+            Some(rf) => {
+                assert!(rf >= 1, "replication factor must be >= 1, got {rf}");
+                assert!(
+                    i64::from(rf) <= i64::from(brokers),
+                    "FATAL: --replication-factor={rf} > --brokers={brokers}"
+                );
+                rf
+            },
+            None => (brokers.min(3)) as i16,
+        };
         let mut config = kip848_3_broker(partitions as u16);
         config.brokers = brokers;
         // Disable broker-side auto topic creation: the topic-recreate action
@@ -92,21 +179,31 @@ impl ChaosHarness {
         let harness = Self {
             cluster,
             admin,
-            topic: topic.to_string(),
+            topics: topics.to_vec(),
             partitions,
-            topic_id: std::sync::Mutex::new(Uuid::zero()),
+            replication,
+            topic_ids: std::sync::Mutex::new(HashMap::new()),
+            recreate_settle: Arc::new(RecreateSettle::default()),
             rps: std::sync::atomic::AtomicU32::new(0),
+            msg_size: std::sync::atomic::AtomicU32::new(100),
             commit_mode: std::sync::Mutex::new(CommitMode::Sync),
             verifier,
         };
-        harness.create_topic().await;
-        harness.resolve_topic_id().await;
+        for t in &harness.topics {
+            harness.create_topic(t).await;
+        }
+        harness.resolve_topic_id_all().await;
         harness
     }
 
-    async fn create_topic(&self) {
-        let replication = self.cluster.config().brokers.min(3) as i16;
-        let new_topic = NewTopic::new(self.topic.clone(), self.partitions, replication);
+    /// The primary topic (first in the run) — the broker-roll / smoke-test
+    /// leader-sampling target, and the `WorkloadContext::topic` fallback.
+    fn primary_topic(&self) -> &str {
+        &self.topics[0]
+    }
+
+    async fn create_topic(&self, topic: &str) {
+        let new_topic = NewTopic::new(topic.to_string(), self.partitions, self.replication);
         self.admin
             .create_topics(&[new_topic], CreateTopicsOptions::new())
             .all()
@@ -115,49 +212,99 @@ impl ChaosHarness {
             .expect("chaos topic creation failed");
     }
 
-    /// Resolve the current topic id (for the physical verification key) via
-    /// `describe_topics`, and cache it. Best-effort: leaves `Uuid::zero()` on
-    /// failure. Called after create and after each recreate (the id changes).
-    async fn resolve_topic_id(&self) {
-        let described = self
-            .admin
-            .describe_topics(
-                TopicCollection::of_topic_names(vec![self.topic.clone()]),
-                DescribeTopicsOptions::new(),
-            )
-            .all_topic_names()
-            .expect("describe by name yields a name-keyed result")
-            .get()
-            .await;
-        if let Ok(map) = described
-            && let Some(desc) = map.get(&self.topic)
-        {
-            *self.topic_id.lock().expect("topic_id poisoned") = desc.topic_id();
+    /// Resolve the current topic id (physical verification key) for every topic.
+    async fn resolve_topic_id_all(&self) {
+        for t in self.topics.clone() {
+            self.resolve_topic_id(&t).await;
         }
     }
 
-    fn current_topic_id(&self) -> Uuid {
-        *self.topic_id.lock().expect("topic_id poisoned")
+    /// Resolve the current topic id (for the physical verification key) via
+    /// `describe_topics`, and cache it. **Retries until a non-zero id is
+    /// resolved**, bounded by `timeout` — under a concurrent broker roll,
+    /// `describe_topics` can transiently return a zero/absent id (metadata
+    /// churn), and keying post-recreate records under `Uuid::zero()` corrupts the
+    /// physical accounting. Logs loudly if it genuinely cannot resolve within the
+    /// bound (leaving the previous cached value untouched). Called after create
+    /// and after each recreate (the id changes).
+    async fn resolve_topic_id(&self, topic: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let described = self
+                .admin
+                .describe_topics(
+                    TopicCollection::of_topic_names(vec![topic.to_string()]),
+                    DescribeTopicsOptions::new(),
+                )
+                .all_topic_names()
+                .expect("describe by name yields a name-keyed result")
+                .get()
+                .await;
+            if let Ok(map) = described
+                && let Some(desc) = map.get(topic)
+            {
+                let id = desc.topic_id();
+                if id != Uuid::zero() {
+                    self.topic_ids.lock().expect("topic_ids poisoned").insert(topic.to_string(), id);
+                    return;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "chaos: WARNING could not resolve a non-zero topic id for {topic} within 10s \
+                     (metadata churn under broker roll); physical keying for it may be degraded"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
-    /// Delete and recreate the chaos topic, optionally dwelling `dwell`
-    /// between delete and recreate (librdkafka's `--topic-chaos
-    /// recreate-immediate` / `recreate-delayed`).
+    fn current_topic_id(&self, topic: &str) -> Uuid {
+        self.topic_ids
+            .lock()
+            .expect("topic_ids poisoned")
+            .get(topic)
+            .copied()
+            .unwrap_or_else(Uuid::zero)
+    }
+
+    /// Snapshot of every topic's current id (for the consumer's per-topic key).
+    fn topic_ids_snapshot(&self) -> HashMap<String, Uuid> {
+        self.topic_ids.lock().expect("topic_ids poisoned").clone()
+    }
+
+    /// Delete and recreate ONE chaos topic, optionally dwelling `dwell` between
+    /// delete and recreate (librdkafka's `--topic-chaos recreate-immediate` /
+    /// `recreate-delayed`). librdkafka's `_topic_chaos_thread` picks a single
+    /// topic (`rng.choice(topics)`); the caller passes the chosen topic here.
     ///
-    /// All records delivered before the delete are marked **expected-lost** in
-    /// the verifier: the topic is gone, so the consumer legitimately cannot see
-    /// them and they must not be scored as data loss.
-    pub async fn recreate_topic(&self, dwell: Duration) {
-        eprintln!("chaos: recreating topic {} (dwell {:?})", self.topic, dwell);
+    /// All records delivered on THIS topic before the delete are marked
+    /// **expected-lost** in the verifier: the topic is gone, so the consumer
+    /// legitimately cannot see them and they must not be scored as data loss.
+    /// Loss on the other topics is still real loss (scoped hint).
+    pub async fn recreate_topic(&self, topic: &str, dwell: Duration) {
+        assert!(
+            self.topics.iter().any(|t| t == topic),
+            "recreate_topic called with unknown topic {topic}"
+        );
+        eprintln!("chaos: recreating topic {topic} (dwell {dwell:?})");
         // Capture the current topic id so we can prove the recreate produced a
         // genuinely new generation (a different id), not the old topic lingering.
-        let old_id = self.current_topic_id();
-        // Snapshot what's already delivered as expected-lost BEFORE deleting.
-        self.verifier.note_expected_loss(ExpectedLossHint::AllDeliveredSoFar);
+        let old_id = self.current_topic_id(topic);
+        // Snapshot what's already delivered on this topic as expected-lost
+        // BEFORE deleting. For a single-topic run this is every delivered
+        // record; for a multi-topic run only this topic's records.
+        let hint = if self.topics.len() == 1 {
+            ExpectedLossHint::AllDeliveredSoFar
+        } else {
+            ExpectedLossHint::AllDeliveredForTopic(topic.to_string())
+        };
+        self.verifier.note_expected_loss(hint);
 
         self.admin
             .delete_topics(
-                confluent_kafka::common::TopicCollection::of_topic_names(vec![self.topic.clone()]),
+                confluent_kafka::common::TopicCollection::of_topic_names(vec![topic.to_string()]),
                 confluent_kafka::admin::DeleteTopicsOptions::new(),
             )
             .all()
@@ -170,7 +317,7 @@ impl ChaosHarness {
         // cluster, so an immediate recreate races with `TopicAlreadyExists`.
         // Wait until describe no longer sees it before recreating. The dwell
         // (recreate-delayed) is applied AFTER the topic is confirmed gone.
-        self.wait_topic_absent(Duration::from_secs(30)).await;
+        self.wait_topic_absent(topic, Duration::from_secs(30)).await;
 
         if !dwell.is_zero() {
             tokio::time::sleep(dwell).await;
@@ -178,14 +325,40 @@ impl ChaosHarness {
 
         // Recreate with the same shape, retrying while the broker still reports
         // the old topic as not-yet-collected.
-        self.create_topic_retrying(Duration::from_secs(30)).await;
+        self.create_topic_retrying(topic, Duration::from_secs(30)).await;
 
         // Re-resolve the topic id so post-recreate records are keyed under the
-        // new generation.
-        self.resolve_topic_id().await;
-        let new_id = self.current_topic_id();
+        // new generation. (librdkafka restarts the topic's producer here; our
+        // in-process producer keeps running against the same topic name — the
+        // re-resolved id is what it and the consumer key new records against.)
+        self.resolve_topic_id(topic).await;
+        let new_id = self.current_topic_id(topic);
 
-        eprintln!("chaos: topic {} recreated: id {old_id} -> {new_id}", self.topic);
+        eprintln!("chaos: topic {topic} recreated: id {old_id} -> {new_id}");
+
+        // Mark the topic as a recreate BLACKOUT. An immediate recreate (dwell 0)
+        // can reuse the SAME topic id (in-place topic_id mutation — a
+        // librdkafka-documented mode); when it does, the consumer's committed
+        // offset from the old generation still points into this topic_id, so it
+        // is now *past* the recreated topic's reset offsets and
+        // `auto.offset.reset` does not fire — the new generation's low-offset
+        // records are silently skipped until the topic's offsets climb back past
+        // the stale commit and the consumer resumes. The in-process producer's
+        // index does NOT reset across the recreate (librdkafka restarts its
+        // per-topic producer; we cannot), so it keeps acking records into that
+        // whole blackout window.
+        //
+        // Rather than guess the window with a wall-clock snapshot, the verifier
+        // computes it from observed data: a delivered-but-unobserved record on a
+        // blackout topic below the highest index the consumer eventually observed
+        // on it was skipped in the blackout and is expected-lost; records above
+        // the resume point remain in the loss check. This is librdkafka's
+        // per-topic pre-delete-HWM window, and it is robust to whether the
+        // recreate reused the id, minted a new one, or the id could not be
+        // resolved under churn (all three occur — see the `old_id`/`new_id` log).
+        self.verifier
+            .note_expected_loss(ExpectedLossHint::RecreateBlackout(topic.to_string()));
+
         // Effect check — but only for recreate-DELAYED. With a dwell long enough
         // for the deletion to propagate, the recreate MUST be a genuinely new
         // generation (different topic id). recreate-IMMEDIATE (dwell 0) can
@@ -196,21 +369,29 @@ impl ChaosHarness {
         if !dwell.is_zero() && old_id != Uuid::zero() && new_id != Uuid::zero() {
             assert_ne!(
                 old_id, new_id,
-                "recreate-delayed produced the same topic id for {} — the topic was not \
-                 recreated as a new generation despite the dwell",
-                self.topic
+                "recreate-delayed produced the same topic id for {topic} — the topic was not \
+                 recreated as a new generation despite the dwell"
             );
         }
+
+        // Arm the drain-settle for THIS topic: the consumer is now about to
+        // re-discover / re-read the recreated topic; the drain must not declare
+        // idle-quiescence until this topic's OWN consume progress climbs past the
+        // baseline captured here (proof it resumed) and then goes flat. Capturing
+        // the per-topic baseline now — not a global count — is what lets the
+        // drain tell this one topic's stall apart from the others still flowing.
+        let baseline = self.verifier.consumed_progress_for_topic(topic);
+        self.recreate_settle.note_recreate(topic, baseline);
     }
 
-    /// Poll until `describe_topics` no longer finds the chaos topic.
-    async fn wait_topic_absent(&self, timeout: Duration) {
+    /// Poll until `describe_topics` no longer finds `topic`.
+    async fn wait_topic_absent(&self, topic: &str, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let described = self
                 .admin
                 .describe_topics(
-                    confluent_kafka::common::TopicCollection::of_topic_names(vec![self.topic.clone()]),
+                    confluent_kafka::common::TopicCollection::of_topic_names(vec![topic.to_string()]),
                     confluent_kafka::admin::DescribeTopicsOptions::new(),
                 )
                 .all_topic_names()
@@ -220,7 +401,7 @@ impl ChaosHarness {
             // Absent when describe errors with unknown-topic, or returns no
             // entry for our topic.
             let absent = match described {
-                Ok(map) => !map.contains_key(&self.topic),
+                Ok(map) => !map.contains_key(topic),
                 Err(_) => true,
             };
             if absent {
@@ -228,20 +409,18 @@ impl ChaosHarness {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "topic {} was not deleted within {timeout:?}",
-                self.topic
+                "topic {topic} was not deleted within {timeout:?}"
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    /// Create the topic, retrying while the broker still reports the previous
+    /// Create `topic`, retrying while the broker still reports the previous
     /// generation as pending deletion (`TopicAlreadyExists`).
-    async fn create_topic_retrying(&self, timeout: Duration) {
-        let replication = self.cluster.config().brokers.min(3) as i16;
+    async fn create_topic_retrying(&self, topic: &str, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let new_topic = NewTopic::new(self.topic.clone(), self.partitions, replication);
+            let new_topic = NewTopic::new(topic.to_string(), self.partitions, self.replication);
             match self
                 .admin
                 .create_topics(&[new_topic], CreateTopicsOptions::new())
@@ -253,13 +432,18 @@ impl ChaosHarness {
                 Err(err) => {
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "recreate of topic {} did not succeed within {timeout:?}: {err}",
-                        self.topic
+                        "recreate of topic {topic} did not succeed within {timeout:?}: {err}"
                     );
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 },
             }
         }
+    }
+
+    /// The topics in this run (in order) — the runner uses this to pick a random
+    /// recreate target and to apply migrations across the whole set.
+    pub fn topics(&self) -> &[String] {
+        &self.topics
     }
 
     /// AdminClient handle (for readiness detection / actions).
@@ -278,32 +462,47 @@ impl ChaosHarness {
         self.verifier.clone()
     }
 
+    /// The drain-settle signal — pass to [`RunningWorkloads::drive`] so the
+    /// drain suppresses idle-quiescence while a just-recreated topic's consumer
+    /// is still recovering.
+    pub fn recreate_settle(&self) -> Arc<RecreateSettle> {
+        self.recreate_settle.clone()
+    }
+
     /// Build the given workloads. They are **not** spawned onto separate
     /// threads (the client futures are not `Send`-guaranteed at the trait
     /// boundary); instead [`RunningWorkloads::drive`] runs them concurrently
     /// with the chaos actions on the scenario's own multi-thread task via
     /// `join_all`. Each carries an independent stop flag so producers can be
     /// drained before consumers.
-    /// Build the immutable per-workload context from current cluster state.
-    /// Shared by `build_workloads` and the runtime `WorkloadPool`.
-    fn workload_ctx(&self) -> WorkloadContext {
+    /// Build the immutable per-workload context from current cluster state,
+    /// bound to `topic` as the producer's target topic. Consumers ignore
+    /// `topic` and subscribe to the full `topics` set. Shared by
+    /// `build_workloads` and the runtime `WorkloadPool`. The group is keyed on
+    /// the primary topic so every consumer joins the same group.
+    fn workload_ctx(&self, topic: &str) -> WorkloadContext {
         WorkloadContext {
             bootstrap: self.cluster.bootstrap_servers().to_string(),
             container_bootstrap: self.cluster.container_bootstrap_servers().to_string(),
-            topic: self.topic.clone(),
-            topic_id: self.current_topic_id(),
-            group: format!("chaos-group-{}", self.topic),
+            topic: topic.to_string(),
+            topics: self.topics.clone(),
+            topic_id: self.current_topic_id(topic),
+            topic_ids: self.topic_ids_snapshot(),
+            group: format!("chaos-group-{}", self.primary_topic()),
             target_rps: self.rps.load(Ordering::Relaxed),
+            msg_size: self.msg_size.load(Ordering::Relaxed) as usize,
             commit_mode: *self.commit_mode.lock().expect("commit_mode poisoned"),
         }
     }
 
     /// A [`WorkloadPool`] for adding/removing consumers mid-run. Capture it in
-    /// the scenario; pass the same pool to [`RunningWorkloads::drive`].
+    /// the scenario; pass the same pool to [`RunningWorkloads::drive`]. Its
+    /// context is bound to the primary topic, but pool-added consumers subscribe
+    /// to every topic (they are consumers).
     pub fn workload_pool(&self) -> WorkloadPool<'_> {
         WorkloadPool {
             harness: self,
-            ctx: self.workload_ctx(),
+            ctx: self.workload_ctx(self.primary_topic()),
             inner: std::rc::Rc::new(WorkloadPoolInner {
                 pending: std::cell::RefCell::new(Vec::new()),
                 added_consumer_stops: std::cell::RefCell::new(Vec::new()),
@@ -316,22 +515,61 @@ impl ChaosHarness {
         &self,
         specs: &[WorkloadSpec],
         target_rps: u32,
+        msg_size: usize,
         commit_mode: CommitMode,
     ) -> RunningWorkloads {
         // Remember these so a runtime WorkloadPool builds matching consumers.
         self.rps.store(target_rps, Ordering::Relaxed);
+        self.msg_size.store(msg_size as u32, Ordering::Relaxed);
         *self.commit_mode.lock().expect("commit_mode poisoned") = commit_mode;
-
-        let ctx = self.workload_ctx();
 
         let mut running = Vec::with_capacity(specs.len());
         for spec in specs {
-            let workload: Box<dyn Workload> =
-                build_workload(spec, ctx.clone(), self.verifier.clone(), self.cluster.network_name())
-                    .await
-                    .expect("failed to build workload");
-            let stop = Arc::new(AtomicBool::new(false));
-            running.push(RunningWorkload { role: spec.role, stop, workload });
+            match spec.role {
+                // One producer per topic (librdkafka spawns one perf producer
+                // per test topic, each at the per-topic `rps`). A single
+                // `producer:rust` spec therefore expands to N producers when
+                // `--num-topics N`; each is bound to its own topic.
+                Role::Producer => {
+                    for (topic_idx, topic) in self.topics.iter().enumerate() {
+                        let ctx = self.workload_ctx(topic);
+                        // Each per-topic producer needs a DISTINCT client.id and
+                        // log identity (librdkafka names them producer-<topic
+                        // index>). A shared client.id across N producers collides
+                        // their logs and confuses per-client broker bookkeeping.
+                        // For a single-topic run keep the original spec unchanged
+                        // (label `producer-<backend>-<instance>`), so N==1
+                        // behaviour is identical.
+                        let per_topic_spec = if self.topics.len() == 1 {
+                            spec.clone()
+                        } else {
+                            let mut s = spec.clone();
+                            // Derive a stable, unique instance from the base
+                            // instance and the topic index (e.g. base 1, 3
+                            // topics -> 100, 101, 102), so ids stay distinct even
+                            // with multiple producer specs.
+                            s.instance = spec.instance * 100 + topic_idx as u32;
+                            s
+                        };
+                        let workload: Box<dyn Workload> =
+                            build_workload(&per_topic_spec, ctx, self.verifier.clone(), self.cluster.network_name())
+                                .await
+                                .expect("failed to build producer workload");
+                        let stop = Arc::new(AtomicBool::new(false));
+                        running.push(RunningWorkload { role: spec.role, stop, workload });
+                    }
+                },
+                // One consumer per spec, subscribing to ALL topics.
+                Role::Consumer => {
+                    let ctx = self.workload_ctx(self.primary_topic());
+                    let workload: Box<dyn Workload> =
+                        build_workload(spec, ctx, self.verifier.clone(), self.cluster.network_name())
+                            .await
+                            .expect("failed to build consumer workload");
+                    let stop = Arc::new(AtomicBool::new(false));
+                    running.push(RunningWorkload { role: spec.role, stop, workload });
+                },
+            }
         }
 
         RunningWorkloads { workloads: running }
@@ -447,6 +685,7 @@ impl RunningWorkloads {
         drain: Duration,
         idle_threshold: Duration,
         verifier: Arc<dyn Verifier>,
+        settle: Arc<RecreateSettle>,
         scenario: Fut,
     ) where
         Fut: std::future::Future<Output = ()>,
@@ -482,7 +721,7 @@ impl RunningWorkloads {
             for stop in &producer_stops {
                 stop.store(true, Ordering::Relaxed);
             }
-            drain_wait(drain, idle_threshold, verifier.as_ref()).await;
+            drain_wait(drain, idle_threshold, verifier.as_ref(), settle.as_ref()).await;
             for stop in &consumer_stops {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -523,7 +762,19 @@ impl RunningWorkloads {
 /// a consumer that never catches up cannot hang the run. This is what lets a
 /// run ending on a heavy fault (reassign/recreate) drain fully without a large
 /// fixed `--drain-s`, while fast runs finish quickly.
-async fn drain_wait(max: Duration, idle_threshold: Duration, verifier: &dyn Verifier) {
+///
+/// **Recreate settle (per topic):** a topic recreate causes a transient
+/// consumption stall — the consumer must re-discover / reset-to-EARLIEST onto the
+/// recreated topic and re-read it before it resumes on that topic. The GLOBAL
+/// progress signal cannot detect this, because the OTHER topics keep being
+/// consumed and keep the global counter climbing. So quiescence is suppressed
+/// until, for EVERY recreated topic, that topic's OWN per-topic consume progress
+/// has climbed past the baseline captured at its recreate (proof the recreated
+/// topic itself resumed re-reading). Only when every recreated topic has resumed
+/// AND global progress has been flat for `idle_threshold` may the drain quiesce.
+/// `max` (--drain-s) still caps the wait, so a topic that never resumes cannot
+/// hang the run.
+async fn drain_wait(max: Duration, idle_threshold: Duration, verifier: &dyn Verifier, settle: &RecreateSettle) {
     if idle_threshold.is_zero() {
         tokio::time::sleep(max).await;
         return;
@@ -533,13 +784,32 @@ async fn drain_wait(max: Duration, idle_threshold: Duration, verifier: &dyn Veri
     let mut idle_since = std::time::Instant::now();
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_secs(1)).await;
+
         let now_progress = verifier.consumed_progress();
         if now_progress > last_progress {
             last_progress = now_progress;
             idle_since = std::time::Instant::now();
-        } else if idle_since.elapsed() >= idle_threshold {
-            eprintln!("chaos: drain quiescent ({} consumed) — ending drain early", now_progress);
-            return;
+            continue;
+        }
+
+        // Global progress has been flat. Before quiescing, require EVERY
+        // recreated topic to have resumed re-reading — its per-topic progress
+        // must exceed the baseline captured at its recreate. (Re-read live each
+        // tick so a recreate that lands mid-drain is honoured.) A topic that has
+        // not resumed keeps the drain running (bounded by `max`).
+        if idle_since.elapsed() >= idle_threshold {
+            let baselines = settle.baselines();
+            let all_resumed = baselines
+                .iter()
+                .all(|(topic, &baseline)| verifier.consumed_progress_for_topic(topic) > baseline);
+            if all_resumed {
+                eprintln!("chaos: drain quiescent ({now_progress} consumed) — ending drain early");
+                return;
+            }
+            // A recreated topic has not resumed yet — keep draining. Reset the
+            // idle timer so we re-evaluate after another flat window rather than
+            // spinning this branch every tick.
+            idle_since = std::time::Instant::now();
         }
     }
 }

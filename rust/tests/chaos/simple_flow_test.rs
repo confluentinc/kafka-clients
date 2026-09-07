@@ -39,7 +39,7 @@ async fn simple_flow_clean_broker_roll() {
         WorkloadSpec::parse("producer:rust", 1).unwrap(),
         WorkloadSpec::parse("consumer:rust", 1).unwrap(),
     ];
-    let workloads = harness.build_workloads(&specs, 200, CommitMode::Sync).await;
+    let workloads = harness.build_workloads(&specs, 200, 100, CommitMode::Sync).await;
     let verifier = harness.verifier();
 
     // The chaos timeline: warm up, roll broker 2 cleanly once, let traffic
@@ -55,7 +55,7 @@ async fn simple_flow_clean_broker_roll() {
             kind: StopKind::Clean,
             down: Duration::from_secs(5),
             wait_up: Duration::from_secs(60),
-            topic: "chaos-simple-flow".to_string(),
+            topics: vec!["chaos-simple-flow".to_string()],
         }
         .execute(&brokers, admin, &None)
         .await;
@@ -68,6 +68,7 @@ async fn simple_flow_clean_broker_roll() {
             Duration::from_secs(15),
             Duration::from_secs(3),
             verifier.clone(),
+            harness.recreate_settle(),
             scenario,
         )
         .await;
