@@ -66,6 +66,13 @@ namespace Confluent.Kafka;
 /// over <see cref="NativeProducer"/> (which owns the graceful close→destroy + the one-shot latch,
 /// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
 /// </para>
+/// <para>
+/// ⚠ <b>Do not mutate a record's key / value buffers after <c>Send</c> returns</b> (M11/P3.1
+/// decision D6). The async send is deferred — the binding borrows the serialized bytes until a
+/// background batch thread hands the record to the core — so a mutation in that window is visible
+/// on the wire. See <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full note.
+/// The <b>synchronous</b> producer has no such window.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>

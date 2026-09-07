@@ -191,16 +191,26 @@ public sealed class PublicProducerSendTests
         Assert.Equal(1, metadata.Partition);
     }
 
-    // ---- Mutation-after-send (the call-scoped-copy correctness proof) ----
+    // ---- Mutation-after-send: memory safety across the deferral (§4.7 / decision D6) ----
 
     [Fact]
     public async Task Send_MutationImmediatelyAfterSend_CompletesCorrectly()
     {
-        // The core copies key/value into the batch buffer synchronously during Producer_send
-        // (ffi §A4), so the caller may mutate the buffer the instant Send returns. Mutating a large
-        // buffer right after Send must not corrupt the in-flight send / crash / hang: the send still
-        // resolves with correct metadata. (A byte read-back is integration-only — see the class
-        // remarks — so this asserts completion, the strongest proof the mock allows.)
+        // ⚠ WHAT THIS ASSERTS CHANGED IN M11/P3.1 (decision D6, §4.7). It used to assert the
+        // Option-C guarantee that a post-Send mutation was INVISIBLE, because the core copied
+        // key/value synchronously inside Producer_send. The ASYNC send is now deferred, so the
+        // binding borrows the caller's buffers until the batch thread hands the record over, and a
+        // mutation in that window IS visible on the wire. That is inherent to deferring a zero-copy
+        // send — the alternative is the per-record copy CLAUDE.md §12 forbids — and it matches the
+        // anchor, where Python likewise borrows the buffer until its drain.
+        //
+        // What this test asserts now is the part that must NOT change: mutating (and here, zeroing)
+        // a large buffer while the send is still deferred is MEMORY-SAFE. The pins are what make it
+        // so — the buffer cannot move or be collected under the core — so the send still resolves,
+        // with correct metadata, rather than corrupting, crashing or hanging.
+        //
+        // The SYNC surface keeps the old guarantee and has no such window (§4.7); its own
+        // mutation-after-send coverage is deliberately left untouched.
         using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         byte[] key = Enumerable.Repeat((byte)0xAB, 32).ToArray();
