@@ -124,6 +124,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // send, which still pins the topic call-scoped (§3.1).
     private readonly PinnedTopicCache _topics = new PinnedTopicCache();
 
+    // How long teardown waits for the send-batch thread's final drain (§3.8 step 4, §6.3). Long
+    // enough that a healthy drain finishes even when send_batch is briefly parked on the core's
+    // buffer.memory, short enough that Dispose returns rather than inheriting max.block.ms (60 s by
+    // default) for a whole chunk of records. On expiry the outcome is DEFINED, not a hang — see
+    // StopAccumulator and SendAccumulator.Stop.
+    private static readonly TimeSpan s_accumulatorDrainTimeout = TimeSpan.FromSeconds(30);
+
     private NativeProducer(SafeProducerHandle handle)
     {
         _handle = handle;
@@ -861,19 +868,59 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// core and its future reaches the <b>still-open</b> pump.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>The ordering is load-bearing, not incidental.</b> Doing this after
     /// <see cref="SendCompletionPump.CloseGate"/> would deliver the final drain's futures to a closed
     /// gate, where <see cref="SendCompletionPump.Enqueue"/> faults them in place and fires <b>no</b>
     /// delivery callback — recorded residual 1. Routing normal teardown through a recorded residual
     /// is silent data loss dressed up as an accepted limitation.
+    /// </para>
     /// <para>
-    /// The join is <b>unbounded</b> in this slice. Bounding it — with a defined outcome on expiry
-    /// when the batch thread is stuck inside <c>send_batch</c> on a full <c>buffer.memory</c>, or
-    /// dead from an unhandled throw — is slice S5, together with the backpressure-gate cancellation
-    /// that must precede it.
+    /// <b>The §6.3 re-enumeration, with the accumulator in place.</b> The recorded pump-orphan
+    /// finding rests on the premise "flush resolves every pending send"; the handshake adds two more
+    /// premises, and <b>neither is assumed</b> — each is a bounded wait with a stated outcome:
+    /// <list type="bullet">
+    /// <item><i>"the accumulator always reaches empty"</i> — it does not have to. The batch thread
+    /// can be parked inside <c>send_batch</c> on a full <c>buffer.memory</c> for up to
+    /// <c>max.block.ms</c>, and it can in principle fail outright. <c>Stop</c>'s wait is bounded by
+    /// <see cref="s_accumulatorDrainTimeout"/> and its expiry outcome is defined (abandon the thread,
+    /// which stays memory-safe and still settles every record it holds); an unhandled failure of the
+    /// thread itself settles its own chain and closes the accumulator.</item>
+    /// <item><i>"every drained node's futures reach the pump before <c>CloseGate</c>"</i> — true
+    /// exactly when the drain completed, which is what the return value reports. When it did not,
+    /// the late futures take <see cref="SendCompletionPump.Enqueue"/>'s fault-in-place branch:
+    /// faulted and freed, never stranded or leaked, at the cost of residual 1's notification.</item>
+    /// </list>
+    /// The drain result also decides one memory-safety question the caller cannot defer: whether the
+    /// interned topic buffers may be freed eagerly. They may only if nothing can still be pointing at
+    /// them, i.e. only if the drain completed — otherwise the cache falls back to its finalizer.
     /// </para>
     /// </remarks>
-    private void StopAccumulator() => AccumulatorToStop()?.Stop();
+    /// <returns><see langword="true"/> if the accumulator drained and its thread exited.</returns>
+    private bool StopAccumulator() => AccumulatorToStop()?.Stop(s_accumulatorDrainTimeout) ?? true;
+
+    /// <summary>
+    /// <b>Teardown's last step:</b> frees the interned topic buffers — but <b>only when the
+    /// accumulator's drain completed</b>.
+    /// </summary>
+    /// <remarks>
+    /// These pointers are raw and un-ref-counted, and they are what a record's
+    /// <c>ProducerRecord_t.topic</c> points at. If the drain completed, every record that ever held
+    /// one has been handed to the core and the core has copied the topic
+    /// (<c>to_string_lossy().into_owned()</c>), so freeing is safe by construction. If it did not,
+    /// the abandoned batch thread may still pass one to <c>send_batch</c>, and freeing here would be
+    /// a use-after-free — so the cache is left to its finalizer, which cannot run while the producer
+    /// (and therefore the cache) is still reachable from that thread. Deliberately unconditional in
+    /// the other direction: a producer that never sent asynchronously has an empty cache, so this is
+    /// a no-op rather than a branch to skip.
+    /// </remarks>
+    private void ReleaseTopicCache(bool accumulatorDrained)
+    {
+        if (accumulatorDrained)
+        {
+            _topics.Dispose();
+        }
+    }
 
     /// <summary>
     /// Reads the started accumulator (under <see cref="_pumpLock"/>), or <see langword="null"/> if
@@ -1006,7 +1053,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </remarks>
     private void StopPump()
     {
-        StopAccumulator();
+        bool accumulatorDrained = StopAccumulator();
 
         SendCompletionPump? pump = PumpToStop();
 
@@ -1039,15 +1086,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // runs on strictly more paths.
         }
 
-        if (pump is null)
-        {
-            // No pump thread to join — but the flush above already ran (Blocker 2).
-            return;
-        }
+        // No pump thread to join when no async send ever started one — but the flush above already
+        // ran (Blocker 2). Join outside the lock (the pump's terminal drain does not touch _pumpLock,
+        // and holding it across a thread join is needless).
+        pump?.Stop();
 
-        // Shared join+destroy tail: join outside the lock (the pump's terminal drain does not touch
-        // _pumpLock, and holding it across a thread join is needless).
-        pump.Stop();
+        ReleaseTopicCache(accumulatorDrained);
     }
 
     /// <summary>
@@ -1072,7 +1116,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </remarks>
     private async Task StopPumpAsync()
     {
-        StopAccumulator();
+        bool accumulatorDrained = StopAccumulator();
 
         SendCompletionPump? pump = PumpToStop();
 
@@ -1099,14 +1143,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // is preserved.
         }
 
-        if (pump is null)
-        {
-            // No pump thread to join — the flush above already ran.
-            return;
-        }
+        // No pump thread to join when no async send ever started one — the flush above already ran.
+        // The join stays blocking by design.
+        pump?.Stop();
 
-        // Shared join+destroy tail (same as StopPump) — the join stays blocking by design.
-        pump.Stop();
+        ReleaseTopicCache(accumulatorDrained);
     }
 
     /// <summary>

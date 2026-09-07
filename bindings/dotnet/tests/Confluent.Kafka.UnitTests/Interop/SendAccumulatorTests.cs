@@ -334,6 +334,36 @@ public sealed class SendAccumulatorTests
         Assert.True(accumulator.TryAcquireSpace(), "a refused Submit did not return its permit");
     }
 
+    [Fact]
+    public async Task StopWithAnExpiredWait_ReportsNotDrained_AndTheAbandonedThreadStillSettlesEveryRecord()
+    {
+        // §6.3: "the accumulator always reaches empty" is a PREMISE, not a fact — the batch thread
+        // can be parked inside send_batch on a full buffer.memory for up to max.block.ms. So the wait
+        // is bounded and its expiry has a defined outcome, which this drives with a zero timeout: the
+        // thread is alive and waiting, so the join cannot succeed.
+        //
+        // The defined outcome is NOT "fault everything from the teardown thread" — that would mean
+        // releasing pins the core may still be reading. It is "abandon it and let it finish", and the
+        // assertion is that every record still settles.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 10, batchChunk: 1100));
+
+        Task<RecordMetadata>[] sends = harness.Append(8);
+
+        Assert.False(
+            harness.Accumulator.Stop(TimeSpan.Zero),
+            "a zero-timeout Stop must report the batch thread as NOT drained");
+
+        // The abandoned thread drains once more and exits on its own (it saw _closed), so the records
+        // settle — later, but they settle. That is the whole content of "defined outcome".
+        await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
+
+        // And the teardown caller must NOT free the interned topic buffers on this path: they are
+        // still what the abandoned thread's records point at. The harness applies the same rule
+        // production does, so disposing it here is safe only because the thread has now finished.
+        harness.Dispose();
+    }
+
     // ------------------------------------------------------------------- backpressure (§4.6) ----
 
     [Fact]
@@ -577,11 +607,16 @@ public sealed class SendAccumulatorTests
 
             // The §3.8 ordering: drain the accumulator into a STILL-OPEN pump gate, then close the
             // gate, then flush so the pump's blocking get_all can return, then join it, then destroy.
-            Accumulator.Stop();
+            bool drained = Accumulator.Stop(s_deadline);
             _pump.CloseGate();
             NativeMethods.ProducerFlush(_producer.Handle, out IntPtr flushError);
             _ = KafkaException.FromHandle(flushError);
             _pump.Stop();
+            if (drained)
+            {
+                Topics.Dispose();
+            }
+
             _producer.Dispose();
         }
     }

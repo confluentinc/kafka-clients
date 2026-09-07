@@ -50,19 +50,24 @@ namespace Confluent.Kafka.Internal;
 /// what makes the cap a safety valve rather than a behavior switch.
 /// </para>
 /// <para>
-/// <b>When the interned pins are freed — and why it is not an explicit teardown call yet.</b> The
-/// pointers this hands out are raw and un-ref-counted, so an eager free is safe only at a point
-/// where no send can still be holding one. Once the accumulator's teardown handshake lands
-/// (M11/P3.1 §3.8 / slice S5 — close the accumulator to new appends, then drain it to empty before
-/// anything else is released) the end of teardown is such a point, and the free becomes explicit
-/// there. Until then the only such point is <b>unreachability</b>: the cache is reachable from the
-/// <see cref="NativeProducer"/>, which is reachable from any thread that could still be inside a
-/// send, so the finalizer cannot run while a topic pointer is in use. That is why this type has a
-/// finalizer and no <c>Dispose</c> — an eager free wired today would be a use-after-free against a
-/// concurrent inline send, and a <c>Dispose</c> nothing calls would be worse than either.
+/// <b>When the interned pins are freed — two paths, and the choice between them is a safety
+/// decision, not a style one.</b> The pointers this hands out are raw and un-ref-counted, so an
+/// eager free is safe only at a point where no send can still be holding one.
+/// <list type="bullet">
+/// <item><see cref="Dispose"/> — the eager path, called at the very end of teardown and <b>only
+/// when the accumulator's drain completed</b> (§3.8 steps 3–4: closed to new appends, then drained
+/// to empty). At that point every record that ever held one of these pointers has been handed to
+/// the core and the core has copied the topic, so freeing is safe by construction.</item>
+/// <item>the <b>finalizer</b> — the fallback, and the only correct answer when the drain did
+/// <em>not</em> complete and the batch thread was abandoned still running (see
+/// <c>SendAccumulator.Stop</c>). That thread may still pass an interned pointer to
+/// <c>send_batch</c>, so an eager free there would be a use-after-free. Unreachability is the one
+/// remaining safe point: the cache is reachable from the <see cref="NativeProducer"/>, which is
+/// reachable from any thread that could still be inside a send.</item>
+/// </list>
 /// </para>
 /// </remarks>
-internal sealed class PinnedTopicCache
+internal sealed class PinnedTopicCache : IDisposable
 {
     /// <summary>
     /// The interning cap (decision D5). Beyond this many <b>distinct</b> topic names the cache stops
@@ -85,18 +90,55 @@ internal sealed class PinnedTopicCache
     // The interned entry count, read WITHOUT the lock so a capped cache never contends.
     private int _internedCount;
 
+    // Set by Dispose / the finalizer under _internGate: the interned pointers are gone, so Rent
+    // must hand out a per-record pin instead of a freed one.
+    private bool _disposed;
+
     /// <summary>Releases every interned pin once the cache becomes unreachable (see the remarks).</summary>
     ~PinnedTopicCache()
     {
         // No lock: finalization means nothing else can reach this instance. GCHandle.Free during
         // finalization is safe — the pinned byte[] is still alive precisely because the handle
         // roots it.
-        foreach (GCHandle pin in _pins)
+        FreePins();
+    }
+
+    /// <summary>
+    /// Frees every interned pin. <b>Only safe once nothing can still be holding an interned
+    /// pointer</b> — see the remarks on this type for the two paths and which applies when. After
+    /// this, <see cref="Rent"/> hands out per-record fallback pins rather than freed pointers, so a
+    /// stray call cannot become a use-after-free.
+    /// </summary>
+    public void Dispose()
+    {
+        FreePins();
+        GC.SuppressFinalize(this);
+    }
+
+    private void FreePins()
+    {
+        lock (_internGate)
         {
-            if (pin.IsAllocated)
+            if (_disposed)
             {
-                pin.Free();
+                return;
             }
+
+            // Set BEFORE freeing, and under the same lock Rent interns under, so a concurrent Rent
+            // either interned before this (its pointer is one of the ones freed below, which is what
+            // the caller asserted was safe) or takes the fallback path afterwards.
+            _disposed = true;
+            _interned.Clear();
+
+            foreach (GCHandle pin in _pins)
+            {
+                if (pin.IsAllocated)
+                {
+                    pin.Free();
+                }
+            }
+
+            _pins.Clear();
         }
     }
 
@@ -135,8 +177,11 @@ internal sealed class PinnedTopicCache
             }
 
             GCHandle pin = PinUtf8(topic);
-            if (_internedCount >= MaxInternedTopics)
+            if (_disposed || _internedCount >= MaxInternedTopics)
             {
+                // Disposed: interning would hand back a pointer nothing will ever free, and the
+                // cache's own pointers are gone. Capped: the D5 fallback. Either way, a per-record
+                // pin the caller releases.
                 return new TopicPin(pin.AddrOfPinnedObject(), pin);
             }
 

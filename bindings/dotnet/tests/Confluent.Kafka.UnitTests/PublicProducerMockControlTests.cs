@@ -166,6 +166,15 @@ public sealed class PublicProducerMockControlTests
 
             _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
+            // The async Send is DEFERRED since M11/P3.1, so without this the record would still be
+            // in the accumulator while the driver below burns through its 64 iterations — and the
+            // driver's Clear() could then land AFTER the drain handed the record to the core,
+            // dropping a completion the pump is blocked reading. That is the recorded pump-orphan
+            // hang (§6.3), which belongs to SendCompletionPump.Stop's unbounded join and is out of
+            // scope here (§1.5); draining first restores this test's original dynamics, where the
+            // driver's own CompleteNext resolves the record it is racing.
+            producer.WaitForSendsToReachCore(s_deadline);
+
             TestTimeout.Run(
                 () =>
                 {

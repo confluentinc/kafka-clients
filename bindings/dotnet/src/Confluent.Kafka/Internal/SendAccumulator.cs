@@ -351,11 +351,17 @@ internal sealed class SendAccumulator
 
         lock (_gate)
         {
-            _forceDrain = true;
-            Monitor.PulseAll(_gate);
-
             while (_head is not null || _draining)
             {
+                // Re-arm the force flag on EVERY iteration, not once before the loop. The batch
+                // thread consumes it when it takes a chain, and a record can land after that — a
+                // backpressure waiter released by the very drain this forced is the ordinary case —
+                // so a single arming would leave the newcomer waiting out the full window while this
+                // caller waits out its whole timeout. "Drain until empty AND idle" is the contract;
+                // one drain is not it.
+                _forceDrain = true;
+                Monitor.PulseAll(_gate);
+
                 int remainingMs = RemainingMilliseconds(deadline);
                 if (remainingMs <= 0)
                 {
@@ -370,17 +376,51 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
-    /// Closes the accumulator to new appends, wakes the batch thread and joins it. The thread
-    /// performs one final drain first, so every record accepted before this call reaches the core
-    /// (and its future the completion pump) rather than being abandoned. Idempotent.
+    /// Teardown steps 2–4 of the §3.8 handshake: cancel the backpressure gate, close the
+    /// accumulator to new appends, wake the batch thread, and wait — <b>bounded</b> — for it to
+    /// finish its final drain and exit. Idempotent.
     /// </summary>
-    internal void Stop()
+    /// <remarks>
+    /// <para>
+    /// <b>Why the wait is bounded, and what expiry means.</b> The batch thread can be stuck for a
+    /// long time inside <c>send_batch</c>: that call takes the core's coarse producer mutex and can
+    /// block on a full <c>buffer.memory</c> for up to <c>max.block.ms</c> (default 60 s), for a whole
+    /// chunk of records rather than one (§3.6). An unbounded join would make <c>Dispose</c> inherit
+    /// that, and the §6.3 re-enumeration asks for a defined outcome instead of a hang.
+    /// </para>
+    /// <para>
+    /// <b>On expiry this ABANDONS the batch thread rather than tearing its state down, deliberately.</b>
+    /// The thread owns the node chain it took, and everything in that chain is either pinned (its
+    /// buffers) or in flight (its futures). Faulting those records from here would mean releasing
+    /// pins the core may still be reading and writing slots the thread is reading — a use-after-free
+    /// and a data race, traded for a marginally earlier <see cref="Task"/> completion. So the defined
+    /// outcome is: leave it running, and let the properties that already hold carry it. It is a
+    /// background thread; <c>_closed</c> is set, so it drains once more and exits on its own; every
+    /// record it holds still settles, only later. It stays memory-safe throughout, because
+    /// <c>send_batch</c> takes the <see cref="SafeProducerHandle"/> as a P/Invoke parameter, so the
+    /// marshaller's ref keeps <c>Producer_destroy</c> from running underneath an in-flight call and
+    /// a handle already closed surfaces as <see cref="ObjectDisposedException"/>, which
+    /// <see cref="SendNode"/> turns into a faulted send. A future that reaches the pump after its
+    /// gate closed is faulted and freed in place — recorded residual 1, which this is the path that
+    /// makes reachable.
+    /// </para>
+    /// <para>
+    /// The caller uses the return value for exactly one decision: whether it is safe to free the
+    /// interned topic buffers eagerly (they are pointed at by whatever the abandoned thread still
+    /// holds), which is why <see cref="PinnedTopicCache"/> keeps its finalizer as the fallback.
+    /// </para>
+    /// </remarks>
+    /// <param name="timeout">How long to wait for the batch thread's final drain.</param>
+    /// <returns>
+    /// <see langword="true"/> if the batch thread finished and exited; <see langword="false"/> if it
+    /// was abandoned still running.
+    /// </returns>
+    internal bool Stop(TimeSpan timeout)
     {
         // §3.8 step 2 BEFORE step 3: cancel the backpressure gate first, so a Send parked on a
-        // permit is released rather than holding teardown behind it. Doing it after closing the
-        // accumulator would still work here, but the ordering is the contract — and it is the one
-        // place this design is strictly better than the inline send it replaces, where a caller
-        // blocked in the core could not be woken by a concurrent close at all (§2.2 / §4.6).
+        // permit is released rather than holding teardown behind it. It is the one place this design
+        // is strictly better than the inline send it replaces, where a caller blocked in the core
+        // could not be woken by a concurrent close at all (§2.2 / §4.6).
         _spaceGate.Cancel();
 
         lock (_gate)
@@ -389,12 +429,66 @@ internal sealed class SendAccumulator
             Monitor.PulseAll(_gate);
         }
 
-        // Unbounded in this slice (see the type remarks): slice S5 replaces it with a bounded wait
-        // and a defined outcome on expiry, together with the rest of the §3.8 handshake.
-        _thread.Join();
+        return _thread.Join(timeout);
     }
 
     private void RunLoop()
+    {
+        try
+        {
+            RunLoopCore();
+        }
+        catch (Exception exception)
+        {
+            // The batch thread must not die silently: everything it holds would then hang forever,
+            // and appends would keep accumulating into a thread that will never drain them. Close
+            // the accumulator so further appends are refused, and settle what is in hand — we are on
+            // the batch thread, so this is the sole owner and touching the chain is safe here in a
+            // way it is not from Stop's expiry path.
+            //
+            // SendNode already catches per-node failures, so reaching here means something outside
+            // that — which is exactly why it is worth handling rather than assuming unreachable.
+            AbandonOnThreadFailure(exception);
+        }
+    }
+
+    /// <summary>
+    /// Settles everything the accumulator holds after an unexpected failure of the batch thread
+    /// itself, then lets the thread exit. Runs ON the batch thread, so it is the chain's sole owner.
+    /// </summary>
+    private void AbandonOnThreadFailure(Exception cause)
+    {
+        Node? chain;
+        int freed;
+        lock (_gate)
+        {
+            // Refuse further appends: an accumulator whose thread is gone can only strand them.
+            _closed = true;
+            chain = TakeChainLocked(out freed);
+            _draining = false;
+            Monitor.PulseAll(_gate);
+        }
+
+        ReleaseSpace(freed);
+
+        while (chain is not null)
+        {
+            Node node = chain;
+            chain = node.Next;
+            node.Next = null;
+
+            int count = node.Count;
+            ReleasePins(node, count);
+
+            // Nothing here reached the core (the failure preceded this node's send_batch), so both
+            // result slots are zero and FaultNode fires each delivery callback — §6.2's "correct and
+            // complete": a failure notification for an un-accepted record invents nothing and can
+            // never duplicate.
+            FaultNode(node, settled: 0, count: count, cause: cause);
+        }
+    }
+
+    private void RunLoopCore()
     {
         while (true)
         {
