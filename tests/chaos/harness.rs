@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
@@ -705,22 +705,47 @@ impl RunningWorkloads {
             .map(|w| w.stop.clone())
             .collect();
 
+        // Wait for producers to FINISH (not just be signalled) before draining: a
+        // producer still flushes its backlog after the stop flag is set (largest
+        // right after a recreate), and draining first would deliver its tail with
+        // no live consumer — the flaky tail loss. Each producer future bumps
+        // `producers_done` on completion.
+        let producer_count = producer_stops.len();
+        let producers_done = Arc::new(AtomicUsize::new(0));
+
         // Live set of running workload futures; new ones are pushed in while it
         // is being polled (that is what `FuturesUnordered` allows and a static
         // `join_all` does not — required for mid-run add/remove).
         let mut live: FuturesUnordered<std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>> =
             FuturesUnordered::new();
         for w in self.workloads {
-            live.push(Box::pin(w.workload.run(w.stop)));
+            match w.role {
+                Role::Producer => {
+                    let done = producers_done.clone();
+                    live.push(Box::pin(async move {
+                        w.workload.run(w.stop).await;
+                        done.fetch_add(1, Ordering::Relaxed);
+                    }));
+                },
+                Role::Consumer => {
+                    live.push(Box::pin(w.workload.run(w.stop)));
+                },
+            }
         }
 
         // The scenario (which may push consumers into the pool) followed by the
         // cooldown → drain sequence.
         let control = async move {
             scenario.await;
+            // (1) Signal producers, then wait for them to finish so the delivered
+            // set is final before draining (they run concurrently via `select!`).
             for stop in &producer_stops {
                 stop.store(true, Ordering::Relaxed);
             }
+            while producers_done.load(Ordering::Relaxed) < producer_count {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // (2) Drain until all delivered observed (or `drain` elapses); (3) stop consumers.
             drain_wait(drain, idle_threshold, verifier.as_ref(), settle.as_ref()).await;
             for stop in &consumer_stops {
                 stop.store(true, Ordering::Relaxed);
@@ -775,11 +800,26 @@ impl RunningWorkloads {
 /// `max` (--drain-s) still caps the wait, so a topic that never resumes cannot
 /// hang the run.
 async fn drain_wait(max: Duration, idle_threshold: Duration, verifier: &dyn Verifier, settle: &RecreateSettle) {
+    let deadline = std::time::Instant::now() + max;
+    if verifier.outstanding().is_some() {
+        loop {
+            if verifier.outstanding() == Some(0) {
+                eprintln!("chaos: drain complete — all delivered records observed");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    // Fallback (verifier does not report `outstanding`): the idle/settle-based
+    // drain.
     if idle_threshold.is_zero() {
         tokio::time::sleep(max).await;
         return;
     }
-    let deadline = std::time::Instant::now() + max;
     let mut last_progress = verifier.consumed_progress();
     let mut idle_since = std::time::Instant::now();
     while std::time::Instant::now() < deadline {

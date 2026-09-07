@@ -310,6 +310,8 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --workload role:backend  repeatable; role=producer|consumer,
 ///                            backend=rust|python|python-async|c
 ///                            (default: producer:rust,consumer:rust)
+///   --consumers N          shorthand for 1 rust producer + N rust consumers
+///                          (librdkafka's --consumers; not usable with --workload)
 ///   --rps N                producer target records/sec, 0 = max (200)
 ///   --stop-s N             seconds a broker stays down per roll (5)
 ///   --drain-s N            drain window at the end (15)
@@ -515,6 +517,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
         ("--commit", "CHAOS_COMMIT"),
         ("--topic", "CHAOS_TOPIC"),
+        ("--consumers", "CHAOS_CONSUMERS"),
     ];
 
     while i < raw.len() {

@@ -135,6 +135,12 @@ pub trait Verifier: Send + Sync {
         0
     }
 
+    /// Delivered records that would currently be scored as loss (`Some(0)` = the
+    /// drain may end). `None` = not tracked → drain falls back to idle/fixed.
+    fn outstanding(&self) -> Option<usize> {
+        None
+    }
+
     /// Render the final verdict.
     fn verdict(&self, min_partitions: usize) -> ChaosVerdict;
 }
@@ -196,6 +202,40 @@ impl ConservationVerifier {
     }
 }
 
+impl ConservationState {
+    fn blackout_resume(&self) -> HashMap<&str, u64> {
+        self.recreate_blackout
+            .iter()
+            .map(|topic| {
+                let max_observed = self
+                    .observed
+                    .keys()
+                    .filter(|(t, _)| t == topic)
+                    .map(|(_, idx)| *idx)
+                    .max()
+                    .unwrap_or(0);
+                (topic.as_str(), max_observed)
+            })
+            .collect()
+    }
+
+    /// Delivered records currently scored as loss (unobserved, not expected-lost,
+    /// and above any blackout resume point). Shared by `verdict` and `outstanding`
+    /// so the drain waits for exactly what the verdict checks.
+    fn lost_keys(&self) -> Vec<LogicalKey> {
+        let blackout_resume = self.blackout_resume();
+        self.delivered
+            .keys()
+            .filter(|key| !self.observed.contains_key(*key) && !self.expected_lost.contains(*key))
+            .filter(|(topic, idx)| match blackout_resume.get(topic.as_str()) {
+                Some(&resume) => *idx > resume,
+                None => true,
+            })
+            .cloned()
+            .collect()
+    }
+}
+
 impl Verifier for ConservationVerifier {
     fn record(&self, event: WorkloadEvent) {
         let mut s = self.inner.lock().expect("verifier poisoned");
@@ -233,6 +273,10 @@ impl Verifier for ConservationVerifier {
             .unwrap_or(0)
     }
 
+    fn outstanding(&self) -> Option<usize> {
+        Some(self.inner.lock().expect("verifier poisoned").lost_keys().len())
+    }
+
     fn note_expected_loss(&self, hint: ExpectedLossHint) {
         let mut s = self.inner.lock().expect("verifier poisoned");
         match hint {
@@ -255,44 +299,10 @@ impl Verifier for ConservationVerifier {
     fn verdict(&self, min_partitions: usize) -> ChaosVerdict {
         let s = self.inner.lock().expect("verifier poisoned");
 
-        // For each recreate-blackout topic, the highest index the consumer
-        // eventually observed on it — the point it proved it had resumed after
-        // the recreate. An unobserved delivered record on a blackout topic BELOW
-        // this point was skipped during the blackout (the consumer's stale
-        // committed offset sat past the recreated topic's reset offsets until the
-        // new generation climbed back), so it is expected-lost, not data loss.
-        // Records ABOVE the resume point are the normal tail and stay in the loss
-        // check. This is librdkafka's per-topic pre-delete-HWM window, computed
-        // from observed data so it is robust to churn and to whether the recreate
-        // reused the topic id.
-        let blackout_resume: HashMap<&str, u64> = s
-            .recreate_blackout
-            .iter()
-            .map(|topic| {
-                let max_observed = s
-                    .observed
-                    .keys()
-                    .filter(|(t, _)| t == topic)
-                    .map(|(_, idx)| *idx)
-                    .max()
-                    .unwrap_or(0);
-                (topic.as_str(), max_observed)
-            })
-            .collect();
-
         // Loss: a delivered (topic, index) the consumer never observed, not one a
         // topic recreate legitimately destroyed, and not one skipped below a
-        // blackout topic's resume point.
-        let lost: Vec<LogicalKey> = s
-            .delivered
-            .keys()
-            .filter(|key| !s.observed.contains_key(*key) && !s.expected_lost.contains(*key))
-            .filter(|(topic, idx)| match blackout_resume.get(topic.as_str()) {
-                Some(&resume) => *idx > resume, // below resume = skipped in blackout
-                None => true,
-            })
-            .cloned()
-            .collect();
+        // blackout topic's resume point. Shared with the drain's `outstanding`.
+        let lost: Vec<LogicalKey> = s.lost_keys();
 
         // Logical duplicates: an index observed more than once.
         let logical_duplicates: u64 = s.observed.values().map(|&c| u64::from(c.saturating_sub(1))).sum();
@@ -342,6 +352,7 @@ impl Verifier for ConservationVerifier {
         // excused: the explicit expected_lost snapshots PLUS blackout-skipped
         // records (unobserved, below a blackout topic's resume point) not already
         // counted in expected_lost.
+        let blackout_resume = s.blackout_resume();
         let blackout_excused = s
             .delivered
             .keys()

@@ -148,7 +148,24 @@ impl ChaosConfig {
         let brokers = env_parse("CHAOS_BROKERS", 3)?;
         let num_topics: u16 = env_parse("CHAOS_NUM_TOPICS", 1)?;
         let random = env_str("CHAOS_RANDOM", "0") == "1";
-        let workloads = parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?;
+        // `--consumers N`: 1 rust producer + N rust consumers (librdkafka's
+        // --consumers). Mutually exclusive with --workload.
+        let workloads = match env_opt_u32("CHAOS_CONSUMERS")? {
+            Some(n) => {
+                if std::env::var("CHAOS_WORKLOADS").is_ok_and(|v| !v.is_empty()) {
+                    return Err("use either --consumers or --workload, not both".to_string());
+                }
+                if n == 0 {
+                    return Err("--consumers must be >= 1".to_string());
+                }
+                let mut spec = String::from("producer:rust");
+                for _ in 0..n {
+                    spec.push_str(",consumer:rust");
+                }
+                parse_workloads(&spec)?
+            },
+            None => parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?,
+        };
         if workloads.is_empty() {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
         }
