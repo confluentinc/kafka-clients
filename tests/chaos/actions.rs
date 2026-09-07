@@ -52,11 +52,14 @@ pub enum ChaosAction {
         kind: StopKind,
         down: Duration,
         wait_up: Duration,
-        /// Topic to sample leaders for (before-stop / while-down / after-start).
-        topic: String,
+        /// Topics to sample leaders for (before-stop / while-down / after-start).
+        /// librdkafka's roll samples leaders across ALL test topics; a
+        /// single-topic run passes one.
+        topics: Vec<String>,
     },
-    /// Trigger a leader migration for `topic` without bouncing brokers.
-    Migrate { topic: String, mode: ReassignMode },
+    /// Trigger a leader migration on every listed topic without bouncing
+    /// brokers (librdkafka's change-leader / reassign act across all topics).
+    Migrate { topics: Vec<String>, mode: ReassignMode },
 }
 
 impl ChaosAction {
@@ -93,7 +96,7 @@ impl ChaosAction {
         F: std::future::Future<Output = ()>,
     {
         match self {
-            ChaosAction::BrokerRoll { node_id, kind, down, wait_up, topic } => {
+            ChaosAction::BrokerRoll { node_id, kind, down, wait_up, topics } => {
                 eprintln!("chaos: rolling broker {node_id} ({kind:?}), down for {down:?}");
                 if let Some(r) = reports {
                     r.record_leader_change(&format!("broker-roll node={node_id} kind={kind:?} down={down:?}"));
@@ -101,8 +104,8 @@ impl ChaosAction {
 
                 // Sample leaders 3× around the roll (librdkafka's roll leader
                 // sampling): before stop, while down, after start — logging which
-                // partitions migrated away and which came back.
-                let before = leaders_of(topic, admin).await;
+                // partitions migrated away and which came back, PER topic.
+                let before = leaders_of_topics(topics, admin).await;
                 brokers.stop(*node_id, *kind);
 
                 // Down-window. If a mid-down hook was supplied, run it here (so a
@@ -119,23 +122,27 @@ impl ChaosAction {
                     tokio::time::sleep(*down).await;
                 }
 
-                let down_state = leaders_of(topic, admin).await;
-                log_leader_migration(&format!("broker {node_id} down"), topic, &before, &down_state, reports);
+                let down_state = leaders_of_topics(topics, admin).await;
+                log_leader_migration_all(&format!("broker {node_id} down"), &before, &down_state, reports);
 
                 brokers.start(*node_id);
                 let up = brokers.wait_operational(admin, *node_id, *wait_up).await;
                 assert!(up, "broker {node_id} did not become operational within {wait_up:?}");
-                let after = leaders_of(topic, admin).await;
-                log_leader_migration(&format!("broker {node_id} back up"), topic, &down_state, &after, reports);
+                let after = leaders_of_topics(topics, admin).await;
+                log_leader_migration_all(&format!("broker {node_id} back up"), &down_state, &after, reports);
                 eprintln!("chaos: broker {node_id} back up");
             },
-            ChaosAction::Migrate { topic, mode } => match mode {
-                ReassignMode::ChangeLeader => {
-                    change_leader(topic, admin, reports).await;
-                },
-                ReassignMode::ReassignPartitions => {
-                    reassign_partitions(topic, admin, reports).await;
-                },
+            ChaosAction::Migrate { topics, mode } => {
+                for topic in topics {
+                    match mode {
+                        ReassignMode::ChangeLeader => {
+                            change_leader(topic, admin, reports).await;
+                        },
+                        ReassignMode::ReassignPartitions => {
+                            reassign_partitions(topic, admin, reports).await;
+                        },
+                    }
+                }
             },
         }
     }
@@ -366,30 +373,34 @@ async fn verify_leader_plan(
     );
 }
 
-/// Current leader per partition for `topic` (a lightweight view of
-/// [`partition_state`] for the broker-roll leader sampling). A partition with
-/// no leader (e.g. its broker is down) maps to `None`.
-async fn leaders_of(topic: &str, admin: &dyn Admin) -> std::collections::BTreeMap<i32, Option<i32>> {
-    partition_state(topic, admin)
-        .await
-        .into_iter()
-        .map(|(p, s)| (p, s.leader))
-        .collect()
+/// Current leader per `(topic, partition)` across `topics` (the multi-topic
+/// broker-roll leader sampling). A partition with no leader (e.g. its broker is
+/// down) maps to `None`.
+async fn leaders_of_topics(
+    topics: &[String],
+    admin: &dyn Admin,
+) -> std::collections::BTreeMap<(String, i32), Option<i32>> {
+    let mut out = std::collections::BTreeMap::new();
+    for topic in topics {
+        for (p, s) in partition_state(topic, admin).await {
+            out.insert((topic.clone(), p), s.leader);
+        }
+    }
+    out
 }
 
-/// Log the leader migration between two snapshots to `leader-changes.txt` (and
-/// stderr): which partitions changed leader across `phase`. The librdkafka
-/// roll leader-diff analog.
-fn log_leader_migration(
+/// Log the leader migration between two `(topic, partition)`-keyed snapshots to
+/// `leader-changes.txt` (and stderr): which partitions changed leader across
+/// `phase`, across every sampled topic. The librdkafka roll leader-diff analog.
+fn log_leader_migration_all(
     phase: &str,
-    topic: &str,
-    from: &std::collections::BTreeMap<i32, Option<i32>>,
-    to: &std::collections::BTreeMap<i32, Option<i32>>,
+    from: &std::collections::BTreeMap<(String, i32), Option<i32>>,
+    to: &std::collections::BTreeMap<(String, i32), Option<i32>>,
     reports: &ReportsHandle,
 ) {
     let mut moved = 0usize;
-    for (partition, from_leader) in from {
-        let to_leader = to.get(partition).copied().flatten();
+    for ((topic, partition), from_leader) in from {
+        let to_leader = to.get(&(topic.clone(), *partition)).copied().flatten();
         if *from_leader != to_leader {
             moved += 1;
             let line = format!("roll {phase}: {topic} p{partition} leader {from_leader:?}->{to_leader:?}");

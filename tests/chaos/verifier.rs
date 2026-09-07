@@ -84,10 +84,27 @@ pub enum WorkloadEvent {
 
 /// Hint to a verifier that a chaos action legitimately destroyed data, so the
 /// affected records must not be scored as loss.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ExpectedLossHint {
-    /// A topic recreate destroyed everything delivered so far.
+    /// A topic recreate destroyed everything delivered so far, across every
+    /// topic. Used by single-topic runs (`--num-topics 1`).
     AllDeliveredSoFar,
+    /// A topic recreate destroyed everything delivered so far **for one named
+    /// topic only** — the multi-topic case (`--num-topics > 1`), where a
+    /// recreate picks a single topic (librdkafka's `rng.choice(topics)`). Loss
+    /// on the other topics is still real loss.
+    AllDeliveredForTopic(String),
+    /// `topic` underwent a recreate — mark it as a **recreate blackout** topic.
+    /// At verdict time, any delivered-but-unobserved record on this topic whose
+    /// index is BELOW the highest index the consumer eventually observed on it is
+    /// excused (the consumer provably skipped over it). This is the per-topic
+    /// analog of librdkafka's pre-delete-HWM → post-recreate expected-loss
+    /// window, and — unlike a point-in-time snapshot — it robustly covers the
+    /// whole blackout the producer's non-resetting index keeps delivering into,
+    /// regardless of whether the recreate reused the topic id (immediate),
+    /// minted a new one (delayed), or the id could not be resolved under churn.
+    /// Records ABOVE the resume point that are unobserved remain real loss.
+    RecreateBlackout(String),
 }
 
 /// Records workload events and renders a pass/fail verdict. The harness owns a
@@ -109,12 +126,30 @@ pub trait Verifier: Send + Sync {
         0
     }
 
+    /// A monotonically non-decreasing count of consume events seen so far for
+    /// ONE topic. The drain uses this to detect that the consumer has resumed
+    /// re-reading a just-recreated topic — the GLOBAL [`Self::consumed_progress`]
+    /// cannot tell one topic apart (it keeps climbing on the other topics while
+    /// the recreated one is still rewinding). Default 0.
+    fn consumed_progress_for_topic(&self, _topic: &str) -> u64 {
+        0
+    }
+
     /// Render the final verdict.
     fn verdict(&self, min_partitions: usize) -> ChaosVerdict;
 }
 
 /// Physical record address: `(topic_id, partition, offset)`.
 type PhysKey = (Uuid, i32, i64);
+
+/// Logical record identity: `(topic, index)`.
+///
+/// The producer restarts `index` at 0 for each topic (one producer per topic),
+/// so `index` alone is NOT unique across topics — topic `t0` index 5 and topic
+/// `t1` index 5 are two distinct records. Keying the conservation maps on
+/// `(topic, index)` keeps them apart. For a single-topic run this collapses to
+/// the old `index`-only behaviour (one topic name in every key).
+type LogicalKey = (String, u64);
 
 /// The default verifier: conservation + per-record bookkeeping on both the
 /// logical `index` and the physical `(topic_id, partition, offset)` key. This
@@ -126,22 +161,33 @@ pub struct ConservationVerifier {
 
 #[derive(Default)]
 struct ConservationState {
-    /// index -> was it broker-acked (must be consumed unless expected-lost).
-    delivered: HashMap<u64, PhysKey>,
-    /// index -> times the consumer observed it (>1 = redelivery).
-    observed: HashMap<u64, u32>,
+    /// (topic, index) -> was it broker-acked (must be consumed unless
+    /// expected-lost).
+    delivered: HashMap<LogicalKey, PhysKey>,
+    /// (topic, index) -> times the consumer observed it (>1 = redelivery).
+    observed: HashMap<LogicalKey, u32>,
     /// Physical addresses the consumer has seen — a second sighting of the same
     /// (topic_id, partition, offset) is a physical duplicate.
     phys_seen: HashMap<PhysKey, u32>,
     /// Partitions that carried at least one observed record (coverage).
     partitions_seen: BTreeSet<i32>,
-    /// indices legitimately destroyed by a topic recreate (not loss).
-    expected_lost: BTreeSet<u64>,
+    /// (topic, index) pairs legitimately destroyed by a topic recreate (not
+    /// loss).
+    expected_lost: BTreeSet<LogicalKey>,
+    /// Topics that underwent a recreate blackout. At verdict, an unobserved
+    /// delivered record on one of these whose index is below the max observed
+    /// index on that topic is excused (the consumer skipped it during the
+    /// blackout). See [`ExpectedLossHint::RecreateBlackout`].
+    recreate_blackout: BTreeSet<String>,
     /// Count of producer sends that failed (context, not loss).
     failed_sends: usize,
     /// Total consume events seen (incl. redeliveries) — the drain-progress
     /// signal read by `consumed_progress`.
     consumed_events: u64,
+    /// Per-topic consume-event count (incl. redeliveries) — the per-topic
+    /// drain-progress signal read by `consumed_progress_for_topic`, used to
+    /// detect that a just-recreated topic's consumer has resumed.
+    consumed_events_by_topic: HashMap<String, u64>,
 }
 
 impl ConservationVerifier {
@@ -154,17 +200,18 @@ impl Verifier for ConservationVerifier {
     fn record(&self, event: WorkloadEvent) {
         let mut s = self.inner.lock().expect("verifier poisoned");
         match event {
-            WorkloadEvent::Delivered { index, topic_id, partition, offset, .. } => {
-                s.delivered.insert(index, (topic_id, partition, offset));
+            WorkloadEvent::Delivered { index, topic, topic_id, partition, offset } => {
+                s.delivered.insert((topic, index), (topic_id, partition, offset));
             },
             WorkloadEvent::SendFailed { .. } => {
                 s.failed_sends += 1;
             },
-            WorkloadEvent::Consumed { index, topic_id, partition, offset, .. } => {
-                *s.observed.entry(index).or_insert(0) += 1;
+            WorkloadEvent::Consumed { index, topic, topic_id, partition, offset } => {
+                *s.observed.entry((topic.clone(), index)).or_insert(0) += 1;
                 *s.phys_seen.entry((topic_id, partition, offset)).or_insert(0) += 1;
                 s.partitions_seen.insert(partition);
                 s.consumed_events += 1;
+                *s.consumed_events_by_topic.entry(topic).or_insert(0) += 1;
             },
             // The conservation verifier does not interpret share-consumer
             // events; a ShareAckVerifier will.
@@ -176,12 +223,31 @@ impl Verifier for ConservationVerifier {
         self.inner.lock().expect("verifier poisoned").consumed_events
     }
 
+    fn consumed_progress_for_topic(&self, topic: &str) -> u64 {
+        self.inner
+            .lock()
+            .expect("verifier poisoned")
+            .consumed_events_by_topic
+            .get(topic)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn note_expected_loss(&self, hint: ExpectedLossHint) {
         let mut s = self.inner.lock().expect("verifier poisoned");
         match hint {
             ExpectedLossHint::AllDeliveredSoFar => {
-                let all: Vec<u64> = s.delivered.keys().copied().collect();
+                let all: Vec<LogicalKey> = s.delivered.keys().cloned().collect();
                 s.expected_lost.extend(all);
+            },
+            ExpectedLossHint::AllDeliveredForTopic(topic) => {
+                // Only the recreated topic's delivered records are expected-lost;
+                // records on the other topics must still be consumed.
+                let scoped: Vec<LogicalKey> = s.delivered.keys().filter(|(t, _)| *t == topic).cloned().collect();
+                s.expected_lost.extend(scoped);
+            },
+            ExpectedLossHint::RecreateBlackout(topic) => {
+                s.recreate_blackout.insert(topic);
             },
         }
     }
@@ -189,13 +255,43 @@ impl Verifier for ConservationVerifier {
     fn verdict(&self, min_partitions: usize) -> ChaosVerdict {
         let s = self.inner.lock().expect("verifier poisoned");
 
-        // Loss: a delivered index the consumer never observed, and not one a
-        // topic recreate legitimately destroyed.
-        let lost: Vec<u64> = s
+        // For each recreate-blackout topic, the highest index the consumer
+        // eventually observed on it — the point it proved it had resumed after
+        // the recreate. An unobserved delivered record on a blackout topic BELOW
+        // this point was skipped during the blackout (the consumer's stale
+        // committed offset sat past the recreated topic's reset offsets until the
+        // new generation climbed back), so it is expected-lost, not data loss.
+        // Records ABOVE the resume point are the normal tail and stay in the loss
+        // check. This is librdkafka's per-topic pre-delete-HWM window, computed
+        // from observed data so it is robust to churn and to whether the recreate
+        // reused the topic id.
+        let blackout_resume: HashMap<&str, u64> = s
+            .recreate_blackout
+            .iter()
+            .map(|topic| {
+                let max_observed = s
+                    .observed
+                    .keys()
+                    .filter(|(t, _)| t == topic)
+                    .map(|(_, idx)| *idx)
+                    .max()
+                    .unwrap_or(0);
+                (topic.as_str(), max_observed)
+            })
+            .collect();
+
+        // Loss: a delivered (topic, index) the consumer never observed, not one a
+        // topic recreate legitimately destroyed, and not one skipped below a
+        // blackout topic's resume point.
+        let lost: Vec<LogicalKey> = s
             .delivered
             .keys()
-            .copied()
-            .filter(|idx| !s.observed.contains_key(idx) && !s.expected_lost.contains(idx))
+            .filter(|key| !s.observed.contains_key(*key) && !s.expected_lost.contains(*key))
+            .filter(|(topic, idx)| match blackout_resume.get(topic.as_str()) {
+                Some(&resume) => *idx > resume, // below resume = skipped in blackout
+                None => true,
+            })
+            .cloned()
             .collect();
 
         // Logical duplicates: an index observed more than once.
@@ -209,8 +305,10 @@ impl Verifier for ConservationVerifier {
             let mut sample = lost.clone();
             sample.sort_unstable();
             sample.truncate(20);
+            // Render as `topic#index` so multi-topic loss is legible.
+            let sample_str: Vec<String> = sample.iter().map(|(t, idx)| format!("{t}#{idx}")).collect();
             reasons.push(format!(
-                "data loss: {} acknowledged record(s) never consumed (sample indices: {sample:?})",
+                "data loss: {} acknowledged record(s) never consumed (sample: {sample_str:?})",
                 lost.len()
             ));
         }
@@ -240,9 +338,23 @@ impl Verifier for ConservationVerifier {
             ));
         }
 
+        // Report expected-lost as every delivered record that was legitimately
+        // excused: the explicit expected_lost snapshots PLUS blackout-skipped
+        // records (unobserved, below a blackout topic's resume point) not already
+        // counted in expected_lost.
+        let blackout_excused = s
+            .delivered
+            .keys()
+            .filter(|key| !s.observed.contains_key(*key) && !s.expected_lost.contains(*key))
+            .filter(|(topic, idx)| match blackout_resume.get(topic.as_str()) {
+                Some(&resume) => *idx <= resume,
+                None => false,
+            })
+            .count();
+
         ChaosVerdict {
             delivered: s.delivered.len(),
-            expected_lost: s.expected_lost.len(),
+            expected_lost: s.expected_lost.len() + blackout_excused,
             failed_sends: s.failed_sends,
             logical_duplicates,
             physical_duplicates,
@@ -264,8 +376,9 @@ pub struct ChaosVerdict {
     /// Same physical `(topic_id, partition, offset)` seen more than once.
     pub physical_duplicates: u64,
     pub partitions_covered: usize,
-    /// Delivered indices the consumer never observed (data loss).
-    pub lost: Vec<u64>,
+    /// Delivered `(topic, index)` records the consumer never observed (data
+    /// loss).
+    pub lost: Vec<LogicalKey>,
     /// Failure reasons; empty ⇒ pass.
     pub reasons: Vec<String>,
 }
@@ -404,7 +517,7 @@ mod tests {
         // never consumed
         let verdict = v.verdict(1);
         assert!(!verdict.is_pass());
-        assert_eq!(verdict.lost, vec![1]);
+        assert_eq!(verdict.lost, vec![("t".to_string(), 1)]);
     }
 
     /// Expected-lost (topic recreate) records are excluded from the loss check.
@@ -417,5 +530,170 @@ mod tests {
         let verdict = v.verdict(1);
         assert_eq!(verdict.lost.len(), 0, "recreate-destroyed record must not be loss: {verdict}");
         assert_eq!(verdict.expected_lost, 1);
+    }
+
+    /// Issue 1 regression: on a recreate-blackout topic, records the producer
+    /// keeps delivering into the delete/recreate window — its index does NOT
+    /// reset — that the consumer skips (they sit below where the consumer later
+    /// resumed) are excused, not scored as loss.
+    #[test]
+    fn recreate_blackout_skipped_records_are_not_loss() {
+        let v = ConservationVerifier::new();
+        // Pre-delete: 0..100 delivered and consumed.
+        for i in 0..100u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+            v.record(WorkloadEvent::Consumed {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+        }
+        // Recreate: harness marks the pre-delete snapshot AND the blackout.
+        v.note_expected_loss(ExpectedLossHint::AllDeliveredForTopic("t".to_string()));
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        // Blackout window: producer keeps its climbing index, delivers 100..130
+        // into the recreated topic; the consumer skips these (stale offset).
+        for i in 100..130u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: (i - 100) as i64,
+            });
+        }
+        // Consumer resumes: 130..160 delivered AND consumed. The max observed
+        // index (159) is the resume point; 100..130 sit below it -> excused.
+        for i in 130..160u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: (i - 100) as i64,
+            });
+            v.record(WorkloadEvent::Consumed {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: (i - 100) as i64,
+            });
+        }
+        let verdict = v.verdict(1);
+        assert_eq!(
+            verdict.lost.len(),
+            0,
+            "blackout-skipped boundary records (below the resume point) must not be loss: {verdict}"
+        );
+    }
+
+    /// A recreate-blackout topic still fails on records ABOVE the resume point
+    /// that the consumer never saw — the excusal is bounded to the skipped
+    /// window, it does not blanket-excuse genuine post-resume loss.
+    #[test]
+    fn recreate_blackout_does_not_excuse_loss_above_resume_point() {
+        let v = ConservationVerifier::new();
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        // Skipped in blackout (0..5), never observed -> excused.
+        for i in 0..5u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+        }
+        // Consumer resumed and observed index 10 (the resume high-water mark).
+        v.record(WorkloadEvent::Delivered { index: 10, topic: "t".into(), topic_id: zero(), partition: 0, offset: 10 });
+        v.record(WorkloadEvent::Consumed { index: 10, topic: "t".into(), topic_id: zero(), partition: 0, offset: 10 });
+        // Delivered index 11 (above resume) never observed -> REAL loss.
+        v.record(WorkloadEvent::Delivered { index: 11, topic: "t".into(), topic_id: zero(), partition: 0, offset: 11 });
+        let verdict = v.verdict(1);
+        assert_eq!(
+            verdict.lost,
+            vec![("t".to_string(), 11)],
+            "loss above the resume point is real: {verdict}"
+        );
+        assert!(!verdict.is_pass());
+    }
+
+    /// The per-topic consume-progress signal advances only for the named topic,
+    /// so the drain can detect a resumed consumer on a just-recreated topic even
+    /// while the other topics' consumption keeps the GLOBAL counter climbing.
+    #[test]
+    fn per_topic_consume_progress_is_scoped() {
+        let v = ConservationVerifier::new();
+        assert_eq!(v.consumed_progress_for_topic("t0"), 0);
+        v.record(WorkloadEvent::Consumed { index: 0, topic: "t0".into(), topic_id: zero(), partition: 0, offset: 0 });
+        v.record(WorkloadEvent::Consumed { index: 0, topic: "t1".into(), topic_id: zero(), partition: 0, offset: 0 });
+        v.record(WorkloadEvent::Consumed { index: 1, topic: "t0".into(), topic_id: zero(), partition: 0, offset: 1 });
+        assert_eq!(v.consumed_progress_for_topic("t0"), 2);
+        assert_eq!(v.consumed_progress_for_topic("t1"), 1);
+        assert_eq!(v.consumed_progress_for_topic("absent"), 0);
+        // Global counter is the sum across topics.
+        assert_eq!(v.consumed_progress(), 3);
+    }
+
+    /// The SAME logical index produced on two different topics is two distinct
+    /// records: consuming both must not be scored as a duplicate, and losing one
+    /// (but not the other) must be scored as exactly one loss. This is the
+    /// multi-topic key-collision guard — with an `index`-only key, topic `t0`
+    /// index 5 and topic `t1` index 5 would collapse into one record and corrupt
+    /// the accounting.
+    #[test]
+    fn same_index_on_two_topics_are_distinct_records() {
+        let v = ConservationVerifier::new();
+        // Both topics deliver index 5 at the same physical partition/offset but
+        // under distinct topic ids (post-create ids differ).
+        let id0 = Uuid::from_bytes([1u8; 16]);
+        let id1 = Uuid::from_bytes([2u8; 16]);
+        v.record(WorkloadEvent::Delivered { index: 5, topic: "t0".into(), topic_id: id0, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Delivered { index: 5, topic: "t1".into(), topic_id: id1, partition: 0, offset: 5 });
+        // Consume each once.
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t0".into(), topic_id: id0, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t1".into(), topic_id: id1, partition: 0, offset: 5 });
+
+        let verdict = v.verdict(1);
+        assert!(
+            verdict.is_pass(),
+            "two distinct records consumed once each should pass: {verdict}"
+        );
+        assert_eq!(verdict.delivered, 2, "both (topic, index=5) records must be counted");
+        assert_eq!(verdict.lost.len(), 0);
+        assert_eq!(
+            verdict.logical_duplicates, 0,
+            "same index on two topics is not a logical duplicate"
+        );
+    }
+
+    /// Expected-loss scoped to ONE topic must not excuse loss on another topic.
+    /// A recreate of `t0` destroys `t0`'s records (not loss), but `t1`'s
+    /// unconsumed delivered record is still real loss.
+    #[test]
+    fn expected_loss_scoped_to_one_topic_does_not_excuse_another() {
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::Delivered { index: 1, topic: "t0".into(), topic_id: zero(), partition: 0, offset: 0 });
+        v.record(WorkloadEvent::Delivered { index: 1, topic: "t1".into(), topic_id: zero(), partition: 0, offset: 0 });
+        // Recreate hits t0 only: its delivered records are expected-lost.
+        v.note_expected_loss(ExpectedLossHint::AllDeliveredForTopic("t0".to_string()));
+        // Neither is consumed. t0's loss is excused; t1's is not.
+        let verdict = v.verdict(1);
+        assert_eq!(verdict.expected_lost, 1, "only t0's record is expected-lost");
+        assert_eq!(
+            verdict.lost,
+            vec![("t1".to_string(), 1)],
+            "t1's unconsumed record is still real loss"
+        );
+        assert!(!verdict.is_pass(), "loss on t1 must fail the run");
     }
 }
