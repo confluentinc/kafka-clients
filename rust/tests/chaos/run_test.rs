@@ -53,8 +53,8 @@ enum PlannedAction {
     ChangeLeader,
     /// Partition reassignment (data moves).
     ReassignPartitions,
-    /// Delete + recreate the topic with the chosen dwell (0 = immediate).
-    TopicRecreate { dwell: Duration },
+    /// Delete + recreate ONE chosen topic with the chosen dwell (0 = immediate).
+    TopicRecreate { topic: String, dwell: Duration },
 }
 
 /// Draw one cycle's action in `--random` mode from the seeded `rng`. Returns
@@ -65,8 +65,14 @@ fn random_plan(rng: &mut StdRng, cfg: &ChaosConfig) -> Option<PlannedAction> {
     if rng.random::<f64>() >= cfg.action_prob {
         return None; // quiet cycle
     }
-    // Candidate faults, all equally likely. Broker-roll included.
-    let plan = match rng.random_range(0..4) {
+    // Candidate faults, all equally likely. Broker-roll included. TopicRecreate
+    // (candidate 3) is EXCLUDED under multi-topic: multi-topic + recreate is a
+    // known limitation (a new-generation recreate leaves the consumer positioned
+    // past the new tail without an offset reset — see `ChaosConfig::from_env`),
+    // so a single-topic run has all 4 candidates while a multi-topic run draws
+    // only broker-roll / change-leader / reassign.
+    let candidates = if cfg.num_topics > 1 { 3 } else { 4 };
+    let plan = match rng.random_range(0..candidates) {
         0 => {
             // Pick a broker that is not permanently left down.
             let eligible: Vec<u16> = (1..=cfg.brokers).filter(|b| cfg.leave_broker_down != Some(*b)).collect();
@@ -91,7 +97,10 @@ fn random_plan(rng: &mut StdRng, cfg: &ChaosConfig) -> Option<PlannedAction> {
             } else {
                 Duration::from_secs(rng.random_range(3..=8))
             };
-            PlannedAction::TopicRecreate { dwell }
+            // Pick one random topic (librdkafka's rng.choice(topics)).
+            let topics = cfg.topics();
+            let topic = topics[rng.random_range(0..topics.len())].clone();
+            PlannedAction::TopicRecreate { topic, dwell }
         },
     };
     Some(plan)
@@ -109,22 +118,28 @@ async fn run_planned(
 ) {
     match plan {
         PlannedAction::BrokerRoll { node_id, kind, down } => {
-            ChaosAction::BrokerRoll { node_id, kind, down, wait_up: cfg.up_wait_dur(), topic: cfg.topic.clone() }
-                .execute(brokers, admin, reports)
-                .await;
+            ChaosAction::BrokerRoll {
+                node_id,
+                kind,
+                down,
+                wait_up: cfg.up_wait_dur(),
+                topics: harness.topics().to_vec(),
+            }
+            .execute(brokers, admin, reports)
+            .await;
         },
         PlannedAction::ChangeLeader => {
-            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ChangeLeader }
+            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ChangeLeader }
                 .execute(brokers, admin, reports)
                 .await;
         },
         PlannedAction::ReassignPartitions => {
-            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ReassignPartitions }
+            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ReassignPartitions }
                 .execute(brokers, admin, reports)
                 .await;
         },
-        PlannedAction::TopicRecreate { dwell } => {
-            harness.recreate_topic(dwell).await;
+        PlannedAction::TopicRecreate { topic, dwell } => {
+            harness.recreate_topic(&topic, dwell).await;
         },
     }
 }
@@ -155,6 +170,7 @@ async fn run_action(
     admin: &dyn Admin,
     harness: &ChaosHarness,
     reports: &ReportsHandle,
+    rng: &mut StdRng,
 ) {
     match action {
         ActionKind::BrokerRoll => {
@@ -164,26 +180,37 @@ async fn run_action(
                     kind: stop_kind,
                     down: cfg.stop_dur(),
                     wait_up: cfg.up_wait_dur(),
-                    topic: cfg.topic.clone(),
+                    topics: harness.topics().to_vec(),
                 }
                 .execute(brokers, admin, reports)
                 .await;
             }
         },
         ActionKind::ChangeLeader => {
-            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ChangeLeader }
+            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ChangeLeader }
                 .execute(brokers, admin, reports)
                 .await;
         },
         ActionKind::ReassignPartitions => {
-            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ReassignPartitions }
+            ChaosAction::Migrate { topics: harness.topics().to_vec(), mode: ReassignMode::ReassignPartitions }
                 .execute(brokers, admin, reports)
                 .await;
         },
         ActionKind::TopicRecreate => {
-            harness.recreate_topic(Duration::from_secs(cfg.dwell_s)).await;
+            // librdkafka's topic-chaos picks ONE random topic per firing
+            // (`rng.choice(topics)`). Seeded so a given --seed reproduces it.
+            let topic = pick_topic(rng, harness);
+            harness.recreate_topic(&topic, Duration::from_secs(cfg.dwell_s)).await;
         },
     }
+}
+
+/// Pick one random topic from the run's set, seeded by `rng` (librdkafka's
+/// `rng.choice(topics)` in `_topic_chaos_thread`). For a single-topic run this
+/// always returns that topic.
+fn pick_topic(rng: &mut StdRng, harness: &ChaosHarness) -> String {
+    let topics = harness.topics();
+    topics[rng.random_range(0..topics.len())].clone()
 }
 
 /// Roll every broker of the cycle, but inject `hook` into the down-window of the
@@ -197,6 +224,7 @@ async fn run_broker_roll_with_hook<F>(
     stop_kind: StopKind,
     brokers: &BrokerControl<'_>,
     admin: &dyn Admin,
+    harness: &ChaosHarness,
     reports: &ReportsHandle,
     hook: F,
 ) where
@@ -211,7 +239,7 @@ async fn run_broker_roll_with_hook<F>(
             kind: stop_kind,
             down: cfg.stop_dur(),
             wait_up: cfg.up_wait_dur(),
-            topic: cfg.topic.clone(),
+            topics: harness.topics().to_vec(),
         }
         .execute_with_hook(brokers, admin, reports, this_hook)
         .await;
@@ -236,10 +264,23 @@ async fn chaos_run() {
     }
     if config.random {
         eprintln!("chaos: RANDOM mode — reproduce this exact run with --seed {}", config.seed);
+        if config.num_topics > 1 {
+            eprintln!(
+                "chaos: NOTE topic-recreate is excluded from RANDOM candidates under --num-topics > 1 \
+                 (multi-topic + recreate is a known limitation)"
+            );
+        }
     }
     eprintln!("chaos: {}", config.summary());
 
-    let harness = ChaosHarness::start(&config.topic, config.brokers, config.partitions).await;
+    let harness = ChaosHarness::start_with_topics(
+        &config.topics(),
+        config.brokers,
+        config.partitions,
+        config.replication_factor,
+        Arc::new(super::verifier::ConservationVerifier::new()),
+    )
+    .await;
 
     // If a broker is to be left permanently down, stop it before workloads
     // ramp up (librdkafka's --leave-broker-down).
@@ -248,7 +289,9 @@ async fn chaos_run() {
         harness.brokers().stop(node, StopKind::Clean);
     }
 
-    let workloads = harness.build_workloads(&config.workloads, config.rps, config.commit_mode).await;
+    let workloads = harness
+        .build_workloads(&config.workloads, config.rps, config.msg_size, config.commit_mode)
+        .await;
     let verifier = harness.verifier();
 
     let stop_kind = if config.unclean {
@@ -363,9 +406,21 @@ async fn chaos_run() {
                             pool_hook.remove_consumer();
                         }
                     };
-                    run_broker_roll_with_hook(cfg, cycle, stop_kind, &brokers, admin, reports_ref, hook).await;
+                    run_broker_roll_with_hook(cfg, cycle, stop_kind, &brokers, admin, harness_ref, reports_ref, hook)
+                        .await;
                 } else {
-                    run_action(spec.kind, cfg, cycle, stop_kind, &brokers, admin, harness_ref, reports_ref).await;
+                    run_action(
+                        spec.kind,
+                        cfg,
+                        cycle,
+                        stop_kind,
+                        &brokers,
+                        admin,
+                        harness_ref,
+                        reports_ref,
+                        &mut rng,
+                    )
+                    .await;
                 }
             }
 
@@ -384,6 +439,7 @@ async fn chaos_run() {
             config.drain_dur(),
             config.idle_threshold_dur(),
             verifier.clone(),
+            harness.recreate_settle(),
             scenario,
         )
         .await;
