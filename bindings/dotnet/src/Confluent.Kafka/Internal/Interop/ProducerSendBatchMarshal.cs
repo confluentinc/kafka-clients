@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System;
+using System.Buffers;
+using System.Runtime.InteropServices;
 
 namespace Confluent.Kafka.Internal.Interop;
 
@@ -20,142 +22,194 @@ namespace Confluent.Kafka.Internal.Interop;
 /// The <c>unsafe</c> send-path marshalling for the async producer's <b>batch</b> send
 /// (<c>kafka_producer_Producer_send_batch</c>) — M11/P3.1, the Python binding's shape
 /// (<c>bindings/python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>). Fills the blittable
-/// <see cref="ProducerRecordNative"/> array, applies the §A4 absent / empty / present sentinels, and
-/// reads the ABI's <b>per-record</b> result pair. The sibling of
+/// <see cref="ProducerRecordNative"/> array from already-pinned buffers, applies the ffi §A4
+/// absent / empty / present sentinels, and issues the call. The sibling of
 /// <see cref="ProducerSendMarshal"/>, which stays in place for the <b>sync</b> send path
 /// (M11/P3.1 §3.1: the sync path is deliberately unchanged and still calls the singular
-/// <c>Producer_send</c>). Lives in <c>Internal/Interop/</c> because it is the only new send-path
-/// code that needs <c>unsafe</c>, keeping <c>unsafe</c> quarantined here (CLAUDE.md §2).
+/// <c>Producer_send</c> with call-scoped <c>fixed</c> pins). Lives in <c>Internal/Interop/</c>
+/// because it is the only new send-path code that needs <c>unsafe</c>, keeping <c>unsafe</c>
+/// quarantined here (CLAUDE.md §2).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Slice S1 scope — pins are still CALL-SCOPED.</b> This entry point pins the topic / key / value
-/// inside the call and unpins on return, exactly as <see cref="ProducerSendMarshal"/> does, so the
-/// buffer-lifetime contract is unchanged from Option C while the mirror struct, the sentinels and
-/// the per-record error semantics are proven against the real ABI. The deferred-pin machinery (a
-/// pin taken in <c>Send</c> and released after <c>send_batch</c> returns) is slice S2, and the
-/// accumulator that makes a batch bigger than one record is slice S3.
+/// <b>It does not own the pins — the caller does (M11/P3.1 §4.4).</b> The key / value
+/// <see cref="MemoryHandle"/>s and the topic pointer arrive already pinned and are released by the
+/// caller, in a <c>finally</c>, <b>after</b> the native call returns and <b>before</b> the future
+/// reaches the completion pump. That split is the whole point of the deferred design: the pin has
+/// to span <c>Send</c> → …accumulator… → <c>send_batch</c> returns, which no <c>fixed</c> block
+/// inside this type could express. It still never spans the returned
+/// <see cref="System.Threading.Tasks.Task"/> — the core copies every buffer synchronously inside
+/// <c>send_batch</c> (verified: <c>send_batch_inner</c> runs <c>producer_send</c>, i.e.
+/// <c>rt.block_on(producer.send(record, None))</c>, per record, and copies the topic with
+/// <c>to_string_lossy().into_owned()</c>), so ffi §A4's "unpin right after the call" still holds,
+/// merely applied to <c>send_batch</c> instead of <c>send</c>.
 /// </para>
 /// <para>
 /// <b>Per-record results, not a single out-param.</b> Unlike <c>Producer_send</c>, which reports a
 /// synchronous failure through one <c>out_error</c>, <c>send_batch</c> writes a
-/// <c>(future, error)</c> pair for <b>every</b> index and returns the success count. The caller
-/// therefore owns <c>count</c> pairs and must free every non-null handle on every path (ffi §A2).
-/// At <c>n == 1</c> that reduces to today's behavior: a non-null error becomes the
+/// <c>(future, error)</c> pair for <b>every</b> index and returns the accepted count. The caller
+/// therefore owns <c>count</c> result pairs and must free every non-null handle on every path
+/// (ffi §A2). At <c>n == 1</c> that reduces to today's behavior: a non-null error becomes the
 /// <see cref="KafkaException"/> the caller already expects.
 /// </para>
 /// </remarks>
 internal static class ProducerSendBatchMarshal
 {
+    // A process-wide, permanently pinned 1-byte buffer for the EMPTY (present but zero-length)
+    // key/value case (M11/P3.1 §4.2). ffi §A4 requires a NON-NULL pointer with length 0 there,
+    // because the core rejects (null, len >= 0) — and both of the obvious ways to produce one are
+    // wrong for a deferred send: `fixed` over an empty span yields NULL, and the stack sentinel the
+    // sync path uses (ProducerSendMarshal) is a stack address that is dead by the time a deferred
+    // batch reads it. That failure mode "works" almost always and corrupts rarely, which is the
+    // worst kind, so the sentinel is hoisted to a static that outlives every send.
+    //
+    // Never freed, deliberately: one byte for the process, and freeing it would reintroduce exactly
+    // the dangling-pointer question it exists to remove. The pin field is read by the pointer
+    // initializer below (static field initializers run in textual order, so the pin exists first).
+    private static readonly GCHandle s_emptySentinelPin =
+        GCHandle.Alloc(new byte[1], GCHandleType.Pinned);
+
+    private static readonly IntPtr s_emptySentinel = s_emptySentinelPin.AddrOfPinnedObject();
+
     /// <summary>
-    /// Sends exactly one record through <c>kafka_producer_Producer_send_batch</c> (<c>count == 1</c>)
-    /// and returns its <c>FutureRecordMetadata_t</c> handle. Behaviorally identical to
-    /// <see cref="ProducerSendMarshal.Send"/>: the topic and the key / value buffers are pinned only
-    /// for the duration of the P/Invoke — the core copies them into the batch buffer during the call
-    /// (ffi §A4) — and a per-record error is raised as a <see cref="KafkaException"/>.
+    /// Pins <paramref name="buffer"/> for a deferred send, or returns a <c>default</c>
+    /// (nothing-pinned) handle when there is nothing to pin — i.e. when the buffer is <b>absent</b>
+    /// (<see langword="null"/>) or <b>empty</b>. Dispose the result exactly once, on every path;
+    /// <see cref="MemoryHandle.Dispose"/> is safe on the <c>default</c> value.
     /// </summary>
     /// <remarks>
-    /// Sentinels (ffi §A4, unchanged): an <b>absent</b> (<see langword="null"/>) key/value passes
-    /// <see cref="IntPtr.Zero"/> + <c>len -1</c>; an <b>empty</b> (zero-length) one passes a
-    /// <b>non-null stack sentinel</b> + <c>len 0</c> (a <c>fixed</c> over an empty span yields a null
-    /// pointer, which the core rejects for a non-negative length); a <b>present</b> one passes the
-    /// pinned pointer + its length. The stack sentinel is correct <em>because the pin is
-    /// call-scoped</em> — slice S2 replaces it with a process-wide statically-pinned byte when the
-    /// send is deferred, at which point a stack address would be a use-after-free (PLAN §4.2).
+    /// <b>The decision to pin and the interpretation of the pin live in one place</b> (DoD §12): the
+    /// empty case is handled by <see cref="s_emptySentinel"/> in <see cref="Fill"/>, so pinning an
+    /// empty buffer here would allocate a <see cref="GCHandle"/> whose pointer is never read — and,
+    /// worse, if the two ever disagreed the record would go out as (null, len 0) and the core would
+    /// reject it as <c>InvalidRequest</c>. Keeping both branches in this file is what stops that
+    /// drifting apart.
+    /// <para>
+    /// <see cref="System.ReadOnlyMemory{T}.Pin"/> — not <c>GCHandle.Alloc(Pinned)</c>: the record's
+    /// key/value is a <see cref="System.ReadOnlyMemory{T}"/>, which <c>GCHandle</c> cannot pin (it
+    /// pins <em>objects</em>), while <c>Pin()</c> handles every backing store (array, string, native
+    /// memory, a custom <c>MemoryManager</c>) and exists on all three TFMs — on
+    /// <c>netstandard2.0</c> through the already-referenced <c>System.Memory</c> package
+    /// (M11/P3.1 §3.9).
+    /// </para>
     /// </remarks>
+    /// <param name="buffer">The record's key or value.</param>
+    internal static MemoryHandle PinIfNeeded(ReadOnlyMemory<byte>? buffer) =>
+        buffer.HasValue && buffer.Value.Length > 0 ? buffer.Value.Pin() : default;
+
+    /// <summary>
+    /// Fills one <see cref="ProducerRecordNative"/> from a record plus its already-pinned buffers,
+    /// applying the ffi §A4 sentinels: <b>absent</b> → <see cref="IntPtr.Zero"/> + <c>len -1</c>;
+    /// <b>empty</b> → the static non-null sentinel + <c>len 0</c>; <b>present</b> → the pinned
+    /// pointer + its length. The ABI's own <c>-1</c> sentinels are applied to a null partition /
+    /// timestamp.
+    /// </summary>
+    /// <param name="native">The slot to fill (overwritten in full).</param>
+    /// <param name="record">The already-serialized record.</param>
+    /// <param name="topic">A pinned NUL-terminated UTF-8 topic pointer (see <see cref="PinnedTopicCache"/>).</param>
+    /// <param name="keyPin">The key pin from <see cref="PinIfNeeded"/> (<c>default</c> when absent or empty).</param>
+    /// <param name="valuePin">The value pin from <see cref="PinIfNeeded"/> (<c>default</c> when absent or empty).</param>
+    internal static unsafe void Fill(
+        ref ProducerRecordNative native,
+        in SerializedProducerRecord record,
+        IntPtr topic,
+        in MemoryHandle keyPin,
+        in MemoryHandle valuePin)
+    {
+        native.Topic = topic;
+
+        // The ABI maps a null partition / timestamp to its own -1 sentinels.
+        native.Partition = record.Partition ?? -1;
+        native.Timestamp = record.Timestamp ?? -1L;
+
+        if (!record.Key.HasValue)
+        {
+            native.Key = IntPtr.Zero;                   // absent (no key)
+            native.KeyLength = -1;
+        }
+        else if (record.Key.Value.Length == 0)
+        {
+            native.Key = s_emptySentinel;               // empty: non-null pointer, length 0
+            native.KeyLength = 0;
+        }
+        else
+        {
+            native.Key = (IntPtr)keyPin.Pointer;        // present
+            native.KeyLength = record.Key.Value.Length;
+        }
+
+        if (!record.Value.HasValue)
+        {
+            native.Value = IntPtr.Zero;                 // absent (a tombstone)
+            native.ValueLength = -1;
+        }
+        else if (record.Value.Value.Length == 0)
+        {
+            native.Value = s_emptySentinel;
+            native.ValueLength = 0;
+        }
+        else
+        {
+            native.Value = (IntPtr)valuePin.Pointer;
+            native.ValueLength = record.Value.Value.Length;
+        }
+    }
+
+    /// <summary>
+    /// Sends exactly one record through <c>kafka_producer_Producer_send_batch</c>
+    /// (<c>count == 1</c>) from already-pinned buffers, and returns its
+    /// <c>FutureRecordMetadata_t</c> handle. Allocation-free: the record and the one result pair
+    /// live on the stack, so the send path's DoD §10 budget is unchanged.
+    /// </summary>
     /// <param name="producer">
     /// The owned producer handle, passed as the <see cref="SafeProducerHandle"/> so the P/Invoke
     /// marshaler auto-<c>DangerousAddRef</c>/<c>Release</c>s it around the synchronous
     /// <c>send_batch</c> — the call-scoped guard against a concurrent <c>Producer_destroy</c>
     /// (ffi §A2 sync-op form). A closed handle marshals to <see cref="ObjectDisposedException"/>.
     /// </param>
-    /// <param name="record">The already-serialized record (its topic is non-null; validated above).</param>
+    /// <param name="record">The already-serialized record.</param>
+    /// <param name="topic">A pinned NUL-terminated UTF-8 topic pointer, valid for this call.</param>
+    /// <param name="keyPin">The key pin, valid for this call (the caller releases it afterwards).</param>
+    /// <param name="valuePin">The value pin, valid for this call (the caller releases it afterwards).</param>
     /// <returns>A non-null <c>FutureRecordMetadata_t</c> handle on success.</returns>
     /// <exception cref="KafkaException">The core reported a per-record send failure.</exception>
-    internal static unsafe IntPtr SendOne(SafeProducerHandle producer, in SerializedProducerRecord record)
+    internal static unsafe IntPtr SendOne(
+        SafeProducerHandle producer,
+        in SerializedProducerRecord record,
+        IntPtr topic,
+        in MemoryHandle keyPin,
+        in MemoryHandle valuePin)
     {
-        // Call-scoped topic pin: send_batch copies the topic synchronously, via
-        // to_string_lossy().into_owned() inside send_batch_inner (ffi §A3).
-        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(record.Topic);
+        ProducerRecordNative native = default;
+        Fill(ref native, record, topic, keyPin, valuePin);
 
-        ReadOnlySpan<byte> keySpan = record.Key.HasValue ? record.Key.Value.Span : default;
-        ReadOnlySpan<byte> valueSpan = record.Value.HasValue ? record.Value.Value.Span : default;
+        // Stack slots for the one result pair — no managed array, so the send path stays
+        // allocation-free (DoD §10). Definitely assigned before `&` per C#'s rules; the callee
+        // overwrites both.
+        IntPtr future = IntPtr.Zero;
+        IntPtr error = IntPtr.Zero;
 
-        // A non-null stack sentinel for the empty (Length == 0) case: `fixed` over an empty span
-        // yields a NULL pointer, and the core rejects (null, len >= 0). Its address is guaranteed
-        // non-null, so it distinguishes empty (non-null ptr, len 0) from absent (null ptr, len -1).
-        byte emptySentinel = 0;
+        _ = NativeMethods.ProducerSendBatch(producer, &native, 1, &future, &error);
 
-        fixed (byte* keyPtr = keySpan)
-        fixed (byte* valuePtr = valueSpan)
+        // Per-record failure: null future + non-null error. FromHandle frees the error exactly
+        // once (null-safe) and returns null on success.
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
         {
-            ProducerRecordNative native = default;
-            native.Topic = topicPin.Pointer;
-
-            // The ABI maps null partition / timestamp to its own -1 sentinels.
-            native.Partition = record.Partition ?? -1;
-            native.Timestamp = record.Timestamp ?? -1L;
-
-            if (!record.Key.HasValue)
-            {
-                native.Key = IntPtr.Zero;       // absent
-                native.KeyLength = -1;
-            }
-            else if (keySpan.Length == 0)
-            {
-                native.Key = (IntPtr)(&emptySentinel);  // empty: non-null pointer, length 0
-                native.KeyLength = 0;
-            }
-            else
-            {
-                native.Key = (IntPtr)keyPtr;    // present
-                native.KeyLength = keySpan.Length;
-            }
-
-            if (!record.Value.HasValue)
-            {
-                native.Value = IntPtr.Zero;     // absent (tombstone)
-                native.ValueLength = -1;
-            }
-            else if (valueSpan.Length == 0)
-            {
-                native.Value = (IntPtr)(&emptySentinel);
-                native.ValueLength = 0;
-            }
-            else
-            {
-                native.Value = (IntPtr)valuePtr;
-                native.ValueLength = valueSpan.Length;
-            }
-
-            // Stack slots for the one result pair — no managed array, so the send path stays
-            // allocation-free (DoD §10). Definitely assigned before `&` per C#'s rules; the callee
-            // overwrites both.
-            IntPtr future = IntPtr.Zero;
-            IntPtr error = IntPtr.Zero;
-
-            _ = NativeMethods.ProducerSendBatch(producer, &native, 1, &future, &error);
-
-            // Per-record failure: null future + non-null error. FromHandle frees the error exactly
-            // once (null-safe) and returns null on success.
-            KafkaException? failure = KafkaException.FromHandle(error);
-            if (failure is not null)
-            {
-                throw failure;
-            }
-
-            if (future == IntPtr.Zero)
-            {
-                // Defensive only: the ABI writes exactly one of the pair per index, so a null future
-                // with a null error is a core contract violation. Surfaced as a KafkaException rather
-                // than handed to the pump, which would enqueue a null future (mirrors the
-                // NativeProducer.Create "null handle without an error" guard).
-                throw new KafkaException(
-                    "kafka_producer_Producer_send_batch returned a null future without an error.");
-            }
-
-            return future;
+            throw failure;
         }
+
+        if (future == IntPtr.Zero)
+        {
+            // Defensive only: the ABI writes exactly one of the pair per index, so a null future
+            // with a null error is a core contract violation. Surfaced as a KafkaException rather
+            // than handed to the pump, which would enqueue a null future (mirrors the
+            // NativeProducer.Create "null handle without an error" guard).
+            throw new KafkaException(
+                "kafka_producer_Producer_send_batch returned a null future without an error.");
+        }
+
+        return future;
     }
 
     /// <summary>
@@ -163,8 +217,8 @@ internal static class ProducerSendBatchMarshal
     /// <paramref name="records"/><c>[offset .. offset + count)</c>, writing the per-record results
     /// into <paramref name="outFutures"/> / <paramref name="outErrors"/> at the <b>same</b>
     /// indices, and returns the number of records the core accepted. The three arrays are pinned
-    /// with <c>fixed</c> for exactly the call's duration; the callee borrows every buffer the
-    /// records point at only for that same window (ffi §A4).
+    /// with <c>fixed</c> for exactly the call's duration; the buffers the records point at are
+    /// pinned by the caller for at least the same window (ffi §A4).
     /// </summary>
     /// <remarks>
     /// <para>

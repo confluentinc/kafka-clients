@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -110,6 +111,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // teardown starts (PLAN §6.3).
     private readonly object _pumpLock = new object();
     private SendCompletionPump? _pump;
+
+    // One permanently-pinned NUL-terminated UTF-8 buffer per DISTINCT topic name, for the deferred
+    // async send path (M11/P3.1 §4.1). Interning rather than a per-record topic pin keeps the cost
+    // at O(distinct topics) permanent pins instead of O(records) transient ones; a topic beyond the
+    // cache's cap falls back to a per-record pin the send releases itself. Not used by the sync
+    // send, which still pins the topic call-scoped (§3.1).
+    private readonly PinnedTopicCache _topics = new PinnedTopicCache();
 
     private NativeProducer(SafeProducerHandle handle)
     {
@@ -401,11 +409,24 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // count == 1, not the singular Producer_send. Behavior is identical (the same
         // producer_send under the hood, the same -1 partition/timestamp sentinels, the same
         // absent/empty/present key-value sentinels, the same KafkaException on a synchronous
-        // failure — which arrives as the per-record out_errors[0] instead of one out_error), and
-        // the pins are still CALL-SCOPED. What it buys is that the mirror struct, the sentinels and
-        // the per-record error semantics are proven before slice S2 defers the pins and slice S3
-        // makes the batch bigger than one record. The SYNC Send below is deliberately NOT moved
-        // (M11/P3.1 §3.1) and still calls ProducerSendMarshal.Send.
+        // failure — which arrives as the per-record out_errors[0] instead of one out_error). The
+        // SYNC Send below is deliberately NOT moved (M11/P3.1 §3.1) and still calls
+        // ProducerSendMarshal.Send.
+        //
+        // Slice S2: the pins are now taken HERE and released in the finally below, instead of
+        // living inside a `fixed` block in the marshaller. Only the *shape* changes in this slice —
+        // the send is still inline, so the pin window is still one call — but it is the shape a
+        // deferred send needs, and it is where the exactly-once-unpin contract (§4.4) is enforced:
+        //   * key / value  -> ReadOnlyMemory<byte>.Pin() (NOT GCHandle.Alloc, which cannot pin a
+        //     ReadOnlyMemory) via the marshaller's PinIfNeeded, which also decides that an ABSENT or
+        //     EMPTY buffer needs no pin at all — the empty case uses the marshaller's static
+        //     sentinel (§4.2), since a stack sentinel would be a use-after-free once deferred.
+        //   * topic        -> one permanently-pinned buffer per DISTINCT topic from the interning
+        //     cache (§4.1), so the third buffer costs O(distinct topics) permanent pins rather than
+        //     O(records) transient ones. Release() is a no-op on an interned hit and frees the
+        //     per-record fallback beyond the cache's cap.
+        // This method holds MemoryHandle values but never reads their pointers, so it stays free of
+        // `unsafe` (CLAUDE.md §2 — that lives only in Internal/Interop/).
         //
         // Pass the SafeProducerHandle straight through (no manual DangerousAddRef): NativeMethods.
         // ProducerSendBatch takes it as a SafeHandle param, so the P/Invoke marshaler auto-
@@ -416,7 +437,31 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // *_async op cannot (the auto ref releases before its completion callback fires) and keeps
         // the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
         // (ThrowIfClosed above already covers the common post-Dispose case).
-        IntPtr future = ProducerSendBatchMarshal.SendOne(_handle, record);
+        MemoryHandle keyPin = default;
+        MemoryHandle valuePin = default;
+        PinnedTopicCache.TopicPin topicPin = default;
+        IntPtr future;
+        try
+        {
+            keyPin = ProducerSendBatchMarshal.PinIfNeeded(record.Key);
+            valuePin = ProducerSendBatchMarshal.PinIfNeeded(record.Value);
+            topicPin = _topics.Rent(record.Topic);
+
+            future = ProducerSendBatchMarshal.SendOne(
+                _handle, record, topicPin.Pointer, keyPin, valuePin);
+        }
+        finally
+        {
+            // Exactly once, on EVERY path (§4.4): the two PinIfNeeded results and the topic rent.
+            // All three are no-ops on their `default` value, so a throw from any of the three
+            // acquisitions above releases exactly what was acquired and nothing else. Unpinning
+            // here — after send_batch returned, before the future reaches the pump — is ffi §A4's
+            // "unpin right after the call": the core copied every buffer synchronously inside the
+            // call, so nothing is held across the returned Task.
+            topicPin.Release();
+            valuePin.Dispose();
+            keyPin.Dispose();
+        }
 
         // The future is live but not yet owned by the pump. If anything between here and
         // pump.Enqueue throws (OOM allocating the TCS / the cancellation registration / the
