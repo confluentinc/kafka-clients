@@ -95,6 +95,19 @@ internal sealed class SendAccumulator
     // linked registration is being torn down is its own hazard.
     private readonly CancellationTokenSource _spaceGate = new CancellationTokenSource();
 
+    // The chain the batch thread TOOK from the accumulator and has not finished sending yet.
+    // Written and read ONLY by the batch thread (RunLoopCore publishes it, SendChain advances it,
+    // AbandonOnThreadFailure settles whatever is left), so it needs no lock.
+    //
+    // It exists because the local variable holding the taken chain used to be the ONLY reference to
+    // it: a throw between the take and the end of the send — ReleaseSpace over-releasing, or
+    // ReleasePins / FaultNode failing inside SendNode — reached RunLoop's catch, which settles the
+    // ACCUMULATOR's chain (_head) and could not see the in-flight one. Every record in it was then
+    // stranded forever: its awaiter never completed, its pins never released, its future handles
+    // never destroyed — and Stop still reported the thread as exited, so the interned topic buffers
+    // those un-released pins point at were freed.
+    private Node? _inFlight;
+
     private Node? _head;      // oldest node, the one the wait loop measures (anchor: next_batches_to_send)
     private Node? _tail;      // the node being filled (anchor: last_accumulating_batch)
     private Node? _spare;     // one fully-settled node kept for reuse (see RecycleNode)
@@ -548,11 +561,23 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
-    /// Settles everything the accumulator holds after an unexpected failure of the batch thread
-    /// itself, then lets the thread exit. Runs ON the batch thread, so it is the chain's sole owner.
+    /// Settles everything the batch thread owns after an unexpected failure of the thread itself,
+    /// then lets it exit. Runs ON the batch thread, so it is the sole owner of both chains.
     /// </summary>
+    /// <remarks>
+    /// <b>Both chains, not just the accumulator's.</b> The failure can land while the thread holds a
+    /// chain it has already taken — <see cref="ReleaseSpace"/> over-releasing between the take and
+    /// the send, or <see cref="ReleasePins"/> / <see cref="FaultNode"/> throwing inside
+    /// <see cref="SendNode"/> — so <see cref="_inFlight"/> is settled first, then whatever is still
+    /// in the accumulator. Settling only the latter left every in-flight record stranded forever
+    /// (awaiter never completed, pins never released, futures never destroyed) while
+    /// <see cref="Stop"/> still reported the thread as exited.
+    /// </remarks>
     private void AbandonOnThreadFailure(Exception cause)
     {
+        Node? inFlight = _inFlight;
+        _inFlight = null;
+
         Node? chain;
         int freed;
         lock (_gate)
@@ -565,22 +590,57 @@ internal sealed class SendAccumulator
             SignalIdleLocked();
         }
 
-        ReleaseSpace(freed);
+        SettleAbandonedChain(inFlight, cause);
+        SettleAbandonedChain(chain, cause);
 
+        try
+        {
+            ReleaseSpace(freed);
+        }
+        catch (Exception)
+        {
+            // Last-resort handler: an over-release is exactly one of the failures that gets us
+            // here, and the permit accounting is already unrecoverable at this point. Settling the
+            // records is what matters, and it has already happened above — so swallow rather than
+            // let this escape and kill the thread with an unhandled exception.
+        }
+    }
+
+    /// <summary>
+    /// Releases the pins and faults the awaiters of every node in <paramref name="chain"/>, node by
+    /// node, on the batch thread's failure path.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are idempotent per index — <see cref="ReleasePins"/> resets each slot to its
+    /// <c>default</c> and <see cref="FaultNode"/> skips an index whose completion was already
+    /// nulled — so a node that <see cref="SendNode"/> had partly settled is finished here rather
+    /// than settled twice. The per-node <c>catch</c> is what keeps one failing node from stranding
+    /// its successors: this is the handler of last resort, so it must not itself be the thing that
+    /// abandons records.
+    /// </remarks>
+    private static void SettleAbandonedChain(Node? chain, Exception cause)
+    {
         while (chain is not null)
         {
             Node node = chain;
             chain = node.Next;
             node.Next = null;
 
-            int count = node.Count;
-            ReleasePins(node, count);
+            try
+            {
+                int count = node.Count;
+                ReleasePins(node, count);
 
-            // Nothing here reached the core (the failure preceded this node's send_batch), so both
-            // result slots are zero and FaultNode fires each delivery callback — §6.2's "correct and
-            // complete": a failure notification for an un-accepted record invents nothing and can
-            // never duplicate.
-            FaultNode(node, settled: 0, count: count, cause: cause);
+                // Where nothing reached the core (both result slots zero) FaultNode fires the
+                // delivery callback — §6.2's "correct and complete": a failure notification for an
+                // un-accepted record invents nothing and can never duplicate. Where the core DID
+                // accept a record, FaultNode destroys its future unread and fires nothing.
+                FaultNode(node, settled: 0, count: count, cause: cause);
+            }
+            catch (Exception)
+            {
+                // See the remarks: keep going, so one node cannot strand the rest of the chain.
+            }
         }
     }
 
@@ -620,6 +680,12 @@ internal sealed class SendAccumulator
                 if (chain is not null)
                 {
                     _draining = true;
+
+                    // Publish the taken chain BEFORE leaving the lock, and so before anything that
+                    // can throw between the take and the send (ReleaseSpace below is the first).
+                    // Until this assignment the local `chain` is the only reference to it, and a
+                    // throw there would strand every record it holds — see _inFlight.
+                    _inFlight = chain;
                 }
                 else
                 {
@@ -638,7 +704,7 @@ internal sealed class SendAccumulator
             {
                 try
                 {
-                    SendChain(chain);
+                    SendChain();
                 }
                 finally
                 {
@@ -693,18 +759,30 @@ internal sealed class SendAccumulator
             nameof(NativeProducer),
             "The producer was closed while this send was waiting for accumulator space.");
 
-    private void SendChain(Node? chain)
+    /// <summary>
+    /// Sends every node of the chain <see cref="_inFlight"/> names, advancing it as each node is
+    /// fully settled so a throw leaves exactly the unfinished remainder published.
+    /// </summary>
+    private void SendChain()
     {
         // One send_batch per chunk, walking the chain node by node (anchor :593 issues one call per
         // node). Never one call for the whole chain: chunking is ALSO what bounds how long the
         // core's coarse producer mutex is held in a single stretch (§3.4), so collapsing this loop
         // into a single flattened call would silently remove that cap.
-        while (chain is not null)
+        while (_inFlight is not null)
         {
-            Node node = chain;
-            chain = node.Next;
-            node.Next = null;
+            Node node = _inFlight;
+
+            // SendNode settles (or faults) every slot of this node. A throw out of it — from
+            // ReleasePins in its finally, or from FaultNode in its catch — leaves this node and
+            // its successors unsettled, and _inFlight still names all of them, which is what lets
+            // AbandonOnThreadFailure finish them instead of stranding them.
             SendNode(node);
+
+            // Fully settled: step past it BEFORE recycling, so the failure handler can never
+            // re-enter a node that is already back in the spare slot.
+            _inFlight = node.Next;
+            node.Next = null;
             RecycleNode(node);
         }
     }

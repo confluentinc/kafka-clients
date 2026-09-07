@@ -364,6 +364,58 @@ public sealed class SendAccumulatorTests
         harness.Dispose();
     }
 
+    // ------------------------------------------------- the batch thread's own failure path -----
+
+    [Fact]
+    public async Task BatchThreadFailure_SettlesTheChainItHadALREADYTaken_NotJustTheAccumulators()
+    {
+        // AbandonOnThreadFailure (RunLoop's catch) had NO coverage at all, and it is not a trivial
+        // helper: it closes the accumulator, settles a chain, releases permits, releases pins and
+        // fires delivery callbacks. The gap hid a real defect — the handler took the ACCUMULATOR's
+        // chain (_head) while the failure it handles can land after the batch thread has already
+        // taken one, so every record in the taken chain was stranded forever (its awaiter never
+        // completed, its pins never released, its futures never destroyed) while Stop still
+        // reported the thread as exited and teardown then freed the interned topic buffers those
+        // un-released pins still pointed at.
+        //
+        // Reaching that window needs a throw BETWEEN the take and the send. AppendWithoutAPermit is
+        // the injection (see its remarks): the over-release throws in exactly that gap, with the
+        // taken chain held only by the loop's local — which is why the record is the in-flight
+        // chain's, never the accumulator's.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 10, batchChunk: 1100));
+
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<RecordMetadata> send = harness.AppendWithoutAPermit(0x5A, callback);
+
+        // Without the fix this never completes and the deadline fires instead.
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => send, TimeSpan.FromSeconds(10)));
+        Assert.Equal("The producer send-batch thread failed to process a batch.", failure.Message);
+        Assert.IsType<SemaphoreFullException>(failure.InnerException);
+
+        // The record never reached the core, so the delivery notification IS owed here (§6.2:
+        // faulting an un-accepted record invents nothing and can never duplicate) — and exactly
+        // once, asserted after a settle window because a first observation of 1 cannot rule out 2.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(1, callback.Count);
+        Assert.NotNull(callback.LastMetadata);
+        Assert.Equal(Topic, callback.LastMetadata!.Topic);
+        Assert.Equal(-1L, callback.LastMetadata.Offset);
+        Assert.Same(failure, callback.LastException);
+
+        // The thread exited and the accumulator refuses further appends — "settle what is in hand,
+        // then let the thread die" rather than "keep accepting records nothing will ever drain".
+        Assert.True(
+            harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+            "the failed batch thread did not exit");
+        Assert.True(harness.Accumulator.TryAcquireSpace());
+        Func<object> refused = () => harness.AppendWithoutAPermit(0x5B);
+        Assert.Throws<ObjectDisposedException>(refused);
+
+        harness.Dispose();
+    }
+
     // ------------------------------------------------------------------- backpressure (§4.6) ----
 
     [Fact]
@@ -462,6 +514,28 @@ public sealed class SendAccumulatorTests
     }
 
     /// <summary>
+    /// Records every <see cref="IDeliveryCallback"/> invocation, so "exactly once" can be asserted
+    /// as a <b>count</b> rather than as "it ran".
+    /// </summary>
+    private sealed class RecordingDeliveryCallback : IDeliveryCallback
+    {
+        private int _count;
+
+        internal int Count => Volatile.Read(ref _count);
+
+        internal RecordMetadata? LastMetadata { get; private set; }
+
+        internal KafkaException? LastException { get; private set; }
+
+        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        {
+            LastMetadata = metadata;
+            LastException = exception;
+            Interlocked.Increment(ref _count);
+        }
+    }
+
+    /// <summary>
     /// Reads <see cref="SendAccumulatorSettings.FromEnvironment"/> with the given variables set,
     /// restoring the previous values afterwards. The read itself is pure — no producer is
     /// constructed inside the window — so a concurrently-running test class cannot observe it.
@@ -531,33 +605,62 @@ public sealed class SendAccumulatorTests
         /// <see cref="SendAccumulator.Submit"/>, which owns the pinning (DoD §12: a fixture that
         /// substituted its own pinning would be a proof about the fixture).
         /// </summary>
-        internal Task<RecordMetadata>[] Append(int count)
+        internal Task<RecordMetadata>[] Append(int count, IDeliveryCallback? callback = null)
         {
             Task<RecordMetadata>[] sends = new Task<RecordMetadata>[count];
             for (int i = 0; i < count; i++)
             {
-                sends[i] = AppendOne((byte)i);
+                sends[i] = AppendOne((byte)i, callback);
             }
 
             return sends;
         }
 
         /// <summary>Appends one record, blocking on the backpressure bound if it is full.</summary>
-        internal Task<RecordMetadata> AppendOne(byte tag)
+        internal Task<RecordMetadata> AppendOne(byte tag, IDeliveryCallback? callback = null)
         {
-            SerializedProducerRecord record = new SerializedProducerRecord(
-                Topic, 0, null, null, new byte[] { tag, 0xAA, 0xBB });
-            TaskCompletionSource<RecordMetadata> completion =
-                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+            SerializedProducerRecord record = NewRecord(tag);
+            TaskCompletionSource<RecordMetadata> completion = NewCompletion();
 
             if (Accumulator.TryAcquireSpace())
             {
-                Accumulator.Submit(record, completion, delivery: null);
+                Accumulator.Submit(record, completion, NewDelivery(callback));
                 return completion.Task;
             }
 
             return SubmitWhenSpaceAvailable(record, completion);
         }
+
+        /// <summary>
+        /// <b>The injection for the batch thread's own failure path</b>, and the ONE place this
+        /// fixture deliberately breaks the contract production keeps: it appends <em>without</em>
+        /// first taking a backpressure permit. The accumulated counter then runs ahead of the
+        /// permits taken, so the batch thread's next <c>ReleaseSpace</c> over-releases the
+        /// <see cref="SemaphoreSlim"/> and throws <see cref="SemaphoreFullException"/> — an
+        /// unexpected managed failure of the batch thread, between taking the chain and sending it,
+        /// which is exactly the shape <c>RunLoop</c>'s <c>catch</c> exists for and the only one
+        /// reachable without a production-side test hook.
+        /// </summary>
+        /// <remarks>
+        /// Everything else stays production's own primitive — the record, the awaiter, the
+        /// <see cref="DeliveryRegistration"/> and <see cref="SendAccumulator.Submit"/> itself
+        /// (DoD §12); only the permit is skipped, because skipping it IS the injected fault.
+        /// </remarks>
+        internal Task<RecordMetadata> AppendWithoutAPermit(byte tag, IDeliveryCallback? callback = null)
+        {
+            TaskCompletionSource<RecordMetadata> completion = NewCompletion();
+            Accumulator.Submit(NewRecord(tag), completion, NewDelivery(callback));
+            return completion.Task;
+        }
+
+        private static SerializedProducerRecord NewRecord(byte tag) =>
+            new SerializedProducerRecord(Topic, 0, null, null, new byte[] { tag, 0xAA, 0xBB });
+
+        private static TaskCompletionSource<RecordMetadata> NewCompletion() =>
+            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private static DeliveryRegistration? NewDelivery(IDeliveryCallback? callback) =>
+            callback is null ? null : new DeliveryRegistration(callback, Topic, 0);
 
         /// <summary>Attempts one append WITHOUT blocking; null when the bound refused it.</summary>
         internal Task<RecordMetadata>? TryAppendOne(byte tag)
