@@ -78,6 +78,20 @@ internal sealed class SendAccumulator
     private readonly Thread _thread;
     private readonly long _windowTicks;
 
+    // The stage-1 backpressure bound (§4.6): one permit per record appended-but-not-yet-taken. The
+    // anchor's own comment is the Java-faithfulness argument for having it at all — "one complete
+    // batch beyond the one being filled — mirrors Java's send() blocking once buffer.memory is
+    // full, applied here at batch granularity in front of the Rust accumulator"
+    // (_confluentkafka.c:21-26). Unlike Option C's native block inside the coarse FFI mutex, this is
+    // a MANAGED, cancellable wait, which is what lets teardown wake a blocked sender (§2.2).
+    private readonly SemaphoreSlim _space;
+
+    // Cancelled by Stop() so a Send parked on _space is released instead of pinning teardown behind
+    // it (§3.8 step 2, which must precede closing the accumulator). Never disposed: a
+    // CancellationTokenSource with no timer holds no unmanaged resource, and disposing one while a
+    // linked registration is being torn down is its own hazard.
+    private readonly CancellationTokenSource _spaceGate = new CancellationTokenSource();
+
     private Node? _head;      // oldest node, the one the wait loop measures (anchor: next_batches_to_send)
     private Node? _tail;      // the node being filled (anchor: last_accumulating_batch)
     private Node? _spare;     // one fully-settled node kept for reuse (see RecycleNode)
@@ -100,6 +114,7 @@ internal sealed class SendAccumulator
         _pump = pump;
         _settings = settings;
         _windowTicks = (long)(Stopwatch.Frequency * (settings.BatchWindowMs / 1000.0));
+        _space = new SemaphoreSlim(settings.MaxAccumulatedRecords, settings.MaxAccumulatedRecords);
 
         _thread = new Thread(RunLoop)
         {
@@ -130,13 +145,121 @@ internal sealed class SendAccumulator
     internal long SendBatchRecordCount => Interlocked.Read(ref _sendBatchRecords);
 
     /// <summary>
+    /// Takes a backpressure permit without waiting — the <b>fast path</b>, which must stay
+    /// allocation-free so the common send does not regress the DoD §10 budget. Returns
+    /// <see langword="false"/> when the accumulator already holds
+    /// <see cref="SendAccumulatorSettings.MaxAccumulatedRecords"/> records that the batch thread has
+    /// not taken yet, in which case the caller must go through
+    /// <see cref="WaitForSpaceAsync"/> (and, unlike this method, yield).
+    /// </summary>
+    internal bool TryAcquireSpace() => _space.Wait(0);
+
+    /// <summary>
+    /// Waits for a backpressure permit — the <b>slow path</b>. Completes when the batch thread's
+    /// next take frees capacity, faults with <see cref="ObjectDisposedException"/> if teardown
+    /// cancels the gate first, or cancels if <paramref name="cancellationToken"/> fires.
+    /// </summary>
+    /// <remarks>
+    /// <b>No lost wakeup, by a different mechanism than the anchor's.</b> Python does the
+    /// check-and-register under the <em>same</em> mutex its drain holds
+    /// (<c>py_Producer_on_space_available</c>), because its "space available" signal is a callback
+    /// list that a drain running in between would simply miss. A <see cref="SemaphoreSlim"/> counts
+    /// <em>permits</em> instead, so a drain that completes between this caller's failed
+    /// <see cref="TryAcquireSpace"/> and its arrival here has already left a permit behind and this
+    /// returns immediately. The property is the anchor's; the mechanism is the one .NET already
+    /// provides. That is also why the permits can be released <b>outside</b> the accumulator's lock
+    /// (as the anchor fires its space callbacks after unlocking, <c>:581</c>), which matters:
+    /// releasing under the lock could run a waiter's continuation inline on the batch thread, and
+    /// that continuation appends.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">Teardown cancelled the gate; nothing was appended.</exception>
+    internal async Task WaitForSpaceAsync(CancellationToken cancellationToken)
+    {
+        CancellationToken gate = _spaceGate.Token;
+        if (!cancellationToken.CanBeCanceled)
+        {
+            try
+            {
+                await _space.WaitAsync(gate).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (gate.IsCancellationRequested)
+            {
+                throw ClosedDuringBackpressure();
+            }
+
+            return;
+        }
+
+        using CancellationTokenSource linked =
+            CancellationTokenSource.CreateLinkedTokenSource(gate, cancellationToken);
+        try
+        {
+            await _space.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (gate.IsCancellationRequested)
+        {
+            // Teardown wins over the caller's token when both fired: the producer is going away, so
+            // "closed" is the more accurate answer than "you cancelled".
+            throw ClosedDuringBackpressure();
+        }
+    }
+
+    /// <summary>
+    /// Pins the record's buffers and appends it, taking ownership of the permit the caller acquired.
+    /// The one primitive both the production send path and the tests use, so a fixture cannot
+    /// diverge from what production does (DoD §12).
+    /// </summary>
+    /// <remarks>
+    /// <b>The permit is acquired BEFORE the pins, never after</b> (§4.4): a sender blocked on
+    /// backpressure while holding pins would turn a bound on <em>records</em> into an unbounded pin
+    /// window. On any failure this releases both the pins and the permit, so a rejected submit
+    /// leaves no trace.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The producer is closing — nothing was appended.</exception>
+    internal void Submit(
+        in SerializedProducerRecord record,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery)
+    {
+        MemoryHandle keyPin = default;
+        MemoryHandle valuePin = default;
+        PinnedTopicCache.TopicPin topicPin = default;
+        bool appended = false;
+        try
+        {
+            // key / value -> ReadOnlyMemory<byte>.Pin() (NOT GCHandle.Alloc, which cannot pin a
+            // ReadOnlyMemory); PinIfNeeded also decides that an ABSENT or EMPTY buffer needs no pin,
+            // the empty case using the marshaller's process-wide static sentinel (§4.2). topic -> one
+            // permanently-pinned buffer per DISTINCT topic from the interning cache (§4.1).
+            keyPin = ProducerSendBatchMarshal.PinIfNeeded(record.Key);
+            valuePin = ProducerSendBatchMarshal.PinIfNeeded(record.Value);
+            topicPin = _topics.Rent(record.Topic);
+
+            Append(record, topicPin, keyPin, valuePin, completion, delivery);
+            appended = true;
+        }
+        finally
+        {
+            if (!appended)
+            {
+                // Nothing was stored, so this frame is still the sole owner of all three pins — and
+                // of the permit, which must go back or the bound leaks one slot per rejected submit.
+                topicPin.Release();
+                valuePin.Dispose();
+                keyPin.Dispose();
+                ReleaseSpace(1);
+            }
+        }
+    }
+
+    /// <summary>
     /// Appends one already-pinned record. On return the accumulator owns
     /// <paramref name="topicPin"/> / <paramref name="keyPin"/> / <paramref name="valuePin"/> and
     /// will release each exactly once after the record's <c>send_batch</c>; if this throws, it owns
     /// none of them and the caller must release them.
     /// </summary>
     /// <exception cref="ObjectDisposedException">The producer is closing — nothing was appended.</exception>
-    internal void Append(
+    private void Append(
         in SerializedProducerRecord record,
         PinnedTopicCache.TopicPin topicPin,
         MemoryHandle keyPin,
@@ -253,6 +376,13 @@ internal sealed class SendAccumulator
     /// </summary>
     internal void Stop()
     {
+        // §3.8 step 2 BEFORE step 3: cancel the backpressure gate first, so a Send parked on a
+        // permit is released rather than holding teardown behind it. Doing it after closing the
+        // accumulator would still work here, but the ordering is the contract — and it is the one
+        // place this design is strictly better than the inline send it replaces, where a caller
+        // blocked in the core could not be woken by a concurrent close at all (§2.2 / §4.6).
+        _spaceGate.Cancel();
+
         lock (_gate)
         {
             _closed = true;
@@ -270,6 +400,7 @@ internal sealed class SendAccumulator
         {
             Node? chain;
             bool stopping;
+            int freed;
 
             lock (_gate)
             {
@@ -295,7 +426,7 @@ internal sealed class SendAccumulator
 
                 _forceDrain = false;
                 stopping = _closed;
-                chain = TakeChainLocked();
+                chain = TakeChainLocked(out freed);
                 if (chain is not null)
                 {
                     _draining = true;
@@ -306,6 +437,11 @@ internal sealed class SendAccumulator
                     Monitor.PulseAll(_gate);
                 }
             }
+
+            // Capacity is free again — release OUTSIDE the lock, as the anchor fires its space
+            // callbacks after unlocking (:581). Releasing under the lock could run a waiter's
+            // continuation inline on this thread, and that continuation appends.
+            ReleaseSpace(freed);
 
             if (chain is not null)
             {
@@ -332,18 +468,38 @@ internal sealed class SendAccumulator
         }
     }
 
-    /// <summary>Takes the whole chain and resets the accumulation (anchor :562-579).</summary>
-    private Node? TakeChainLocked()
+    /// <summary>
+    /// Takes the whole chain and resets the accumulation (anchor :562-579), reporting how many
+    /// backpressure permits the caller must release once it has left the lock.
+    /// </summary>
+    private Node? TakeChainLocked(out int freed)
     {
         Node? chain = _head;
         _head = null;
         _tail = null;
 
-        // Capacity is free again. Slice S4 releases the backpressure permits for `_accumulated`
-        // here, under this same lock — which is what closes the lost-wakeup window (§4.6).
+        freed = _accumulated;
         _accumulated = 0;
         return chain;
     }
+
+    /// <summary>
+    /// Returns <paramref name="count"/> backpressure permits. Never called with the accumulator's
+    /// lock held (see <see cref="RunLoop"/>), and a no-op for zero because
+    /// <see cref="SemaphoreSlim.Release(int)"/> rejects a zero count.
+    /// </summary>
+    private void ReleaseSpace(int count)
+    {
+        if (count > 0)
+        {
+            _space.Release(count);
+        }
+    }
+
+    private static ObjectDisposedException ClosedDuringBackpressure() =>
+        new ObjectDisposedException(
+            nameof(NativeProducer),
+            "The producer was closed while this send was waiting for accumulator space.");
 
     private void SendChain(Node? chain)
     {

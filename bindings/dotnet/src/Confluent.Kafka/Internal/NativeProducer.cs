@@ -458,47 +458,60 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 TaskScheduler.Default);
         }
 
-        // Pin, then append. Ownership of all three pins transfers to the accumulator the moment
-        // Append RETURNS; until then this frame owns them, which is what the `appended` flag makes
-        // explicit (§4.4 — "every MemoryHandle obtained in Send is disposed exactly once, on every
-        // path, including the append throwing"). Append allocates any new node BEFORE it mutates the
-        // chain, so a failing append has stored nothing.
-        //   * key / value -> ReadOnlyMemory<byte>.Pin() (NOT GCHandle.Alloc, which cannot pin a
-        //     ReadOnlyMemory) via PinIfNeeded, which also decides that an ABSENT or EMPTY buffer
-        //     needs no pin — the empty case uses the marshaller's process-wide static sentinel
-        //     (§4.2), because a stack sentinel is a use-after-free once the send is deferred.
-        //   * topic -> one permanently-pinned buffer per DISTINCT topic from the interning cache
-        //     (§4.1). Release() is a no-op on an interned hit and frees the per-record fallback
-        //     beyond the cache's cap.
-        // This method holds MemoryHandle values but never reads their pointers, so it stays free of
-        // `unsafe` (CLAUDE.md §2 — that lives only in Internal/Interop/).
-        MemoryHandle keyPin = default;
-        MemoryHandle valuePin = default;
-        PinnedTopicCache.TopicPin topicPin = default;
-        bool appended = false;
+        // Backpressure FIRST, pins second (§4.4/§4.6). Taking a permit before pinning is what keeps
+        // a blocked sender from holding pins while it waits — which would turn a bound on RECORDS
+        // into an unbounded pin window. Submit does the pinning and the append, and releases both
+        // the pins and the permit if the append is refused.
+        //
+        // ⚠ THIS METHOD MUST NOT BECOME `async`. The fast path has to stay synchronous so a
+        // serializer throw (raised above this carrier, before the call) and the precondition throws
+        // above still surface synchronously rather than as a faulted Task — the reason
+        // AsyncKafkaProducer.SendValidated is deliberately not `async` either. Only the SLOW path
+        // yields, in the separate async method below.
+        if (accumulator.TryAcquireSpace())
+        {
+            accumulator.Submit(record, completion, delivery);
+            return completion.Task;
+        }
+
+        return SendWhenSpaceAvailable(accumulator, record, delivery, completion, cancellationToken);
+    }
+
+    /// <summary>
+    /// The backpressure slow path: waits for accumulator space, then submits. Only reached when the
+    /// bound is already full, so the yield it introduces is exactly what the bound is for.
+    /// </summary>
+    /// <remarks>
+    /// The failure is routed through <paramref name="completion"/> rather than thrown straight out
+    /// of this <c>async</c> method, so the cancellation registration wired to that awaiter (and its
+    /// disposing continuation) still settles — and so the caller sees one consistent awaitable
+    /// whichever path the send took.
+    /// </remarks>
+    private static async Task<RecordMetadata> SendWhenSpaceAvailable(
+        SendAccumulator accumulator,
+        SerializedProducerRecord record,
+        DeliveryRegistration? delivery,
+        TaskCompletionSource<RecordMetadata> completion,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            keyPin = ProducerSendBatchMarshal.PinIfNeeded(record.Key);
-            valuePin = ProducerSendBatchMarshal.PinIfNeeded(record.Value);
-            topicPin = _topics.Rent(record.Topic);
-
-            accumulator.Append(record, topicPin, keyPin, valuePin, completion, delivery);
-            appended = true;
+            await accumulator.WaitForSpaceAsync(cancellationToken).ConfigureAwait(false);
+            accumulator.Submit(record, delivery: delivery, completion: completion);
         }
-        finally
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            if (!appended)
-            {
-                // Nothing was stored, so this frame is still the sole owner: release exactly what was
-                // acquired (each release is a no-op on its `default` value) and let the throw
-                // propagate. No delivery callback fires — nothing reached the core (decision D5).
-                topicPin.Release();
-                valuePin.Dispose();
-                keyPin.Dispose();
-            }
+            // Cancelled WITH the caller's token, matching the post-append cancellation path.
+            completion.TrySetCanceled(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            // Teardown cancelled the gate, or the accumulator refused the append. Nothing reached
+            // the core either way, so no delivery callback fires (decision D5).
+            completion.TrySetException(exception);
         }
 
-        return completion.Task;
+        return await completion.Task.ConfigureAwait(false);
     }
 
     /// <summary>

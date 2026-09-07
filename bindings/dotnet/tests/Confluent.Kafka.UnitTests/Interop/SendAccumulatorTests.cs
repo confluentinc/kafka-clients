@@ -313,34 +313,122 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public void AppendAfterStop_ThrowsAndTransfersNoPin()
+    public void SubmitAfterStop_ThrowsAndReleasesBothThePinsAndThePermit()
     {
         Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 10, batchChunk: 1100));
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 10, batchChunk: 1100));
         SendAccumulator accumulator = harness.Accumulator;
         harness.Dispose();
 
-        MemoryHandle keyPin = default;
-        MemoryHandle valuePin = ProducerSendBatchMarshal.PinIfNeeded(new byte[] { 1, 2, 3 });
-        PinnedTopicCache.TopicPin topicPin = harness.Topics.Rent(Topic);
-        try
+        // Four refused submits: each must give its permit back, or the bound would leak one slot per
+        // rejection and the fifth attempt could not even acquire one.
+        for (int i = 0; i < 4; i++)
         {
-            Assert.Throws<ObjectDisposedException>(() => accumulator.Append(
+            Assert.True(accumulator.TryAcquireSpace());
+            Assert.Throws<ObjectDisposedException>(() => accumulator.Submit(
                 new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 1, 2, 3 }),
-                topicPin,
-                keyPin,
-                valuePin,
                 new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously),
                 delivery: null));
         }
-        finally
-        {
-            // Still OURS to release — the accumulator took nothing, which is the contract the
-            // caller's `appended` flag relies on.
-            topicPin.Release();
-            valuePin.Dispose();
-            keyPin.Dispose();
-        }
+
+        Assert.True(accumulator.TryAcquireSpace(), "a refused Submit did not return its permit");
+    }
+
+    // ------------------------------------------------------------------- backpressure (§4.6) ----
+
+    [Fact]
+    public async Task Backpressure_BlocksAtTheBound_AndReleasesWhenTheDrainTakesTheChain()
+    {
+        // A 60 s window means only an explicit drain can free capacity, so "blocked" and "released"
+        // are both deterministic rather than timing-dependent.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+
+        Task<RecordMetadata>[] filled = harness.Append(4);
+        Assert.Equal(4, filled.Length);
+
+        // The bound is full: a non-blocking attempt is refused.
+        Assert.Null(harness.TryAppendOne(0xF0));
+
+        // A blocking attempt parks rather than throwing or dropping the record.
+        Task<RecordMetadata> blocked = harness.AppendOne(0xF1);
+        Assert.False(blocked.IsCompleted, "the fifth send did not park on the backpressure bound");
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // The drain takes the chain and returns the permits (anchor :573/:579).
+        harness.DrainNow();
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+
+        // The released sender resumes on the thread pool, so its append is not ordered against the
+        // drain that freed it — poll rather than assume. A bound that never released would never
+        // satisfy this, so the deadline is the real assertion.
+        await TestTimeout.Run(
+            async () =>
+            {
+                while (!blocked.IsCompleted)
+                {
+                    harness.DrainNow();
+                    await Task.Delay(5);
+                }
+
+                await blocked;
+            },
+            s_deadline);
+
+        Assert.Equal(5, harness.Accumulator.SendBatchRecordCount);
+    }
+
+    [Fact]
+    public async Task Backpressure_DrainBetweenTheCheckAndTheWait_DoesNotStrandTheSender()
+    {
+        // The lost-wakeup case. Python does the check-and-register under the same mutex its drain
+        // holds; a SemaphoreSlim counts PERMITS instead, so a drain landing in this exact window
+        // leaves a permit behind and the wait returns immediately rather than parking forever.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 2, batchWindowMs: 60_000, batchChunk: 1100));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+
+        // The check fails...
+        Assert.False(harness.Accumulator.TryAcquireSpace());
+
+        // ...the drain completes HERE, entirely before the wait is even entered...
+        harness.DrainNow();
+
+        // ...and the wait must still return, not strand.
+        await TestTimeout.Run(
+            () => harness.Accumulator.WaitForSpaceAsync(CancellationToken.None),
+            TimeSpan.FromSeconds(10));
+
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+    }
+
+    [Fact]
+    public async Task Backpressure_TeardownCancelsTheGate_SoAParkedSendCompletesAndStopReturns()
+    {
+        // The one place this design is strictly better than the inline send it replaces: a caller
+        // waiting for capacity is on a MANAGED, cancellable primitive, so teardown can wake it. Under
+        // Option C the equivalent caller was blocked inside the core's coarse mutex and a concurrent
+        // close could not wake it at all (§2.2/§4.6).
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 2, batchWindowMs: 60_000, batchChunk: 1100));
+
+        _ = harness.Append(2);
+        Task<RecordMetadata> blocked = harness.AppendOne(0xF2);
+        Assert.False(blocked.IsCompleted);
+
+        // Teardown must return rather than hang behind the parked sender...
+        TestTimeout.Run(harness.Dispose, TimeSpan.FromSeconds(10));
+
+        // ...and the parked send must SETTLE (faulted — it never reached the core), not hang.
+        //
+        // Either of two racing paths can settle it, and both are the same observable outcome: the
+        // cancelled gate releases the waiter directly, or the final drain's permit release lets it
+        // through and the now-closed accumulator refuses the append. Asserting one specific message
+        // would be asserting which side of that race won, which is not a contract.
+        ObjectDisposedException failure = await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => blocked, TimeSpan.FromSeconds(10)));
+        Assert.Contains(nameof(NativeProducer), failure.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -407,42 +495,71 @@ public sealed class SendAccumulatorTests
 
         internal PinnedTopicCache Topics { get; }
 
-        /// <summary>Appends <paramref name="count"/> records the way <c>SendViaPump</c> does.</summary>
+        /// <summary>
+        /// Appends <paramref name="count"/> records through the SAME primitives
+        /// <c>NativeProducer.SendViaPump</c> uses — the backpressure permit first, then
+        /// <see cref="SendAccumulator.Submit"/>, which owns the pinning (DoD §12: a fixture that
+        /// substituted its own pinning would be a proof about the fixture).
+        /// </summary>
         internal Task<RecordMetadata>[] Append(int count)
         {
             Task<RecordMetadata>[] sends = new Task<RecordMetadata>[count];
             for (int i = 0; i < count; i++)
             {
-                byte[] value = new byte[] { (byte)i, 0xAA, 0xBB };
-                SerializedProducerRecord record =
-                    new SerializedProducerRecord(Topic, 0, null, null, value);
-
-                MemoryHandle keyPin = default;
-                MemoryHandle valuePin = ProducerSendBatchMarshal.PinIfNeeded(record.Value);
-                PinnedTopicCache.TopicPin topicPin = Topics.Rent(Topic);
-                TaskCompletionSource<RecordMetadata> completion =
-                    new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-                bool appended = false;
-                try
-                {
-                    Accumulator.Append(record, topicPin, keyPin, valuePin, completion, delivery: null);
-                    appended = true;
-                }
-                finally
-                {
-                    if (!appended)
-                    {
-                        topicPin.Release();
-                        valuePin.Dispose();
-                        keyPin.Dispose();
-                    }
-                }
-
-                sends[i] = completion.Task;
+                sends[i] = AppendOne((byte)i);
             }
 
             return sends;
+        }
+
+        /// <summary>Appends one record, blocking on the backpressure bound if it is full.</summary>
+        internal Task<RecordMetadata> AppendOne(byte tag)
+        {
+            SerializedProducerRecord record = new SerializedProducerRecord(
+                Topic, 0, null, null, new byte[] { tag, 0xAA, 0xBB });
+            TaskCompletionSource<RecordMetadata> completion =
+                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            if (Accumulator.TryAcquireSpace())
+            {
+                Accumulator.Submit(record, completion, delivery: null);
+                return completion.Task;
+            }
+
+            return SubmitWhenSpaceAvailable(record, completion);
+        }
+
+        /// <summary>Attempts one append WITHOUT blocking; null when the bound refused it.</summary>
+        internal Task<RecordMetadata>? TryAppendOne(byte tag)
+        {
+            if (!Accumulator.TryAcquireSpace())
+            {
+                return null;
+            }
+
+            SerializedProducerRecord record = new SerializedProducerRecord(
+                Topic, 0, null, null, new byte[] { tag, 0xAA, 0xBB });
+            TaskCompletionSource<RecordMetadata> completion =
+                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Accumulator.Submit(record, completion, delivery: null);
+            return completion.Task;
+        }
+
+        private async Task<RecordMetadata> SubmitWhenSpaceAvailable(
+            SerializedProducerRecord record, TaskCompletionSource<RecordMetadata> completion)
+        {
+            try
+            {
+                await Accumulator.WaitForSpaceAsync(CancellationToken.None);
+                Accumulator.Submit(record, completion, delivery: null);
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetException(exception);
+            }
+
+            return await completion.Task;
         }
 
         /// <summary>Forces one drain and waits for it, the way the test drain hook does.</summary>
