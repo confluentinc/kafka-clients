@@ -350,7 +350,15 @@ mod tests {
             std::sync::Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        Arc::new(CommitRequestManager::new(&config, metadata, subs, "g", None, 0))
+        Arc::new(CommitRequestManager::new(
+            &config,
+            metadata,
+            subs,
+            "g",
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
+            0,
+        ))
     }
 
     fn offsets_manager() -> OffsetsRequestManager {

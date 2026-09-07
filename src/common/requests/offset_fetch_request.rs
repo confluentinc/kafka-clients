@@ -242,6 +242,17 @@ impl OffsetFetchRequest {
         version >= TOPIC_ID_MIN_VERSION
     }
 
+    /// Returns `true` if the group requests offsets for all topics (i.e. its
+    /// `topics` list is null / absent), rather than a specific topic set.
+    ///
+    /// Mirrors Java's
+    /// `OffsetFetchRequest.requestAllOffsets(OffsetFetchRequestGroup)`
+    /// (added in AK 4.3.1); the sole callers are broker-side (group
+    /// coordinator), so this is exposed for wire-parity / future use.
+    pub fn request_all_offsets(request: &OffsetFetchRequestGroup) -> bool {
+        request.topics.is_none()
+    }
+
     /// Parses an `OffsetFetchRequest` from a readable buffer at the given
     /// version.
     ///
@@ -449,6 +460,19 @@ mod tests {
         g.set_group_id("g".to_string());
         g.set_topics(Some(topics_for_test()));
         g
+    }
+
+    /// `request_all_offsets` is true only when the group's `topics` list is
+    /// absent (null), mirroring Java's `topics() == null`.
+    #[test]
+    fn request_all_offsets_reflects_null_topics() {
+        let with_topics = group_with_topics();
+        assert!(!OffsetFetchRequest::request_all_offsets(&with_topics));
+
+        let mut all = OffsetFetchRequestGroup::new();
+        all.set_group_id("g".to_string());
+        all.set_topics(None);
+        assert!(OffsetFetchRequest::request_all_offsets(&all));
     }
 
     /// `for_topic_ids_or_names` opens the full version range.

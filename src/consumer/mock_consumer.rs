@@ -585,13 +585,16 @@ where
         // iterates the HashMap.entrySet() in whatever order Java's HashMap
         // produces. Test ordering does not depend on this.
         let partition_keys: Vec<TopicPartition> = self.records.keys().cloned().collect();
-        let assignment_set = self.subscriptions.assigned_partitions();
 
         for tp in partition_keys {
             if num_poll_records >= self.max_poll_records {
                 break;
             }
-            if self.subscriptions.is_paused(&tp) {
+            // AK 4.3.1: skip the whole partition if it is paused OR not
+            // assigned. Java moved the `isAssigned` check up to the partition
+            // level (`!subscriptions.isPaused(tp) && subscriptions.isAssigned(tp)`)
+            // and dropped the per-record `assignment().contains(tp)` check.
+            if self.subscriptions.is_paused(&tp) || !self.subscriptions.is_assigned(&tp) {
                 continue;
             }
 
@@ -640,10 +643,10 @@ where
                     return Err(crate::consumer::errors::ConsumerError::offset_out_of_range(m).into());
                 }
 
-                // Java line 301: `assignment().contains(entry.getKey()) &&
-                // rec.offset() >= position`. The assignment check guards
-                // against records added before a re-assignment.
-                if assignment_set.contains(&tp) && rec.offset() >= position {
+                // AK 4.3.1 (MockConsumer): the per-partition `isAssigned`
+                // check now sits at the entry level above, so the per-record
+                // guard is just `rec.offset() >= position`.
+                if rec.offset() >= position {
                     let leader_epoch = rec.leader_epoch();
                     let next_offset = rec.offset() + 1;
 
@@ -983,9 +986,12 @@ where
     }
 
     async fn close(&mut self) -> Result<(), KafkaError> {
-        // Java line 574-576 / 580-582: set `closed = true`.
-        self.closed = true;
-        Ok(())
+        // AK 4.3.1: Java's `close()` now delegates to
+        // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
+        self.close_with_options(CloseOptions::timeout(Duration::from_millis(
+            crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS,
+        )))
+        .await
     }
 
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), KafkaError> {
