@@ -38,7 +38,7 @@ use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::RecordMetadata;
-use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptions};
+use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 /// Every manual-test producer sends `String` keys and values.
 pub type StringProducer = KafkaProducer<String, String>;
@@ -146,13 +146,11 @@ pub fn build_consumer_with(
 
 /// Builds a record for partition 0 with key `key-{value}`.
 pub fn string_record(topic: &str, value: &str) -> Result<ProducerRecord<String, String>, String> {
-    ProducerRecord::new_partition_timestamp_options(
-        topic.to_string(),
-        Some(0),
-        None,
-        ProducerRecordOptions::new(Some(format!("key-{value}")), Some(value.to_string()), None),
-    )
-    .map_err(|e| format!("building the record {value}: {e}"))
+    let options = ProducerRecordOptionsBuilder::new_topic_value(topic.to_string(), Some(value.to_string()))
+        .set_partition(Some(0))
+        .set_key(Some(format!("key-{value}")))
+        .build();
+    ProducerRecord::new_options(options).map_err(|e| format!("building the record {value}: {e}"))
 }
 
 /// Sends one record to partition 0 and awaits its broker ack.

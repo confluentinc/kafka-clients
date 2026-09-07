@@ -1565,7 +1565,7 @@ mod tests {
     async fn test_response_routing_through_spawned_forwarder() {
         use crate::client_response::ClientResponse;
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptions};
+        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
 
         let (mut mgr, coord, mm) = make_with_coord(Some(0));
@@ -1590,11 +1590,14 @@ mod tests {
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(
@@ -1669,7 +1672,7 @@ mod tests {
     async fn issue3_error_response_resets_sent_fields() {
         use crate::client_response::ClientResponse;
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptions};
+        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
         use std::collections::HashSet;
 
@@ -1708,11 +1711,14 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(
@@ -1877,7 +1883,7 @@ mod tests {
     ) {
         use crate::client_response::ClientResponse;
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptions};
+        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
 
         set_coordinator(coord);
@@ -1895,11 +1901,14 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(
@@ -2868,7 +2877,7 @@ mod tests {
     async fn error_response_surfaces_the_broker_error_message() {
         use crate::client_response::ClientResponse;
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptions};
+        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer::internals::events::background_event::BackgroundEvent;
         use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
 
@@ -2888,11 +2897,14 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(

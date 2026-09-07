@@ -43,12 +43,17 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      - additional methods with <base_name>_<param1_name>_<param2_name> (WITHOUT additional keywords in between).
      - when parameters have the same name and different type,
      **only if the names would collide**, use the type to discriminate the method. In case the difference is **only** Optional use Rust's `Option` and a single method name
-     - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct with all three parameters and the options containing rest of parameters
+     - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct that is the only parameter to the method 
+     name with `_options` suffix. Also in case Java API makes some parameters of the intersection set optional in a later version, add this method with only the `options` parameter.
+     The `Options` struct must have a `OptionsBuilder` with all mandatory parameters listed in the name, while rest of parameters are set to the defaults. If later a parameters is made optional, we add a new constructor for `OptionsBuilder` with all new mandatory parameters in the name. All optional parameters have fluent setters in the builder. Finally the user calls `build` before passing the `Options` struct.
      - getters and setters with same name: use `<field_name>` for the getter and `set_<field_name>` for the setter. If a method is a setter,
        use `set_<field_name>` even if there's no corresponding getter.
      - examples:
        - `fooBar(a, b)`, `fooBar(a, c)` -> `foo_bar_b(a, b)`, `foo_bar_c(a, c)`
        - `fooBaz(a)`, `fooBaz(a, c)` -> `foo_baz(a)`, `foo_baz_c(a, c)`
+       - `fooBar(a, b)`, `fooBar(a, c)`, `fooBar(a, b, c, d)`  -> `foo_bar_b(a, b)`, `foo_bar_c(a, c)`, `foo_bar_b_c_d(a, b, c, d)`
+        - later: `foo_bar_b(a, b, c, d, e)` -> `foo_bar_options(options)`, `FooBarOptionsBuilder::new_a(a).build()`
+        - later: `fooBar(b)`, `fooBar(c)` -> `FooBarOptionsBuilder::new().build()`
 3. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this

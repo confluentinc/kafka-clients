@@ -32,9 +32,8 @@
 use std::collections::HashMap;
 
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecords, OffsetAndMetadata};
+use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder, ConsumerRecords, OffsetAndMetadata};
 use indexmap::IndexMap;
 
 /// Translated from `ConsumerRecordsTest.testIterator`.
@@ -173,22 +172,19 @@ fn build_topic_test_records(
             let mut records: Vec<ConsumerRecord<i32, String>> = Vec::with_capacity(record_size as usize);
             if i != empty_partition_index {
                 for j in 0..record_size {
-                    let r: ConsumerRecord<i32, String> = ConsumerRecord::new_options(
+                    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
                         *topic,
                         i,
                         j as i64,
-                        ConsumerRecordOptions::new(
-                            0,
-                            TimestampType::CreateTime,
-                            0,
-                            0,
-                            Some(j),
-                            Some(j.to_string()),
-                            RecordHeaders::new(),
-                            None,
-                            None,
-                        ),
-                    );
+                        Some(j),
+                        Some(j.to_string()),
+                    )
+                    .set_timestamp(0)
+                    .set_timestamp_type(TimestampType::CreateTime)
+                    .set_serialized_key_size(0)
+                    .set_serialized_value_size(0)
+                    .build();
+                    let r: ConsumerRecord<i32, String> = ConsumerRecord::new_options(options);
                     records.push(r);
                 }
             }

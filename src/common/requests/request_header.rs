@@ -41,29 +41,84 @@ pub struct RequestHeader {
 }
 
 /// The parameters of Java's
-/// `RequestHeader(ApiKeys, short, String, int)` (`RequestHeader.java:38`) that
-/// do not fit in the derived method name.
+/// `RequestHeader(ApiKeys, short, String, int)` (`RequestHeader.java:38`).
 ///
 /// Java's two `RequestHeader` constructors (`:38`, `:47`) share no parameter
 /// name, so all four of `:38`'s reach its derived name. CLAUDE.md §2 caps that
-/// at three and moves the remainder here. This struct has no Java counterpart:
-/// it exists solely to satisfy that naming rule (DoD #7).
+/// at three and makes this struct the method's *only* parameter, so all four
+/// live here. This struct has no Java counterpart: it exists solely to satisfy
+/// that naming rule (DoD #7).
 ///
-/// It deliberately has **no** `Default`. Java declares no `RequestHeader`
-/// overload that omits `correlationId`, so there is no Java-derived default to
-/// carry across, and a synthesised `0` would silently produce a header that
-/// cannot be matched to its response. Construct it with [`RequestHeaderOptions::new`].
+/// It deliberately has **no** `Default`. Java's other `RequestHeader` overload
+/// (`:47`) takes an already-built `RequestHeaderData`, so it supplies none of
+/// these four on the caller's behalf — none has a Java-derived default, and a
+/// synthesised `correlationId` of `0` would silently produce a header that
+/// cannot be matched to its response. Construct it with
+/// [`RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id`].
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct RequestHeaderOptions {
+pub struct RequestHeaderOptions<'a> {
+    /// Java's `apiKey`.
+    pub request_api_key: &'a ApiKeys,
+    /// Java's `requestVersion`.
+    pub request_version: i16,
+    /// Java's `clientId`.
+    pub client_id: &'a str,
     /// Java's `correlationId`.
     pub correlation_id: i32,
 }
 
-impl RequestHeaderOptions {
-    /// Creates the options carrying the given correlation id.
-    pub fn new(correlation_id: i32) -> Self {
-        Self { correlation_id }
+impl<'a> RequestHeaderOptions<'a> {
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`RequestHeaderOptionsBuilder`], which is this constructor's only caller.
+    fn new_request_api_key_request_version_client_id_correlation_id(
+        request_api_key: &'a ApiKeys,
+        request_version: i16,
+        client_id: &'a str,
+        correlation_id: i32,
+    ) -> Self {
+        Self { request_api_key, request_version, client_id, correlation_id }
+    }
+}
+
+/// Fluent builder for [`RequestHeaderOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`RequestHeaderOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct RequestHeaderOptionsBuilder<'a> {
+    options: RequestHeaderOptions<'a>,
+}
+
+impl<'a> RequestHeaderOptionsBuilder<'a> {
+    /// Creates the options carrying the given API key, request version, client
+    /// id and correlation id.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_request_api_key_request_version_client_id_correlation_id(
+        request_api_key: &'a ApiKeys,
+        request_version: i16,
+        client_id: &'a str,
+        correlation_id: i32,
+    ) -> Self {
+        Self {
+            options: RequestHeaderOptions::new_request_api_key_request_version_client_id_correlation_id(
+                request_api_key,
+                request_version,
+                client_id,
+                correlation_id,
+            ),
+        }
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> RequestHeaderOptions<'a> {
+        self.options
     }
 }
 
@@ -76,13 +131,8 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if the API key is not recognized.
-    pub fn new_request_api_key_request_version_client_id_options(
-        request_api_key: &ApiKeys,
-        request_version: i16,
-        client_id: &str,
-        options: RequestHeaderOptions,
-    ) -> io::Result<Self> {
-        let correlation_id = options.correlation_id;
+    pub fn new_options(options: RequestHeaderOptions<'_>) -> io::Result<Self> {
+        let RequestHeaderOptions { request_api_key, request_version, client_id, correlation_id } = options;
         let mut data = RequestHeaderData::new();
         data.set_request_api_key(request_api_key.id());
         data.set_request_api_version(request_version);
@@ -296,11 +346,14 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV1`.
     #[test]
     fn test_request_header_v1() {
-        let mut header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::FIND_COORDINATOR,
-            1,
-            "",
-            RequestHeaderOptions::new(10),
+        let mut header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::FIND_COORDINATOR,
+                1,
+                "",
+                10,
+            )
+            .build(),
         )
         .unwrap();
         assert_eq!(header.header_version(), 1);
@@ -314,11 +367,14 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV2`.
     #[test]
     fn test_request_header_v2() {
-        let mut header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::CREATE_DELEGATION_TOKEN,
-            2,
-            "",
-            RequestHeaderOptions::new(10),
+        let mut header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::CREATE_DELEGATION_TOKEN,
+                2,
+                "",
+                10,
+            )
+            .build(),
         )
         .unwrap();
         assert_eq!(header.header_version(), 2);
@@ -339,11 +395,14 @@ mod tests {
             full_buf.write_byte(0).unwrap();
         }
 
-        let mut header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::FIND_COORDINATOR,
-            1,
-            "",
-            RequestHeaderOptions::new(10),
+        let mut header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::FIND_COORDINATOR,
+                1,
+                "",
+                10,
+            )
+            .build(),
         )
         .unwrap();
         let mut cache = ObjectSerializationCache::new();
@@ -418,11 +477,14 @@ mod tests {
     /// header's rendering is the text every `NetworkClient` send log embeds.
     #[test]
     fn test_request_header_display() {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            1,
-            "test-client",
-            RequestHeaderOptions::new(42),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                1,
+                "test-client",
+                42,
+            )
+            .build(),
         )
         .unwrap();
         assert_eq!(
@@ -435,11 +497,14 @@ mod tests {
 
     #[test]
     fn test_request_header_to_response_header() {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            12,
-            "client",
-            RequestHeaderOptions::new(99),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                12,
+                "client",
+                99,
+            )
+            .build(),
         )
         .unwrap();
         let response_header = header.to_response_header();
@@ -448,11 +513,14 @@ mod tests {
 
     #[test]
     fn test_request_header_is_api_version_supported() {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            ApiKeys::METADATA.oldest_version(),
-            "c",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                ApiKeys::METADATA.oldest_version(),
+                "c",
+                1,
+            )
+            .build(),
         )
         .unwrap();
         assert!(header.is_api_version_supported());

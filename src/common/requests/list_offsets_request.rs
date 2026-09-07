@@ -207,41 +207,114 @@ pub struct ListOffsetsRequestBuilder {
     latest_allowed_version: i16,
 }
 
-/// The feature flags of Java's six-argument
-/// `ListOffsetsRequest.Builder.forConsumer(...)` (`ListOffsetsRequest.java:66`)
-/// that do not fit in the derived method name.
+/// The parameters of Java's six-argument
+/// `ListOffsetsRequest.Builder.forConsumer(...)` (`ListOffsetsRequest.java:66`).
 ///
 /// The two `forConsumer` forms (`:61`, `:66`) intersect on
 /// `{requireTimestamp, isolationLevel}`, leaving four flags to reach `:66`'s
-/// derived name. CLAUDE.md §2 caps that at three parameters and moves the
-/// remainder here. This struct has no Java counterpart: it exists solely to
-/// satisfy that naming rule (DoD #7).
+/// derived name. CLAUDE.md §2 caps that at three parameters and makes this
+/// struct the method's *only* parameter, so every Java parameter lives here —
+/// the intersection members included. This struct has no Java counterpart: it
+/// exists solely to satisfy that naming rule (DoD #7).
 ///
-/// Its `Default` is Java's own — the two-argument `forConsumer` (`:61`) passes
-/// `false, false, false, false` for the four flags on the caller's behalf.
-#[derive(Debug, Clone, Copy, Default)]
+/// It deliberately has **no** `Default`. Java's two-argument `forConsumer`
+/// (`:61`) does supply the four flags (`false, false, false, false`) but takes
+/// `requireTimestamp` and `isolationLevel` from its caller, so those two have
+/// no Java-derived default — and a synthesised `isolationLevel` would silently
+/// pick a read isolation the caller never asked for. Build it from
+/// [`ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level`] and override the flags you need.
+#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ListOffsetsRequestBuilderOptions {
-    /// Java's `requireEarliestLocalTimestamp`.
+    /// Java's `requireTimestamp`.
+    pub require_timestamp: bool,
+    /// Java's `isolationLevel`.
+    pub isolation_level: IsolationLevel,
+    /// Java's `requireMaxTimestamp`. Starts as `false`, as in `:61`.
+    pub require_max_timestamp: bool,
+    /// Java's `requireEarliestLocalTimestamp`. Starts as `false`, as in `:61`.
     pub require_earliest_local_timestamp: bool,
-    /// Java's `requireTieredStorageTimestamp`.
+    /// Java's `requireTieredStorageTimestamp`. Starts as `false`, as in `:61`.
     pub require_tiered_storage_timestamp: bool,
-    /// Java's `requireEarliestPendingUploadTimestamp`.
+    /// Java's `requireEarliestPendingUploadTimestamp`. Starts as `false`, as in
+    /// `:61`.
     pub require_earliest_pending_upload_timestamp: bool,
 }
 
 impl ListOffsetsRequestBuilderOptions {
-    /// Creates the options carrying the given feature flags.
-    pub fn new(
-        require_earliest_local_timestamp: bool,
-        require_tiered_storage_timestamp: bool,
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`ListOffsetsRequestBuilderOptionsBuilder`], which is this constructor's only caller.
+    fn new_require_timestamp_isolation_level(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
+        Self {
+            require_timestamp,
+            isolation_level,
+            require_max_timestamp: false,
+            require_earliest_local_timestamp: false,
+            require_tiered_storage_timestamp: false,
+            require_earliest_pending_upload_timestamp: false,
+        }
+    }
+}
+
+/// Fluent builder for [`ListOffsetsRequestBuilderOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`ListOffsetsRequestBuilderOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct ListOffsetsRequestBuilderOptionsBuilder {
+    options: ListOffsetsRequestBuilderOptions,
+}
+
+impl ListOffsetsRequestBuilderOptionsBuilder {
+    /// Creates the options for the given timestamp requirement and isolation
+    /// level, with the four feature flags at the values Java's two-argument
+    /// `forConsumer` (`:61`) passes on the caller's behalf.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_require_timestamp_isolation_level(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
+        Self {
+            options: ListOffsetsRequestBuilderOptions::new_require_timestamp_isolation_level(
+                require_timestamp,
+                isolation_level,
+            ),
+        }
+    }
+
+    /// Sets [`ListOffsetsRequestBuilderOptions::require_max_timestamp`].
+    pub fn set_require_max_timestamp(mut self, require_max_timestamp: bool) -> Self {
+        self.options.require_max_timestamp = require_max_timestamp;
+        self
+    }
+
+    /// Sets [`ListOffsetsRequestBuilderOptions::require_earliest_local_timestamp`].
+    pub fn set_require_earliest_local_timestamp(mut self, require_earliest_local_timestamp: bool) -> Self {
+        self.options.require_earliest_local_timestamp = require_earliest_local_timestamp;
+        self
+    }
+
+    /// Sets [`ListOffsetsRequestBuilderOptions::require_tiered_storage_timestamp`].
+    pub fn set_require_tiered_storage_timestamp(mut self, require_tiered_storage_timestamp: bool) -> Self {
+        self.options.require_tiered_storage_timestamp = require_tiered_storage_timestamp;
+        self
+    }
+
+    /// Sets [`ListOffsetsRequestBuilderOptions::require_earliest_pending_upload_timestamp`].
+    pub fn set_require_earliest_pending_upload_timestamp(
+        mut self,
         require_earliest_pending_upload_timestamp: bool,
     ) -> Self {
-        Self {
-            require_earliest_local_timestamp,
-            require_tiered_storage_timestamp,
-            require_earliest_pending_upload_timestamp,
-        }
+        self.options.require_earliest_pending_upload_timestamp = require_earliest_pending_upload_timestamp;
+        self
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> ListOffsetsRequestBuilderOptions {
+        self.options
     }
 }
 
@@ -252,11 +325,12 @@ impl ListOffsetsRequestBuilder {
     /// `ListOffsetsRequest.Builder.forConsumer(boolean, IsolationLevel)`
     /// (`ListOffsetsRequest.java:61`).
     pub fn for_consumer(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
-        Self::for_consumer_require_max_timestamp_options(
-            require_timestamp,
-            isolation_level,
-            false,
-            ListOffsetsRequestBuilderOptions::default(),
+        Self::for_consumer_options(
+            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
+                require_timestamp,
+                isolation_level,
+            )
+            .build(),
         )
     }
 
@@ -265,13 +339,11 @@ impl ListOffsetsRequestBuilder {
     ///
     /// Corresponds to Java's six-argument `Builder.forConsumer(...)`
     /// (`ListOffsetsRequest.java:66`).
-    pub fn for_consumer_require_max_timestamp_options(
-        require_timestamp: bool,
-        isolation_level: IsolationLevel,
-        require_max_timestamp: bool,
-        options: ListOffsetsRequestBuilderOptions,
-    ) -> Self {
+    pub fn for_consumer_options(options: ListOffsetsRequestBuilderOptions) -> Self {
         let ListOffsetsRequestBuilderOptions {
+            require_timestamp,
+            isolation_level,
+            require_max_timestamp,
             require_earliest_local_timestamp,
             require_tiered_storage_timestamp,
             require_earliest_pending_upload_timestamp,
@@ -405,11 +477,13 @@ mod tests {
     /// Verifies that `requireMaxTimestamp` forces minimum v7.
     #[test]
     fn for_consumer_require_max_timestamp_forces_v7() {
-        let builder = ListOffsetsRequestBuilder::for_consumer_require_max_timestamp_options(
-            true,
-            IsolationLevel::ReadCommitted,
-            true,
-            ListOffsetsRequestBuilderOptions::new(false, false, false),
+        let builder = ListOffsetsRequestBuilder::for_consumer_options(
+            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
+                true,
+                IsolationLevel::ReadCommitted,
+            )
+            .set_require_max_timestamp(true)
+            .build(),
         );
         assert_eq!(builder.oldest_allowed_version(), 7);
     }
@@ -417,11 +491,13 @@ mod tests {
     /// Verifies that `requireEarliestPendingUploadTimestamp` forces minimum v11.
     #[test]
     fn for_consumer_require_earliest_pending_upload_forces_v11() {
-        let builder = ListOffsetsRequestBuilder::for_consumer_require_max_timestamp_options(
-            true,
-            IsolationLevel::ReadCommitted,
-            false,
-            ListOffsetsRequestBuilderOptions::new(false, false, true),
+        let builder = ListOffsetsRequestBuilder::for_consumer_options(
+            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
+                true,
+                IsolationLevel::ReadCommitted,
+            )
+            .set_require_earliest_pending_upload_timestamp(true)
+            .build(),
         );
         assert_eq!(builder.oldest_allowed_version(), 11);
     }

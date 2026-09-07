@@ -28,7 +28,7 @@ use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
     ApiVersionsRequestBuilder, MetadataRequestBuilder, MetadataResponse, RequestBuilder, RequestHeader,
-    RequestHeaderOptions,
+    RequestHeaderOptionsBuilder,
 };
 
 use crate::common::cluster_config::ClusterConfig;
@@ -87,11 +87,14 @@ async fn send_and_receive(
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-        api_key,
-        version,
-        client_id,
-        RequestHeaderOptions::new(correlation_id),
+    let header = RequestHeader::new_options(
+        RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+            api_key,
+            version,
+            client_id,
+            correlation_id,
+        )
+        .build(),
     )
     .expect("Failed to create request header");
 

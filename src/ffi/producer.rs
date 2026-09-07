@@ -163,7 +163,7 @@ use crate::producer::MockProducer;
 use crate::producer::Producer;
 use crate::producer::ProducerConfig;
 use crate::producer::RecordMetadata;
-use crate::producer::{ProducerRecord, ProducerRecordOptions};
+use crate::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -358,11 +358,12 @@ fn producer_send(
     match kind {
         ProducerKind::Mock(mock, _) => {
             let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
-            let owned_record = ProducerRecord::new_partition_timestamp_options(
-                topic,
-                partition,
-                timestamp,
-                ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), None),
+            let owned_record = ProducerRecord::new_options(
+                ProducerRecordOptionsBuilder::new_topic_value(topic, value.map(|v| v.to_vec()))
+                    .set_partition(partition)
+                    .set_timestamp(timestamp)
+                    .set_key(key.map(|k| k.to_vec()))
+                    .build(),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
             rt.block_on(mock.send(owned_record))
@@ -385,11 +386,12 @@ fn producer_send_with_callback(
     match kind {
         ProducerKind::Mock(mock, _) => {
             let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
-            let owned_record = ProducerRecord::new_partition_timestamp_options(
-                topic,
-                partition,
-                timestamp,
-                ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), None),
+            let owned_record = ProducerRecord::new_options(
+                ProducerRecordOptionsBuilder::new_topic_value(topic, value.map(|v| v.to_vec()))
+                    .set_partition(partition)
+                    .set_timestamp(timestamp)
+                    .set_key(key.map(|k| k.to_vec()))
+                    .build(),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
             rt.block_on(mock.send_callback(owned_record, Some(callback)))
@@ -811,11 +813,13 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                 // (test helper, not a hot path). Re-validation cannot fail since
                 // the record was already built in `send_async`.
                 let (topic, partition, timestamp, headers, key, value) = record.into_parts();
-                match ProducerRecord::new_partition_timestamp_options(
-                    topic,
-                    partition,
-                    timestamp,
-                    ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), Some(headers)),
+                match ProducerRecord::new_options(
+                    ProducerRecordOptionsBuilder::new_topic_value(topic, value.map(|v| v.to_vec()))
+                        .set_partition(partition)
+                        .set_timestamp(timestamp)
+                        .set_key(key.map(|k| k.to_vec()))
+                        .set_headers(Some(headers))
+                        .build(),
                 ) {
                     Ok(record) => {
                         if let Err(e) = mp.send_callback(record, Some(callback)).await {
@@ -1289,11 +1293,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     let partition_opt = if partition >= 0 { Some(partition) } else { None };
     let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
 
-    let record = match ProducerRecord::new_partition_timestamp_options(
-        topic_str,
-        partition_opt,
-        timestamp_opt,
-        ProducerRecordOptions::new(key_slice, value_slice, None),
+    let record = match ProducerRecord::new_options(
+        ProducerRecordOptionsBuilder::new_topic_value(topic_str, value_slice)
+            .set_partition(partition_opt)
+            .set_timestamp(timestamp_opt)
+            .set_key(key_slice)
+            .build(),
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -1431,11 +1436,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     let partition_opt = if partition >= 0 { Some(partition) } else { None };
     let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
 
-    let record = match ProducerRecord::new_partition_timestamp_options(
-        topic_str,
-        partition_opt,
-        timestamp_opt,
-        ProducerRecordOptions::new(key_slice, value_slice, None),
+    let record = match ProducerRecord::new_options(
+        ProducerRecordOptionsBuilder::new_topic_value(topic_str, value_slice)
+            .set_partition(partition_opt)
+            .set_timestamp(timestamp_opt)
+            .set_key(key_slice)
+            .build(),
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -1550,11 +1556,12 @@ unsafe fn send_batch_inner(
         let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
         let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
 
-        let record = match ProducerRecord::new_partition_timestamp_options(
-            topic_str,
-            partition,
-            timestamp,
-            ProducerRecordOptions::new(key, value, None),
+        let record = match ProducerRecord::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value(topic_str, value)
+                .set_partition(partition)
+                .set_timestamp(timestamp)
+                .set_key(key)
+                .build(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1720,11 +1727,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 
     // Build (and validate) the record once, here, so construction errors are
     // reported synchronously via `out_error` rather than deferred to the task.
-    let record = match ProducerRecord::new_partition_timestamp_options(
-        topic_str,
-        partition_opt,
-        timestamp_opt,
-        ProducerRecordOptions::new(key_slice, value_slice, None),
+    let record = match ProducerRecord::new_options(
+        ProducerRecordOptionsBuilder::new_topic_value(topic_str, value_slice)
+            .set_partition(partition_opt)
+            .set_timestamp(timestamp_opt)
+            .set_key(key_slice)
+            .build(),
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -1830,11 +1838,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
         let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
 
-        let record = match ProducerRecord::new_partition_timestamp_options(
-            topic,
-            partition,
-            timestamp,
-            ProducerRecordOptions::new(key, value, None),
+        let record = match ProducerRecord::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+                .set_partition(partition)
+                .set_timestamp(timestamp)
+                .set_key(key)
+                .build(),
         ) {
             Ok(r) => r,
             Err(e) => {

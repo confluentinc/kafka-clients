@@ -505,7 +505,7 @@ mod tests {
     use crate::client_response::ClientResponse;
     use crate::common::Node;
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptions};
+    use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
 
     use super::*;
@@ -1085,11 +1085,14 @@ mod tests {
         data.set_topics(vec![topic_meta]);
         let metadata_response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            ApiKeys::METADATA.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                ApiKeys::METADATA.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .unwrap();
         let response = ClientResponse::new_timed_out(

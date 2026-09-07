@@ -115,7 +115,7 @@ use crate::common::serialization::Deserializer;
 use crate::consumer::internals::fetch_config::FetchConfig;
 use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
 use crate::consumer::internals::subscription_state::SubscriptionState;
-use crate::consumer::{ConsumerRecord, ConsumerRecordOptions};
+use crate::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder};
 use crate::fetch_response_data::{AbortedTransaction, PartitionData};
 
 /// Sentinel value: a partition leader epoch that is unknown / unset.
@@ -749,20 +749,20 @@ impl CompletedFetch {
             // §27: cheap Arc clone — atomic pointer bump, no UTF-8 copy.
             let topic_arc = Arc::clone(&self.topic_arc);
             let consumer_record = ConsumerRecord::new_options(
-                topic_arc,
-                self.partition.partition(),
-                offset,
-                ConsumerRecordOptions::new(
-                    timestamp,
-                    timestamp_type,
-                    key_size,
-                    value_size,
+                ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
+                    topic_arc,
+                    self.partition.partition(),
+                    offset,
                     key,
                     value,
-                    headers_owned,
-                    leader_epoch,
-                    None,
-                ),
+                )
+                .set_timestamp(timestamp)
+                .set_timestamp_type(timestamp_type)
+                .set_serialized_key_size(key_size)
+                .set_serialized_value_size(value_size)
+                .set_headers(headers_owned)
+                .set_leader_epoch(leader_epoch)
+                .build(),
             );
             self.records_read += 1;
             self.bytes_read += record_size_in_bytes;

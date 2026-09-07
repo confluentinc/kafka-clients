@@ -27,7 +27,7 @@ use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
-    ApiVersionsRequestBuilder, ApiVersionsResponse, RequestBuilder, RequestHeader, RequestHeaderOptions,
+    ApiVersionsRequestBuilder, ApiVersionsResponse, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder,
 };
 
 use crate::common::cluster_config::ClusterConfig;
@@ -67,11 +67,14 @@ async fn send_api_versions_request(selector: &mut Selector) -> ApiVersionsRespon
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-        api_key,
-        version,
-        "api-versions-test",
-        RequestHeaderOptions::new(1),
+    let header = RequestHeader::new_options(
+        RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+            api_key,
+            version,
+            "api-versions-test",
+            1,
+        )
+        .build(),
     )
     .expect("Failed to create request header");
 

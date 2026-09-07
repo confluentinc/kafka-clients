@@ -1679,7 +1679,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::requests::RequestHeaderOptions;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
     use crate::api_message_type::ListenerType;
     use crate::api_versions_response_data::ApiVersionsResponseData;
@@ -1693,7 +1693,7 @@ mod tests {
     use crate::common::requests::ApiVersionsResponse;
     use crate::common::requests::ProduceRequestBuilder;
     use crate::common::requests::ResponseHeader;
-    use crate::common::requests::{MetadataRequestBuilder, MetadataRequestBuilderOptions};
+    use crate::common::requests::{MetadataRequestBuilder, MetadataRequestBuilderOptionsBuilder};
     use crate::host_resolver::HostResolver;
     use crate::kafka_client::KafkaClient;
     use crate::metadata_response_data::MetadataResponseData;
@@ -3552,11 +3552,11 @@ mod tests {
             .expect("METADATA must be advertised");
 
         let unreachable = supported.max_version + 1;
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation_min_version_options(
-            Some(&["topic_1"]),
-            true,
-            unreachable,
-            MetadataRequestBuilderOptions::new(unreachable),
+        let builder = MetadataRequestBuilder::new_options(
+            MetadataRequestBuilderOptionsBuilder::new_topics_allow_auto_topic_creation(Some(&["topic_1"]), true)
+                .set_min_version(unreachable)
+                .set_max_version(unreachable)
+                .build(),
         );
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
@@ -4223,11 +4223,14 @@ mod tests {
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
-        crate::common::requests::RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            12,
-            "client-id",
-            RequestHeaderOptions::new(correlation_id),
+        crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                12,
+                "client-id",
+                correlation_id,
+            )
+            .build(),
         )
         .expect("request header")
     }
@@ -4346,11 +4349,14 @@ mod tests {
 
         // `assertThrows(SchemaException.class, ...)` — the request is SASL, the
         // response is not.
-        let header0 = crate::common::requests::RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::LIST_OFFSETS,
-            version,
-            "id",
-            RequestHeaderOptions::new(sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID),
+        let header0 = crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::LIST_OFFSETS,
+                version,
+                "id",
+                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            )
+            .build(),
         )
         .expect("request header");
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.clone());
@@ -4361,11 +4367,14 @@ mod tests {
         // so the mismatch is rethrown. `CorrelationIdMismatchException` *is* the
         // `IllegalStateException` Java's assertion accepts, which is why every
         // hierarchy predicate must answer `false` for it.
-        let header1 = crate::common::requests::RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::LIST_OFFSETS,
-            version,
-            "id",
-            RequestHeaderOptions::new(1),
+        let header1 = crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::LIST_OFFSETS,
+                version,
+                "id",
+                1,
+            )
+            .build(),
         )
         .expect("request header");
         let mut buffer = ByteBufferAccessor::from_bytes(bytes);

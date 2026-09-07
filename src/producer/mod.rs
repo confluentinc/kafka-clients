@@ -29,6 +29,6 @@ pub use kafka_producer::KafkaProducer;
 pub use mock_producer::MockProducer;
 pub use producer_buffer_exhausted_error::ProducerBufferExhaustedError;
 pub use producer_config::ProducerConfig;
-pub use producer_record::{ProducerRecord, ProducerRecordOptions};
+pub use producer_record::{ProducerRecord, ProducerRecordOptions, ProducerRecordOptionsBuilder};
 pub use producer_trait::Producer;
 pub use record_metadata::RecordMetadata;

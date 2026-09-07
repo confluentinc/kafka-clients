@@ -52,36 +52,103 @@ pub struct ProducerRecord<K, V> {
     timestamp: Option<i64>,
 }
 
-/// The parameters of [`ProducerRecord::new_partition_timestamp_options`]
-/// beyond its first three.
+/// The parameters of Java's widest `ProducerRecord` constructor
+/// (`ProducerRecord(String, Integer, Long, K, V, Iterable<Header>)`,
+/// `ProducerRecord.java:69`).
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to
-/// satisfy CLAUDE.md §2's rule that a derived overload name carry at most
-/// three parameter names: the widest Java constructor
-/// (`ProducerRecord.java:69`) differs from the group's intersection
-/// `{topic, value}` by four parameters — `partition`, `timestamp`, `key`,
-/// `headers` — so the method keeps its first three parameters and this
-/// struct carries the rest.
+/// satisfy CLAUDE.md §2's cap on derived overload names: that constructor
+/// differs from the group's intersection `{topic, value}` by four parameters
+/// — `partition`, `timestamp`, `key`, `headers` — so the cap fires and this
+/// struct becomes the method's *only* parameter, carrying every Java
+/// parameter including the intersection's own.
 ///
-/// It is `#[non_exhaustive]`, so callers construct it with [`Self::new`].
-/// There is deliberately **no** `Default`: no Java overload supplies a
-/// default for `value`, so there is no Java-sanctioned "all fields omitted"
-/// form to translate.
+/// It deliberately has **no** `Default`. `topic` and `value` are what even
+/// Java's narrowest constructor (`:142`) takes from its caller, so neither has
+/// a Java-derived default — and a synthesised empty topic would silently send
+/// the record nowhere. Construct it with [`ProducerRecordOptionsBuilder::new_topic_value`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ProducerRecordOptions<K, V> {
-    /// The key that will be included in the record. Java's `key`.
+    /// The topic the record will be appended to. Java's `topic`.
+    pub topic: String,
+    /// The partition to which the record should be sent. Java's `partition`.
+    /// Starts as `None`, as in `:142`.
+    pub partition: Option<i32>,
+    /// The timestamp of the record, in milliseconds since epoch. If `None`,
+    /// the producer will assign the timestamp using the system clock. Java's
+    /// `timestamp`; starts as `None`, as in `:142`.
+    pub timestamp: Option<i64>,
+    /// The key that will be included in the record. Java's `key`. Starts as
+    /// `None`, as in `:142`.
     pub key: Option<K>,
     /// The record contents. Java's `value`.
     pub value: Option<V>,
     /// The headers that will be included in the record. Java's `headers`.
+    /// Starts as `None`, as in `:142`.
     pub headers: Option<RecordHeaders>,
 }
 
 impl<K, V> ProducerRecordOptions<K, V> {
-    /// Creates the options carrying the given key, value and headers.
-    pub fn new(key: Option<K>, value: Option<V>, headers: Option<RecordHeaders>) -> Self {
-        Self { key, value, headers }
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`ProducerRecordOptionsBuilder`], which is this constructor's only caller.
+    fn new_topic_value(topic: String, value: Option<V>) -> Self {
+        Self { topic, partition: None, timestamp: None, key: None, value, headers: None }
+    }
+}
+
+/// Fluent builder for [`ProducerRecordOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`ProducerRecordOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct ProducerRecordOptionsBuilder<K, V> {
+    options: ProducerRecordOptions<K, V>,
+}
+
+impl<K, V> ProducerRecordOptionsBuilder<K, V> {
+    /// Creates the options for the given topic and value, with every other
+    /// parameter at the value Java's narrowest `ProducerRecord` constructor
+    /// (`:142`) passes on the caller's behalf — its body is
+    /// `this(topic, null, null, null, value, null)`.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_topic_value(topic: String, value: Option<V>) -> Self {
+        Self { options: ProducerRecordOptions::new_topic_value(topic, value) }
+    }
+
+    /// Sets [`ProducerRecordOptions::partition`].
+    pub fn set_partition(mut self, partition: Option<i32>) -> Self {
+        self.options.partition = partition;
+        self
+    }
+
+    /// Sets [`ProducerRecordOptions::timestamp`].
+    pub fn set_timestamp(mut self, timestamp: Option<i64>) -> Self {
+        self.options.timestamp = timestamp;
+        self
+    }
+
+    /// Sets [`ProducerRecordOptions::key`].
+    pub fn set_key(mut self, key: Option<K>) -> Self {
+        self.options.key = key;
+        self
+    }
+
+    /// Sets [`ProducerRecordOptions::headers`].
+    pub fn set_headers(mut self, headers: Option<RecordHeaders>) -> Self {
+        self.options.headers = headers;
+        self
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> ProducerRecordOptions<K, V> {
+        self.options
     }
 }
 
@@ -91,27 +158,21 @@ impl<K, V> ProducerRecord<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `topic` - The topic the record will be appended to
-    /// * `partition` - The partition to which the record should be sent
-    /// * `timestamp` - The timestamp of the record, in milliseconds since epoch. If `None`,
-    ///   the producer will assign the timestamp using the system clock.
-    /// * `options` - The remaining parameters: key, value and headers
+    /// * `options` - Every parameter of Java's widest constructor: topic,
+    ///   partition, timestamp, key, value and headers
     ///
     /// Corresponds to Java's `ProducerRecord(String, Integer, Long, K, V, Iterable<Header>)`
-    /// (`ProducerRecord.java:69`).
+    /// (`ProducerRecord.java:69`). Its six parameters exceed CLAUDE.md §2's
+    /// three-parameter cap on derived overload names, so
+    /// [`ProducerRecordOptions`] is this method's only parameter.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The timestamp is negative
     /// - The partition is negative
-    pub fn new_partition_timestamp_options(
-        topic: String,
-        partition: Option<i32>,
-        timestamp: Option<i64>,
-        options: ProducerRecordOptions<K, V>,
-    ) -> Result<Self, LocalIllegalArgumentError> {
-        let ProducerRecordOptions { key, value, headers } = options;
+    pub fn new_options(options: ProducerRecordOptions<K, V>) -> Result<Self, LocalIllegalArgumentError> {
+        let ProducerRecordOptions { topic, partition, timestamp, key, value, headers } = options;
         if let Some(ts) = timestamp
             && ts < 0
         {
@@ -145,7 +206,13 @@ impl<K, V> ProducerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
     ) -> Result<Self, LocalIllegalArgumentError> {
-        Self::new_partition_timestamp_options(topic, partition, timestamp, ProducerRecordOptions::new(key, value, None))
+        Self::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+                .set_partition(partition)
+                .set_timestamp(timestamp)
+                .set_key(key)
+                .build(),
+        )
     }
 
     /// Creates a record to be sent to a specified topic and partition (with headers,
@@ -164,11 +231,12 @@ impl<K, V> ProducerRecord<K, V> {
         value: Option<V>,
         headers: RecordHeaders,
     ) -> Result<Self, LocalIllegalArgumentError> {
-        Self::new_partition_timestamp_options(
-            topic,
-            partition,
-            None,
-            ProducerRecordOptions::new(key, value, Some(headers)),
+        Self::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+                .set_partition(partition)
+                .set_key(key)
+                .set_headers(Some(headers))
+                .build(),
         )
     }
 
@@ -186,7 +254,12 @@ impl<K, V> ProducerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
     ) -> Result<Self, LocalIllegalArgumentError> {
-        Self::new_partition_timestamp_options(topic, partition, None, ProducerRecordOptions::new(key, value, None))
+        Self::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+                .set_partition(partition)
+                .set_key(key)
+                .build(),
+        )
     }
 
     /// Creates a record to be sent to Kafka with a key and value (no partition, no
@@ -195,7 +268,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// Corresponds to Java's `ProducerRecord(String, K, V)` (`ProducerRecord.java:132`).
     pub fn new_key(topic: String, key: Option<K>, value: Option<V>) -> Self {
         // Cannot fail: no partition, no timestamp to validate
-        Self::new_partition_timestamp_options(topic, None, None, ProducerRecordOptions::new(key, value, None)).unwrap()
+        Self::new_options(ProducerRecordOptionsBuilder::new_topic_value(topic, value).set_key(key).build()).unwrap()
     }
 
     /// Creates a record with no key (no partition, no timestamp, no headers).
@@ -205,7 +278,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// constructors — so it owns the plain name (CLAUDE.md §2).
     pub fn new(topic: String, value: Option<V>) -> Self {
         // Cannot fail: no partition, no timestamp to validate
-        Self::new_partition_timestamp_options(topic, None, None, ProducerRecordOptions::new(None, value, None)).unwrap()
+        Self::new_options(ProducerRecordOptionsBuilder::new_topic_value(topic, value).build()).unwrap()
     }
 
     /// Returns the topic this record is being sent to.
@@ -329,11 +402,8 @@ mod tests {
             ProducerRecord::new_partition_key("test".to_string(), Some(1), Some("key".to_string()), Some(2)).unwrap();
         assert_ne!(producer_record, value_mismatch);
 
-        let null_fields_record: ProducerRecord<String, String> = ProducerRecord::new_partition_timestamp_options(
-            "topic".to_string(),
-            None,
-            None,
-            ProducerRecordOptions::new(None, None, None),
+        let null_fields_record: ProducerRecord<String, String> = ProducerRecord::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value("topic".to_string(), None).build(),
         )
         .unwrap();
         assert_eq!(null_fields_record, null_fields_record.clone());

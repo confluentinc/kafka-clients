@@ -399,7 +399,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
     // `"latestVersionUnstable": false` mark v11 as a stable, released part of
     // 4.2 — not gated behind an unstable-versions flag). Our client already
     // negotiates v11 for this spec (`ListOffsetsRequestBuilder::
-    // for_consumer_require_max_timestamp_options` sets `min_version = 11` for
+    // for_consumer_options` sets `min_version = 11` for
     // `require_earliest_pending_upload_timestamp`, covered by
     // `for_consumer_require_earliest_pending_upload_forces_v11`), so the
     // request goes through as an ordinary, successful v11 call. The broker's

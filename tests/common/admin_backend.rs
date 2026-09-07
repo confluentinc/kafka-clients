@@ -21,7 +21,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use confluent_kafka::admin::ConfigEntryOptions;
+use confluent_kafka::admin::ConfigEntryOptionsBuilder;
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
@@ -888,7 +888,7 @@ pub struct ConfigSynonymView {
 /// One configuration entry as `describeConfigs` reports it, standing in for the
 /// production [`ConfigEntry`].
 ///
-/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::new_source_options` is public
+/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::new_options` is public
 /// but takes `Vec<ConfigSynonym>`, whose constructor is not. Dropping synonyms
 /// to keep the production type was rejected — `describeConfigs` reports all nine
 /// `ConfigEntry` fields through *every* binding (`kafka_admin_ConfigEntry_*`,
@@ -1867,22 +1867,19 @@ fn comparable_config(config: &Config) -> Config {
         config
             .entries()
             .map(|entry| {
-                ConfigEntry::new_source_options(
+                let options = ConfigEntryOptionsBuilder::new_name_value(
                     entry.name().to_string(),
                     entry.value().map(str::to_string),
-                    if entry.is_default() {
-                        ConfigSource::DefaultConfig
-                    } else {
-                        ConfigSource::Unknown
-                    },
-                    ConfigEntryOptions::new(
-                        entry.is_sensitive(),
-                        entry.is_read_only(),
-                        Vec::new(),
-                        ConfigType::Unknown,
-                        None,
-                    ),
                 )
+                .set_source(if entry.is_default() {
+                    ConfigSource::DefaultConfig
+                } else {
+                    ConfigSource::Unknown
+                })
+                .set_is_sensitive(entry.is_sensitive())
+                .set_is_read_only(entry.is_read_only())
+                .build();
+                ConfigEntry::new_options(options)
             })
             .collect::<Vec<_>>(),
     )

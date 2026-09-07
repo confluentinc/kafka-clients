@@ -793,12 +793,15 @@ mod tests {
     /// `offsets_request_manager.rs`.
     fn build_fetch_client_response(response: Option<FetchResponse>) -> crate::client_response::ClientResponse {
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptions};
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::FETCH,
-            ApiKeys::FETCH.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptionsBuilder};
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::FETCH,
+                ApiKeys::FETCH.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header");
         crate::client_response::ClientResponse::new_timed_out(

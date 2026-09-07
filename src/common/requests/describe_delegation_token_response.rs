@@ -39,28 +39,78 @@ pub struct DescribeDelegationTokenResponse {
 }
 
 /// The parameters of Java's four-argument `DescribeDelegationTokenResponse`
-/// constructor (`DescribeDelegationTokenResponse.java:38`) that do not fit in
-/// the derived method name.
+/// constructor (`DescribeDelegationTokenResponse.java:38`).
 ///
 /// Java's three constructors (`:38`, `:69`, `:73`) share no parameter name, so
 /// all four of `:38`'s parameters reach its derived name. CLAUDE.md §2 caps that
-/// at three and moves the remainder here. This struct has no Java counterpart:
-/// it exists solely to satisfy that naming rule (DoD #7).
+/// at three and makes this struct the method's *only* parameter, so every Java
+/// parameter lives here. This struct has no Java counterpart: it exists solely
+/// to satisfy that naming rule (DoD #7).
 ///
-/// Its `Default` is Java's own — `DescribeDelegationTokenResponse(int, int,
-/// Errors)` (`:69`) passes `new ArrayList<>()` for `tokens` on the caller's
-/// behalf.
-#[derive(Debug, Clone, Copy, Default)]
+/// It has **no** `Default`: `version`, `throttle_time_ms` and `error` come from
+/// the caller in every Java overload. Build it from
+/// [`DescribeDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error`], whose `tokens` starts empty
+/// exactly as Java's `DescribeDelegationTokenResponse(int, int, Errors)` (`:69`)
+/// passes `new ArrayList<>()` on the caller's behalf.
+#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct DescribeDelegationTokenResponseOptions<'a> {
-    /// Java's `tokens`.
+    /// Java's `version`.
+    pub version: i16,
+    /// Java's `throttleTimeMs`.
+    pub throttle_time_ms: i32,
+    /// Java's `error`.
+    pub error: Errors,
+    /// Java's `tokens`. Starts empty, as in `:69`.
     pub tokens: &'a [DelegationToken],
 }
 
 impl<'a> DescribeDelegationTokenResponseOptions<'a> {
-    /// Creates the options carrying the given delegation tokens.
-    pub fn new(tokens: &'a [DelegationToken]) -> Self {
-        Self { tokens }
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`DescribeDelegationTokenResponseOptionsBuilder`], which is this constructor's only caller.
+    fn new_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
+        Self { version, throttle_time_ms, error, tokens: &[] }
+    }
+}
+
+/// Fluent builder for [`DescribeDelegationTokenResponseOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`DescribeDelegationTokenResponseOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct DescribeDelegationTokenResponseOptionsBuilder<'a> {
+    options: DescribeDelegationTokenResponseOptions<'a>,
+}
+
+impl<'a> DescribeDelegationTokenResponseOptionsBuilder<'a> {
+    /// Creates the options for an error response with no tokens, as Java's
+    /// `DescribeDelegationTokenResponse(int, int, Errors)` (`:69`) does.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
+        Self {
+            options: DescribeDelegationTokenResponseOptions::new_version_throttle_time_ms_error(
+                version,
+                throttle_time_ms,
+                error,
+            ),
+        }
+    }
+
+    /// Sets [`DescribeDelegationTokenResponseOptions::tokens`].
+    pub fn set_tokens(mut self, tokens: &'a [DelegationToken]) -> Self {
+        self.options.tokens = tokens;
+        self
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> DescribeDelegationTokenResponseOptions<'a> {
+        self.options
     }
 }
 
@@ -79,13 +129,8 @@ impl DescribeDelegationTokenResponse {
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors,
     /// List<DelegationToken>)` (`DescribeDelegationTokenResponse.java:38`). The
     /// token requester is only encoded on v3+.
-    pub fn new_version_throttle_time_ms_error_options(
-        version: i16,
-        throttle_time_ms: i32,
-        error: Errors,
-        options: DescribeDelegationTokenResponseOptions<'_>,
-    ) -> Self {
-        let tokens = options.tokens;
+    pub fn new_options(options: DescribeDelegationTokenResponseOptions<'_>) -> Self {
+        let DescribeDelegationTokenResponseOptions { version, throttle_time_ms, error, tokens } = options;
         let described: Vec<DescribedDelegationToken> = tokens
             .iter()
             .map(|dt| {
@@ -128,11 +173,13 @@ impl DescribeDelegationTokenResponse {
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`
     /// (`DescribeDelegationTokenResponse.java:69`).
     pub fn new_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
-        Self::new_version_throttle_time_ms_error_options(
-            version,
-            throttle_time_ms,
-            error,
-            DescribeDelegationTokenResponseOptions::default(),
+        Self::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error(
+                version,
+                throttle_time_ms,
+                error,
+            )
+            .build(),
         )
     }
 
@@ -259,11 +306,10 @@ mod tests {
     fn tokens_round_trip_through_response_v3() {
         let version = 3;
         let tokens = vec![token("id-1"), token("id-2")];
-        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error_options(
-            version,
-            0,
-            Errors::None,
-            DescribeDelegationTokenResponseOptions::new(&tokens),
+        let response = DescribeDelegationTokenResponse::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error(version, 0, Errors::None)
+                .set_tokens(&tokens)
+                .build(),
         );
         assert!(!response.has_error());
         let reconstructed = response.tokens();
@@ -274,11 +320,10 @@ mod tests {
     #[test]
     fn requester_not_encoded_below_v3() {
         let tokens = vec![token("id-1")];
-        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error_options(
-            2,
-            0,
-            Errors::None,
-            DescribeDelegationTokenResponseOptions::new(&tokens),
+        let response = DescribeDelegationTokenResponse::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error(2, 0, Errors::None)
+                .set_tokens(&tokens)
+                .build(),
         );
         // On v2 the requester principal is not encoded; it decodes to empty.
         assert_eq!(response.data().tokens[0].token_requester_principal_name, "");
@@ -299,11 +344,10 @@ mod tests {
 
     #[test]
     fn display_redacts_token_id_and_hmac() {
-        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error_options(
-            3,
-            0,
-            Errors::None,
-            DescribeDelegationTokenResponseOptions::new(&[token("secret-id")]),
+        let response = DescribeDelegationTokenResponse::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error(3, 0, Errors::None)
+                .set_tokens(&[token("secret-id")])
+                .build(),
         );
         let rendered = response.to_string();
         assert!(rendered.contains("REDACTED"), "{rendered}");

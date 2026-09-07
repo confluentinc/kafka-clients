@@ -32,7 +32,7 @@ use crate::common::TopicPartition;
 use crate::common::errors::SerializationError;
 use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
-use crate::consumer::consumer_partition_assignor::{Assignment, Subscription, SubscriptionOptions};
+use crate::consumer::consumer_partition_assignor::{Assignment, Subscription, SubscriptionOptionsBuilder};
 use crate::consumer_protocol_assignment_data::{
     ConsumerProtocolAssignmentData, TopicPartition as AssignmentTopicPartition,
 };
@@ -207,11 +207,13 @@ impl ConsumerProtocol {
             _ => None,
         };
 
-        Ok(Subscription::new_user_data_owned_partitions_options(
-            data.topics.clone(),
-            data.user_data.clone(),
-            owned_partitions,
-            SubscriptionOptions { generation_id: data.generation_id, rack_id },
+        Ok(Subscription::new_options(
+            SubscriptionOptionsBuilder::new_topics(data.topics.clone())
+                .set_user_data(data.user_data.clone())
+                .set_owned_partitions(owned_partitions)
+                .set_generation_id(data.generation_id)
+                .set_rack_id(rack_id)
+                .build(),
         ))
     }
 
@@ -499,11 +501,12 @@ mod tests {
     /// Round-trips a subscription including owned partitions and generation.
     #[test]
     fn subscription_round_trip() {
-        let subscription = Subscription::new_user_data_owned_partitions_options(
-            vec!["b".to_string(), "a".to_string()],
-            None,
-            vec![tp("a", 0), tp("a", 1)],
-            SubscriptionOptions { generation_id: 7, rack_id: Some("rack-1".to_string()) },
+        let subscription = Subscription::new_options(
+            SubscriptionOptionsBuilder::new_topics(vec!["b".to_string(), "a".to_string()])
+                .set_owned_partitions(vec![tp("a", 0), tp("a", 1)])
+                .set_generation_id(7)
+                .set_rack_id(Some("rack-1".to_string()))
+                .build(),
         );
         let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
         let decoded = ConsumerProtocol::deserialize_subscription(&bytes).unwrap();
@@ -568,11 +571,11 @@ mod tests {
     /// `serialize_subscription` / `deserialize_consumer_protocol_subscription`.
     #[test]
     fn consumer_protocol_subscription_data_round_trip() {
-        let subscription = Subscription::new_user_data_owned_partitions_options(
-            vec!["b".to_string(), "a".to_string()],
-            None,
-            vec![tp("a", 0)],
-            SubscriptionOptions { generation_id: 3, ..Default::default() },
+        let subscription = Subscription::new_options(
+            SubscriptionOptionsBuilder::new_topics(vec!["b".to_string(), "a".to_string()])
+                .set_owned_partitions(vec![tp("a", 0)])
+                .set_generation_id(3)
+                .build(),
         );
         let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
 

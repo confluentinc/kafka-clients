@@ -2798,7 +2798,7 @@ mod tests {
     use crate::client_response::ClientResponse;
     use crate::common::Node;
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader, RequestHeaderOptions};
+    use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
 
     /// A `CoordinatorRequestManager` with a known coordinator node injected,
@@ -2812,11 +2812,14 @@ mod tests {
     /// Wrap a `ConcreteResponse` in a `ClientResponse` with the appropriate
     /// API key header. Mirrors the Java test's `ClientResponse` construction.
     fn client_response_for(api_key: &ApiKeys, version: i16, response: ConcreteResponse) -> ClientResponse {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            api_key,
-            version,
-            "test-client",
-            RequestHeaderOptions::new(0),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                api_key,
+                version,
+                "test-client",
+                0,
+            )
+            .build(),
         )
         .expect("request header");
         ClientResponse::new(header, None, "localhost:9092", 0, 1, false, None, None, Some(response))
@@ -3211,11 +3214,14 @@ mod tests {
         let response = ConcreteResponse::OffsetCommit(
             crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
-        let header = crate::common::requests::RequestHeader::new_request_api_key_request_version_client_id_options(
-            &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
-            0,
-            "test-client",
-            RequestHeaderOptions::new(0),
+        let header = crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
+                0,
+                "test-client",
+                0,
+            )
+            .build(),
         )
         .expect("request header");
         let client_response = crate::client_response::ClientResponse::new(
@@ -3548,11 +3554,14 @@ mod tests {
         let response = ConcreteResponse::OffsetCommit(
             crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
-        let header = crate::common::requests::RequestHeader::new_request_api_key_request_version_client_id_options(
-            &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
-            0,
-            "test-client",
-            RequestHeaderOptions::new(0),
+        let header = crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
+                0,
+                "test-client",
+                0,
+            )
+            .build(),
         )
         .expect("request header");
         let client_response = crate::client_response::ClientResponse::new(

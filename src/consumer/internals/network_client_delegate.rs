@@ -1141,11 +1141,13 @@ mod tests {
         // Build a synthetic, non-disconnected response carrying a
         // FindCoordinator body. The handler's on_complete pulls
         // `received_time_ms` off the response and stores it.
-        let header = crate::common::requests::RequestHeader::new_request_api_key_request_version_client_id_options(
-            &crate::common::protocol::ApiKeys::FIND_COORDINATOR,
-            0,
-            "",
-            crate::common::requests::RequestHeaderOptions::new(1),
+        let header = crate::common::requests::RequestHeader::new_options(
+            crate::common::requests::RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &crate::common::protocol::ApiKeys::FIND_COORDINATOR,
+                0,
+                "",
+                1,
+            ).build(),
         )
         .expect("header ok");
         let body = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());

@@ -27,11 +27,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
-use confluent_kafka::admin::ConfigEntryOptions;
+use confluent_kafka::admin::ConfigEntryOptionsBuilder;
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
     AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
-    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
+    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource,
     ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
     CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
     DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
@@ -1333,16 +1333,16 @@ fn feature_update_to_proto(update: &FeatureUpdate) -> proto::FeatureUpdate {
 }
 
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
-    ConfigEntry::new_source_options(
-        entry.name,
-        entry.value,
-        if entry.is_default {
+    let options = ConfigEntryOptionsBuilder::new_name_value(entry.name, entry.value)
+        .set_source(if entry.is_default {
             ConfigSource::DefaultConfig
         } else {
             ConfigSource::Unknown
-        },
-        ConfigEntryOptions::new(entry.is_sensitive, entry.is_read_only, Vec::new(), ConfigType::Unknown, None),
-    )
+        })
+        .set_is_sensitive(entry.is_sensitive)
+        .set_is_read_only(entry.is_read_only)
+        .build();
+    ConfigEntry::new_options(options)
 }
 
 impl AdminBackend for MultilanguageAdmin {

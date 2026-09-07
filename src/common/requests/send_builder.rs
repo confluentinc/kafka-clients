@@ -190,16 +190,19 @@ mod tests {
     use super::*;
     use crate::common::network::KafkaSend;
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::RequestHeaderOptions;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
     use crate::metadata_request_data::MetadataRequestData;
 
     #[test]
     fn test_send_builder_creates_size_prefixed_buffer() {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            ApiKeys::METADATA.latest_version(),
-            "test-client",
-            RequestHeaderOptions::new(42),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                ApiKeys::METADATA.latest_version(),
+                "test-client",
+                42,
+            )
+            .build(),
         )
         .unwrap();
 

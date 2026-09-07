@@ -32,32 +32,103 @@ use crate::common::TopicPartition;
 /// Corresponds to `AbstractStickyAssignor.DEFAULT_GENERATION`.
 pub const DEFAULT_GENERATION: i32 = -1;
 
-/// Options carried by
-/// [`Subscription::new_user_data_owned_partitions_options`].
-///
-/// Java's widest `Subscription` constructor
+/// The parameters of Java's widest `Subscription` constructor
 /// (`Subscription(List, ByteBuffer, List, int, Optional<String>)`,
-/// `ConsumerPartitionAssignor.java:113`) carries four parameters beyond the
-/// overload group's `{topics}` intersection, so CLAUDE.md §2 caps the derived
-/// name at three of them and moves the remainder here. This struct has no Java
-/// counterpart: it exists solely to satisfy that naming rule (DoD #7).
+/// `ConsumerPartitionAssignor.java:113`).
 ///
-/// It is `#[non_exhaustive]`, so construct it with [`Default`] and assign the
-/// fields you need. The defaults are Java's — the values its narrower
-/// `Subscription` constructors pass on the caller's behalf
-/// (`ConsumerPartitionAssignor.java:122,126,130`).
+/// That constructor carries four parameters beyond the overload group's
+/// `{topics}` intersection, so CLAUDE.md §2 caps its derived name and makes
+/// this struct the method's *only* parameter — every Java parameter lives
+/// here, `topics` included. This struct has no Java counterpart: it exists
+/// solely to satisfy that naming rule (DoD #7).
+///
+/// It deliberately has **no** `Default`. `topics` is what even Java's
+/// narrowest `Subscription` constructor (`:130`) takes from its caller, so it
+/// has no Java-derived default, and a synthesised empty topic list would
+/// silently produce a subscription to nothing. Construct it with
+/// [`SubscriptionOptionsBuilder::new_topics`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscriptionOptions {
-    /// Java's `generationId`. Defaults to [`DEFAULT_GENERATION`].
+    /// Java's `topics`.
+    pub topics: Vec<String>,
+    /// Java's `userData`. Starts as `None`, as in `:130`.
+    pub user_data: Option<Vec<u8>>,
+    /// Java's `ownedPartitions`. Starts empty, as in `:130`
+    /// (`Collections.emptyList()`).
+    pub owned_partitions: Vec<TopicPartition>,
+    /// Java's `generationId`. Starts as [`DEFAULT_GENERATION`], as in `:130`.
     pub generation_id: i32,
-    /// Java's `rackId`. Defaults to `None`.
+    /// Java's `rackId`. Starts as `None`, as in `:130`'s `Optional.empty()`.
     pub rack_id: Option<String>,
 }
 
-impl Default for SubscriptionOptions {
-    fn default() -> Self {
-        Self { generation_id: DEFAULT_GENERATION, rack_id: None }
+impl SubscriptionOptions {
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`SubscriptionOptionsBuilder`], which is this constructor's only caller.
+    fn new_topics(topics: Vec<String>) -> Self {
+        Self {
+            topics,
+            user_data: None,
+            owned_partitions: Vec::new(),
+            generation_id: DEFAULT_GENERATION,
+            rack_id: None,
+        }
+    }
+}
+
+/// Fluent builder for [`SubscriptionOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`SubscriptionOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct SubscriptionOptionsBuilder {
+    options: SubscriptionOptions,
+}
+
+impl SubscriptionOptionsBuilder {
+    /// Creates the options for the given topics, with every other parameter at
+    /// the value Java's narrowest `Subscription` constructor (`:130`) passes on
+    /// the caller's behalf — its body is
+    /// `this(topics, null, Collections.emptyList(), DEFAULT_GENERATION, Optional.empty())`.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_topics(topics: Vec<String>) -> Self {
+        Self { options: SubscriptionOptions::new_topics(topics) }
+    }
+
+    /// Sets [`SubscriptionOptions::user_data`].
+    pub fn set_user_data(mut self, user_data: Option<Vec<u8>>) -> Self {
+        self.options.user_data = user_data;
+        self
+    }
+
+    /// Sets [`SubscriptionOptions::owned_partitions`].
+    pub fn set_owned_partitions(mut self, owned_partitions: Vec<TopicPartition>) -> Self {
+        self.options.owned_partitions = owned_partitions;
+        self
+    }
+
+    /// Sets [`SubscriptionOptions::generation_id`].
+    pub fn set_generation_id(mut self, generation_id: i32) -> Self {
+        self.options.generation_id = generation_id;
+        self
+    }
+
+    /// Sets [`SubscriptionOptions::rack_id`].
+    pub fn set_rack_id(mut self, rack_id: Option<String>) -> Self {
+        self.options.rack_id = rack_id;
+        self
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> SubscriptionOptions {
+        self.options
     }
 }
 
@@ -80,21 +151,21 @@ impl Subscription {
     // `{topics}`, and `Subscription(List topics)` (`:130`) is exactly that — so
     // it keeps the plain name `new` and the others carry their Rust parameters
     // beyond it (CLAUDE.md §2). Only `:113` would need more than three
-    // parameters in its name, so it alone takes the `Options` shape: three
-    // named parameters plus [`SubscriptionOptions`] for the rest.
+    // parameters in its name, so it alone takes the `Options` shape, where the
+    // struct is the method's only parameter.
 
     /// Creates a subscription from topics only.
     ///
     /// Mirrors `Subscription(List)` (`:130`).
     pub fn new(topics: Vec<String>) -> Self {
-        Self::new_user_data_owned_partitions_options(topics, None, Vec::new(), SubscriptionOptions::default())
+        Self::new_options(SubscriptionOptionsBuilder::new_topics(topics).build())
     }
 
     /// Creates a subscription from topics and optional user data.
     ///
     /// Mirrors `Subscription(List, ByteBuffer)` (`:126`).
     pub fn new_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
-        Self::new_user_data_owned_partitions_options(topics, user_data, Vec::new(), SubscriptionOptions::default())
+        Self::new_options(SubscriptionOptionsBuilder::new_topics(topics).set_user_data(user_data).build())
     }
 
     /// Creates a subscription from topics, optional user data and owned
@@ -106,29 +177,24 @@ impl Subscription {
         user_data: Option<Vec<u8>>,
         owned_partitions: Vec<TopicPartition>,
     ) -> Self {
-        Self::new_user_data_owned_partitions_options(
-            topics,
-            user_data,
-            owned_partitions,
-            SubscriptionOptions::default(),
+        Self::new_options(
+            SubscriptionOptionsBuilder::new_topics(topics)
+                .set_user_data(user_data)
+                .set_owned_partitions(owned_partitions)
+                .build(),
         )
     }
 
     /// Creates a subscription with all fields.
     ///
     /// Mirrors `Subscription(List, ByteBuffer, List, int, Optional<String>)`
-    /// (`:113`); Java's `generationId` and `rackId` are carried by
+    /// (`:113`); all five of its parameters are carried by
     /// [`SubscriptionOptions`] — see the note above this overload group.
     ///
     /// A `generation_id` less than zero is mapped to `None`, matching Java's
     /// `generationId < 0 ? Optional.empty() : Optional.of(generationId)`.
-    pub fn new_user_data_owned_partitions_options(
-        topics: Vec<String>,
-        user_data: Option<Vec<u8>>,
-        owned_partitions: Vec<TopicPartition>,
-        options: SubscriptionOptions,
-    ) -> Self {
-        let SubscriptionOptions { generation_id, rack_id } = options;
+    pub fn new_options(options: SubscriptionOptions) -> Self {
+        let SubscriptionOptions { topics, user_data, owned_partitions, generation_id, rack_id } = options;
         Self {
             topics,
             user_data,
@@ -221,22 +287,21 @@ mod tests {
 
     #[test]
     fn subscription_negative_generation_is_none() {
-        let s = Subscription::new_user_data_owned_partitions_options(
-            vec!["t".to_string()],
-            None,
-            Vec::new(),
-            SubscriptionOptions { generation_id: -1, ..Default::default() },
+        let s = Subscription::new_options(
+            SubscriptionOptionsBuilder::new_topics(vec!["t".to_string()])
+                .set_generation_id(-1)
+                .build(),
         );
         assert_eq!(s.generation_id(), None);
     }
 
     #[test]
     fn subscription_non_negative_generation_is_some() {
-        let s = Subscription::new_user_data_owned_partitions_options(
-            vec!["t".to_string()],
-            None,
-            Vec::new(),
-            SubscriptionOptions { generation_id: 5, rack_id: Some("r".to_string()) },
+        let s = Subscription::new_options(
+            SubscriptionOptionsBuilder::new_topics(vec!["t".to_string()])
+                .set_generation_id(5)
+                .set_rack_id(Some("r".to_string()))
+                .build(),
         );
         assert_eq!(s.generation_id(), Some(5));
         assert_eq!(s.rack_id(), Some("r"));

@@ -303,9 +303,8 @@ impl<K, V> IntoIterator for ConsumerRecords<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::header::RecordHeaders;
     use crate::common::record::TimestampType;
-    use crate::consumer::ConsumerRecordOptions;
+    use crate::consumer::ConsumerRecordOptionsBuilder;
     use std::sync::Mutex;
 
     /// `TAINTED_NEXT_OFFSETS_LAST_LOG_NS` is process-global (as in Java), so the
@@ -318,20 +317,18 @@ mod tests {
     fn one_record() -> IndexMap<TopicPartition, Vec<ConsumerRecord<i32, String>>> {
         let tp = TopicPartition::new("topic".to_string(), 0);
         let record = ConsumerRecord::new_options(
-            "topic",
-            0,
-            0,
-            ConsumerRecordOptions::new(
-                0,
-                TimestampType::CreateTime,
+            ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
+                "topic",
                 0,
                 0,
                 Some(0),
                 Some("value".to_string()),
-                RecordHeaders::new(),
-                None,
-                None,
-            ),
+            )
+            .set_timestamp(0)
+            .set_timestamp_type(TimestampType::CreateTime)
+            .set_serialized_key_size(0)
+            .set_serialized_value_size(0)
+            .build(),
         );
         let mut records = IndexMap::new();
         records.insert(tp, vec![record]);

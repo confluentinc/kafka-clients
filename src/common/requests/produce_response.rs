@@ -143,42 +143,58 @@ pub struct PartitionResponse {
 }
 
 /// The parameters of Java's widest `ProduceResponse.PartitionResponse`
-/// constructor (`ProduceResponse.java:188`) that do not fit in the derived
-/// method name.
+/// constructor (`ProduceResponse.java:188`).
 ///
 /// Java's six constructors (`:168`, `:172`, `:176`, `:180`, `:184`, `:188`)
 /// intersect on `{error}`, so the widest form carries six parameters into its
-/// derived name. CLAUDE.md §2 caps that at three parameters and moves the
-/// remainder here. This struct has no Java counterpart: it exists solely to
+/// derived name. CLAUDE.md §2 caps that at three parameters and makes this
+/// struct the method's *only* parameter, so every Java parameter lives here —
+/// `error` included. This struct has no Java counterpart: it exists solely to
 /// satisfy that naming rule (DoD #7).
 ///
 /// Because the cap applies to the *whole* group, Java's `:184` and `:188` forms
-/// derive the same name — `new_base_offset_log_append_time_options`, differing
-/// only in whether they supply `currentLeader`. They therefore collapse into the
-/// single constructor below, with `:184`'s
-/// `new ProduceResponseData.LeaderIdAndEpoch()` becoming this struct's
-/// `current_leader` default.
+/// derive the same name — `new_options`, differing only in whether they supply
+/// `currentLeader`. They therefore collapse into the single constructor below,
+/// with `:184`'s `new ProduceResponseData.LeaderIdAndEpoch()` becoming this
+/// struct's initial `current_leader`.
 ///
-/// Its `Default` is Java's own throughout — every field is supplied by a
-/// narrower Java overload on the caller's behalf: `log_start_offset` by `:168`
-/// (`INVALID_OFFSET`), `record_errors` by `:176` (`Collections.emptyList()`),
-/// `error_message` by `:176`/`:180` (`null`), and `current_leader` by `:184`.
+/// It deliberately has **no** `Default`. Every field *except* `error` is
+/// supplied by a narrower Java overload on the caller's behalf, and
+/// [`PartitionResponseOptionsBuilder::new_error`] carries exactly those values; `error` is
+/// what even Java's narrowest form (`:168`) takes from its caller, so it has no
+/// Java-derived default — and a synthesised `Errors::None` would silently turn a
+/// failed partition into a successful one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PartitionResponseOptions {
-    /// Java's `logStartOffset`.
+    /// Java's `error`.
+    pub error: Errors,
+    /// Java's `baseOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
+    pub base_offset: i64,
+    /// Java's `logAppendTime`. Starts as `RecordBatch.NO_TIMESTAMP`, as in
+    /// `:168`.
+    pub log_append_time: i64,
+    /// Java's `logStartOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
     pub log_start_offset: i64,
-    /// Java's `recordErrors`.
+    /// Java's `recordErrors`. Starts empty, as in `:176`
+    /// (`Collections.emptyList()`).
     pub record_errors: Vec<RecordError>,
-    /// Java's `errorMessage`.
+    /// Java's `errorMessage`. Starts as `None`, as in `:176`/`:180`.
     pub error_message: Option<String>,
-    /// Java's `currentLeader`.
+    /// Java's `currentLeader`. Starts as `new LeaderIdAndEpoch()`, as in `:184`.
     pub current_leader: LeaderIdAndEpoch,
 }
 
-impl Default for PartitionResponseOptions {
-    fn default() -> Self {
+impl PartitionResponseOptions {
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`PartitionResponseOptionsBuilder`], which is this constructor's only caller.
+    fn new_error(error: Errors) -> Self {
         Self {
+            error,
+            base_offset: INVALID_OFFSET,
+            log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
             log_start_offset: INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message: None,
@@ -187,16 +203,67 @@ impl Default for PartitionResponseOptions {
     }
 }
 
-impl PartitionResponseOptions {
-    /// Creates the options carrying the given log start offset, per-record
-    /// errors, error message and current leader.
-    pub fn new(
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
-        current_leader: LeaderIdAndEpoch,
-    ) -> Self {
-        Self { log_start_offset, record_errors, error_message, current_leader }
+/// Fluent builder for [`PartitionResponseOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`PartitionResponseOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct PartitionResponseOptionsBuilder {
+    options: PartitionResponseOptions,
+}
+
+impl PartitionResponseOptionsBuilder {
+    /// Creates the options for the given error, with every other parameter at
+    /// the value Java's narrowest `PartitionResponse` overload (`:168`) passes
+    /// on the caller's behalf.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_error(error: Errors) -> Self {
+        Self { options: PartitionResponseOptions::new_error(error) }
+    }
+
+    /// Sets [`PartitionResponseOptions::base_offset`].
+    pub fn set_base_offset(mut self, base_offset: i64) -> Self {
+        self.options.base_offset = base_offset;
+        self
+    }
+
+    /// Sets [`PartitionResponseOptions::log_append_time`].
+    pub fn set_log_append_time(mut self, log_append_time: i64) -> Self {
+        self.options.log_append_time = log_append_time;
+        self
+    }
+
+    /// Sets [`PartitionResponseOptions::log_start_offset`].
+    pub fn set_log_start_offset(mut self, log_start_offset: i64) -> Self {
+        self.options.log_start_offset = log_start_offset;
+        self
+    }
+
+    /// Sets [`PartitionResponseOptions::record_errors`].
+    pub fn set_record_errors(mut self, record_errors: Vec<RecordError>) -> Self {
+        self.options.record_errors = record_errors;
+        self
+    }
+
+    /// Sets [`PartitionResponseOptions::error_message`].
+    pub fn set_error_message(mut self, error_message: Option<String>) -> Self {
+        self.options.error_message = error_message;
+        self
+    }
+
+    /// Sets [`PartitionResponseOptions::current_leader`].
+    pub fn set_current_leader(mut self, current_leader: LeaderIdAndEpoch) -> Self {
+        self.options.current_leader = current_leader;
+        self
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> PartitionResponseOptions {
+        self.options
     }
 }
 
@@ -240,16 +307,20 @@ impl PartitionResponse {
     /// List<RecordError>, String)` (`ProduceResponse.java:184`) **and**
     /// `PartitionResponse(Errors, long, long, long, List<RecordError>, String,
     /// LeaderIdAndEpoch)` (`:188`): both derive this same name under CLAUDE.md
-    /// §2, so they collapse into one constructor. Pass
-    /// [`PartitionResponseOptions::default`] — whose `current_leader` is `:184`'s
-    /// own `new LeaderIdAndEpoch()` — to get `:184`'s behaviour.
-    pub fn new_base_offset_log_append_time_options(
-        error: Errors,
-        base_offset: i64,
-        log_append_time: i64,
-        options: PartitionResponseOptions,
-    ) -> Self {
-        let PartitionResponseOptions { log_start_offset, record_errors, error_message, current_leader } = options;
+    /// §2, so they collapse into one constructor, whose only parameter is
+    /// [`PartitionResponseOptions`]. Leaving that struct's `current_leader` at
+    /// its initial value — `:184`'s own `new LeaderIdAndEpoch()` — gives `:184`'s
+    /// behaviour.
+    pub fn new_options(options: PartitionResponseOptions) -> Self {
+        let PartitionResponseOptions {
+            error,
+            base_offset,
+            log_append_time,
+            log_start_offset,
+            record_errors,
+            error_message,
+            current_leader,
+        } = options;
         Self {
             error,
             base_offset,

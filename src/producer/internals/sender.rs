@@ -65,7 +65,7 @@ use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ProduceRequestBuilder;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
-use crate::common::requests::{PartitionResponse, PartitionResponseOptions, RecordError};
+use crate::common::requests::{PartitionResponse, PartitionResponseOptionsBuilder, RecordError};
 use crate::kafka_client::KafkaClient;
 use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, ProduceRequestData, TopicProduceData};
@@ -2133,16 +2133,15 @@ impl<C: KafkaClient> Sender<C> {
                                 .map(|e| RecordError::new_message(e.batch_index, e.batch_index_error_message.clone()))
                                 .collect();
 
-                            let part_resp = PartitionResponse::new_base_offset_log_append_time_options(
-                                error,
-                                partition_resp.base_offset,
-                                partition_resp.log_append_time_ms,
-                                PartitionResponseOptions::new(
-                                    partition_resp.log_start_offset,
-                                    record_errors,
-                                    partition_resp.error_message.clone(),
-                                    partition_resp.current_leader.clone(),
-                                ),
+                            let part_resp = PartitionResponse::new_options(
+                                PartitionResponseOptionsBuilder::new_error(error)
+                                    .set_base_offset(partition_resp.base_offset)
+                                    .set_log_append_time(partition_resp.log_append_time_ms)
+                                    .set_log_start_offset(partition_resp.log_start_offset)
+                                    .set_record_errors(record_errors)
+                                    .set_error_message(partition_resp.error_message.clone())
+                                    .set_current_leader(partition_resp.current_leader.clone())
+                                    .build(),
                             );
 
                             // Find batch based on topic id and partition index
@@ -5105,14 +5104,17 @@ mod tests {
         error: Option<Errors>,
     ) -> ClientResponse {
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::{InitProducerIdResponse, RequestHeader, RequestHeaderOptions};
+        use crate::common::requests::{InitProducerIdResponse, RequestHeader, RequestHeaderOptionsBuilder};
         use crate::init_producer_id_response_data::InitProducerIdResponseData;
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::INIT_PRODUCER_ID,
-            0,
-            "",
-            RequestHeaderOptions::new(correlation_id),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::INIT_PRODUCER_ID,
+                0,
+                "",
+                correlation_id,
+            )
+            .build(),
         )
         .expect("INIT_PRODUCER_ID is a known api key");
         let body = error.map(|error| {
@@ -6373,22 +6375,30 @@ mod tests {
 
         // First batch of each partition succeeds.
         let b1_append_time = 0;
-        let t0b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-            Errors::None,
-            500,
-            b1_append_time,
-            PartitionResponseOptions::new(0, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        let t0b1_response = PartitionResponse::new_options(
+            PartitionResponseOptionsBuilder::new_error(Errors::None)
+                .set_base_offset(500)
+                .set_log_append_time(b1_append_time)
+                .set_log_start_offset(0)
+                .set_record_errors(Vec::new())
+                .set_error_message(None)
+                .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                .build(),
         );
         transaction_manager
             .lock()
             .unwrap()
             .handle_completed_batch(&tp0b1, &t0b1_response)
             .expect("the completion is recorded");
-        let t1b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-            Errors::None,
-            500,
-            b1_append_time,
-            PartitionResponseOptions::new(0, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        let t1b1_response = PartitionResponse::new_options(
+            PartitionResponseOptionsBuilder::new_error(Errors::None)
+                .set_base_offset(500)
+                .set_log_append_time(b1_append_time)
+                .set_log_start_offset(0)
+                .set_record_errors(Vec::new())
+                .set_error_message(None)
+                .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                .build(),
         );
         transaction_manager
             .lock()
@@ -6398,11 +6408,15 @@ mod tests {
 
         // An UNKNOWN_PRODUCER_ID on tp0 requests the epoch bump and sets tp0's
         // sequences back to 0.
-        let t0b2_response = PartitionResponse::new_base_offset_log_append_time_options(
-            Errors::UnknownProducerId,
-            -1,
-            -1,
-            PartitionResponseOptions::new(500, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        let t0b2_response = PartitionResponse::new_options(
+            PartitionResponseOptionsBuilder::new_error(Errors::UnknownProducerId)
+                .set_base_offset(-1)
+                .set_log_append_time(-1)
+                .set_log_start_offset(500)
+                .set_record_errors(Vec::new())
+                .set_error_message(None)
+                .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                .build(),
         );
         assert!(
             transaction_manager
@@ -6480,11 +6494,15 @@ mod tests {
 
         // Partition failover: tp1 returns NOT_LEADER_OR_FOLLOWER. Despite having the
         // old epoch, the batch retries.
-        let t1b2_response = PartitionResponse::new_base_offset_log_append_time_options(
-            Errors::NotLeaderOrFollower,
-            -1,
-            -1,
-            PartitionResponseOptions::new(600, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        let t1b2_response = PartitionResponse::new_options(
+            PartitionResponseOptionsBuilder::new_error(Errors::NotLeaderOrFollower)
+                .set_base_offset(-1)
+                .set_log_append_time(-1)
+                .set_log_start_offset(600)
+                .set_record_errors(Vec::new())
+                .set_error_message(None)
+                .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                .build(),
         );
         assert!(
             transaction_manager

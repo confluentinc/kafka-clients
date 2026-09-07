@@ -29,12 +29,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecordOptions,
-    MockConsumer, OffsetAndMetadata, SubscriptionPattern,
+    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecordOptionsBuilder, MockConsumer, OffsetAndMetadata, SubscriptionPattern,
 };
 use regex::Regex;
 
@@ -50,22 +49,19 @@ fn mock_consumer_is_consumer_trait_object() {
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
 /// offset, ts, tsType, sizeK, sizeV, key, value, headers, leaderEpoch)`.
 fn build_record(topic: &str, partition: i32, offset: i64, key: &str, value: &str) -> ConsumerRecord<String, String> {
-    ConsumerRecord::new_options(
+    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
         topic.to_string(),
         partition,
         offset,
-        ConsumerRecordOptions::new(
-            0,
-            TimestampType::CreateTime,
-            0,
-            0,
-            Some(key.to_string()),
-            Some(value.to_string()),
-            RecordHeaders::new(),
-            None,
-            None,
-        ),
+        Some(key.to_string()),
+        Some(value.to_string()),
     )
+    .set_timestamp(0)
+    .set_timestamp_type(TimestampType::CreateTime)
+    .set_serialized_key_size(0)
+    .set_serialized_value_size(0)
+    .build();
+    ConsumerRecord::new_options(options)
 }
 
 /// Builder helper: matches Java's 5-arg `new ConsumerRecord<>(topic,

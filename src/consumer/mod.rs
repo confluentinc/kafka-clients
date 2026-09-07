@@ -48,7 +48,9 @@ pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
 pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, NO_TIMESTAMP, NULL_SIZE};
+pub use consumer_record::{
+    ConsumerRecord, ConsumerRecordOptions, ConsumerRecordOptionsBuilder, NO_TIMESTAMP, NULL_SIZE,
+};
 pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;

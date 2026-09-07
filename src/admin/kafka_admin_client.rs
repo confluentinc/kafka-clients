@@ -55,7 +55,7 @@ use tokio::task::JoinHandle;
 
 use crate::ApiVersions;
 use crate::DefaultHostResolver;
-use crate::admin::ConfigEntryOptions;
+use crate::admin::ConfigEntryOptionsBuilder;
 use crate::alter_replica_log_dirs_request_data::{
     AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequestData,
 };
@@ -2083,17 +2083,15 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 )
             })
             .collect();
-        ConfigEntry::new_source_options(
-            config.name.clone(),
-            config.value.clone(),
-            ConfigSource::for_id(config.config_source),
-            ConfigEntryOptions::new(
-                config.is_sensitive,
-                config.read_only,
-                synonyms,
-                ConfigType::for_id(config.config_type),
-                config.documentation.clone(),
-            ),
+        ConfigEntry::new_options(
+            ConfigEntryOptionsBuilder::new_name_value(config.name.clone(), config.value.clone())
+                .set_source(ConfigSource::for_id(config.config_source))
+                .set_is_sensitive(config.is_sensitive)
+                .set_is_read_only(config.read_only)
+                .set_synonyms(synonyms)
+                .set_config_type(ConfigType::for_id(config.config_type))
+                .set_documentation(config.documentation.clone())
+                .build(),
         )
     }))
 }
@@ -2565,17 +2563,12 @@ fn get_create_topics_call(
                     .as_ref()
                     .map(|configs| {
                         Config::new(configs.iter().map(|c| {
-                            ConfigEntry::new_source_options(
-                                c.name.clone(),
-                                c.value.clone(),
-                                ConfigSource::for_id(c.config_source),
-                                ConfigEntryOptions::new(
-                                    c.is_sensitive,
-                                    c.read_only,
-                                    Vec::new(),
-                                    ConfigType::Unknown,
-                                    None,
-                                ),
+                            ConfigEntry::new_options(
+                                ConfigEntryOptionsBuilder::new_name_value(c.name.clone(), c.value.clone())
+                                    .set_source(ConfigSource::for_id(c.config_source))
+                                    .set_is_sensitive(c.is_sensitive)
+                                    .set_is_read_only(c.read_only)
+                                    .build(),
                             )
                         }))
                     })

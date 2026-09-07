@@ -50,8 +50,8 @@ use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecordOptions, ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
-    SubscriptionPattern,
+    ConsumerRecordOptionsBuilder, ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp,
+    OffsetCommitCallback, SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -784,22 +784,21 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
         RecordHeaders::new_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
-    ConsumerRecord::new_options(
+    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
         r.topic,
         r.partition,
         r.offset,
-        ConsumerRecordOptions::new(
-            r.timestamp,
-            timestamp_type_from_id(r.timestamp_type),
-            serialized_key_size,
-            serialized_value_size,
-            r.key,
-            r.value,
-            headers,
-            r.leader_epoch,
-            None,
-        ),
+        r.key,
+        r.value,
     )
+    .set_timestamp(r.timestamp)
+    .set_timestamp_type(timestamp_type_from_id(r.timestamp_type))
+    .set_serialized_key_size(serialized_key_size)
+    .set_serialized_value_size(serialized_value_size)
+    .set_headers(headers)
+    .set_leader_epoch(r.leader_epoch)
+    .build();
+    ConsumerRecord::new_options(options)
 }
 
 /// Records bucketed by topic-partition, in the shape `ConsumerRecords::new` takes.

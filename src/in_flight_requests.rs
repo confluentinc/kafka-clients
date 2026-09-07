@@ -447,7 +447,7 @@ mod tests {
     use super::*;
     use crate::common::network::{ByteBufferSend, NetworkSend};
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::RequestHeaderOptions;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
     fn add_request(
         in_flight_requests: &mut InFlightRequests,
@@ -459,11 +459,14 @@ mod tests {
         let id = *correlation_id;
         *correlation_id += 1;
 
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::METADATA,
-            0,
-            "clientId",
-            RequestHeaderOptions::new(id),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::METADATA,
+                0,
+                "clientId",
+                id,
+            )
+            .build(),
         )
         .expect("header creation should not fail");
 

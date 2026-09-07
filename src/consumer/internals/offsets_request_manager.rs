@@ -2655,7 +2655,7 @@ mod tests {
         ListOffsetsResponse, UNKNOWN_EPOCH, UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP,
     };
     use crate::common::requests::request_test_utils;
-    use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestHeader, RequestHeaderOptions};
+    use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::list_offsets_response_data::{
         ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
     };
@@ -2688,11 +2688,14 @@ mod tests {
     /// to resolve the request's response receiver — mirrors the Java test
     /// helper `buildClientResponse`.
     fn build_list_offsets_client_response(response: ListOffsetsResponse) -> ClientResponse {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::LIST_OFFSETS,
-            ApiKeys::LIST_OFFSETS.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::LIST_OFFSETS,
+                ApiKeys::LIST_OFFSETS.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(
@@ -2712,11 +2715,14 @@ mod tests {
     /// Build a synthesised disconnect-style `ClientResponse` so the test
     /// can drive a transport-level failure into the request handler.
     fn build_disconnected_client_response() -> ClientResponse {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::LIST_OFFSETS,
-            ApiKeys::LIST_OFFSETS.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::LIST_OFFSETS,
+                ApiKeys::LIST_OFFSETS.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(
@@ -2744,11 +2750,14 @@ mod tests {
     /// `NetworkException` (Java's transport-level disconnect) rather than
     /// the SASL-authentication failure path.
     fn build_network_disconnect_client_response() -> ClientResponse {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::LIST_OFFSETS,
-            ApiKeys::LIST_OFFSETS.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::LIST_OFFSETS,
+                ApiKeys::LIST_OFFSETS.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(header, None, "0", 0, 0, true, false, None, None, None)
@@ -4389,11 +4398,14 @@ mod tests {
     /// test can drive `unsent.handler().on_complete(...)`. Mirrors the
     /// ListOffsets helper `build_list_offsets_client_response`.
     fn build_oitle_client_response(response: OffsetsForLeaderEpochResponse) -> ClientResponse {
-        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::OFFSET_FOR_LEADER_EPOCH,
-            ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::OFFSET_FOR_LEADER_EPOCH,
+                ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(
@@ -5085,11 +5097,14 @@ mod tests {
         // shared `build_disconnected_client_response` helper carries an auth
         // exception, which would map to a non-retriable
         // SaslAuthenticationFailed; build a clean disconnect inline instead.
-        let disconnect_header = RequestHeader::new_request_api_key_request_version_client_id_options(
-            &ApiKeys::LIST_OFFSETS,
-            ApiKeys::LIST_OFFSETS.latest_version(),
-            "",
-            RequestHeaderOptions::new(1),
+        let disconnect_header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
+                &ApiKeys::LIST_OFFSETS,
+                ApiKeys::LIST_OFFSETS.latest_version(),
+                "",
+                1,
+            )
+            .build(),
         )
         .expect("header");
         let disconnect_response = ClientResponse::new_timed_out(

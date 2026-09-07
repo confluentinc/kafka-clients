@@ -29,7 +29,7 @@ use crate::common::requests::list_offsets_request::{
 };
 use crate::common::requests::list_offsets_response::UNKNOWN_EPOCH;
 use crate::common::requests::{
-    ConcreteResponse, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptions, RequestBuilder,
+    ConcreteResponse, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptionsBuilder, RequestBuilder,
 };
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
@@ -121,15 +121,16 @@ impl ListOffsetsHandler {
             .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&EARLIEST_PENDING_UPLOAD_TIMESTAMP));
 
         let timeout_ms = self.options.timeout_ms().unwrap_or(self.default_api_timeout_ms);
-        let mut builder = ListOffsetsRequestBuilder::for_consumer_require_max_timestamp_options(
-            true,
-            self.options.isolation_level(),
-            supports_max_timestamp,
-            ListOffsetsRequestBuilderOptions::new(
-                require_earliest_local_timestamp,
-                require_tiered_storage_timestamp,
-                require_earliest_pending_upload_timestamp,
-            ),
+        let mut builder = ListOffsetsRequestBuilder::for_consumer_options(
+            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
+                true,
+                self.options.isolation_level(),
+            )
+            .set_require_max_timestamp(supports_max_timestamp)
+            .set_require_earliest_local_timestamp(require_earliest_local_timestamp)
+            .set_require_tiered_storage_timestamp(require_tiered_storage_timestamp)
+            .set_require_earliest_pending_upload_timestamp(require_earliest_pending_upload_timestamp)
+            .build(),
         );
         builder
             .set_target_times(topics_by_name.into_values().collect())

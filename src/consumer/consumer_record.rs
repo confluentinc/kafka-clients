@@ -76,68 +76,163 @@ pub struct ConsumerRecord<K, V> {
     delivery_count: Option<i16>,
 }
 
-/// The parameters of [`ConsumerRecord::new_options`] beyond its first three.
+/// Every parameter of Java's widest `ConsumerRecord` constructor
+/// (`ConsumerRecord.java:138`).
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to
-/// satisfy CLAUDE.md §2's rule that a derived overload name carry at most
-/// three parameter names: Java's widest constructor
-/// (`ConsumerRecord.java:138`) differs from the group's intersection
-/// `{topic, partition, offset, key, value}` by seven parameters, so the
-/// method keeps its first three parameters and this struct carries the rest.
+/// satisfy CLAUDE.md §2's cap on derived overload names: that constructor
+/// differs from the group's intersection
+/// `{topic, partition, offset, key, value}` by seven parameters, so the cap
+/// fires and this struct becomes the method's *only* parameter, carrying
+/// every Java parameter including the intersection's own.
 ///
-/// It is `#[non_exhaustive]`, so callers construct it with [`Self::new`].
-/// There is deliberately **no** `Default`: Java's narrow constructor
-/// (`ConsumerRecord.java:83`) supplies defaults for every field *except*
-/// `key` and `value`, which it still takes as parameters — so no Java
-/// overload sanctions an "all fields omitted" form.
+/// It deliberately has **no** `Default`. `topic`, `partition`, `offset`,
+/// `key` and `value` are what even Java's narrowest constructor
+/// (`ConsumerRecord.java:83`) takes from its caller, so none of them has a
+/// Java-derived default — and a synthesised empty topic would name no
+/// partition at all. Construct it with [`ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value`].
 #[non_exhaustive]
 pub struct ConsumerRecordOptions<K, V> {
-    /// The timestamp of the record. Java's `timestamp`.
+    /// The topic this record is received from. Java's `topic`.
+    pub topic: Arc<str>,
+    /// The partition of the topic this record is received from. Java's
+    /// `partition`.
+    pub partition: i32,
+    /// The offset of this record in the corresponding Kafka partition.
+    /// Java's `offset`.
+    pub offset: i64,
+    /// The timestamp of the record. Java's `timestamp`; starts as
+    /// [`NO_TIMESTAMP`], as in `:83`.
     pub timestamp: i64,
-    /// The timestamp type of the record. Java's `timestampType`.
+    /// The timestamp type of the record. Java's `timestampType`; starts as
+    /// [`TimestampType::NoTimestampType`], as in `:83`.
     pub timestamp_type: TimestampType,
-    /// The length of the serialized key. Java's `serializedKeySize`.
+    /// The length of the serialized key. Java's `serializedKeySize`; starts
+    /// as [`NULL_SIZE`], as in `:83`.
     pub serialized_key_size: i32,
-    /// The length of the serialized value. Java's `serializedValueSize`.
+    /// The length of the serialized value. Java's `serializedValueSize`;
+    /// starts as [`NULL_SIZE`], as in `:83`.
     pub serialized_value_size: i32,
     /// The key of the record, if one exists. Java's `key`.
     pub key: Option<K>,
     /// The record contents. Java's `value`.
     pub value: Option<V>,
-    /// The headers of the record. Java's `headers`.
+    /// The headers of the record. Java's `headers`; starts empty, as in
+    /// `:83` (`new RecordHeaders()`).
     pub headers: RecordHeaders,
-    /// The leader epoch, if available. Java's `leaderEpoch`.
+    /// The leader epoch, if available. Java's `leaderEpoch`; starts as
+    /// `None`, as in `:83` (`Optional.empty()`).
     pub leader_epoch: Option<i32>,
-    /// The delivery count, if available. Java's `deliveryCount`.
+    /// The delivery count, if available. Java's `deliveryCount`; starts as
+    /// `None`, as in `:107`/`:83` (`Optional.empty()`).
     pub delivery_count: Option<i16>,
 }
 
 impl<K, V> ConsumerRecordOptions<K, V> {
-    /// Creates the options carrying every parameter of Java's widest
-    /// constructor beyond `topic`, `partition` and `offset`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        timestamp: i64,
-        timestamp_type: TimestampType,
-        serialized_key_size: i32,
-        serialized_value_size: i32,
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`ConsumerRecordOptionsBuilder`], which is this constructor's only caller.
+    fn new_topic_partition_offset_key_value(
+        topic: impl Into<Arc<str>>,
+        partition: i32,
+        offset: i64,
         key: Option<K>,
         value: Option<V>,
-        headers: RecordHeaders,
-        leader_epoch: Option<i32>,
-        delivery_count: Option<i16>,
     ) -> Self {
         Self {
-            timestamp,
-            timestamp_type,
-            serialized_key_size,
-            serialized_value_size,
+            topic: topic.into(),
+            partition,
+            offset,
+            timestamp: NO_TIMESTAMP,
+            timestamp_type: TimestampType::NoTimestampType,
+            serialized_key_size: NULL_SIZE,
+            serialized_value_size: NULL_SIZE,
             key,
             value,
-            headers,
-            leader_epoch,
-            delivery_count,
+            headers: RecordHeaders::new(),
+            leader_epoch: None,
+            delivery_count: None,
         }
+    }
+}
+
+/// Fluent builder for [`ConsumerRecordOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`ConsumerRecordOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct ConsumerRecordOptionsBuilder<K, V> {
+    options: ConsumerRecordOptions<K, V>,
+}
+
+impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
+    /// Creates the options for the given topic, partition, offset, key and
+    /// value — the intersection across Java's three constructors — with every
+    /// other parameter at the value Java's narrowest constructor (`:83`)
+    /// passes on the caller's behalf.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_topic_partition_offset_key_value(
+        topic: impl Into<Arc<str>>,
+        partition: i32,
+        offset: i64,
+        key: Option<K>,
+        value: Option<V>,
+    ) -> Self {
+        Self {
+            options: ConsumerRecordOptions::new_topic_partition_offset_key_value(topic, partition, offset, key, value),
+        }
+    }
+
+    /// Sets [`ConsumerRecordOptions::timestamp`].
+    pub fn set_timestamp(mut self, timestamp: i64) -> Self {
+        self.options.timestamp = timestamp;
+        self
+    }
+
+    /// Sets [`ConsumerRecordOptions::timestamp_type`].
+    pub fn set_timestamp_type(mut self, timestamp_type: TimestampType) -> Self {
+        self.options.timestamp_type = timestamp_type;
+        self
+    }
+
+    /// Sets [`ConsumerRecordOptions::serialized_key_size`].
+    pub fn set_serialized_key_size(mut self, serialized_key_size: i32) -> Self {
+        self.options.serialized_key_size = serialized_key_size;
+        self
+    }
+
+    /// Sets [`ConsumerRecordOptions::serialized_value_size`].
+    pub fn set_serialized_value_size(mut self, serialized_value_size: i32) -> Self {
+        self.options.serialized_value_size = serialized_value_size;
+        self
+    }
+
+    /// Sets [`ConsumerRecordOptions::headers`].
+    pub fn set_headers(mut self, headers: RecordHeaders) -> Self {
+        self.options.headers = headers;
+        self
+    }
+
+    /// Sets [`ConsumerRecordOptions::leader_epoch`].
+    pub fn set_leader_epoch(mut self, leader_epoch: Option<i32>) -> Self {
+        self.options.leader_epoch = leader_epoch;
+        self
+    }
+
+    /// Sets [`ConsumerRecordOptions::delivery_count`].
+    pub fn set_delivery_count(mut self, delivery_count: Option<i16>) -> Self {
+        self.options.delivery_count = delivery_count;
+        self
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> ConsumerRecordOptions<K, V> {
+        self.options
     }
 }
 
@@ -155,20 +250,8 @@ impl<K, V> ConsumerRecord<K, V> {
     /// `leader_epoch` and `delivery_count` to `None`.
     pub fn new(topic: impl Into<Arc<str>>, partition: i32, offset: i64, key: Option<K>, value: Option<V>) -> Self {
         Self::new_options(
-            topic,
-            partition,
-            offset,
-            ConsumerRecordOptions::new(
-                NO_TIMESTAMP,
-                TimestampType::NoTimestampType,
-                NULL_SIZE,
-                NULL_SIZE,
-                key,
-                value,
-                RecordHeaders::new(),
-                None,
-                None,
-            ),
+            ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(topic, partition, offset, key, value)
+                .build(),
         )
     }
 
@@ -176,7 +259,10 @@ impl<K, V> ConsumerRecord<K, V> {
     ///
     /// Corresponds to Java's widest constructor
     /// (`ConsumerRecord.java:138`), which takes `deliveryCount` alongside
-    /// every other field.
+    /// every other field. Its twelve parameters exceed CLAUDE.md §2's
+    /// three-parameter cap on derived overload names, so
+    /// [`ConsumerRecordOptions`] is this method's only parameter and carries
+    /// all of them.
     ///
     /// Java's intermediate 11-arg constructor (`ConsumerRecord.java:107`) is
     /// *not* a separate Rust method: its body is literally this one with
@@ -184,15 +270,15 @@ impl<K, V> ConsumerRecord<K, V> {
     /// the same name `new_options` once the surplus parameters move into
     /// [`ConsumerRecordOptions`]. Callers get the 11-arg form by leaving
     /// [`ConsumerRecordOptions::delivery_count`] at `None`.
-    pub fn new_options(
-        topic: impl Into<Arc<str>>,
-        partition: i32,
-        offset: i64,
-        options: ConsumerRecordOptions<K, V>,
-    ) -> Self {
+    ///
+    /// * `options` - every parameter of Java's widest constructor
+    pub fn new_options(options: ConsumerRecordOptions<K, V>) -> Self {
         // Java validates `topic != null` and `headers != null`; both are
         // type-system invariants in Rust (Arc<str> and RecordHeaders).
         let ConsumerRecordOptions {
+            topic,
+            partition,
+            offset,
             timestamp,
             timestamp_type,
             serialized_key_size,
@@ -204,7 +290,7 @@ impl<K, V> ConsumerRecord<K, V> {
             delivery_count,
         } = options;
         Self {
-            topic: topic.into(),
+            topic,
             partition,
             offset,
             timestamp,

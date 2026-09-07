@@ -36,7 +36,7 @@ use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::requests::{
     AddOffsetsToTxnRequestBuilder, AddPartitionsToTxnRequestBuilder, CommittedOffset, ConcreteResponse,
     EndTxnRequestBuilder, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder, PartitionResponse,
-    RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder, TxnOffsetCommitRequestBuilderOptions,
+    RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder, TxnOffsetCommitRequestBuilderOptionsBuilder,
     V3_AND_BELOW_TXN_ID,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
@@ -1724,20 +1724,17 @@ impl TransactionManager {
                 .insert(topic_partition.clone(), committed_offset);
         }
 
-        let builder = TxnOffsetCommitRequestBuilder::new_transactional_id_consumer_group_id_producer_id_options(
-            // `ensureTransactional()` has already run, so the id is present.
-            self.transactional_id.clone().unwrap_or_default(),
-            group_metadata.group_id(),
-            self.producer_id_and_epoch.producer_id,
-            TxnOffsetCommitRequestBuilderOptions::new(
+        let builder = TxnOffsetCommitRequestBuilder::new_options(
+// `ensureTransactional()` has already run, so the id is present.
+TxnOffsetCommitRequestBuilderOptionsBuilder::new_transactional_id_consumer_group_id_producer_id_producer_epoch_pending_txn_offset_commits_is_transaction_v2_enabled(
+
+                self.transactional_id.clone().unwrap_or_default(),
+                group_metadata.group_id(),
+                self.producer_id_and_epoch.producer_id,
                 self.producer_id_and_epoch.epoch,
                 &self.pending_txn_offset_commits,
-                group_metadata.member_id(),
-                group_metadata.generation_id(),
-                group_metadata.group_instance_id().map(ToString::to_string),
                 self.is_transaction_v2_enabled(),
-            ),
-        );
+            ).set_member_id(group_metadata.member_id().to_string()).set_generation_id(group_metadata.generation_id()).set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string)).build());
         let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder };
         match result {
             Some(result) => TxnRequestHandler::with_result(result, self.retry_backoff_ms, kind),
@@ -4358,7 +4355,7 @@ impl TransactionManager {
     /// Both builders snapshot the topic collection at construction — Java's
     /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
     /// and
-    /// [`TxnOffsetCommitRequestBuilder::new_transactional_id_consumer_group_id_producer_id_options`]
+    /// [`TxnOffsetCommitRequestBuilder::new_options`]
     /// takes the map by reference and
     /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
     /// since the handler outlives the call). `reenqueue()` (Java 1394) and
@@ -4756,7 +4753,7 @@ mod tests {
     use crate::common::record::internal::memory_records::MemoryRecords;
     use crate::common::requests::{
         AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse,
-        FindCoordinatorResponse, InitProducerIdResponse, PartitionResponseOptions, TxnOffsetCommitResponse,
+        FindCoordinatorResponse, InitProducerIdResponse, PartitionResponseOptionsBuilder, TxnOffsetCommitResponse,
     };
     use crate::end_txn_response_data::EndTxnResponseData;
     use crate::init_producer_id_response_data::InitProducerIdResponseData;
@@ -9723,16 +9720,15 @@ mod tests {
 
             // First batch succeeds
             let b1_append_time = 0;
-            let b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::None,
-                500,
-                b1_append_time,
-                PartitionResponseOptions::new(
-                    0,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(b1_append_time)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             b1.complete(500, b1_append_time);
             manager
@@ -9740,16 +9736,15 @@ mod tests {
                 .expect("the completion is recorded");
 
             // We get an UNKNOWN_PRODUCER_ID, so bump the epoch and set sequence numbers back to 0
-            let b2_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::UnknownProducerId,
-                -1,
-                -1,
-                PartitionResponseOptions::new(
-                    500,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let b2_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::UnknownProducerId)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(500)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             assert!(
                 manager
@@ -9804,31 +9799,29 @@ mod tests {
             let tp0b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
 
-            let tp0b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::None,
-                -1,
-                -1,
-                PartitionResponseOptions::new(
-                    400,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let tp0b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             manager
                 .handle_completed_batch(&tp0b1, &tp0b1_response)
                 .expect("the completion is recorded");
 
-            let tp1b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::None,
-                -1,
-                -1,
-                PartitionResponseOptions::new(
-                    400,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let tp1b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             manager
                 .handle_completed_batch(&tp1b1, &tp1b1_response)
@@ -9839,16 +9832,15 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp0()), 2);
             assert_eq!(manager.sequence_number(&tp1()), 2);
 
-            let b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::UnknownProducerId,
-                -1,
-                -1,
-                PartitionResponseOptions::new(
-                    400,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::UnknownProducerId)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             assert!(
                 manager
@@ -9862,16 +9854,15 @@ mod tests {
                     .expect("the retry decision is made")
             );
 
-            let b2_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::None,
-                -1,
-                -1,
-                PartitionResponseOptions::new(
-                    400,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let b2_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             manager
                 .handle_completed_batch(&tp1b1, &b2_response)
@@ -9938,16 +9929,15 @@ mod tests {
             initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID + 1, 0);
 
             // We continue to track the state of tp0 until in-flight requests complete
-            let b1_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::None,
-                500,
-                0,
-                PartitionResponseOptions::new(
-                    0,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(0)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             manager
                 .handle_completed_batch(&b1, &b1_response)
@@ -9967,16 +9957,15 @@ mod tests {
                 Some(epoch)
             );
 
-            let b2_response = PartitionResponse::new_base_offset_log_append_time_options(
-                Errors::None,
-                500,
-                0,
-                PartitionResponseOptions::new(
-                    0,
-                    Vec::new(),
-                    None,
-                    crate::produce_response_data::LeaderIdAndEpoch::new(),
-                ),
+            let b2_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(0)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build(),
             );
             manager
                 .handle_completed_batch(&b2, &b2_response)
@@ -10063,16 +10052,15 @@ mod tests {
             manager
                 .handle_completed_batch(
                     &b1,
-                    &PartitionResponse::new_base_offset_log_append_time_options(
-                        Errors::None,
-                        500,
-                        0,
-                        PartitionResponseOptions::new(
-                            0,
-                            Vec::new(),
-                            None,
-                            crate::produce_response_data::LeaderIdAndEpoch::new(),
-                        ),
+                    &PartitionResponse::new_options(
+                        PartitionResponseOptionsBuilder::new_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build(),
                     ),
                 )
                 .expect("the completion is recorded");
@@ -10153,16 +10141,15 @@ mod tests {
             manager
                 .handle_completed_batch(
                     &b3,
-                    &PartitionResponse::new_base_offset_log_append_time_options(
-                        Errors::None,
-                        500,
-                        0,
-                        PartitionResponseOptions::new(
-                            0,
-                            Vec::new(),
-                            None,
-                            crate::produce_response_data::LeaderIdAndEpoch::new(),
-                        ),
+                    &PartitionResponse::new_options(
+                        PartitionResponseOptionsBuilder::new_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build(),
                     ),
                 )
                 .expect("the completion is recorded");
@@ -10201,16 +10188,15 @@ mod tests {
             manager
                 .handle_completed_batch(
                     &b2,
-                    &PartitionResponse::new_base_offset_log_append_time_options(
-                        Errors::None,
-                        500,
-                        0,
-                        PartitionResponseOptions::new(
-                            0,
-                            Vec::new(),
-                            None,
-                            crate::produce_response_data::LeaderIdAndEpoch::new(),
-                        ),
+                    &PartitionResponse::new_options(
+                        PartitionResponseOptionsBuilder::new_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build(),
                     ),
                 )
                 .expect("the completion is recorded");

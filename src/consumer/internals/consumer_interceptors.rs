@@ -255,10 +255,9 @@ mod tests {
 
     use super::*;
     use crate::common::TopicPartition;
-    use crate::common::header::internals::RecordHeaders;
     use crate::common::record::TimestampType;
     use crate::consumer::interceptor::ConsumerInterceptor;
-    use crate::consumer::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecords, OffsetAndMetadata};
+    use crate::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder, ConsumerRecords, OffsetAndMetadata};
 
     /// Shared interior state for [`FilterConsumerInterceptor`]. Held in an
     /// [`Arc`] so the test can poke the toggles and read the counts from
@@ -351,20 +350,21 @@ mod tests {
                         .iter()
                         .map(|r| {
                             ConsumerRecord::new_options(
-                                r.topic().to_string(),
-                                r.partition(),
-                                r.offset(),
-                                ConsumerRecordOptions::new(
-                                    r.timestamp(),
-                                    r.timestamp_type(),
-                                    r.serialized_key_size(),
-                                    r.serialized_value_size(),
+                                ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
+                                    r.topic().to_string(),
+                                    r.partition(),
+                                    r.offset(),
                                     r.key().copied(),
                                     r.value().copied(),
-                                    r.headers().clone(),
-                                    r.leader_epoch(),
-                                    r.delivery_count(),
-                                ),
+                                )
+                                .set_timestamp(r.timestamp())
+                                .set_timestamp_type(r.timestamp_type())
+                                .set_serialized_key_size(r.serialized_key_size())
+                                .set_serialized_value_size(r.serialized_value_size())
+                                .set_headers(r.headers().clone())
+                                .set_leader_epoch(r.leader_epoch())
+                                .set_delivery_count(r.delivery_count())
+                                .build(),
                             )
                         })
                         .collect();
@@ -397,20 +397,20 @@ mod tests {
         //       TimestampType.CREATE_TIME, 0, 0, 1, 1, new RecordHeaders(),
         //       Optional.empty())
         ConsumerRecord::new_options(
-            topic.to_string(),
-            partition,
-            0, // offset
-            ConsumerRecordOptions::new(
-                0,                         // timestamp
-                TimestampType::CreateTime, // timestamp_type
-                0,                         // serialized_key_size
-                0,                         // serialized_value_size
-                Some(1),                   // key
-                Some(1),                   // value
-                RecordHeaders::new(),      // headers
-                None,                      // leader_epoch
-                None,                      // delivery_count
-            ),
+            // headers, leader_epoch and delivery_count keep the initial values
+            // `ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value` gives them, which are Java's.
+            ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
+                topic.to_string(),
+                partition,
+                0,
+                Some(1),
+                Some(1),
+            )
+            .set_timestamp(0)
+            .set_timestamp_type(TimestampType::CreateTime)
+            .set_serialized_key_size(0)
+            .set_serialized_value_size(0)
+            .build(),
         )
     }
 

@@ -1901,7 +1901,7 @@ mod tests {
     use crate::common::serialization::StringSerializer;
     use crate::mock_client::MockClient;
     use crate::producer::ProducerConfig;
-    use crate::producer::ProducerRecordOptions;
+    use crate::producer::ProducerRecordOptionsBuilder;
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 
@@ -4112,11 +4112,11 @@ mod tests {
             "nothing may be pending before the send"
         );
 
-        let record = ProducerRecord::new_partition_timestamp_options(
-            TOPIC.to_string(),
-            None,
-            Some(ctx.time.milliseconds()),
-            ProducerRecordOptions::new(Some("key".to_string()), Some("value".to_string()), None),
+        let record = ProducerRecord::new_options(
+            ProducerRecordOptionsBuilder::new_topic_value(TOPIC.to_string(), Some("value".to_string()))
+                .set_timestamp(Some(ctx.time.milliseconds()))
+                .set_key(Some("key".to_string()))
+                .build(),
         )
         .expect("a valid record");
         let future = ctx.producer.send(record).await.expect("send");

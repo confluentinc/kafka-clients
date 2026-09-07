@@ -19787,7 +19787,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::ConfigEntryOptions;
+    use crate::admin::ConfigEntryOptionsBuilder;
     use crate::admin::{
         ConfigSynonym, FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange,
     };
@@ -20017,24 +20017,21 @@ mod tests {
 
     #[test]
     fn config_entry_c_carries_every_field_including_synonyms() {
-        let entry = ConfigEntry::new_source_options(
-            "retention.ms".to_string(),
-            Some("604800000".to_string()),
-            ConfigSource::DynamicTopicConfig,
-            ConfigEntryOptions::new(
-                true,
-                false,
-                vec![
+        let entry = ConfigEntry::new_options(
+            ConfigEntryOptionsBuilder::new_name_value("retention.ms".to_string(), Some("604800000".to_string()))
+                .set_source(ConfigSource::DynamicTopicConfig)
+                .set_is_sensitive(true)
+                .set_synonyms(vec![
                     ConfigSynonym::new(
                         "retention.ms".to_string(),
                         Some("604800000".to_string()),
                         ConfigSource::DynamicTopicConfig,
                     ),
                     ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
-                ],
-                ConfigType::Long,
-                Some("The retention window.".to_string()),
-            ),
+                ])
+                .set_config_type(ConfigType::Long)
+                .set_documentation(Some("The retention window.".to_string()))
+                .build(),
         );
 
         let flat = ConfigEntryC::new(&entry);
@@ -20072,11 +20069,12 @@ mod tests {
 
     #[test]
     fn config_entry_c_is_default_tracks_the_default_config_source() {
-        let flat = ConfigEntryC::new(&ConfigEntry::new_source_options(
-            "k".to_string(),
-            Some("v".to_string()),
-            ConfigSource::DefaultConfig,
-            ConfigEntryOptions::new(false, true, Vec::new(), ConfigType::String, None),
+        let flat = ConfigEntryC::new(&ConfigEntry::new_options(
+            ConfigEntryOptionsBuilder::new_name_value("k".to_string(), Some("v".to_string()))
+                .set_source(ConfigSource::DefaultConfig)
+                .set_is_read_only(true)
+                .set_config_type(ConfigType::String)
+                .build(),
         ));
         assert!(flat.is_default);
         assert!(flat.is_read_only);

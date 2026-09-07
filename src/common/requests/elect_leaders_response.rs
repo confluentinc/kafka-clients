@@ -38,25 +38,79 @@ pub struct ElectLeadersResponse {
 ///
 /// Java's two constructors (`:37`, `:42`) share no parameter name, so all four
 /// of `:42`'s parameters reach its derived name. CLAUDE.md §2 caps that at three
-/// and moves the remainder here. This struct has no Java counterpart: it exists
-/// solely to satisfy that naming rule (DoD #7).
+/// and makes this struct the method's *only* parameter, so every Java parameter
+/// lives here. This struct has no Java counterpart: it exists solely to satisfy
+/// that naming rule (DoD #7).
 ///
 /// It deliberately has **no** `Default`. Java declares no `ElectLeadersResponse`
-/// overload that omits `version`, so there is no Java-derived default to carry
-/// across, and a synthesised `0` would silently drop the top-level error code
-/// (`:49` encodes it only for v1+). Construct it with
-/// [`ElectLeadersResponseOptions::new`].
-#[derive(Debug, Clone, Copy)]
+/// overload that omits any of these four, so none has a Java-derived default —
+/// for `version` in particular a synthesised `0` would silently drop the
+/// top-level error code (`:49` encodes it only for v1+). Construct it with
+/// [`ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version`].
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ElectLeadersResponseOptions {
+    /// Java's `throttleTimeMs`.
+    pub throttle_time_ms: i32,
+    /// Java's `errorCode`.
+    pub error_code: i16,
+    /// Java's `electionResults`.
+    pub election_results: Vec<ReplicaElectionResult>,
     /// Java's `version`.
     pub version: i16,
 }
 
 impl ElectLeadersResponseOptions {
-    /// Creates the options carrying the given response version.
-    pub fn new(version: i16) -> Self {
-        Self { version }
+    /// Java's defaults for every parameter beyond those the name lists.
+    ///
+    /// Private: per CLAUDE.md §2 the options are built through
+    /// [`ElectLeadersResponseOptionsBuilder`], which is this constructor's only caller.
+    fn new_throttle_time_ms_error_code_election_results_version(
+        throttle_time_ms: i32,
+        error_code: i16,
+        election_results: Vec<ReplicaElectionResult>,
+        version: i16,
+    ) -> Self {
+        Self { throttle_time_ms, error_code, election_results, version }
+    }
+}
+
+/// Fluent builder for [`ElectLeadersResponseOptions`].
+///
+/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
+/// each remaining parameter starts at its Java-derived default and has a
+/// fluent setter, and `build` yields the options the method takes. Like
+/// [`ElectLeadersResponseOptions`] it has no Java counterpart and exists solely to satisfy
+/// that naming rule (DoD #7).
+pub struct ElectLeadersResponseOptionsBuilder {
+    options: ElectLeadersResponseOptions,
+}
+
+impl ElectLeadersResponseOptionsBuilder {
+    /// Creates the options carrying the throttle time, top-level error code,
+    /// per-topic results and response version.
+    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
+    /// Java version that makes one of them optional adds a differently named
+    /// constructor rather than changing this one.
+    pub fn new_throttle_time_ms_error_code_election_results_version(
+        throttle_time_ms: i32,
+        error_code: i16,
+        election_results: Vec<ReplicaElectionResult>,
+        version: i16,
+    ) -> Self {
+        Self {
+            options: ElectLeadersResponseOptions::new_throttle_time_ms_error_code_election_results_version(
+                throttle_time_ms,
+                error_code,
+                election_results,
+                version,
+            ),
+        }
+    }
+
+    /// Returns the built options.
+    pub fn build(self) -> ElectLeadersResponseOptions {
+        self.options
     }
 }
 
@@ -75,13 +129,8 @@ impl ElectLeadersResponse {
     /// Corresponds to Java's
     /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)`
     /// (`ElectLeadersResponse.java:42`) — the error code is only encoded for v1+.
-    pub fn new_throttle_time_ms_error_code_election_results_options(
-        throttle_time_ms: i32,
-        error_code: i16,
-        election_results: Vec<ReplicaElectionResult>,
-        options: ElectLeadersResponseOptions,
-    ) -> Self {
-        let version = options.version;
+    pub fn new_options(options: ElectLeadersResponseOptions) -> Self {
+        let ElectLeadersResponseOptions { throttle_time_ms, error_code, election_results, version } = options;
         let mut data = ElectLeadersResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
         if version >= 1 {
@@ -198,18 +247,24 @@ mod tests {
 
     #[test]
     fn from_results_encodes_error_code_only_for_v1_plus() {
-        let v0 = ElectLeadersResponse::new_throttle_time_ms_error_code_election_results_options(
-            0,
-            Errors::NotController.code(),
-            Vec::new(),
-            ElectLeadersResponseOptions::new(0),
+        let v0 = ElectLeadersResponse::new_options(
+            ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version(
+                0,
+                Errors::NotController.code(),
+                Vec::new(),
+                0,
+            )
+            .build(),
         );
         assert_eq!(v0.data().error_code, Errors::None.code());
-        let v1 = ElectLeadersResponse::new_throttle_time_ms_error_code_election_results_options(
-            0,
-            Errors::NotController.code(),
-            Vec::new(),
-            ElectLeadersResponseOptions::new(1),
+        let v1 = ElectLeadersResponse::new_options(
+            ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version(
+                0,
+                Errors::NotController.code(),
+                Vec::new(),
+                1,
+            )
+            .build(),
         );
         assert_eq!(v1.data().error_code, Errors::NotController.code());
     }
