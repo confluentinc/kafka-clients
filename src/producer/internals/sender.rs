@@ -2134,7 +2134,8 @@ impl<C: KafkaClient> Sender<C> {
                                 .collect();
 
                             let part_resp = PartitionResponse::new_options(
-                                PartitionResponseOptionsBuilder::new_error(error)
+                                PartitionResponseOptionsBuilder::new()
+                                    .set_error(error)
                                     .set_base_offset(partition_resp.base_offset)
                                     .set_log_append_time(partition_resp.log_append_time_ms)
                                     .set_log_start_offset(partition_resp.log_start_offset)
@@ -5108,13 +5109,12 @@ mod tests {
         use crate::init_producer_id_response_data::InitProducerIdResponseData;
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::INIT_PRODUCER_ID,
-                0,
-                "",
-                correlation_id,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::INIT_PRODUCER_ID)
+                .set_request_version(0)
+                .set_client_id("")
+                .set_correlation_id(correlation_id)
+                .build(),
         )
         .expect("INIT_PRODUCER_ID is a known api key");
         let body = error.map(|error| {
@@ -6376,7 +6376,8 @@ mod tests {
         // First batch of each partition succeeds.
         let b1_append_time = 0;
         let t0b1_response = PartitionResponse::new_options(
-            PartitionResponseOptionsBuilder::new_error(Errors::None)
+            PartitionResponseOptionsBuilder::new()
+                .set_error(Errors::None)
                 .set_base_offset(500)
                 .set_log_append_time(b1_append_time)
                 .set_log_start_offset(0)
@@ -6391,7 +6392,8 @@ mod tests {
             .handle_completed_batch(&tp0b1, &t0b1_response)
             .expect("the completion is recorded");
         let t1b1_response = PartitionResponse::new_options(
-            PartitionResponseOptionsBuilder::new_error(Errors::None)
+            PartitionResponseOptionsBuilder::new()
+                .set_error(Errors::None)
                 .set_base_offset(500)
                 .set_log_append_time(b1_append_time)
                 .set_log_start_offset(0)
@@ -6409,7 +6411,8 @@ mod tests {
         // An UNKNOWN_PRODUCER_ID on tp0 requests the epoch bump and sets tp0's
         // sequences back to 0.
         let t0b2_response = PartitionResponse::new_options(
-            PartitionResponseOptionsBuilder::new_error(Errors::UnknownProducerId)
+            PartitionResponseOptionsBuilder::new()
+                .set_error(Errors::UnknownProducerId)
                 .set_base_offset(-1)
                 .set_log_append_time(-1)
                 .set_log_start_offset(500)
@@ -6495,7 +6498,8 @@ mod tests {
         // Partition failover: tp1 returns NOT_LEADER_OR_FOLLOWER. Despite having the
         // old epoch, the batch retries.
         let t1b2_response = PartitionResponse::new_options(
-            PartitionResponseOptionsBuilder::new_error(Errors::NotLeaderOrFollower)
+            PartitionResponseOptionsBuilder::new()
+                .set_error(Errors::NotLeaderOrFollower)
                 .set_base_offset(-1)
                 .set_log_append_time(-1)
                 .set_log_start_offset(600)

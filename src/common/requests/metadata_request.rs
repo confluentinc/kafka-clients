@@ -198,7 +198,8 @@ pub struct MetadataRequestBuilder {
 /// and `allowAutoTopicCreation` from its caller, so those two have no
 /// Java-derived default — and a synthesised `topics` of `None` means *all*
 /// topics, which is a materially different request. Build it from
-/// [`MetadataRequestBuilderOptionsBuilder::new_topics_allow_auto_topic_creation`] and override the versions you need.
+/// [`MetadataRequestBuilderOptionsBuilder::new`], setting those two and
+/// overriding the versions you need: [`MetadataRequestBuilderOptionsBuilder::build`] panics if any of `topics`, `allow_auto_topic_creation` was not set.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct MetadataRequestBuilderOptions<'a> {
@@ -214,66 +215,84 @@ pub struct MetadataRequestBuilderOptions<'a> {
     pub max_version: i16,
 }
 
-impl<'a> MetadataRequestBuilderOptions<'a> {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`MetadataRequestBuilderOptionsBuilder`], which is this constructor's only caller.
-    fn new_topics_allow_auto_topic_creation(topics: Option<&'a [&'a str]>, allow_auto_topic_creation: bool) -> Self {
+/// Fluent builder for [`MetadataRequestBuilderOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`MetadataRequestBuilderOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct MetadataRequestBuilderOptionsBuilder<'a> {
+    topics: Option<Option<&'a [&'a str]>>,
+    allow_auto_topic_creation: Option<bool>,
+    min_version: i16,
+    max_version: i16,
+}
+
+impl<'a> Default for MetadataRequestBuilderOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> MetadataRequestBuilderOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            topics,
-            allow_auto_topic_creation,
+            topics: None,
+            allow_auto_topic_creation: None,
             min_version: ApiKeys::METADATA.oldest_version(),
             max_version: ApiKeys::METADATA.latest_version(),
         }
     }
-}
 
-/// Fluent builder for [`MetadataRequestBuilderOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`MetadataRequestBuilderOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct MetadataRequestBuilderOptionsBuilder<'a> {
-    options: MetadataRequestBuilderOptions<'a>,
-}
-
-impl<'a> MetadataRequestBuilderOptionsBuilder<'a> {
-    /// Creates the options for the given topics and auto-creation flag, with the
-    /// version range Java's narrowest `Builder` (`:79`) passes on the caller's
-    /// behalf.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_topics_allow_auto_topic_creation(
-        topics: Option<&'a [&'a str]>,
-        allow_auto_topic_creation: bool,
-    ) -> Self {
-        Self {
-            options: MetadataRequestBuilderOptions::new_topics_allow_auto_topic_creation(
-                topics,
-                allow_auto_topic_creation,
-            ),
-        }
-    }
-
-    /// Sets [`MetadataRequestBuilderOptions::min_version`].
-    pub fn set_min_version(mut self, min_version: i16) -> Self {
-        self.options.min_version = min_version;
+    /// Sets [`MetadataRequestBuilderOptions::topics`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_topics(mut self, topics: Option<&'a [&'a str]>) -> Self {
+        self.topics = Some(topics);
         self
     }
-
+    /// Sets [`MetadataRequestBuilderOptions::allow_auto_topic_creation`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_allow_auto_topic_creation(mut self, allow_auto_topic_creation: bool) -> Self {
+        self.allow_auto_topic_creation = Some(allow_auto_topic_creation);
+        self
+    }
+    /// Sets [`MetadataRequestBuilderOptions::min_version`].
+    pub fn set_min_version(mut self, min_version: i16) -> Self {
+        self.min_version = min_version;
+        self
+    }
     /// Sets [`MetadataRequestBuilderOptions::max_version`].
     pub fn set_max_version(mut self, max_version: i16) -> Self {
-        self.options.max_version = max_version;
+        self.max_version = max_version;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `topics`, `allow_auto_topic_creation`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> MetadataRequestBuilderOptions<'a> {
-        self.options
+        MetadataRequestBuilderOptions {
+            topics: self.topics.unwrap_or_else(|| Self::missing("topics")),
+            allow_auto_topic_creation: self
+                .allow_auto_topic_creation
+                .unwrap_or_else(|| Self::missing("allow_auto_topic_creation")),
+            min_version: self.min_version,
+            max_version: self.max_version,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("MetadataRequestBuilderOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -296,11 +315,10 @@ impl MetadataRequestBuilder {
     /// (`MetadataRequest.java:79`).
     pub fn new_topics_allow_auto_topic_creation(topics: Option<&[&str]>, allow_auto_topic_creation: bool) -> Self {
         Self::new_options(
-            MetadataRequestBuilderOptionsBuilder::new_topics_allow_auto_topic_creation(
-                topics,
-                allow_auto_topic_creation,
-            )
-            .build(),
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(topics)
+                .set_allow_auto_topic_creation(allow_auto_topic_creation)
+                .build(),
         )
     }
 
@@ -315,13 +333,12 @@ impl MetadataRequestBuilder {
         version: i16,
     ) -> Self {
         Self::new_options(
-            MetadataRequestBuilderOptionsBuilder::new_topics_allow_auto_topic_creation(
-                topics,
-                allow_auto_topic_creation,
-            )
-            .set_min_version(version)
-            .set_max_version(version)
-            .build(),
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(topics)
+                .set_allow_auto_topic_creation(allow_auto_topic_creation)
+                .set_min_version(version)
+                .set_max_version(version)
+                .build(),
         )
     }
 
@@ -522,7 +539,9 @@ mod tests {
         let min_version: i16 = 1;
         let max_version: i16 = 6;
         let builder3 = MetadataRequestBuilder::new_options(
-            MetadataRequestBuilderOptionsBuilder::new_topics_allow_auto_topic_creation(Some(&["topic"]), false)
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(Some(&["topic"]))
+                .set_allow_auto_topic_creation(false)
                 .set_min_version(min_version)
                 .set_max_version(max_version)
                 .build(),
@@ -634,5 +653,24 @@ mod tests {
                 assert!(result.is_ok(), "Should not fail for version {version} with topic {:?}", topic);
             }
         }
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`MetadataRequestBuilderOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "MetadataRequestBuilderOptionsBuilder::build: mandatory parameter `topics` was not set")]
+    fn metadata_request_builder_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = MetadataRequestBuilderOptionsBuilder::new().build();
+    }
+
+    /// Validation covers every mandatory parameter, not just the first: setting
+    /// all but one still panics, naming the one left unset.
+    #[test]
+    #[should_panic(
+        expected = "MetadataRequestBuilderOptionsBuilder::build: mandatory parameter `allow_auto_topic_creation` was not set"
+    )]
+    fn metadata_request_builder_options_builder_build_panics_when_only_allow_auto_topic_creation_is_unset() {
+        let _ = MetadataRequestBuilderOptionsBuilder::new().set_topics(None).build();
     }
 }

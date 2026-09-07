@@ -2084,7 +2084,9 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
             })
             .collect();
         ConfigEntry::new_options(
-            ConfigEntryOptionsBuilder::new_name_value(config.name.clone(), config.value.clone())
+            ConfigEntryOptionsBuilder::new()
+                .set_name(config.name.clone())
+                .set_value(config.value.clone())
                 .set_source(ConfigSource::for_id(config.config_source))
                 .set_is_sensitive(config.is_sensitive)
                 .set_is_read_only(config.read_only)
@@ -2564,7 +2566,9 @@ fn get_create_topics_call(
                     .map(|configs| {
                         Config::new(configs.iter().map(|c| {
                             ConfigEntry::new_options(
-                                ConfigEntryOptionsBuilder::new_name_value(c.name.clone(), c.value.clone())
+                                ConfigEntryOptionsBuilder::new()
+                                    .set_name(c.name.clone())
+                                    .set_value(c.value.clone())
                                     .set_source(ConfigSource::for_id(c.config_source))
                                     .set_is_sensitive(c.is_sensitive)
                                     .set_is_read_only(c.read_only)

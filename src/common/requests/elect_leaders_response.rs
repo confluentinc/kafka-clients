@@ -46,7 +46,7 @@ pub struct ElectLeadersResponse {
 /// overload that omits any of these four, so none has a Java-derived default —
 /// for `version` in particular a synthesised `0` would silently drop the
 /// top-level error code (`:49` encodes it only for v1+). Construct it with
-/// [`ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version`].
+/// [`ElectLeadersResponseOptionsBuilder::new`] and set all four: [`ElectLeadersResponseOptionsBuilder::build`] panics if any of `throttle_time_ms`, `error_code`, `election_results`, `version` was not set.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ElectLeadersResponseOptions {
@@ -60,57 +60,79 @@ pub struct ElectLeadersResponseOptions {
     pub version: i16,
 }
 
-impl ElectLeadersResponseOptions {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`ElectLeadersResponseOptionsBuilder`], which is this constructor's only caller.
-    fn new_throttle_time_ms_error_code_election_results_version(
-        throttle_time_ms: i32,
-        error_code: i16,
-        election_results: Vec<ReplicaElectionResult>,
-        version: i16,
-    ) -> Self {
-        Self { throttle_time_ms, error_code, election_results, version }
-    }
-}
-
 /// Fluent builder for [`ElectLeadersResponseOptions`].
 ///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`ElectLeadersResponseOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`ElectLeadersResponseOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
 pub struct ElectLeadersResponseOptionsBuilder {
-    options: ElectLeadersResponseOptions,
+    throttle_time_ms: Option<i32>,
+    error_code: Option<i16>,
+    election_results: Option<Vec<ReplicaElectionResult>>,
+    version: Option<i16>,
+}
+
+impl Default for ElectLeadersResponseOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ElectLeadersResponseOptionsBuilder {
-    /// Creates the options carrying the throttle time, top-level error code,
-    /// per-topic results and response version.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_throttle_time_ms_error_code_election_results_version(
-        throttle_time_ms: i32,
-        error_code: i16,
-        election_results: Vec<ReplicaElectionResult>,
-        version: i16,
-    ) -> Self {
-        Self {
-            options: ElectLeadersResponseOptions::new_throttle_time_ms_error_code_election_results_version(
-                throttle_time_ms,
-                error_code,
-                election_results,
-                version,
-            ),
-        }
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self { throttle_time_ms: None, error_code: None, election_results: None, version: None }
+    }
+
+    /// Sets [`ElectLeadersResponseOptions::throttle_time_ms`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_throttle_time_ms(mut self, throttle_time_ms: i32) -> Self {
+        self.throttle_time_ms = Some(throttle_time_ms);
+        self
+    }
+    /// Sets [`ElectLeadersResponseOptions::error_code`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_error_code(mut self, error_code: i16) -> Self {
+        self.error_code = Some(error_code);
+        self
+    }
+    /// Sets [`ElectLeadersResponseOptions::election_results`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_election_results(mut self, election_results: Vec<ReplicaElectionResult>) -> Self {
+        self.election_results = Some(election_results);
+        self
+    }
+    /// Sets [`ElectLeadersResponseOptions::version`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_version(mut self, version: i16) -> Self {
+        self.version = Some(version);
+        self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `throttle_time_ms`, `error_code`, `election_results`, `version`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> ElectLeadersResponseOptions {
-        self.options
+        ElectLeadersResponseOptions {
+            throttle_time_ms: self.throttle_time_ms.unwrap_or_else(|| Self::missing("throttle_time_ms")),
+            error_code: self.error_code.unwrap_or_else(|| Self::missing("error_code")),
+            election_results: self.election_results.unwrap_or_else(|| Self::missing("election_results")),
+            version: self.version.unwrap_or_else(|| Self::missing("version")),
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("ElectLeadersResponseOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -248,23 +270,21 @@ mod tests {
     #[test]
     fn from_results_encodes_error_code_only_for_v1_plus() {
         let v0 = ElectLeadersResponse::new_options(
-            ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version(
-                0,
-                Errors::NotController.code(),
-                Vec::new(),
-                0,
-            )
-            .build(),
+            ElectLeadersResponseOptionsBuilder::new()
+                .set_throttle_time_ms(0)
+                .set_error_code(Errors::NotController.code())
+                .set_election_results(Vec::new())
+                .set_version(0)
+                .build(),
         );
         assert_eq!(v0.data().error_code, Errors::None.code());
         let v1 = ElectLeadersResponse::new_options(
-            ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version(
-                0,
-                Errors::NotController.code(),
-                Vec::new(),
-                1,
-            )
-            .build(),
+            ElectLeadersResponseOptionsBuilder::new()
+                .set_throttle_time_ms(0)
+                .set_error_code(Errors::NotController.code())
+                .set_election_results(Vec::new())
+                .set_version(1)
+                .build(),
         );
         assert_eq!(v1.data().error_code, Errors::NotController.code());
     }
@@ -312,5 +332,16 @@ mod tests {
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::None), Some(&1));
         assert_eq!(counts.get(&Errors::ClusterAuthorizationFailed), Some(&1));
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ElectLeadersResponseOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(
+        expected = "ElectLeadersResponseOptionsBuilder::build: mandatory parameter `throttle_time_ms` was not set"
+    )]
+    fn elect_leaders_response_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = ElectLeadersResponseOptionsBuilder::new().build();
     }
 }

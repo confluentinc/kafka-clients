@@ -208,7 +208,8 @@ impl ConsumerProtocol {
         };
 
         Ok(Subscription::new_options(
-            SubscriptionOptionsBuilder::new_topics(data.topics.clone())
+            SubscriptionOptionsBuilder::new()
+                .set_topics(data.topics.clone())
                 .set_user_data(data.user_data.clone())
                 .set_owned_partitions(owned_partitions)
                 .set_generation_id(data.generation_id)
@@ -502,7 +503,8 @@ mod tests {
     #[test]
     fn subscription_round_trip() {
         let subscription = Subscription::new_options(
-            SubscriptionOptionsBuilder::new_topics(vec!["b".to_string(), "a".to_string()])
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["b".to_string(), "a".to_string()])
                 .set_owned_partitions(vec![tp("a", 0), tp("a", 1)])
                 .set_generation_id(7)
                 .set_rack_id(Some("rack-1".to_string()))
@@ -572,7 +574,8 @@ mod tests {
     #[test]
     fn consumer_protocol_subscription_data_round_trip() {
         let subscription = Subscription::new_options(
-            SubscriptionOptionsBuilder::new_topics(vec!["b".to_string(), "a".to_string()])
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["b".to_string(), "a".to_string()])
                 .set_owned_partitions(vec![tp("a", 0)])
                 .set_generation_id(3)
                 .build(),

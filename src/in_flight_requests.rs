@@ -460,13 +460,12 @@ mod tests {
         *correlation_id += 1;
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                0,
-                "clientId",
-                id,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(0)
+                .set_client_id("clientId")
+                .set_correlation_id(id)
+                .build(),
         )
         .expect("header creation should not fail");
 

@@ -20018,7 +20018,9 @@ mod tests {
     #[test]
     fn config_entry_c_carries_every_field_including_synonyms() {
         let entry = ConfigEntry::new_options(
-            ConfigEntryOptionsBuilder::new_name_value("retention.ms".to_string(), Some("604800000".to_string()))
+            ConfigEntryOptionsBuilder::new()
+                .set_name("retention.ms".to_string())
+                .set_value(Some("604800000".to_string()))
                 .set_source(ConfigSource::DynamicTopicConfig)
                 .set_is_sensitive(true)
                 .set_synonyms(vec![
@@ -20070,7 +20072,9 @@ mod tests {
     #[test]
     fn config_entry_c_is_default_tracks_the_default_config_source() {
         let flat = ConfigEntryC::new(&ConfigEntry::new_options(
-            ConfigEntryOptionsBuilder::new_name_value("k".to_string(), Some("v".to_string()))
+            ConfigEntryOptionsBuilder::new()
+                .set_name("k".to_string())
+                .set_value(Some("v".to_string()))
                 .set_source(ConfigSource::DefaultConfig)
                 .set_is_read_only(true)
                 .set_config_type(ConfigType::String)

@@ -784,20 +784,19 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
         RecordHeaders::new_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
-    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-        r.topic,
-        r.partition,
-        r.offset,
-        r.key,
-        r.value,
-    )
-    .set_timestamp(r.timestamp)
-    .set_timestamp_type(timestamp_type_from_id(r.timestamp_type))
-    .set_serialized_key_size(serialized_key_size)
-    .set_serialized_value_size(serialized_value_size)
-    .set_headers(headers)
-    .set_leader_epoch(r.leader_epoch)
-    .build();
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(r.topic)
+        .set_partition(r.partition)
+        .set_offset(r.offset)
+        .set_key(r.key)
+        .set_value(r.value)
+        .set_timestamp(r.timestamp)
+        .set_timestamp_type(timestamp_type_from_id(r.timestamp_type))
+        .set_serialized_key_size(serialized_key_size)
+        .set_serialized_value_size(serialized_value_size)
+        .set_headers(headers)
+        .set_leader_epoch(r.leader_epoch)
+        .build();
     ConsumerRecord::new_options(options)
 }
 

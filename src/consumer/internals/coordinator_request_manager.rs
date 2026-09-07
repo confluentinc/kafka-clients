@@ -509,13 +509,12 @@ mod tests {
             .build_version(api_version)
             .expect("build ok");
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::FIND_COORDINATOR,
-                api_version,
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
+                .set_request_version(api_version)
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header ok");
         let response_body = FindCoordinatorResponse::prepare_response(error, GROUP_ID, &node());

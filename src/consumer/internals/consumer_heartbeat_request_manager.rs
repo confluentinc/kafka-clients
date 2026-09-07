@@ -1591,13 +1591,12 @@ mod tests {
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(
@@ -1712,13 +1711,12 @@ mod tests {
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(
@@ -1902,13 +1900,12 @@ mod tests {
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(
@@ -2898,13 +2895,12 @@ mod tests {
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-                ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header ok");
         let client_response = ClientResponse::new_timed_out(

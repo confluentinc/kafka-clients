@@ -1725,16 +1725,19 @@ impl TransactionManager {
         }
 
         let builder = TxnOffsetCommitRequestBuilder::new_options(
-// `ensureTransactional()` has already run, so the id is present.
-TxnOffsetCommitRequestBuilderOptionsBuilder::new_transactional_id_consumer_group_id_producer_id_producer_epoch_pending_txn_offset_commits_is_transaction_v2_enabled(
-
-                self.transactional_id.clone().unwrap_or_default(),
-                group_metadata.group_id(),
-                self.producer_id_and_epoch.producer_id,
-                self.producer_id_and_epoch.epoch,
-                &self.pending_txn_offset_commits,
-                self.is_transaction_v2_enabled(),
-            ).set_member_id(group_metadata.member_id().to_string()).set_generation_id(group_metadata.generation_id()).set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string)).build());
+            // `ensureTransactional()` has already run, so the id is present.
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
+                .set_consumer_group_id(group_metadata.group_id())
+                .set_producer_id(self.producer_id_and_epoch.producer_id)
+                .set_producer_epoch(self.producer_id_and_epoch.epoch)
+                .set_pending_txn_offset_commits(&self.pending_txn_offset_commits)
+                .set_is_transaction_v2_enabled(self.is_transaction_v2_enabled())
+                .set_member_id(group_metadata.member_id().to_string())
+                .set_generation_id(group_metadata.generation_id())
+                .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
+                .build(),
+        );
         let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder };
         match result {
             Some(result) => TxnRequestHandler::with_result(result, self.retry_backoff_ms, kind),
@@ -9721,7 +9724,8 @@ mod tests {
             // First batch succeeds
             let b1_append_time = 0;
             let b1_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
                     .set_base_offset(500)
                     .set_log_append_time(b1_append_time)
                     .set_log_start_offset(0)
@@ -9737,7 +9741,8 @@ mod tests {
 
             // We get an UNKNOWN_PRODUCER_ID, so bump the epoch and set sequence numbers back to 0
             let b2_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::UnknownProducerId)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::UnknownProducerId)
                     .set_base_offset(-1)
                     .set_log_append_time(-1)
                     .set_log_start_offset(500)
@@ -9800,7 +9805,8 @@ mod tests {
             let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
 
             let tp0b1_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
                     .set_base_offset(-1)
                     .set_log_append_time(-1)
                     .set_log_start_offset(400)
@@ -9814,7 +9820,8 @@ mod tests {
                 .expect("the completion is recorded");
 
             let tp1b1_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
                     .set_base_offset(-1)
                     .set_log_append_time(-1)
                     .set_log_start_offset(400)
@@ -9833,7 +9840,8 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp1()), 2);
 
             let b1_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::UnknownProducerId)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::UnknownProducerId)
                     .set_base_offset(-1)
                     .set_log_append_time(-1)
                     .set_log_start_offset(400)
@@ -9855,7 +9863,8 @@ mod tests {
             );
 
             let b2_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
                     .set_base_offset(-1)
                     .set_log_append_time(-1)
                     .set_log_start_offset(400)
@@ -9930,7 +9939,8 @@ mod tests {
 
             // We continue to track the state of tp0 until in-flight requests complete
             let b1_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
                     .set_base_offset(500)
                     .set_log_append_time(0)
                     .set_log_start_offset(0)
@@ -9958,7 +9968,8 @@ mod tests {
             );
 
             let b2_response = PartitionResponse::new_options(
-                PartitionResponseOptionsBuilder::new_error(Errors::None)
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
                     .set_base_offset(500)
                     .set_log_append_time(0)
                     .set_log_start_offset(0)
@@ -10053,7 +10064,8 @@ mod tests {
                 .handle_completed_batch(
                     &b1,
                     &PartitionResponse::new_options(
-                        PartitionResponseOptionsBuilder::new_error(Errors::None)
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
                             .set_base_offset(500)
                             .set_log_append_time(0)
                             .set_log_start_offset(0)
@@ -10142,7 +10154,8 @@ mod tests {
                 .handle_completed_batch(
                     &b3,
                     &PartitionResponse::new_options(
-                        PartitionResponseOptionsBuilder::new_error(Errors::None)
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
                             .set_base_offset(500)
                             .set_log_append_time(0)
                             .set_log_start_offset(0)
@@ -10189,7 +10202,8 @@ mod tests {
                 .handle_completed_batch(
                     &b2,
                     &PartitionResponse::new_options(
-                        PartitionResponseOptionsBuilder::new_error(Errors::None)
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
                             .set_base_offset(500)
                             .set_log_append_time(0)
                             .set_log_start_offset(0)

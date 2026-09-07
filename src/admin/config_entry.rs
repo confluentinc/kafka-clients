@@ -200,7 +200,8 @@ pub struct ConfigEntry {
 /// It deliberately has **no** `Default`. `name` and `value` are what even Java's
 /// narrow constructor (`:44`) takes from its caller, so neither has a
 /// Java-derived default, and a synthesised empty name would produce an entry
-/// naming no config at all. Construct it with [`ConfigEntryOptionsBuilder::new_name_value`].
+/// naming no config at all. Construct it with [`ConfigEntryOptionsBuilder::new`]
+/// and set them: [`ConfigEntryOptionsBuilder::build`] panics if any of `name`, `value` was not set.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigEntryOptions {
@@ -229,15 +230,36 @@ pub struct ConfigEntryOptions {
     pub documentation: Option<String>,
 }
 
-impl ConfigEntryOptions {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`ConfigEntryOptionsBuilder`], which is this constructor's only caller.
-    fn new_name_value(name: String, value: Option<String>) -> Self {
+/// Fluent builder for [`ConfigEntryOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`ConfigEntryOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct ConfigEntryOptionsBuilder {
+    name: Option<String>,
+    value: Option<Option<String>>,
+    source: ConfigSource,
+    is_sensitive: bool,
+    is_read_only: bool,
+    synonyms: Vec<ConfigSynonym>,
+    config_type: ConfigType,
+    documentation: Option<String>,
+}
+
+impl Default for ConfigEntryOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConfigEntryOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            name,
-            value,
+            name: None,
+            value: None,
             source: ConfigSource::Unknown,
             is_sensitive: false,
             is_read_only: false,
@@ -246,70 +268,76 @@ impl ConfigEntryOptions {
             documentation: None,
         }
     }
-}
 
-/// Fluent builder for [`ConfigEntryOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`ConfigEntryOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct ConfigEntryOptionsBuilder {
-    options: ConfigEntryOptions,
-}
-
-impl ConfigEntryOptionsBuilder {
-    /// Creates the options for the given name and value, with every other
-    /// parameter at the value Java's narrow `ConfigEntry` constructor (`:44`)
-    /// passes on the caller's behalf — its body is
-    /// `this(name, value, ConfigSource.UNKNOWN, false, false, Collections.emptyList(), ConfigType.UNKNOWN, null)`.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_name_value(name: String, value: Option<String>) -> Self {
-        Self { options: ConfigEntryOptions::new_name_value(name, value) }
+    /// Sets [`ConfigEntryOptions::name`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
     }
-
+    /// Sets [`ConfigEntryOptions::value`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_value(mut self, value: Option<String>) -> Self {
+        self.value = Some(value);
+        self
+    }
     /// Sets [`ConfigEntryOptions::source`].
     pub fn set_source(mut self, source: ConfigSource) -> Self {
-        self.options.source = source;
+        self.source = source;
         self
     }
-
     /// Sets [`ConfigEntryOptions::is_sensitive`].
     pub fn set_is_sensitive(mut self, is_sensitive: bool) -> Self {
-        self.options.is_sensitive = is_sensitive;
+        self.is_sensitive = is_sensitive;
         self
     }
-
     /// Sets [`ConfigEntryOptions::is_read_only`].
     pub fn set_is_read_only(mut self, is_read_only: bool) -> Self {
-        self.options.is_read_only = is_read_only;
+        self.is_read_only = is_read_only;
         self
     }
-
     /// Sets [`ConfigEntryOptions::synonyms`].
     pub fn set_synonyms(mut self, synonyms: Vec<ConfigSynonym>) -> Self {
-        self.options.synonyms = synonyms;
+        self.synonyms = synonyms;
         self
     }
-
     /// Sets [`ConfigEntryOptions::config_type`].
     pub fn set_config_type(mut self, config_type: ConfigType) -> Self {
-        self.options.config_type = config_type;
+        self.config_type = config_type;
         self
     }
-
     /// Sets [`ConfigEntryOptions::documentation`].
     pub fn set_documentation(mut self, documentation: Option<String>) -> Self {
-        self.options.documentation = documentation;
+        self.documentation = documentation;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `name`, `value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> ConfigEntryOptions {
-        self.options
+        ConfigEntryOptions {
+            name: self.name.unwrap_or_else(|| Self::missing("name")),
+            value: self.value.unwrap_or_else(|| Self::missing("value")),
+            source: self.source,
+            is_sensitive: self.is_sensitive,
+            is_read_only: self.is_read_only,
+            synonyms: self.synonyms,
+            config_type: self.config_type,
+            documentation: self.documentation,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("ConfigEntryOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -324,7 +352,7 @@ impl ConfigEntry {
     /// * `name` - the non-null config name
     /// * `value` - the config value or `None`
     pub fn new(name: String, value: Option<String>) -> Self {
-        Self::new_options(ConfigEntryOptionsBuilder::new_name_value(name, value).build())
+        Self::new_options(ConfigEntryOptionsBuilder::new().set_name(name).set_value(value).build())
     }
 
     /// Create a configuration entry with all values.
@@ -454,7 +482,9 @@ mod tests {
     #[test]
     fn is_default_only_for_default_config_source() {
         let default = ConfigEntry::new_options(
-            ConfigEntryOptionsBuilder::new_name_value("k".to_string(), None)
+            ConfigEntryOptionsBuilder::new()
+                .set_name("k".to_string())
+                .set_value(None)
                 .set_source(ConfigSource::DefaultConfig)
                 .set_config_type(ConfigType::String)
                 .build(),
@@ -466,7 +496,9 @@ mod tests {
     #[test]
     fn display_redacts_sensitive_value() {
         let entry = ConfigEntry::new_options(
-            ConfigEntryOptionsBuilder::new_name_value("password".to_string(), Some("secret".to_string()))
+            ConfigEntryOptionsBuilder::new()
+                .set_name("password".to_string())
+                .set_value(Some("secret".to_string()))
                 .set_is_sensitive(true)
                 .set_config_type(ConfigType::Password)
                 .build(),
@@ -483,5 +515,24 @@ mod tests {
         let c = ConfigEntry::new("k".to_string(), Some("other".to_string()));
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ConfigEntryOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "ConfigEntryOptionsBuilder::build: mandatory parameter `name` was not set")]
+    fn config_entry_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = ConfigEntryOptionsBuilder::new().build();
+    }
+
+    /// Validation covers every mandatory parameter, not just the first: setting
+    /// all but one still panics, naming the one left unset.
+    #[test]
+    #[should_panic(expected = "ConfigEntryOptionsBuilder::build: mandatory parameter `value` was not set")]
+    fn config_entry_options_builder_build_panics_when_only_value_is_unset() {
+        let _ = ConfigEntryOptionsBuilder::new()
+            .set_name("compression.type".to_string())
+            .build();
     }
 }

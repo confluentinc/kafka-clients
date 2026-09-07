@@ -350,21 +350,20 @@ mod tests {
                         .iter()
                         .map(|r| {
                             ConsumerRecord::new_options(
-                                ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-                                    r.topic().to_string(),
-                                    r.partition(),
-                                    r.offset(),
-                                    r.key().copied(),
-                                    r.value().copied(),
-                                )
-                                .set_timestamp(r.timestamp())
-                                .set_timestamp_type(r.timestamp_type())
-                                .set_serialized_key_size(r.serialized_key_size())
-                                .set_serialized_value_size(r.serialized_value_size())
-                                .set_headers(r.headers().clone())
-                                .set_leader_epoch(r.leader_epoch())
-                                .set_delivery_count(r.delivery_count())
-                                .build(),
+                                ConsumerRecordOptionsBuilder::new()
+                                    .set_topic(r.topic().to_string())
+                                    .set_partition(r.partition())
+                                    .set_offset(r.offset())
+                                    .set_key(r.key().copied())
+                                    .set_value(r.value().copied())
+                                    .set_timestamp(r.timestamp())
+                                    .set_timestamp_type(r.timestamp_type())
+                                    .set_serialized_key_size(r.serialized_key_size())
+                                    .set_serialized_value_size(r.serialized_value_size())
+                                    .set_headers(r.headers().clone())
+                                    .set_leader_epoch(r.leader_epoch())
+                                    .set_delivery_count(r.delivery_count())
+                                    .build(),
                             )
                         })
                         .collect();
@@ -398,19 +397,18 @@ mod tests {
         //       Optional.empty())
         ConsumerRecord::new_options(
             // headers, leader_epoch and delivery_count keep the initial values
-            // `ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value` gives them, which are Java's.
-            ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-                topic.to_string(),
-                partition,
-                0,
-                Some(1),
-                Some(1),
-            )
-            .set_timestamp(0)
-            .set_timestamp_type(TimestampType::CreateTime)
-            .set_serialized_key_size(0)
-            .set_serialized_value_size(0)
-            .build(),
+            // `ConsumerRecordOptionsBuilder::new` gives them, which are Java's.
+            ConsumerRecordOptionsBuilder::new()
+                .set_topic(topic.to_string())
+                .set_partition(partition)
+                .set_offset(0)
+                .set_key(Some(1))
+                .set_value(Some(1))
+                .set_timestamp(0)
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_serialized_key_size(0)
+                .set_serialized_value_size(0)
+                .build(),
         )
     }
 

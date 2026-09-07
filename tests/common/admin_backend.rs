@@ -1867,18 +1867,17 @@ fn comparable_config(config: &Config) -> Config {
         config
             .entries()
             .map(|entry| {
-                let options = ConfigEntryOptionsBuilder::new_name_value(
-                    entry.name().to_string(),
-                    entry.value().map(str::to_string),
-                )
-                .set_source(if entry.is_default() {
-                    ConfigSource::DefaultConfig
-                } else {
-                    ConfigSource::Unknown
-                })
-                .set_is_sensitive(entry.is_sensitive())
-                .set_is_read_only(entry.is_read_only())
-                .build();
+                let options = ConfigEntryOptionsBuilder::new()
+                    .set_name(entry.name().to_string())
+                    .set_value(entry.value().map(str::to_string))
+                    .set_source(if entry.is_default() {
+                        ConfigSource::DefaultConfig
+                    } else {
+                        ConfigSource::Unknown
+                    })
+                    .set_is_sensitive(entry.is_sensitive())
+                    .set_is_read_only(entry.is_read_only())
+                    .build();
                 ConfigEntry::new_options(options)
             })
             .collect::<Vec<_>>(),

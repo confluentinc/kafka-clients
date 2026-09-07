@@ -122,15 +122,14 @@ impl ListOffsetsHandler {
 
         let timeout_ms = self.options.timeout_ms().unwrap_or(self.default_api_timeout_ms);
         let mut builder = ListOffsetsRequestBuilder::for_consumer_options(
-            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
-                true,
-                self.options.isolation_level(),
-            )
-            .set_require_max_timestamp(supports_max_timestamp)
-            .set_require_earliest_local_timestamp(require_earliest_local_timestamp)
-            .set_require_tiered_storage_timestamp(require_tiered_storage_timestamp)
-            .set_require_earliest_pending_upload_timestamp(require_earliest_pending_upload_timestamp)
-            .build(),
+            ListOffsetsRequestBuilderOptionsBuilder::new()
+                .set_require_timestamp(true)
+                .set_isolation_level(self.options.isolation_level())
+                .set_require_max_timestamp(supports_max_timestamp)
+                .set_require_earliest_local_timestamp(require_earliest_local_timestamp)
+                .set_require_tiered_storage_timestamp(require_tiered_storage_timestamp)
+                .set_require_earliest_pending_upload_timestamp(require_earliest_pending_upload_timestamp)
+                .build(),
         );
         builder
             .set_target_times(topics_by_name.into_values().collect())

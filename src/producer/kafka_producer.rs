@@ -4113,7 +4113,9 @@ mod tests {
         );
 
         let record = ProducerRecord::new_options(
-            ProducerRecordOptionsBuilder::new_topic_value(TOPIC.to_string(), Some("value".to_string()))
+            ProducerRecordOptionsBuilder::new()
+                .set_topic(TOPIC.to_string())
+                .set_value(Some("value".to_string()))
                 .set_timestamp(Some(ctx.time.milliseconds()))
                 .set_key(Some("key".to_string()))
                 .build(),

@@ -317,18 +317,17 @@ mod tests {
     fn one_record() -> IndexMap<TopicPartition, Vec<ConsumerRecord<i32, String>>> {
         let tp = TopicPartition::new("topic".to_string(), 0);
         let record = ConsumerRecord::new_options(
-            ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-                "topic",
-                0,
-                0,
-                Some(0),
-                Some("value".to_string()),
-            )
-            .set_timestamp(0)
-            .set_timestamp_type(TimestampType::CreateTime)
-            .set_serialized_key_size(0)
-            .set_serialized_value_size(0)
-            .build(),
+            ConsumerRecordOptionsBuilder::new()
+                .set_topic("topic")
+                .set_partition(0)
+                .set_offset(0)
+                .set_key(Some(0))
+                .set_value(Some("value".to_string()))
+                .set_timestamp(0)
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_serialized_key_size(0)
+                .set_serialized_value_size(0)
+                .build(),
         );
         let mut records = IndexMap::new();
         records.insert(tp, vec![record]);

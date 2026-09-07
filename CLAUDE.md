@@ -45,7 +45,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      **only if the names would collide**, use the type to discriminate the method. In case the difference is **only** Optional use Rust's `Option` and a single method name
      - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct that is the only parameter to the method 
      name with `_options` suffix. Also in case Java API makes some parameters of the intersection set optional in a later version, add this method with only the `options` parameter.
-     The `Options` struct must have a `OptionsBuilder` with all mandatory parameters listed in the name, while rest of parameters are set to the defaults. If later a parameters is made optional, we add a new constructor for `OptionsBuilder` with all new mandatory parameters in the name. All optional parameters have fluent setters in the builder. Finally the user calls `build` before passing the `Options` struct.
+     The `Options` struct must have a `OptionsBuilder` with a `new` parameterless constructor. All optional parameters have fluent setters in the builder. Finally the user calls `build` before passing the `Options` struct, there the different sets of mandatory parameters are validated and a panic is emitted if they were not set.
      - getters and setters with same name: use `<field_name>` for the getter and `set_<field_name>` for the setter. If a method is a setter,
        use `set_<field_name>` even if there's no corresponding getter.
      - examples:

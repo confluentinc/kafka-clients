@@ -795,13 +795,12 @@ mod tests {
         use crate::common::protocol::ApiKeys;
         use crate::common::requests::request_header::{RequestHeader, RequestHeaderOptionsBuilder};
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::FETCH,
-                ApiKeys::FETCH.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FETCH)
+                .set_request_version(ApiKeys::FETCH.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header");
         crate::client_response::ClientResponse::new_timed_out(

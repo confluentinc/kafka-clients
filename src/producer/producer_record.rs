@@ -66,7 +66,8 @@ pub struct ProducerRecord<K, V> {
 /// It deliberately has **no** `Default`. `topic` and `value` are what even
 /// Java's narrowest constructor (`:142`) takes from its caller, so neither has
 /// a Java-derived default — and a synthesised empty topic would silently send
-/// the record nowhere. Construct it with [`ProducerRecordOptionsBuilder::new_topic_value`].
+/// the record nowhere. Construct it with [`ProducerRecordOptionsBuilder::new`]
+/// and set them: [`ProducerRecordOptionsBuilder::build`] panics if any of `topic`, `value` was not set.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ProducerRecordOptions<K, V> {
@@ -89,66 +90,98 @@ pub struct ProducerRecordOptions<K, V> {
     pub headers: Option<RecordHeaders>,
 }
 
-impl<K, V> ProducerRecordOptions<K, V> {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`ProducerRecordOptionsBuilder`], which is this constructor's only caller.
-    fn new_topic_value(topic: String, value: Option<V>) -> Self {
-        Self { topic, partition: None, timestamp: None, key: None, value, headers: None }
-    }
-}
-
 /// Fluent builder for [`ProducerRecordOptions`].
 ///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`ProducerRecordOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`ProducerRecordOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
 pub struct ProducerRecordOptionsBuilder<K, V> {
-    options: ProducerRecordOptions<K, V>,
+    topic: Option<String>,
+    partition: Option<i32>,
+    timestamp: Option<i64>,
+    key: Option<K>,
+    value: Option<Option<V>>,
+    headers: Option<RecordHeaders>,
+}
+
+impl<K, V> Default for ProducerRecordOptionsBuilder<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K, V> ProducerRecordOptionsBuilder<K, V> {
-    /// Creates the options for the given topic and value, with every other
-    /// parameter at the value Java's narrowest `ProducerRecord` constructor
-    /// (`:142`) passes on the caller's behalf — its body is
-    /// `this(topic, null, null, null, value, null)`.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_topic_value(topic: String, value: Option<V>) -> Self {
-        Self { options: ProducerRecordOptions::new_topic_value(topic, value) }
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            topic: None,
+            partition: None,
+            timestamp: None,
+            key: None,
+            value: None,
+            headers: None,
+        }
     }
 
+    /// Sets [`ProducerRecordOptions::topic`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_topic(mut self, topic: String) -> Self {
+        self.topic = Some(topic);
+        self
+    }
     /// Sets [`ProducerRecordOptions::partition`].
     pub fn set_partition(mut self, partition: Option<i32>) -> Self {
-        self.options.partition = partition;
+        self.partition = partition;
         self
     }
-
     /// Sets [`ProducerRecordOptions::timestamp`].
     pub fn set_timestamp(mut self, timestamp: Option<i64>) -> Self {
-        self.options.timestamp = timestamp;
+        self.timestamp = timestamp;
         self
     }
-
     /// Sets [`ProducerRecordOptions::key`].
     pub fn set_key(mut self, key: Option<K>) -> Self {
-        self.options.key = key;
+        self.key = key;
         self
     }
-
+    /// Sets [`ProducerRecordOptions::value`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_value(mut self, value: Option<V>) -> Self {
+        self.value = Some(value);
+        self
+    }
     /// Sets [`ProducerRecordOptions::headers`].
     pub fn set_headers(mut self, headers: Option<RecordHeaders>) -> Self {
-        self.options.headers = headers;
+        self.headers = headers;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `topic`, `value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> ProducerRecordOptions<K, V> {
-        self.options
+        ProducerRecordOptions {
+            topic: self.topic.unwrap_or_else(|| Self::missing("topic")),
+            partition: self.partition,
+            timestamp: self.timestamp,
+            key: self.key,
+            value: self.value.unwrap_or_else(|| Self::missing("value")),
+            headers: self.headers,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("ProducerRecordOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -207,7 +240,9 @@ impl<K, V> ProducerRecord<K, V> {
         value: Option<V>,
     ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new_options(
-            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+            ProducerRecordOptionsBuilder::new()
+                .set_topic(topic)
+                .set_value(value)
                 .set_partition(partition)
                 .set_timestamp(timestamp)
                 .set_key(key)
@@ -232,7 +267,9 @@ impl<K, V> ProducerRecord<K, V> {
         headers: RecordHeaders,
     ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new_options(
-            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+            ProducerRecordOptionsBuilder::new()
+                .set_topic(topic)
+                .set_value(value)
                 .set_partition(partition)
                 .set_key(key)
                 .set_headers(Some(headers))
@@ -255,7 +292,9 @@ impl<K, V> ProducerRecord<K, V> {
         value: Option<V>,
     ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new_options(
-            ProducerRecordOptionsBuilder::new_topic_value(topic, value)
+            ProducerRecordOptionsBuilder::new()
+                .set_topic(topic)
+                .set_value(value)
                 .set_partition(partition)
                 .set_key(key)
                 .build(),
@@ -268,7 +307,14 @@ impl<K, V> ProducerRecord<K, V> {
     /// Corresponds to Java's `ProducerRecord(String, K, V)` (`ProducerRecord.java:132`).
     pub fn new_key(topic: String, key: Option<K>, value: Option<V>) -> Self {
         // Cannot fail: no partition, no timestamp to validate
-        Self::new_options(ProducerRecordOptionsBuilder::new_topic_value(topic, value).set_key(key).build()).unwrap()
+        Self::new_options(
+            ProducerRecordOptionsBuilder::new()
+                .set_topic(topic)
+                .set_value(value)
+                .set_key(key)
+                .build(),
+        )
+        .unwrap()
     }
 
     /// Creates a record with no key (no partition, no timestamp, no headers).
@@ -278,7 +324,7 @@ impl<K, V> ProducerRecord<K, V> {
     /// constructors — so it owns the plain name (CLAUDE.md §2).
     pub fn new(topic: String, value: Option<V>) -> Self {
         // Cannot fail: no partition, no timestamp to validate
-        Self::new_options(ProducerRecordOptionsBuilder::new_topic_value(topic, value).build()).unwrap()
+        Self::new_options(ProducerRecordOptionsBuilder::new().set_topic(topic).set_value(value).build()).unwrap()
     }
 
     /// Returns the topic this record is being sent to.
@@ -403,7 +449,10 @@ mod tests {
         assert_ne!(producer_record, value_mismatch);
 
         let null_fields_record: ProducerRecord<String, String> = ProducerRecord::new_options(
-            ProducerRecordOptionsBuilder::new_topic_value("topic".to_string(), None).build(),
+            ProducerRecordOptionsBuilder::new()
+                .set_topic("topic".to_string())
+                .set_value(None)
+                .build(),
         )
         .unwrap();
         assert_eq!(null_fields_record, null_fields_record.clone());
@@ -433,5 +482,24 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         value.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ProducerRecordOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "ProducerRecordOptionsBuilder::build: mandatory parameter `topic` was not set")]
+    fn producer_record_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = ProducerRecordOptionsBuilder::<String, String>::new().build();
+    }
+
+    /// Validation covers every mandatory parameter, not just the first: setting
+    /// all but one still panics, naming the one left unset.
+    #[test]
+    #[should_panic(expected = "ProducerRecordOptionsBuilder::build: mandatory parameter `value` was not set")]
+    fn producer_record_options_builder_build_panics_when_only_value_is_unset() {
+        let _ = ProducerRecordOptionsBuilder::<String, String>::new()
+            .set_topic("topic".to_string())
+            .build();
     }
 }

@@ -88,13 +88,12 @@ async fn send_and_receive(
     let mut request = builder.build_version(version).expect("Failed to build request");
 
     let header = RequestHeader::new_options(
-        RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-            api_key,
-            version,
-            client_id,
-            correlation_id,
-        )
-        .build(),
+        RequestHeaderOptionsBuilder::new()
+            .set_request_api_key(api_key)
+            .set_request_version(version)
+            .set_client_id(client_id)
+            .set_correlation_id(correlation_id)
+            .build(),
     )
     .expect("Failed to create request header");
 

@@ -749,20 +749,19 @@ impl CompletedFetch {
             // §27: cheap Arc clone — atomic pointer bump, no UTF-8 copy.
             let topic_arc = Arc::clone(&self.topic_arc);
             let consumer_record = ConsumerRecord::new_options(
-                ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-                    topic_arc,
-                    self.partition.partition(),
-                    offset,
-                    key,
-                    value,
-                )
-                .set_timestamp(timestamp)
-                .set_timestamp_type(timestamp_type)
-                .set_serialized_key_size(key_size)
-                .set_serialized_value_size(value_size)
-                .set_headers(headers_owned)
-                .set_leader_epoch(leader_epoch)
-                .build(),
+                ConsumerRecordOptionsBuilder::new()
+                    .set_topic(topic_arc)
+                    .set_partition(self.partition.partition())
+                    .set_offset(offset)
+                    .set_key(key)
+                    .set_value(value)
+                    .set_timestamp(timestamp)
+                    .set_timestamp_type(timestamp_type)
+                    .set_serialized_key_size(key_size)
+                    .set_serialized_value_size(value_size)
+                    .set_headers(headers_owned)
+                    .set_leader_epoch(leader_epoch)
+                    .build(),
             );
             self.records_read += 1;
             self.bytes_read += record_size_in_bytes;

@@ -146,7 +146,9 @@ pub fn build_consumer_with(
 
 /// Builds a record for partition 0 with key `key-{value}`.
 pub fn string_record(topic: &str, value: &str) -> Result<ProducerRecord<String, String>, String> {
-    let options = ProducerRecordOptionsBuilder::new_topic_value(topic.to_string(), Some(value.to_string()))
+    let options = ProducerRecordOptionsBuilder::new()
+        .set_topic(topic.to_string())
+        .set_value(Some(value.to_string()))
         .set_partition(Some(0))
         .set_key(Some(format!("key-{value}")))
         .build();

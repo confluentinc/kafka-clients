@@ -49,18 +49,17 @@ fn mock_consumer_is_consumer_trait_object() {
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
 /// offset, ts, tsType, sizeK, sizeV, key, value, headers, leaderEpoch)`.
 fn build_record(topic: &str, partition: i32, offset: i64, key: &str, value: &str) -> ConsumerRecord<String, String> {
-    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-        topic.to_string(),
-        partition,
-        offset,
-        Some(key.to_string()),
-        Some(value.to_string()),
-    )
-    .set_timestamp(0)
-    .set_timestamp_type(TimestampType::CreateTime)
-    .set_serialized_key_size(0)
-    .set_serialized_value_size(0)
-    .build();
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(topic.to_string())
+        .set_partition(partition)
+        .set_offset(offset)
+        .set_key(Some(key.to_string()))
+        .set_value(Some(value.to_string()))
+        .set_timestamp(0)
+        .set_timestamp_type(TimestampType::CreateTime)
+        .set_serialized_key_size(0)
+        .set_serialized_value_size(0)
+        .build();
     ConsumerRecord::new_options(options)
 }
 

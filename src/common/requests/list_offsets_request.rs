@@ -222,7 +222,8 @@ pub struct ListOffsetsRequestBuilder {
 /// `requireTimestamp` and `isolationLevel` from its caller, so those two have
 /// no Java-derived default — and a synthesised `isolationLevel` would silently
 /// pick a read isolation the caller never asked for. Build it from
-/// [`ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level`] and override the flags you need.
+/// [`ListOffsetsRequestBuilderOptionsBuilder::new`], setting those two and
+/// overriding the flags you need: [`ListOffsetsRequestBuilderOptionsBuilder::build`] panics if any of `require_timestamp`, `isolation_level` was not set.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ListOffsetsRequestBuilderOptions {
@@ -241,80 +242,101 @@ pub struct ListOffsetsRequestBuilderOptions {
     pub require_earliest_pending_upload_timestamp: bool,
 }
 
-impl ListOffsetsRequestBuilderOptions {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`ListOffsetsRequestBuilderOptionsBuilder`], which is this constructor's only caller.
-    fn new_require_timestamp_isolation_level(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
+/// Fluent builder for [`ListOffsetsRequestBuilderOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`ListOffsetsRequestBuilderOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct ListOffsetsRequestBuilderOptionsBuilder {
+    require_timestamp: Option<bool>,
+    isolation_level: Option<IsolationLevel>,
+    require_max_timestamp: bool,
+    require_earliest_local_timestamp: bool,
+    require_tiered_storage_timestamp: bool,
+    require_earliest_pending_upload_timestamp: bool,
+}
+
+impl Default for ListOffsetsRequestBuilderOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ListOffsetsRequestBuilderOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            require_timestamp,
-            isolation_level,
+            require_timestamp: None,
+            isolation_level: None,
             require_max_timestamp: false,
             require_earliest_local_timestamp: false,
             require_tiered_storage_timestamp: false,
             require_earliest_pending_upload_timestamp: false,
         }
     }
-}
 
-/// Fluent builder for [`ListOffsetsRequestBuilderOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`ListOffsetsRequestBuilderOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct ListOffsetsRequestBuilderOptionsBuilder {
-    options: ListOffsetsRequestBuilderOptions,
-}
-
-impl ListOffsetsRequestBuilderOptionsBuilder {
-    /// Creates the options for the given timestamp requirement and isolation
-    /// level, with the four feature flags at the values Java's two-argument
-    /// `forConsumer` (`:61`) passes on the caller's behalf.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_require_timestamp_isolation_level(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
-        Self {
-            options: ListOffsetsRequestBuilderOptions::new_require_timestamp_isolation_level(
-                require_timestamp,
-                isolation_level,
-            ),
-        }
+    /// Sets [`ListOffsetsRequestBuilderOptions::require_timestamp`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_require_timestamp(mut self, require_timestamp: bool) -> Self {
+        self.require_timestamp = Some(require_timestamp);
+        self
     }
-
+    /// Sets [`ListOffsetsRequestBuilderOptions::isolation_level`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_isolation_level(mut self, isolation_level: IsolationLevel) -> Self {
+        self.isolation_level = Some(isolation_level);
+        self
+    }
     /// Sets [`ListOffsetsRequestBuilderOptions::require_max_timestamp`].
     pub fn set_require_max_timestamp(mut self, require_max_timestamp: bool) -> Self {
-        self.options.require_max_timestamp = require_max_timestamp;
+        self.require_max_timestamp = require_max_timestamp;
         self
     }
-
     /// Sets [`ListOffsetsRequestBuilderOptions::require_earliest_local_timestamp`].
     pub fn set_require_earliest_local_timestamp(mut self, require_earliest_local_timestamp: bool) -> Self {
-        self.options.require_earliest_local_timestamp = require_earliest_local_timestamp;
+        self.require_earliest_local_timestamp = require_earliest_local_timestamp;
         self
     }
-
     /// Sets [`ListOffsetsRequestBuilderOptions::require_tiered_storage_timestamp`].
     pub fn set_require_tiered_storage_timestamp(mut self, require_tiered_storage_timestamp: bool) -> Self {
-        self.options.require_tiered_storage_timestamp = require_tiered_storage_timestamp;
+        self.require_tiered_storage_timestamp = require_tiered_storage_timestamp;
         self
     }
-
     /// Sets [`ListOffsetsRequestBuilderOptions::require_earliest_pending_upload_timestamp`].
     pub fn set_require_earliest_pending_upload_timestamp(
         mut self,
         require_earliest_pending_upload_timestamp: bool,
     ) -> Self {
-        self.options.require_earliest_pending_upload_timestamp = require_earliest_pending_upload_timestamp;
+        self.require_earliest_pending_upload_timestamp = require_earliest_pending_upload_timestamp;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `require_timestamp`, `isolation_level`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> ListOffsetsRequestBuilderOptions {
-        self.options
+        ListOffsetsRequestBuilderOptions {
+            require_timestamp: self.require_timestamp.unwrap_or_else(|| Self::missing("require_timestamp")),
+            isolation_level: self.isolation_level.unwrap_or_else(|| Self::missing("isolation_level")),
+            require_max_timestamp: self.require_max_timestamp,
+            require_earliest_local_timestamp: self.require_earliest_local_timestamp,
+            require_tiered_storage_timestamp: self.require_tiered_storage_timestamp,
+            require_earliest_pending_upload_timestamp: self.require_earliest_pending_upload_timestamp,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("ListOffsetsRequestBuilderOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -326,11 +348,10 @@ impl ListOffsetsRequestBuilder {
     /// (`ListOffsetsRequest.java:61`).
     pub fn for_consumer(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
         Self::for_consumer_options(
-            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
-                require_timestamp,
-                isolation_level,
-            )
-            .build(),
+            ListOffsetsRequestBuilderOptionsBuilder::new()
+                .set_require_timestamp(require_timestamp)
+                .set_isolation_level(isolation_level)
+                .build(),
         )
     }
 
@@ -478,12 +499,11 @@ mod tests {
     #[test]
     fn for_consumer_require_max_timestamp_forces_v7() {
         let builder = ListOffsetsRequestBuilder::for_consumer_options(
-            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
-                true,
-                IsolationLevel::ReadCommitted,
-            )
-            .set_require_max_timestamp(true)
-            .build(),
+            ListOffsetsRequestBuilderOptionsBuilder::new()
+                .set_require_timestamp(true)
+                .set_isolation_level(IsolationLevel::ReadCommitted)
+                .set_require_max_timestamp(true)
+                .build(),
         );
         assert_eq!(builder.oldest_allowed_version(), 7);
     }
@@ -492,12 +512,11 @@ mod tests {
     #[test]
     fn for_consumer_require_earliest_pending_upload_forces_v11() {
         let builder = ListOffsetsRequestBuilder::for_consumer_options(
-            ListOffsetsRequestBuilderOptionsBuilder::new_require_timestamp_isolation_level(
-                true,
-                IsolationLevel::ReadCommitted,
-            )
-            .set_require_earliest_pending_upload_timestamp(true)
-            .build(),
+            ListOffsetsRequestBuilderOptionsBuilder::new()
+                .set_require_timestamp(true)
+                .set_isolation_level(IsolationLevel::ReadCommitted)
+                .set_require_earliest_pending_upload_timestamp(true)
+                .build(),
         );
         assert_eq!(builder.oldest_allowed_version(), 11);
     }
@@ -545,5 +564,28 @@ mod tests {
         let req = ListOffsetsRequest::new(data, ApiKeys::LIST_OFFSETS.latest_version());
         assert_eq!(req.duplicate_partitions().len(), 1);
         assert!(req.duplicate_partitions().contains(&TopicPartition::new("t".to_string(), 0)));
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ListOffsetsRequestBuilderOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(
+        expected = "ListOffsetsRequestBuilderOptionsBuilder::build: mandatory parameter `require_timestamp` was not set"
+    )]
+    fn list_offsets_request_builder_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = ListOffsetsRequestBuilderOptionsBuilder::new().build();
+    }
+
+    /// Validation covers every mandatory parameter, not just the first: setting
+    /// all but one still panics, naming the one left unset.
+    #[test]
+    #[should_panic(
+        expected = "ListOffsetsRequestBuilderOptionsBuilder::build: mandatory parameter `isolation_level` was not set"
+    )]
+    fn list_offsets_request_builder_options_builder_build_panics_when_only_isolation_level_is_unset() {
+        let _ = ListOffsetsRequestBuilderOptionsBuilder::new()
+            .set_require_timestamp(true)
+            .build();
     }
 }

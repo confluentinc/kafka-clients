@@ -160,7 +160,7 @@ pub struct PartitionResponse {
 ///
 /// It deliberately has **no** `Default`. Every field *except* `error` is
 /// supplied by a narrower Java overload on the caller's behalf, and
-/// [`PartitionResponseOptionsBuilder::new_error`] carries exactly those values; `error` is
+/// [`PartitionResponseOptionsBuilder::new`] carries exactly those values; `error` is
 /// what even Java's narrowest form (`:168`) takes from its caller, so it has no
 /// Java-derived default — and a synthesised `Errors::None` would silently turn a
 /// failed partition into a successful one.
@@ -185,14 +185,34 @@ pub struct PartitionResponseOptions {
     pub current_leader: LeaderIdAndEpoch,
 }
 
-impl PartitionResponseOptions {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`PartitionResponseOptionsBuilder`], which is this constructor's only caller.
-    fn new_error(error: Errors) -> Self {
+/// Fluent builder for [`PartitionResponseOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`PartitionResponseOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct PartitionResponseOptionsBuilder {
+    error: Option<Errors>,
+    base_offset: i64,
+    log_append_time: i64,
+    log_start_offset: i64,
+    record_errors: Vec<RecordError>,
+    error_message: Option<String>,
+    current_leader: LeaderIdAndEpoch,
+}
+
+impl Default for PartitionResponseOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartitionResponseOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            error,
+            error: None,
             base_offset: INVALID_OFFSET,
             log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
             log_start_offset: INVALID_OFFSET,
@@ -201,69 +221,69 @@ impl PartitionResponseOptions {
             current_leader: LeaderIdAndEpoch::new(),
         }
     }
-}
 
-/// Fluent builder for [`PartitionResponseOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`PartitionResponseOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct PartitionResponseOptionsBuilder {
-    options: PartitionResponseOptions,
-}
-
-impl PartitionResponseOptionsBuilder {
-    /// Creates the options for the given error, with every other parameter at
-    /// the value Java's narrowest `PartitionResponse` overload (`:168`) passes
-    /// on the caller's behalf.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_error(error: Errors) -> Self {
-        Self { options: PartitionResponseOptions::new_error(error) }
+    /// Sets [`PartitionResponseOptions::error`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_error(mut self, error: Errors) -> Self {
+        self.error = Some(error);
+        self
     }
-
     /// Sets [`PartitionResponseOptions::base_offset`].
     pub fn set_base_offset(mut self, base_offset: i64) -> Self {
-        self.options.base_offset = base_offset;
+        self.base_offset = base_offset;
         self
     }
-
     /// Sets [`PartitionResponseOptions::log_append_time`].
     pub fn set_log_append_time(mut self, log_append_time: i64) -> Self {
-        self.options.log_append_time = log_append_time;
+        self.log_append_time = log_append_time;
         self
     }
-
     /// Sets [`PartitionResponseOptions::log_start_offset`].
     pub fn set_log_start_offset(mut self, log_start_offset: i64) -> Self {
-        self.options.log_start_offset = log_start_offset;
+        self.log_start_offset = log_start_offset;
         self
     }
-
     /// Sets [`PartitionResponseOptions::record_errors`].
     pub fn set_record_errors(mut self, record_errors: Vec<RecordError>) -> Self {
-        self.options.record_errors = record_errors;
+        self.record_errors = record_errors;
         self
     }
-
     /// Sets [`PartitionResponseOptions::error_message`].
     pub fn set_error_message(mut self, error_message: Option<String>) -> Self {
-        self.options.error_message = error_message;
+        self.error_message = error_message;
         self
     }
-
     /// Sets [`PartitionResponseOptions::current_leader`].
     pub fn set_current_leader(mut self, current_leader: LeaderIdAndEpoch) -> Self {
-        self.options.current_leader = current_leader;
+        self.current_leader = current_leader;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `error`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> PartitionResponseOptions {
-        self.options
+        PartitionResponseOptions {
+            error: self.error.unwrap_or_else(|| Self::missing("error")),
+            base_offset: self.base_offset,
+            log_append_time: self.log_append_time,
+            log_start_offset: self.log_start_offset,
+            record_errors: self.record_errors,
+            error_message: self.error_message,
+            current_leader: self.current_leader,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("PartitionResponseOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -456,5 +476,14 @@ mod tests {
 
         let re_none = RecordError::new(3);
         assert_eq!(re_none.to_string(), "RecordError(batchIndex=3, message=null)");
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`PartitionResponseOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "PartitionResponseOptionsBuilder::build: mandatory parameter `error` was not set")]
+    fn partition_response_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = PartitionResponseOptionsBuilder::new().build();
     }
 }

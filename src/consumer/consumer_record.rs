@@ -90,7 +90,8 @@ pub struct ConsumerRecord<K, V> {
 /// `key` and `value` are what even Java's narrowest constructor
 /// (`ConsumerRecord.java:83`) takes from its caller, so none of them has a
 /// Java-derived default — and a synthesised empty topic would name no
-/// partition at all. Construct it with [`ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value`].
+/// partition at all. Construct it with [`ConsumerRecordOptionsBuilder::new`]
+/// and set them: [`ConsumerRecordOptionsBuilder::build`] panics if any of `topic`, `partition`, `offset`, `key`, `value` was not set.
 #[non_exhaustive]
 pub struct ConsumerRecordOptions<K, V> {
     /// The topic this record is received from. Java's `topic`.
@@ -128,111 +129,149 @@ pub struct ConsumerRecordOptions<K, V> {
     pub delivery_count: Option<i16>,
 }
 
-impl<K, V> ConsumerRecordOptions<K, V> {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`ConsumerRecordOptionsBuilder`], which is this constructor's only caller.
-    fn new_topic_partition_offset_key_value(
-        topic: impl Into<Arc<str>>,
-        partition: i32,
-        offset: i64,
-        key: Option<K>,
-        value: Option<V>,
-    ) -> Self {
+/// Fluent builder for [`ConsumerRecordOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`ConsumerRecordOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct ConsumerRecordOptionsBuilder<K, V> {
+    topic: Option<Arc<str>>,
+    partition: Option<i32>,
+    offset: Option<i64>,
+    timestamp: i64,
+    timestamp_type: TimestampType,
+    serialized_key_size: i32,
+    serialized_value_size: i32,
+    key: Option<Option<K>>,
+    value: Option<Option<V>>,
+    headers: RecordHeaders,
+    leader_epoch: Option<i32>,
+    delivery_count: Option<i16>,
+}
+
+impl<K, V> Default for ConsumerRecordOptionsBuilder<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            topic: topic.into(),
-            partition,
-            offset,
+            topic: None,
+            partition: None,
+            offset: None,
             timestamp: NO_TIMESTAMP,
             timestamp_type: TimestampType::NoTimestampType,
             serialized_key_size: NULL_SIZE,
             serialized_value_size: NULL_SIZE,
-            key,
-            value,
+            key: None,
+            value: None,
             headers: RecordHeaders::new(),
             leader_epoch: None,
             delivery_count: None,
         }
     }
-}
 
-/// Fluent builder for [`ConsumerRecordOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`ConsumerRecordOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct ConsumerRecordOptionsBuilder<K, V> {
-    options: ConsumerRecordOptions<K, V>,
-}
-
-impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
-    /// Creates the options for the given topic, partition, offset, key and
-    /// value — the intersection across Java's three constructors — with every
-    /// other parameter at the value Java's narrowest constructor (`:83`)
-    /// passes on the caller's behalf.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_topic_partition_offset_key_value(
-        topic: impl Into<Arc<str>>,
-        partition: i32,
-        offset: i64,
-        key: Option<K>,
-        value: Option<V>,
-    ) -> Self {
-        Self {
-            options: ConsumerRecordOptions::new_topic_partition_offset_key_value(topic, partition, offset, key, value),
-        }
+    /// Sets [`ConsumerRecordOptions::topic`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_topic(mut self, topic: impl Into<Arc<str>>) -> Self {
+        self.topic = Some(topic.into());
+        self
     }
-
+    /// Sets [`ConsumerRecordOptions::partition`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_partition(mut self, partition: i32) -> Self {
+        self.partition = Some(partition);
+        self
+    }
+    /// Sets [`ConsumerRecordOptions::offset`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_offset(mut self, offset: i64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
     /// Sets [`ConsumerRecordOptions::timestamp`].
     pub fn set_timestamp(mut self, timestamp: i64) -> Self {
-        self.options.timestamp = timestamp;
+        self.timestamp = timestamp;
         self
     }
-
     /// Sets [`ConsumerRecordOptions::timestamp_type`].
     pub fn set_timestamp_type(mut self, timestamp_type: TimestampType) -> Self {
-        self.options.timestamp_type = timestamp_type;
+        self.timestamp_type = timestamp_type;
         self
     }
-
     /// Sets [`ConsumerRecordOptions::serialized_key_size`].
     pub fn set_serialized_key_size(mut self, serialized_key_size: i32) -> Self {
-        self.options.serialized_key_size = serialized_key_size;
+        self.serialized_key_size = serialized_key_size;
         self
     }
-
     /// Sets [`ConsumerRecordOptions::serialized_value_size`].
     pub fn set_serialized_value_size(mut self, serialized_value_size: i32) -> Self {
-        self.options.serialized_value_size = serialized_value_size;
+        self.serialized_value_size = serialized_value_size;
         self
     }
-
+    /// Sets [`ConsumerRecordOptions::key`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_key(mut self, key: Option<K>) -> Self {
+        self.key = Some(key);
+        self
+    }
+    /// Sets [`ConsumerRecordOptions::value`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_value(mut self, value: Option<V>) -> Self {
+        self.value = Some(value);
+        self
+    }
     /// Sets [`ConsumerRecordOptions::headers`].
     pub fn set_headers(mut self, headers: RecordHeaders) -> Self {
-        self.options.headers = headers;
+        self.headers = headers;
         self
     }
-
     /// Sets [`ConsumerRecordOptions::leader_epoch`].
     pub fn set_leader_epoch(mut self, leader_epoch: Option<i32>) -> Self {
-        self.options.leader_epoch = leader_epoch;
+        self.leader_epoch = leader_epoch;
         self
     }
-
     /// Sets [`ConsumerRecordOptions::delivery_count`].
     pub fn set_delivery_count(mut self, delivery_count: Option<i16>) -> Self {
-        self.options.delivery_count = delivery_count;
+        self.delivery_count = delivery_count;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `topic`, `partition`, `offset`, `key`, `value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> ConsumerRecordOptions<K, V> {
-        self.options
+        ConsumerRecordOptions {
+            topic: self.topic.unwrap_or_else(|| Self::missing("topic")),
+            partition: self.partition.unwrap_or_else(|| Self::missing("partition")),
+            offset: self.offset.unwrap_or_else(|| Self::missing("offset")),
+            timestamp: self.timestamp,
+            timestamp_type: self.timestamp_type,
+            serialized_key_size: self.serialized_key_size,
+            serialized_value_size: self.serialized_value_size,
+            key: self.key.unwrap_or_else(|| Self::missing("key")),
+            value: self.value.unwrap_or_else(|| Self::missing("value")),
+            headers: self.headers,
+            leader_epoch: self.leader_epoch,
+            delivery_count: self.delivery_count,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("ConsumerRecordOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -250,7 +289,12 @@ impl<K, V> ConsumerRecord<K, V> {
     /// `leader_epoch` and `delivery_count` to `None`.
     pub fn new(topic: impl Into<Arc<str>>, partition: i32, offset: i64, key: Option<K>, value: Option<V>) -> Self {
         Self::new_options(
-            ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(topic, partition, offset, key, value)
+            ConsumerRecordOptionsBuilder::new()
+                .set_topic(topic)
+                .set_partition(partition)
+                .set_offset(offset)
+                .set_key(key)
+                .set_value(value)
                 .build(),
         )
     }
@@ -439,5 +483,19 @@ where
             key_str,
             value_str
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ConsumerRecordOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "ConsumerRecordOptionsBuilder::build: mandatory parameter `topic` was not set")]
+    fn consumer_record_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = ConsumerRecordOptionsBuilder::<i32, i32>::new().build();
     }
 }

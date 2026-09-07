@@ -196,13 +196,12 @@ mod tests {
     #[test]
     fn test_send_builder_creates_size_prefixed_buffer() {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                ApiKeys::METADATA.latest_version(),
-                "test-client",
-                42,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.latest_version())
+                .set_client_id("test-client")
+                .set_correlation_id(42)
+                .build(),
         )
         .unwrap();
 

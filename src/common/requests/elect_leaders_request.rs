@@ -97,13 +97,12 @@ impl ElectLeadersRequest {
             }
         }
         ConcreteResponse::ElectLeaders(ElectLeadersResponse::new_options(
-            ElectLeadersResponseOptionsBuilder::new_throttle_time_ms_error_code_election_results_version(
-                throttle_time_ms,
-                error.code(),
-                election_results,
-                self.version,
-            )
-            .build(),
+            ElectLeadersResponseOptionsBuilder::new()
+                .set_throttle_time_ms(throttle_time_ms)
+                .set_error_code(error.code())
+                .set_election_results(election_results)
+                .set_version(self.version)
+                .build(),
         ))
     }
 

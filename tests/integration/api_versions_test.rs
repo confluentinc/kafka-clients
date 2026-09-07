@@ -68,13 +68,12 @@ async fn send_api_versions_request(selector: &mut Selector) -> ApiVersionsRespon
     let mut request = builder.build_version(version).expect("Failed to build request");
 
     let header = RequestHeader::new_options(
-        RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-            api_key,
-            version,
-            "api-versions-test",
-            1,
-        )
-        .build(),
+        RequestHeaderOptionsBuilder::new()
+            .set_request_api_key(api_key)
+            .set_request_version(version)
+            .set_client_id("api-versions-test")
+            .set_correlation_id(1)
+            .build(),
     )
     .expect("Failed to create request header");
 

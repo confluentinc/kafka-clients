@@ -46,7 +46,7 @@ pub const DEFAULT_GENERATION: i32 = -1;
 /// narrowest `Subscription` constructor (`:130`) takes from its caller, so it
 /// has no Java-derived default, and a synthesised empty topic list would
 /// silently produce a subscription to nothing. Construct it with
-/// [`SubscriptionOptionsBuilder::new_topics`].
+/// [`SubscriptionOptionsBuilder::new`] and set it: [`SubscriptionOptionsBuilder::build`] panics if `topics` was not set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscriptionOptions {
@@ -63,72 +63,89 @@ pub struct SubscriptionOptions {
     pub rack_id: Option<String>,
 }
 
-impl SubscriptionOptions {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`SubscriptionOptionsBuilder`], which is this constructor's only caller.
-    fn new_topics(topics: Vec<String>) -> Self {
+/// Fluent builder for [`SubscriptionOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`SubscriptionOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct SubscriptionOptionsBuilder {
+    topics: Option<Vec<String>>,
+    user_data: Option<Vec<u8>>,
+    owned_partitions: Vec<TopicPartition>,
+    generation_id: i32,
+    rack_id: Option<String>,
+}
+
+impl Default for SubscriptionOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubscriptionOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            topics,
+            topics: None,
             user_data: None,
             owned_partitions: Vec::new(),
             generation_id: DEFAULT_GENERATION,
             rack_id: None,
         }
     }
-}
 
-/// Fluent builder for [`SubscriptionOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`SubscriptionOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct SubscriptionOptionsBuilder {
-    options: SubscriptionOptions,
-}
-
-impl SubscriptionOptionsBuilder {
-    /// Creates the options for the given topics, with every other parameter at
-    /// the value Java's narrowest `Subscription` constructor (`:130`) passes on
-    /// the caller's behalf — its body is
-    /// `this(topics, null, Collections.emptyList(), DEFAULT_GENERATION, Optional.empty())`.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_topics(topics: Vec<String>) -> Self {
-        Self { options: SubscriptionOptions::new_topics(topics) }
+    /// Sets [`SubscriptionOptions::topics`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_topics(mut self, topics: Vec<String>) -> Self {
+        self.topics = Some(topics);
+        self
     }
-
     /// Sets [`SubscriptionOptions::user_data`].
     pub fn set_user_data(mut self, user_data: Option<Vec<u8>>) -> Self {
-        self.options.user_data = user_data;
+        self.user_data = user_data;
         self
     }
-
     /// Sets [`SubscriptionOptions::owned_partitions`].
     pub fn set_owned_partitions(mut self, owned_partitions: Vec<TopicPartition>) -> Self {
-        self.options.owned_partitions = owned_partitions;
+        self.owned_partitions = owned_partitions;
         self
     }
-
     /// Sets [`SubscriptionOptions::generation_id`].
     pub fn set_generation_id(mut self, generation_id: i32) -> Self {
-        self.options.generation_id = generation_id;
+        self.generation_id = generation_id;
         self
     }
-
     /// Sets [`SubscriptionOptions::rack_id`].
     pub fn set_rack_id(mut self, rack_id: Option<String>) -> Self {
-        self.options.rack_id = rack_id;
+        self.rack_id = rack_id;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `topics`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> SubscriptionOptions {
-        self.options
+        SubscriptionOptions {
+            topics: self.topics.unwrap_or_else(|| Self::missing("topics")),
+            user_data: self.user_data,
+            owned_partitions: self.owned_partitions,
+            generation_id: self.generation_id,
+            rack_id: self.rack_id,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("SubscriptionOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -158,14 +175,19 @@ impl Subscription {
     ///
     /// Mirrors `Subscription(List)` (`:130`).
     pub fn new(topics: Vec<String>) -> Self {
-        Self::new_options(SubscriptionOptionsBuilder::new_topics(topics).build())
+        Self::new_options(SubscriptionOptionsBuilder::new().set_topics(topics).build())
     }
 
     /// Creates a subscription from topics and optional user data.
     ///
     /// Mirrors `Subscription(List, ByteBuffer)` (`:126`).
     pub fn new_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
-        Self::new_options(SubscriptionOptionsBuilder::new_topics(topics).set_user_data(user_data).build())
+        Self::new_options(
+            SubscriptionOptionsBuilder::new()
+                .set_topics(topics)
+                .set_user_data(user_data)
+                .build(),
+        )
     }
 
     /// Creates a subscription from topics, optional user data and owned
@@ -178,7 +200,8 @@ impl Subscription {
         owned_partitions: Vec<TopicPartition>,
     ) -> Self {
         Self::new_options(
-            SubscriptionOptionsBuilder::new_topics(topics)
+            SubscriptionOptionsBuilder::new()
+                .set_topics(topics)
                 .set_user_data(user_data)
                 .set_owned_partitions(owned_partitions)
                 .build(),
@@ -288,7 +311,8 @@ mod tests {
     #[test]
     fn subscription_negative_generation_is_none() {
         let s = Subscription::new_options(
-            SubscriptionOptionsBuilder::new_topics(vec!["t".to_string()])
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["t".to_string()])
                 .set_generation_id(-1)
                 .build(),
         );
@@ -298,7 +322,8 @@ mod tests {
     #[test]
     fn subscription_non_negative_generation_is_some() {
         let s = Subscription::new_options(
-            SubscriptionOptionsBuilder::new_topics(vec!["t".to_string()])
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["t".to_string()])
                 .set_generation_id(5)
                 .set_rack_id(Some("r".to_string()))
                 .build(),
@@ -321,5 +346,14 @@ mod tests {
         let a = Assignment::new(vec![TopicPartition::new("t", 0)]);
         assert_eq!(a.partitions().len(), 1);
         assert!(a.user_data().is_none());
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`SubscriptionOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "SubscriptionOptionsBuilder::build: mandatory parameter `topics` was not set")]
+    fn subscription_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = SubscriptionOptionsBuilder::new().build();
     }
 }

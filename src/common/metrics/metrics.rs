@@ -106,11 +106,13 @@ pub struct Metrics {
 /// `name` included. This struct has no Java counterpart: it exists solely to
 /// satisfy that naming rule (DoD #7).
 ///
-/// It is `#[non_exhaustive]`, so build it from [`SensorOptionsBuilder::new_name`] and
-/// override the fields you need. Every other field's initial value is Java's —
-/// what its narrower `sensor` overloads pass on the caller's behalf. There is
-/// deliberately no `Default`: Java declares no `sensor` overload that omits
-/// `name`, so there is no Java-derived default for it.
+/// It is `#[non_exhaustive]`, so build it from [`SensorOptionsBuilder::new`]
+/// and set the fields you need. Every other field's initial value is Java's —
+/// what its narrower `sensor` overloads pass on the caller's behalf. `name` has
+/// no such initial value: Java declares no `sensor` overload that omits it, so
+/// there is no Java-derived default to fall back on, and
+/// [`SensorOptionsBuilder::build`] panics if it was not set. `SensorOptions`
+/// itself has deliberately no `Default` for the same reason.
 // No `Debug` — `Sensor` is not `Debug`, and adding it there is out of scope for
 // a naming change. No `Copy` either: `config` is an `Option<Arc<..>>`.
 #[derive(Clone)]
@@ -131,71 +133,89 @@ pub struct SensorOptions<'a> {
     pub parents: &'a [Arc<Sensor>],
 }
 
-impl<'a> SensorOptions<'a> {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`SensorOptionsBuilder`], which is this constructor's only caller.
-    fn new_name(name: &'a str) -> Self {
+/// Fluent builder for [`SensorOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`SensorOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct SensorOptionsBuilder<'a> {
+    name: Option<&'a str>,
+    config: Option<Arc<MetricConfig>>,
+    inactive_sensor_expiration_time_seconds: i64,
+    recording_level: RecordingLevel,
+    parents: &'a [Arc<Sensor>],
+}
+
+impl<'a> Default for SensorOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> SensorOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            name,
+            name: None,
             config: None,
             inactive_sensor_expiration_time_seconds: i64::MAX,
             recording_level: RecordingLevel::Info,
             parents: &[],
         }
     }
-}
 
-/// Fluent builder for [`SensorOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`SensorOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct SensorOptionsBuilder<'a> {
-    options: SensorOptions<'a>,
-}
-
-impl<'a> SensorOptionsBuilder<'a> {
-    /// Creates the options for the sensor named `name`, with every other
-    /// parameter at the value Java's narrowest `sensor` overload (`:325`)
-    /// passes on the caller's behalf.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_name(name: &'a str) -> Self {
-        Self { options: SensorOptions::new_name(name) }
+    /// Sets [`SensorOptions::name`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
     }
-
     /// Sets [`SensorOptions::config`].
     pub fn set_config(mut self, config: Option<Arc<MetricConfig>>) -> Self {
-        self.options.config = config;
+        self.config = config;
         self
     }
-
     /// Sets [`SensorOptions::inactive_sensor_expiration_time_seconds`].
     pub fn set_inactive_sensor_expiration_time_seconds(mut self, inactive_sensor_expiration_time_seconds: i64) -> Self {
-        self.options.inactive_sensor_expiration_time_seconds = inactive_sensor_expiration_time_seconds;
+        self.inactive_sensor_expiration_time_seconds = inactive_sensor_expiration_time_seconds;
         self
     }
-
     /// Sets [`SensorOptions::recording_level`].
     pub fn set_recording_level(mut self, recording_level: RecordingLevel) -> Self {
-        self.options.recording_level = recording_level;
+        self.recording_level = recording_level;
         self
     }
-
     /// Sets [`SensorOptions::parents`].
     pub fn set_parents(mut self, parents: &'a [Arc<Sensor>]) -> Self {
-        self.options.parents = parents;
+        self.parents = parents;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `name`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> SensorOptions<'a> {
-        self.options
+        SensorOptions {
+            name: self.name.unwrap_or_else(|| Self::missing("name")),
+            config: self.config,
+            inactive_sensor_expiration_time_seconds: self.inactive_sensor_expiration_time_seconds,
+            recording_level: self.recording_level,
+            parents: self.parents,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("SensorOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -385,14 +405,15 @@ impl Metrics {
     /// Get or create a sensor with the given unique name and no parents at INFO
     /// recording level. Mirrors Java's `sensor(String name)` (`:325`).
     pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
-        self.sensor_options(SensorOptionsBuilder::new_name(name).build())
+        self.sensor_options(SensorOptionsBuilder::new().set_name(name).build())
     }
 
     /// Get or create a sensor with the given name, recording level, and no parents.
     /// Mirrors Java's `sensor(String name, Sensor.RecordingLevel recordingLevel)` (`:336`).
     pub fn sensor_recording_level(&self, name: &str, recording_level: RecordingLevel) -> Result<Arc<Sensor>, Error> {
         self.sensor_options(
-            SensorOptionsBuilder::new_name(name)
+            SensorOptionsBuilder::new()
+                .set_name(name)
                 .set_recording_level(recording_level)
                 .build(),
         )
@@ -401,7 +422,7 @@ impl Metrics {
     /// Get or create a sensor with parents at INFO recording level.
     /// Mirrors Java's `sensor(String name, Sensor... parents)` (`:348`).
     pub fn sensor_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, Error> {
-        self.sensor_options(SensorOptionsBuilder::new_name(name).set_parents(parents).build())
+        self.sensor_options(SensorOptionsBuilder::new().set_name(name).set_parents(parents).build())
     }
 
     /// Get or create a sensor with the given name, recording level and parents.
@@ -415,7 +436,8 @@ impl Metrics {
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
         self.sensor_options(
-            SensorOptionsBuilder::new_name(name)
+            SensorOptionsBuilder::new()
+                .set_name(name)
                 .set_recording_level(recording_level)
                 .set_parents(parents)
                 .build(),
@@ -446,7 +468,8 @@ impl Metrics {
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
         self.sensor_options(
-            SensorOptionsBuilder::new_name(name)
+            SensorOptionsBuilder::new()
+                .set_name(name)
                 .set_config(config)
                 .set_recording_level(recording_level)
                 .set_parents(parents)
@@ -466,7 +489,8 @@ impl Metrics {
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
         self.sensor_options(
-            SensorOptionsBuilder::new_name(name)
+            SensorOptionsBuilder::new()
+                .set_name(name)
                 .set_config(config)
                 .set_inactive_sensor_expiration_time_seconds(inactive_sensor_expiration_time_seconds)
                 .set_parents(parents)
@@ -1126,7 +1150,8 @@ mod tests {
 
         let s1 = metrics
             .sensor_options(
-                SensorOptionsBuilder::new_name("test.s1")
+                SensorOptionsBuilder::new()
+                    .set_name("test.s1")
                     .set_inactive_sensor_expiration_time_seconds(1)
                     .build(),
             )
@@ -1136,7 +1161,8 @@ mod tests {
 
         let s2 = metrics
             .sensor_options(
-                SensorOptionsBuilder::new_name("test.s2")
+                SensorOptionsBuilder::new()
+                    .set_name("test.s2")
                     .set_inactive_sensor_expiration_time_seconds(3)
                     .build(),
             )
@@ -1179,7 +1205,8 @@ mod tests {
         // After purging, it should be possible to recreate a metric.
         let s1 = metrics
             .sensor_options(
-                SensorOptionsBuilder::new_name("test.s1")
+                SensorOptionsBuilder::new()
+                    .set_name("test.s1")
                     .set_inactive_sensor_expiration_time_seconds(1)
                     .build(),
             )
@@ -1336,7 +1363,8 @@ mod tests {
 
         let s = metrics
             .sensor_options(
-                SensorOptionsBuilder::new_name("test.sensor")
+                SensorOptionsBuilder::new()
+                    .set_name("test.sensor")
                     .set_config(Some(Arc::clone(&cfg)))
                     .build(),
             )
@@ -1580,7 +1608,8 @@ mod tests {
         // The canonical `sensor_options` form, given the same arguments, agrees.
         let canonical = metrics
             .sensor_options(
-                SensorOptionsBuilder::new_name("e")
+                SensorOptionsBuilder::new()
+                    .set_name("e")
                     .set_config(Some(Arc::clone(&config)))
                     .set_inactive_sensor_expiration_time_seconds(1)
                     .set_parents(std::slice::from_ref(&parent))
@@ -1589,5 +1618,14 @@ mod tests {
             .unwrap();
         assert!(canonical.should_record());
         assert!(Arc::ptr_eq(&canonical.parents()[0], &parent));
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`SensorOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "SensorOptionsBuilder::build: mandatory parameter `name` was not set")]
+    fn sensor_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = SensorOptionsBuilder::new().build();
     }
 }

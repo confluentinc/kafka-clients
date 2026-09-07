@@ -1086,13 +1086,12 @@ mod tests {
         let metadata_response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                ApiKeys::METADATA.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .unwrap();
         let response = ClientResponse::new_timed_out(

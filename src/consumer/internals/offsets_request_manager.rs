@@ -2689,13 +2689,12 @@ mod tests {
     /// helper `buildClientResponse`.
     fn build_list_offsets_client_response(response: ListOffsetsResponse) -> ClientResponse {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::LIST_OFFSETS,
-                ApiKeys::LIST_OFFSETS.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(
@@ -2716,13 +2715,12 @@ mod tests {
     /// can drive a transport-level failure into the request handler.
     fn build_disconnected_client_response() -> ClientResponse {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::LIST_OFFSETS,
-                ApiKeys::LIST_OFFSETS.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(
@@ -2751,13 +2749,12 @@ mod tests {
     /// the SASL-authentication failure path.
     fn build_network_disconnect_client_response() -> ClientResponse {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::LIST_OFFSETS,
-                ApiKeys::LIST_OFFSETS.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(header, None, "0", 0, 0, true, false, None, None, None)
@@ -4399,13 +4396,12 @@ mod tests {
     /// ListOffsets helper `build_list_offsets_client_response`.
     fn build_oitle_client_response(response: OffsetsForLeaderEpochResponse) -> ClientResponse {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::OFFSET_FOR_LEADER_EPOCH,
-                ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::OFFSET_FOR_LEADER_EPOCH)
+                .set_request_version(ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header");
         ClientResponse::new_timed_out(
@@ -5098,13 +5094,12 @@ mod tests {
         // exception, which would map to a non-retriable
         // SaslAuthenticationFailed; build a clean disconnect inline instead.
         let disconnect_header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::LIST_OFFSETS,
-                ApiKeys::LIST_OFFSETS.latest_version(),
-                "",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("header");
         let disconnect_response = ClientResponse::new_timed_out(

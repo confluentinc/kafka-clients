@@ -235,13 +235,12 @@ impl SaslClientAuthenticator {
     fn next_request_header(&mut self, api_key: &'static ApiKeys, version: i16) -> io::Result<RequestHeader> {
         let correlation_id = self.next_correlation_id();
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                api_key,
-                version,
-                &self.client_id,
-                correlation_id,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(api_key)
+                .set_request_version(version)
+                .set_client_id(&self.client_id)
+                .set_correlation_id(correlation_id)
+                .build(),
         )?;
         self.current_request_header = Some(header.clone());
         Ok(header)

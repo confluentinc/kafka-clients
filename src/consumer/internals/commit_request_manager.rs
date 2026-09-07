@@ -2813,13 +2813,12 @@ mod tests {
     /// API key header. Mirrors the Java test's `ClientResponse` construction.
     fn client_response_for(api_key: &ApiKeys, version: i16, response: ConcreteResponse) -> ClientResponse {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                api_key,
-                version,
-                "test-client",
-                0,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(api_key)
+                .set_request_version(version)
+                .set_client_id("test-client")
+                .set_correlation_id(0)
+                .build(),
         )
         .expect("request header");
         ClientResponse::new(header, None, "localhost:9092", 0, 1, false, None, None, Some(response))
@@ -3215,13 +3214,12 @@ mod tests {
             crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
         let header = crate::common::requests::RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
-                0,
-                "test-client",
-                0,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&crate::common::protocol::ApiKeys::OFFSET_COMMIT)
+                .set_request_version(0)
+                .set_client_id("test-client")
+                .set_correlation_id(0)
+                .build(),
         )
         .expect("request header");
         let client_response = crate::client_response::ClientResponse::new(
@@ -3555,13 +3553,12 @@ mod tests {
             crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
         let header = crate::common::requests::RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
-                0,
-                "test-client",
-                0,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&crate::common::protocol::ApiKeys::OFFSET_COMMIT)
+                .set_request_version(0)
+                .set_client_id("test-client")
+                .set_correlation_id(0)
+                .build(),
         )
         .expect("request header");
         let client_response = crate::client_response::ClientResponse::new(

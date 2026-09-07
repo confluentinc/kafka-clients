@@ -52,8 +52,8 @@ pub struct CreateDelegationTokenResponse {
 /// but takes `version`, `throttleTimeMs`, `error`, `owner` and `requester` from
 /// its caller, so those five have no Java-derived default — a synthesised empty
 /// `KafkaPrincipal` would silently attribute the token to nobody. Build it from
-/// [`CreateDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error_owner_token_requester`] and override the token fields
-/// you need.
+/// [`CreateDelegationTokenResponseOptionsBuilder::new`], setting those five and
+/// overriding the token fields you need: [`CreateDelegationTokenResponseOptionsBuilder::build`] panics if any of `version`, `throttle_time_ms`, `error`, `owner`, `token_requester` was not set.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CreateDelegationTokenResponseOptions<'a> {
@@ -79,24 +79,41 @@ pub struct CreateDelegationTokenResponseOptions<'a> {
     pub hmac: Vec<u8>,
 }
 
-impl<'a> CreateDelegationTokenResponseOptions<'a> {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`CreateDelegationTokenResponseOptionsBuilder`], which is this constructor's only caller.
-    fn new_version_throttle_time_ms_error_owner_token_requester(
-        version: i16,
-        throttle_time_ms: i32,
-        error: Errors,
-        owner: &'a KafkaPrincipal,
-        token_requester: &'a KafkaPrincipal,
-    ) -> Self {
+/// Fluent builder for [`CreateDelegationTokenResponseOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`CreateDelegationTokenResponseOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct CreateDelegationTokenResponseOptionsBuilder<'a> {
+    version: Option<i16>,
+    throttle_time_ms: Option<i32>,
+    error: Option<Errors>,
+    owner: Option<&'a KafkaPrincipal>,
+    token_requester: Option<&'a KafkaPrincipal>,
+    issue_timestamp: i64,
+    expiry_timestamp: i64,
+    max_timestamp: i64,
+    token_id: &'a str,
+    hmac: Vec<u8>,
+}
+
+impl<'a> Default for CreateDelegationTokenResponseOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> CreateDelegationTokenResponseOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            version,
-            throttle_time_ms,
-            error,
-            owner,
-            token_requester,
+            version: None,
+            throttle_time_ms: None,
+            error: None,
+            owner: None,
+            token_requester: None,
             issue_timestamp: -1,
             expiry_timestamp: -1,
             max_timestamp: -1,
@@ -104,77 +121,91 @@ impl<'a> CreateDelegationTokenResponseOptions<'a> {
             hmac: Vec::new(),
         }
     }
-}
 
-/// Fluent builder for [`CreateDelegationTokenResponseOptions`].
-///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`CreateDelegationTokenResponseOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
-pub struct CreateDelegationTokenResponseOptionsBuilder<'a> {
-    options: CreateDelegationTokenResponseOptions<'a>,
-}
-
-impl<'a> CreateDelegationTokenResponseOptionsBuilder<'a> {
-    /// Creates the options for an error response, with the five token fields at
-    /// the values Java's narrower `prepareResponse` (`:69`) passes on the
-    /// caller's behalf.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_version_throttle_time_ms_error_owner_token_requester(
-        version: i16,
-        throttle_time_ms: i32,
-        error: Errors,
-        owner: &'a KafkaPrincipal,
-        token_requester: &'a KafkaPrincipal,
-    ) -> Self {
-        Self {
-            options: CreateDelegationTokenResponseOptions::new_version_throttle_time_ms_error_owner_token_requester(
-                version,
-                throttle_time_ms,
-                error,
-                owner,
-                token_requester,
-            ),
-        }
+    /// Sets [`CreateDelegationTokenResponseOptions::version`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_version(mut self, version: i16) -> Self {
+        self.version = Some(version);
+        self
     }
-
+    /// Sets [`CreateDelegationTokenResponseOptions::throttle_time_ms`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_throttle_time_ms(mut self, throttle_time_ms: i32) -> Self {
+        self.throttle_time_ms = Some(throttle_time_ms);
+        self
+    }
+    /// Sets [`CreateDelegationTokenResponseOptions::error`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_error(mut self, error: Errors) -> Self {
+        self.error = Some(error);
+        self
+    }
+    /// Sets [`CreateDelegationTokenResponseOptions::owner`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_owner(mut self, owner: &'a KafkaPrincipal) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+    /// Sets [`CreateDelegationTokenResponseOptions::token_requester`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_token_requester(mut self, token_requester: &'a KafkaPrincipal) -> Self {
+        self.token_requester = Some(token_requester);
+        self
+    }
     /// Sets [`CreateDelegationTokenResponseOptions::issue_timestamp`].
     pub fn set_issue_timestamp(mut self, issue_timestamp: i64) -> Self {
-        self.options.issue_timestamp = issue_timestamp;
+        self.issue_timestamp = issue_timestamp;
         self
     }
-
     /// Sets [`CreateDelegationTokenResponseOptions::expiry_timestamp`].
     pub fn set_expiry_timestamp(mut self, expiry_timestamp: i64) -> Self {
-        self.options.expiry_timestamp = expiry_timestamp;
+        self.expiry_timestamp = expiry_timestamp;
         self
     }
-
     /// Sets [`CreateDelegationTokenResponseOptions::max_timestamp`].
     pub fn set_max_timestamp(mut self, max_timestamp: i64) -> Self {
-        self.options.max_timestamp = max_timestamp;
+        self.max_timestamp = max_timestamp;
         self
     }
-
     /// Sets [`CreateDelegationTokenResponseOptions::token_id`].
     pub fn set_token_id(mut self, token_id: &'a str) -> Self {
-        self.options.token_id = token_id;
+        self.token_id = token_id;
         self
     }
-
     /// Sets [`CreateDelegationTokenResponseOptions::hmac`].
     pub fn set_hmac(mut self, hmac: Vec<u8>) -> Self {
-        self.options.hmac = hmac;
+        self.hmac = hmac;
         self
     }
 
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `version`, `throttle_time_ms`, `error`, `owner`, `token_requester`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> CreateDelegationTokenResponseOptions<'a> {
-        self.options
+        CreateDelegationTokenResponseOptions {
+            version: self.version.unwrap_or_else(|| Self::missing("version")),
+            throttle_time_ms: self.throttle_time_ms.unwrap_or_else(|| Self::missing("throttle_time_ms")),
+            error: self.error.unwrap_or_else(|| Self::missing("error")),
+            owner: self.owner.unwrap_or_else(|| Self::missing("owner")),
+            token_requester: self.token_requester.unwrap_or_else(|| Self::missing("token_requester")),
+            issue_timestamp: self.issue_timestamp,
+            expiry_timestamp: self.expiry_timestamp,
+            max_timestamp: self.max_timestamp,
+            token_id: self.token_id,
+            hmac: self.hmac,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("CreateDelegationTokenResponseOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -232,14 +263,13 @@ impl CreateDelegationTokenResponse {
         token_requester: &KafkaPrincipal,
     ) -> Self {
         Self::prepare_response_options(
-            CreateDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error_owner_token_requester(
-                version,
-                throttle_time_ms,
-                error,
-                owner,
-                token_requester,
-            )
-            .build(),
+            CreateDelegationTokenResponseOptionsBuilder::new()
+                .set_version(version)
+                .set_throttle_time_ms(throttle_time_ms)
+                .set_error(error)
+                .set_owner(owner)
+                .set_token_requester(token_requester)
+                .build(),
         )
     }
 
@@ -323,36 +353,34 @@ mod tests {
         let requester = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "requester");
 
         let v2 = CreateDelegationTokenResponse::prepare_response_options(
-            CreateDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error_owner_token_requester(
-                2,
-                0,
-                Errors::None,
-                &owner,
-                &requester,
-            )
-            .set_issue_timestamp(1)
-            .set_expiry_timestamp(2)
-            .set_max_timestamp(3)
-            .set_token_id("id")
-            .set_hmac(b"hmac".to_vec())
-            .build(),
+            CreateDelegationTokenResponseOptionsBuilder::new()
+                .set_version(2)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_owner(&owner)
+                .set_token_requester(&requester)
+                .set_issue_timestamp(1)
+                .set_expiry_timestamp(2)
+                .set_max_timestamp(3)
+                .set_token_id("id")
+                .set_hmac(b"hmac".to_vec())
+                .build(),
         );
         assert!(v2.data().token_requester_principal_name.is_empty());
 
         let v3 = CreateDelegationTokenResponse::prepare_response_options(
-            CreateDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error_owner_token_requester(
-                3,
-                0,
-                Errors::None,
-                &owner,
-                &requester,
-            )
-            .set_issue_timestamp(1)
-            .set_expiry_timestamp(2)
-            .set_max_timestamp(3)
-            .set_token_id("id")
-            .set_hmac(b"hmac".to_vec())
-            .build(),
+            CreateDelegationTokenResponseOptionsBuilder::new()
+                .set_version(3)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_owner(&owner)
+                .set_token_requester(&requester)
+                .set_issue_timestamp(1)
+                .set_expiry_timestamp(2)
+                .set_max_timestamp(3)
+                .set_token_id("id")
+                .set_hmac(b"hmac".to_vec())
+                .build(),
         );
         assert_eq!(v3.data().token_requester_principal_name, "requester");
         assert_eq!(v3.data().token_requester_principal_type, "User");
@@ -373,19 +401,18 @@ mod tests {
     fn display_redacts_token_id_and_hmac() {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
         let response = CreateDelegationTokenResponse::prepare_response_options(
-            CreateDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error_owner_token_requester(
-                3,
-                0,
-                Errors::None,
-                &owner,
-                &owner,
-            )
-            .set_issue_timestamp(1)
-            .set_expiry_timestamp(2)
-            .set_max_timestamp(3)
-            .set_token_id("secret-id")
-            .set_hmac(b"secret-hmac".to_vec())
-            .build(),
+            CreateDelegationTokenResponseOptionsBuilder::new()
+                .set_version(3)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_owner(&owner)
+                .set_token_requester(&owner)
+                .set_issue_timestamp(1)
+                .set_expiry_timestamp(2)
+                .set_max_timestamp(3)
+                .set_token_id("secret-id")
+                .set_hmac(b"secret-hmac".to_vec())
+                .build(),
         );
         let rendered = response.to_string();
         assert!(rendered.contains("REDACTED"), "{rendered}");
@@ -399,19 +426,18 @@ mod tests {
         use crate::common::requests::ConcreteResponse;
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
         let response = CreateDelegationTokenResponse::prepare_response_options(
-            CreateDelegationTokenResponseOptionsBuilder::new_version_throttle_time_ms_error_owner_token_requester(
-                3,
-                4,
-                Errors::None,
-                &owner,
-                &owner,
-            )
-            .set_issue_timestamp(1)
-            .set_expiry_timestamp(2)
-            .set_max_timestamp(3)
-            .set_token_id("tid")
-            .set_hmac(vec![0xAB, 0xCD])
-            .build(),
+            CreateDelegationTokenResponseOptionsBuilder::new()
+                .set_version(3)
+                .set_throttle_time_ms(4)
+                .set_error(Errors::None)
+                .set_owner(&owner)
+                .set_token_requester(&owner)
+                .set_issue_timestamp(1)
+                .set_expiry_timestamp(2)
+                .set_max_timestamp(3)
+                .set_token_id("tid")
+                .set_hmac(vec![0xAB, 0xCD])
+                .build(),
         );
         let mut response = ConcreteResponse::CreateDelegationToken(response);
         let bytes = response.serialize(3).unwrap().into_buffer();
@@ -430,5 +456,16 @@ mod tests {
             0x00, // response tagged fields
         ];
         assert_eq!(bytes.as_slice(), expected.as_slice());
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`CreateDelegationTokenResponseOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(
+        expected = "CreateDelegationTokenResponseOptionsBuilder::build: mandatory parameter `version` was not set"
+    )]
+    fn create_delegation_token_response_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = CreateDelegationTokenResponseOptionsBuilder::new().build();
     }
 }

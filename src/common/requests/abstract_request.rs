@@ -1137,13 +1137,12 @@ mod tests {
     fn test_serialize_with_header_api_key_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::PRODUCE,
-                12,
-                "client",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::PRODUCE)
+                .set_request_version(12)
+                .set_client_id("client")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("valid header");
 
@@ -1165,13 +1164,12 @@ mod tests {
     fn test_serialize_with_header_version_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                9,
-                "client",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(9)
+                .set_client_id("client")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("valid header");
 

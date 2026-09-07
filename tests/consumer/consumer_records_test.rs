@@ -172,18 +172,17 @@ fn build_topic_test_records(
             let mut records: Vec<ConsumerRecord<i32, String>> = Vec::with_capacity(record_size as usize);
             if i != empty_partition_index {
                 for j in 0..record_size {
-                    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-                        *topic,
-                        i,
-                        j as i64,
-                        Some(j),
-                        Some(j.to_string()),
-                    )
-                    .set_timestamp(0)
-                    .set_timestamp_type(TimestampType::CreateTime)
-                    .set_serialized_key_size(0)
-                    .set_serialized_value_size(0)
-                    .build();
+                    let options = ConsumerRecordOptionsBuilder::new()
+                        .set_topic(*topic)
+                        .set_partition(i)
+                        .set_offset(j as i64)
+                        .set_key(Some(j))
+                        .set_value(Some(j.to_string()))
+                        .set_timestamp(0)
+                        .set_timestamp_type(TimestampType::CreateTime)
+                        .set_serialized_key_size(0)
+                        .set_serialized_value_size(0)
+                        .build();
                     let r: ConsumerRecord<i32, String> = ConsumerRecord::new_options(options);
                     records.push(r);
                 }

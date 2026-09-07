@@ -66,19 +66,18 @@ fn test_long_constructor() {
         .unwrap();
 
     // 11-arg constructor (no delivery count, no leader epoch)
-    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-        topic,
-        partition,
-        offset,
-        Some(key),
-        Some(value),
-    )
-    .set_timestamp(timestamp)
-    .set_timestamp_type(timestamp_type)
-    .set_serialized_key_size(serialized_key_size)
-    .set_serialized_value_size(serialized_value_size)
-    .set_headers(headers.clone())
-    .build();
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(topic)
+        .set_partition(partition)
+        .set_offset(offset)
+        .set_key(Some(key))
+        .set_value(Some(value))
+        .set_timestamp(timestamp)
+        .set_timestamp_type(timestamp_type)
+        .set_serialized_key_size(serialized_key_size)
+        .set_serialized_value_size(serialized_value_size)
+        .set_headers(headers.clone())
+        .build();
     let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(options);
 
     assert_eq!(record.topic(), topic);
@@ -97,21 +96,20 @@ fn test_long_constructor() {
     // 12-arg constructor (with leader epoch and delivery count)
     let leader_epoch: Option<i32> = Some(10);
     let delivery_count: Option<i16> = Some(1);
-    let options = ConsumerRecordOptionsBuilder::new_topic_partition_offset_key_value(
-        topic,
-        partition,
-        offset,
-        Some(key),
-        Some(value),
-    )
-    .set_timestamp(timestamp)
-    .set_timestamp_type(timestamp_type)
-    .set_serialized_key_size(serialized_key_size)
-    .set_serialized_value_size(serialized_value_size)
-    .set_headers(headers.clone())
-    .set_leader_epoch(leader_epoch)
-    .set_delivery_count(delivery_count)
-    .build();
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(topic)
+        .set_partition(partition)
+        .set_offset(offset)
+        .set_key(Some(key))
+        .set_value(Some(value))
+        .set_timestamp(timestamp)
+        .set_timestamp_type(timestamp_type)
+        .set_serialized_key_size(serialized_key_size)
+        .set_serialized_value_size(serialized_value_size)
+        .set_headers(headers.clone())
+        .set_leader_epoch(leader_epoch)
+        .set_delivery_count(delivery_count)
+        .build();
     let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(options);
 
     assert_eq!(record.topic(), topic);

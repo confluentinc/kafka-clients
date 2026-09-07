@@ -1333,7 +1333,9 @@ fn feature_update_to_proto(update: &FeatureUpdate) -> proto::FeatureUpdate {
 }
 
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
-    let options = ConfigEntryOptionsBuilder::new_name_value(entry.name, entry.value)
+    let options = ConfigEntryOptionsBuilder::new()
+        .set_name(entry.name)
+        .set_value(entry.value)
         .set_source(if entry.is_default {
             ConfigSource::DefaultConfig
         } else {

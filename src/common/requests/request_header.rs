@@ -54,7 +54,7 @@ pub struct RequestHeader {
 /// these four on the caller's behalf — none has a Java-derived default, and a
 /// synthesised `correlationId` of `0` would silently produce a header that
 /// cannot be matched to its response. Construct it with
-/// [`RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id`].
+/// [`RequestHeaderOptionsBuilder::new`] and set all four: [`RequestHeaderOptionsBuilder::build`] panics if any of `request_api_key`, `request_version`, `client_id`, `correlation_id` was not set.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct RequestHeaderOptions<'a> {
@@ -68,57 +68,84 @@ pub struct RequestHeaderOptions<'a> {
     pub correlation_id: i32,
 }
 
-impl<'a> RequestHeaderOptions<'a> {
-    /// Java's defaults for every parameter beyond those the name lists.
-    ///
-    /// Private: per CLAUDE.md §2 the options are built through
-    /// [`RequestHeaderOptionsBuilder`], which is this constructor's only caller.
-    fn new_request_api_key_request_version_client_id_correlation_id(
-        request_api_key: &'a ApiKeys,
-        request_version: i16,
-        client_id: &'a str,
-        correlation_id: i32,
-    ) -> Self {
-        Self { request_api_key, request_version, client_id, correlation_id }
-    }
-}
-
 /// Fluent builder for [`RequestHeaderOptions`].
 ///
-/// Per CLAUDE.md §2 the constructor's name lists every mandatory parameter,
-/// each remaining parameter starts at its Java-derived default and has a
-/// fluent setter, and `build` yields the options the method takes. Like
-/// [`RequestHeaderOptions`] it has no Java counterpart and exists solely to satisfy
-/// that naming rule (DoD #7).
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`RequestHeaderOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
 pub struct RequestHeaderOptionsBuilder<'a> {
-    options: RequestHeaderOptions<'a>,
+    request_api_key: Option<&'a ApiKeys>,
+    request_version: Option<i16>,
+    client_id: Option<&'a str>,
+    correlation_id: Option<i32>,
+}
+
+impl<'a> Default for RequestHeaderOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a> RequestHeaderOptionsBuilder<'a> {
-    /// Creates the options carrying the given API key, request version, client
-    /// id and correlation id.
-    /// Per CLAUDE.md §2, the name lists every mandatory parameter, so a later
-    /// Java version that makes one of them optional adds a differently named
-    /// constructor rather than changing this one.
-    pub fn new_request_api_key_request_version_client_id_correlation_id(
-        request_api_key: &'a ApiKeys,
-        request_version: i16,
-        client_id: &'a str,
-        correlation_id: i32,
-    ) -> Self {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
         Self {
-            options: RequestHeaderOptions::new_request_api_key_request_version_client_id_correlation_id(
-                request_api_key,
-                request_version,
-                client_id,
-                correlation_id,
-            ),
+            request_api_key: None,
+            request_version: None,
+            client_id: None,
+            correlation_id: None,
         }
     }
 
+    /// Sets [`RequestHeaderOptions::request_api_key`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_request_api_key(mut self, request_api_key: &'a ApiKeys) -> Self {
+        self.request_api_key = Some(request_api_key);
+        self
+    }
+    /// Sets [`RequestHeaderOptions::request_version`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_request_version(mut self, request_version: i16) -> Self {
+        self.request_version = Some(request_version);
+        self
+    }
+    /// Sets [`RequestHeaderOptions::client_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_client_id(mut self, client_id: &'a str) -> Self {
+        self.client_id = Some(client_id);
+        self
+    }
+    /// Sets [`RequestHeaderOptions::correlation_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_correlation_id(mut self, correlation_id: i32) -> Self {
+        self.correlation_id = Some(correlation_id);
+        self
+    }
+
     /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `request_api_key`, `request_version`, `client_id`, `correlation_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
     pub fn build(self) -> RequestHeaderOptions<'a> {
-        self.options
+        RequestHeaderOptions {
+            request_api_key: self.request_api_key.unwrap_or_else(|| Self::missing("request_api_key")),
+            request_version: self.request_version.unwrap_or_else(|| Self::missing("request_version")),
+            client_id: self.client_id.unwrap_or_else(|| Self::missing("client_id")),
+            correlation_id: self.correlation_id.unwrap_or_else(|| Self::missing("correlation_id")),
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("RequestHeaderOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
     }
 }
 
@@ -347,13 +374,12 @@ mod tests {
     #[test]
     fn test_request_header_v1() {
         let mut header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::FIND_COORDINATOR,
-                1,
-                "",
-                10,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
+                .set_request_version(1)
+                .set_client_id("")
+                .set_correlation_id(10)
+                .build(),
         )
         .unwrap();
         assert_eq!(header.header_version(), 1);
@@ -368,13 +394,12 @@ mod tests {
     #[test]
     fn test_request_header_v2() {
         let mut header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::CREATE_DELEGATION_TOKEN,
-                2,
-                "",
-                10,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CREATE_DELEGATION_TOKEN)
+                .set_request_version(2)
+                .set_client_id("")
+                .set_correlation_id(10)
+                .build(),
         )
         .unwrap();
         assert_eq!(header.header_version(), 2);
@@ -396,13 +421,12 @@ mod tests {
         }
 
         let mut header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::FIND_COORDINATOR,
-                1,
-                "",
-                10,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
+                .set_request_version(1)
+                .set_client_id("")
+                .set_correlation_id(10)
+                .build(),
         )
         .unwrap();
         let mut cache = ObjectSerializationCache::new();
@@ -478,13 +502,12 @@ mod tests {
     #[test]
     fn test_request_header_display() {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                1,
-                "test-client",
-                42,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(1)
+                .set_client_id("test-client")
+                .set_correlation_id(42)
+                .build(),
         )
         .unwrap();
         assert_eq!(
@@ -498,13 +521,12 @@ mod tests {
     #[test]
     fn test_request_header_to_response_header() {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                12,
-                "client",
-                99,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(12)
+                .set_client_id("client")
+                .set_correlation_id(99)
+                .build(),
         )
         .unwrap();
         let response_header = header.to_response_header();
@@ -514,15 +536,23 @@ mod tests {
     #[test]
     fn test_request_header_is_api_version_supported() {
         let header = RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                ApiKeys::METADATA.oldest_version(),
-                "c",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.oldest_version())
+                .set_client_id("c")
+                .set_correlation_id(1)
+                .build(),
         )
         .unwrap();
         assert!(header.is_api_version_supported());
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`RequestHeaderOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "RequestHeaderOptionsBuilder::build: mandatory parameter `request_api_key` was not set")]
+    fn request_header_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = RequestHeaderOptionsBuilder::new().build();
     }
 }

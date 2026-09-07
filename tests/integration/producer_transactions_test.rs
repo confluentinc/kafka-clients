@@ -197,7 +197,9 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
 /// shadowing, so no UFCS is needed.
 async fn send_all<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, partition: i32, values: &[&str]) {
     for value in values {
-        let options = ProducerRecordOptionsBuilder::new_topic_value(topic.to_string(), Some(value.as_bytes().to_vec()))
+        let options = ProducerRecordOptionsBuilder::new()
+            .set_topic(topic.to_string())
+            .set_value(Some(value.as_bytes().to_vec()))
             .set_partition(Some(partition))
             .set_key(Some(format!("k-{value}").into_bytes()))
             .build();
@@ -329,7 +331,9 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
 
     // The fenced producer can no longer produce.
     first.begin_transaction().expect("beginTransaction is a local state change");
-    let options = ProducerRecordOptionsBuilder::new_topic_value(topic.clone(), Some(b"fenced".to_vec()))
+    let options = ProducerRecordOptionsBuilder::new()
+        .set_topic(topic.clone())
+        .set_value(Some(b"fenced".to_vec()))
         .set_partition(Some(0))
         .set_key(Some(b"k-fenced".to_vec()))
         .build();

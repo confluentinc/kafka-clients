@@ -3553,7 +3553,9 @@ mod tests {
 
         let unreachable = supported.max_version + 1;
         let builder = MetadataRequestBuilder::new_options(
-            MetadataRequestBuilderOptionsBuilder::new_topics_allow_auto_topic_creation(Some(&["topic_1"]), true)
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(Some(&["topic_1"]))
+                .set_allow_auto_topic_creation(true)
                 .set_min_version(unreachable)
                 .set_max_version(unreachable)
                 .build(),
@@ -4224,13 +4226,12 @@ mod tests {
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
         crate::common::requests::RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::METADATA,
-                12,
-                "client-id",
-                correlation_id,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(12)
+                .set_client_id("client-id")
+                .set_correlation_id(correlation_id)
+                .build(),
         )
         .expect("request header")
     }
@@ -4350,13 +4351,12 @@ mod tests {
         // `assertThrows(SchemaException.class, ...)` — the request is SASL, the
         // response is not.
         let header0 = crate::common::requests::RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::LIST_OFFSETS,
-                version,
-                "id",
-                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(version)
+                .set_client_id("id")
+                .set_correlation_id(sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID)
+                .build(),
         )
         .expect("request header");
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.clone());
@@ -4368,13 +4368,12 @@ mod tests {
         // `IllegalStateException` Java's assertion accepts, which is why every
         // hierarchy predicate must answer `false` for it.
         let header1 = crate::common::requests::RequestHeader::new_options(
-            RequestHeaderOptionsBuilder::new_request_api_key_request_version_client_id_correlation_id(
-                &ApiKeys::LIST_OFFSETS,
-                version,
-                "id",
-                1,
-            )
-            .build(),
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(version)
+                .set_client_id("id")
+                .set_correlation_id(1)
+                .build(),
         )
         .expect("request header");
         let mut buffer = ByteBufferAccessor::from_bytes(bytes);
