@@ -89,6 +89,29 @@ public sealed class SendAccumulatorTests
             "60 s window released it instead");
     }
 
+    [Fact]
+    public void WithoutADrain_TheRecordsHaveNotReachedTheCore()
+    {
+        // The CONTROL for PublicProducerFlushDrainTests.Flush_DrainsAccumulatorRecords_…: without
+        // it, "history is 16 after Flush" could just mean the window happened to elapse. It lives
+        // HERE rather than beside the test it controls for because the public producer's window
+        // comes from the environment (10 ms) and is free-running (§3.3), so the public form raced
+        // its own 16 sends — see the note in that file. An explicit 60 s window makes both halves
+        // deterministic: nothing reaches the core until a drain, and the drain is what moves it.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+
+        Task<RecordMetadata>[] sends = harness.Append(16);
+
+        Assert.Equal(0, harness.HistoryCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        harness.DrainNow();
+
+        Assert.Equal(16, harness.HistoryCount);
+        Assert.Equal(16, sends.Length);
+    }
+
     // ------------------------------------------------------------------------- chunking (§3.4) -
 
     [Fact]
@@ -692,6 +715,9 @@ public sealed class SendAccumulatorTests
         /// index was handed to the pump" (and, by its absence, for "this index was not").
         /// </summary>
         internal long DrainedSendCount => _pump.DrainedSendCount;
+
+        /// <summary>The mock core's sent-record count — what "reached the core" means (§3.5).</summary>
+        internal int HistoryCount => _producer.MockHistoryCount();
 
         /// <summary>
         /// <b>The injection for the per-record immediate-error branch</b>: closes the CORE producer

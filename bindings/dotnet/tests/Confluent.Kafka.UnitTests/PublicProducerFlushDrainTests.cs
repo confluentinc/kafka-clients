@@ -59,19 +59,18 @@ public sealed class PublicProducerFlushDrainTests
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
     }
 
-    [Fact]
-    public void WithoutFlush_TheRecordsAreStillInTheAccumulator()
-    {
-        // The CONTROL for the test above, and what makes it meaningful: immediately after Send the
-        // records have NOT reached the core, because the send is deferred. Without this, "history is
-        // 16 after Flush" could just mean the 10 ms window happened to elapse.
-        using AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-
-        _ = Fire(producer);
-
-        Assert.Equal(0, producer.HistoryCount());
-    }
+    // ⚠ THE CONTROL FOR THE TEST ABOVE LIVES IN Interop/SendAccumulatorTests, deliberately:
+    // WithoutADrain_TheRecordsHaveNotReachedTheCore. It is what makes "history is 16 after Flush"
+    // meaningful rather than possibly just "the window elapsed", so it has to hold — and here it
+    // could not. The public producer reads its window from the environment (10 ms) and that window
+    // is FREE-RUNNING (§3.3): the batch thread's deadline comes from the top of its own loop, so a
+    // drain can land microseconds after the first append. A GC pause or thread-pool hiccup inside
+    // the 16-send window flipped the assertion to 16, and a flake in the control would read as a
+    // product regression in the thing it controls for. The accumulator-level form takes an explicit
+    // 60 s window, so only an explicit drain can move the records — and it asserts BOTH halves
+    // (nothing before the drain, everything after). Setting the environment variable here instead
+    // is not an option: this assembly runs its test classes in PARALLEL (see AssemblyInfo), so a
+    // process-wide override would reach producers other tests are constructing.
 
     [Fact]
     public async Task Flush_WithNothingBuffered_StillFlushesTheCore()
