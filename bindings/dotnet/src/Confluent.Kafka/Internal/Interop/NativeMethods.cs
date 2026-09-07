@@ -2292,9 +2292,9 @@ internal static class NativeMethods
     //
     // ⚠ SUPERSEDED TEXT (M11/P3, kept for the record): "No ProducerRecord_t mirror struct
     // (that is send_batch / Option A), no per-send callback (that is send_async / Option B)."
-    // The first clause is superseded above — as of M11/P3.1 slice S0 (docs only, no behavior)
-    // Producer_send is still the only send import declared here, and the ProducerRecord_t
-    // mirror struct + the Producer_send_batch import arrive with slice S1. The second clause
+    // The first clause is superseded above and, as of M11/P3.1 slice S1, no longer describes the
+    // code either: ProducerRecordNative (the mirror struct) and the ProducerSendBatch import below
+    // are declared, and the ASYNC send path goes through them. The second clause
     // STANDS on both paths: Producer_send_async and any per-send Cdecl callback remain
     // undeclared, because that is Option B, which this phase does NOT adopt (M11/P3.1 §1.5).
     // Likewise unchanged: the optional fast-path FutureRecordMetadata_is_done and the
@@ -2338,6 +2338,41 @@ internal static class NativeMethods
         IntPtr value,
         int valueLen,
         out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_send_batch</c> — sends <paramref name="count"/> records in one
+    /// call, writing one result pair per index: <paramref name="outFutures"/><c>[i]</c> is a non-null
+    /// <c>FutureRecordMetadata_t</c> and <paramref name="outErrors"/><c>[i]</c> null on success, or
+    /// the reverse on a <b>per-record</b> failure. Returns the number of records that succeeded. The
+    /// callee writes <b>both</b> slots for every index (verified <c>send_batch_inner</c> — every
+    /// early-continue branch assigns both), so the caller reads all <paramref name="count"/> pairs
+    /// and frees every non-null handle (ffi §A2): the futures via
+    /// <see cref="FutureRecordMetadataDestroyAll"/> / <see cref="FutureRecordMetadataDestroy"/>, the
+    /// errors via <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// <para>
+    /// <b>The buffers are borrowed only for this call (ffi §A4).</b> The core copies every record's
+    /// key/value into the batch buffer <b>synchronously inside this call</b> — <c>send_batch_inner</c>
+    /// takes the producer mutex once and then runs <c>producer_send</c> (which is
+    /// <c>rt.block_on(producer.send(record, None))</c>) per record — and copies the topic with
+    /// <c>to_string_lossy().into_owned()</c>. So the pins the caller holds over the topic / key /
+    /// value end when this returns; nothing is held across the returned <see cref="System.Threading.Tasks.Task"/>
+    /// (M11/P3.1 §3.9). That is ffi §A4's own deferred-send carve-out applied to <c>send_batch</c>.
+    /// </para>
+    /// <para>
+    /// The three array parameters are raw pointers rather than managed arrays so the caller controls
+    /// the pinning: the batch marshaller fills long-lived accumulator arrays and pins them with
+    /// <c>fixed</c> for exactly the call's duration, which the array marshaller's own hidden pin
+    /// would duplicate. <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> — the
+    /// sync-op auto-ref (ffi §A2), since this call is synchronous.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_batch", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe int ProducerSendBatch(
+        SafeProducerHandle producer,
+        ProducerRecordNative* records,
+        int count,
+        IntPtr* outFutures,
+        IntPtr* outErrors);
 
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_get_all</c> — blocks until every future in

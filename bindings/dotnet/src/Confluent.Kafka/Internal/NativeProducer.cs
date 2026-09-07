@@ -330,8 +330,18 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>get_all</c>, so a <c>WithCallback</c> suffix would misdescribe the mechanism (PLAN §6.2).
     /// The <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
     /// <see cref="Send"/> (which has no pump). Runs inline on the caller thread: preconditions →
-    /// <c>Producer_send</c> (call-scoped pinning, the core copies key/value synchronously, ffi §A4) →
-    /// enqueue <c>(future, TCS, delivery)</c> on the pump → return the <see cref="Task{TResult}"/>.
+    /// <c>Producer_send_batch</c> at <c>count == 1</c> (call-scoped pinning, the core copies
+    /// key/value synchronously, ffi §A4) → enqueue <c>(future, TCS, delivery)</c> on the pump →
+    /// return the <see cref="Task{TResult}"/>.
+    /// <para>
+    /// <b>M11/P3.1 slice S1 — <c>send_batch</c>, not <c>Producer_send</c>.</b> The async send now
+    /// routes through <see cref="ProducerSendBatchMarshal.SendOne"/>, the one-record form of the
+    /// batch entry point the accumulator will drive in slice S3. Behavior is unchanged (the same
+    /// <c>producer_send</c> underneath, the same sentinels, the same synchronous
+    /// <see cref="KafkaException"/> — now read from the per-record <c>out_errors[0]</c>). The
+    /// <b>sync</b> <see cref="Send"/> deliberately keeps the singular <c>Producer_send</c>
+    /// (M11/P3.1 §3.1), so the two paths no longer share one marshaller.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// <b>Preconditions (ffi §A5).</b> An already-canceled <paramref name="cancellationToken"/> →
@@ -361,9 +371,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <b>nothing</b> (decision D5). The throw sites that precede the core's acceptance — the
     /// disposed guard (directly, and again inside <see cref="EnsurePump"/> under its lock), the
     /// already-canceled token, a pump that could not be started, and
-    /// <c>ProducerSendMarshal.Send</c>'s synchronous <c>out_error</c> — are cases where nothing was
-    /// sent. The orphaned-future <c>catch</c> below runs <em>after</em> <c>Producer_send</c> accepted
-    /// the record: an allocation failure there is a recorded <em>drop</em> (residual 4 on
+    /// <see cref="ProducerSendBatchMarshal.SendOne"/>'s per-record error — are cases where nothing
+    /// was sent. The orphaned-future <c>catch</c> below runs <em>after</em> <c>send_batch</c>
+    /// accepted the record: an allocation failure there is a recorded <em>drop</em> (residual 4 on
     /// <see cref="IDeliveryCallback"/>) noted at that <c>catch</c>.
     /// </param>
     /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
@@ -387,22 +397,26 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // once the producer is closing (ThrowIfClosed under _pumpLock).
         SendCompletionPump pump = EnsurePump();
 
-        // Inline call-scoped-pinned send (throws a KafkaException synchronously on out_error). The
-        // ABI maps null partition/timestamp to its own -1 sentinels.
-        int partition = record.Partition ?? -1;
-        long timestamp = record.Timestamp ?? -1L;
-
+        // M11/P3.1 slice S1: the ASYNC send goes through kafka_producer_Producer_send_batch at
+        // count == 1, not the singular Producer_send. Behavior is identical (the same
+        // producer_send under the hood, the same -1 partition/timestamp sentinels, the same
+        // absent/empty/present key-value sentinels, the same KafkaException on a synchronous
+        // failure — which arrives as the per-record out_errors[0] instead of one out_error), and
+        // the pins are still CALL-SCOPED. What it buys is that the mirror struct, the sentinels and
+        // the per-record error semantics are proven before slice S2 defers the pins and slice S3
+        // makes the batch bigger than one record. The SYNC Send below is deliberately NOT moved
+        // (M11/P3.1 §3.1) and still calls ProducerSendMarshal.Send.
+        //
         // Pass the SafeProducerHandle straight through (no manual DangerousAddRef): NativeMethods.
-        // ProducerSend takes it as a SafeHandle param, so the P/Invoke marshaler auto-DangerousAddRef/
-        // Releases it AROUND the synchronous Producer_send — the call-scoped guard against a
-        // concurrent Producer_destroy (Producer_send can block up to max.block.ms and the producer is
-        // multi-writer). Send is the FIRST adopter of the sync-native-call → SafeHandle-param
-        // convention (ffi §A2): a synchronous op passes the SafeHandle (auto ref, call-scoped); an
-        // async *_async op cannot (the auto ref releases before its completion callback fires) and
-        // keeps the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
+        // ProducerSendBatch takes it as a SafeHandle param, so the P/Invoke marshaler auto-
+        // DangerousAddRef/Releases it AROUND the synchronous send_batch — the call-scoped guard
+        // against a concurrent Producer_destroy (the send can block up to max.block.ms and the
+        // producer is multi-writer). This is the sync-native-call → SafeHandle-param convention
+        // (ffi §A2): a synchronous op passes the SafeHandle (auto ref, call-scoped); an async
+        // *_async op cannot (the auto ref releases before its completion callback fires) and keeps
+        // the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
         // (ThrowIfClosed above already covers the common post-Dispose case).
-        IntPtr future = ProducerSendMarshal.Send(
-            _handle, record.Topic, partition, timestamp, record.Key, record.Value);
+        IntPtr future = ProducerSendBatchMarshal.SendOne(_handle, record);
 
         // The future is live but not yet owned by the pump. If anything between here and
         // pump.Enqueue throws (OOM allocating the TCS / the cancellation registration / the
@@ -469,7 +483,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // declarations, so this is Mode A either way.
             //
             // This branch does NOT invoke `delivery` — recorded residual 4 on IDeliveryCallback.
-            // Here Producer_send returned a live future AND a null out_error — the ABI's statement
+            // Here send_batch returned a live future AND a null per-record error — the ABI's statement
             // that the core accepted the record — so the core may still deliver it. What is lost is
             // the completion: the future is destroyed unread, so there is nothing to report. Firing
             // a fabricated failure here would invent a delivery failure for a record the core may
