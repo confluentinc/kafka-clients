@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A factory abstraction over the three producer backends used by the
-//! multilanguage integration tests.
+//! A factory abstraction over the backends used by the multilanguage
+//! integration tests (native Rust, Python sync, Python asyncio, C).
 //!
 //! Test bodies are written generically over `<F: ProducerBackendFactory>`,
 //! and the [`crate::common::multilanguage_test`] macro instantiates each
@@ -36,11 +36,46 @@ use confluent_kafka::producer::ProducerConfig;
 #[cfg(feature = "multilanguage-tests")]
 use tonic::transport::Channel;
 
+use crate::common::admin_backend::{AdminBackend, RustNativeAdmin};
 use crate::common::callback_log::{ConsumerCallbackLog, ProducerCallbackLog};
+#[cfg(feature = "multilanguage-tests")]
+use crate::common::multilanguage_admin::MultilanguageAdmin;
 #[cfg(feature = "multilanguage-tests")]
 use crate::common::multilanguage_consumer::MultilanguageConsumer;
 #[cfg(feature = "multilanguage-tests")]
 use crate::common::multilanguage_producer::MultilanguageProducer;
+
+/// Abstraction over an [`AdminBackend`] source.
+///
+/// Shaped like [`ProducerBackendFactory`] (an associated type, static dispatch)
+/// rather than like [`ConsumerBackendFactory`]: `AdminBackend`'s methods are
+/// `async fn` in the trait, which is not dyn-compatible, so there is no
+/// `Box<dyn AdminBackend>` to hand back. Test bodies are written generically
+/// over `<F: AdminBackendFactory>` and quadruplicated by
+/// [`crate::multilanguage_admin_test`].
+#[allow(async_fn_in_trait)]
+pub trait AdminBackendFactory {
+    /// The concrete admin backend this factory constructs.
+    type Admin: AdminBackend;
+
+    /// Construct a network-backed admin client from the given config
+    /// properties.
+    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, KafkaError>;
+
+    /// Construct a broker-less mock admin client with `num_brokers` brokers
+    /// (Java `MockAdminClient.create().numBrokers(n).build()`).
+    async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, KafkaError>;
+
+    /// Short backend label used in test names and log messages.
+    fn name(&self) -> &'static str;
+
+    /// Whether this backend needs the container-internal bootstrap addresses
+    /// (true for the gRPC backends). See
+    /// [`ProducerBackendFactory::needs_container_bootstrap`].
+    fn needs_container_bootstrap(&self) -> bool {
+        false
+    }
+}
 
 /// Abstraction over a `Box<dyn Consumer<Vec<u8>, Vec<u8>>>` source.
 ///
@@ -145,6 +180,22 @@ impl ProducerBackendFactory for RustNativeFactory {
             ProducerBackendFactory::create(self, config).await?,
             ProducerCallbackLog::native(),
         ))
+    }
+
+    fn name(&self) -> &'static str {
+        "rust"
+    }
+}
+
+impl AdminBackendFactory for RustNativeFactory {
+    type Admin = RustNativeAdmin;
+
+    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, KafkaError> {
+        RustNativeAdmin::from_config(&config)
+    }
+
+    async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, KafkaError> {
+        RustNativeAdmin::mock(num_brokers)
     }
 
     fn name(&self) -> &'static str {
@@ -276,6 +327,26 @@ mod grpc_backends {
         }
     }
 
+    impl AdminBackendFactory for PythonGrpcFactory {
+        type Admin = MultilanguageAdmin;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, KafkaError> {
+            MultilanguageAdmin::new(self.channel.clone(), config, "python").await
+        }
+
+        async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, KafkaError> {
+            MultilanguageAdmin::new_mock(self.channel.clone(), num_brokers, "python").await
+        }
+
+        fn name(&self) -> &'static str {
+            "python"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
+
     /// Backend that drives the *asyncio-native* bindings/python client
     /// (`AsyncKafkaProducer` / `AsyncKafkaConsumer`) through a gRPC server
     /// running in the `confluent-kafka-rust/python-async-grpc-server:dev`
@@ -329,6 +400,26 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
             consumer_with_log(&self.channel, config, "python_async").await
+        }
+
+        fn name(&self) -> &'static str {
+            "python_async"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
+
+    impl AdminBackendFactory for PythonAsyncGrpcFactory {
+        type Admin = MultilanguageAdmin;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, KafkaError> {
+            MultilanguageAdmin::new(self.channel.clone(), config, "python_async").await
+        }
+
+        async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, KafkaError> {
+            MultilanguageAdmin::new_mock(self.channel.clone(), num_brokers, "python_async").await
         }
 
         fn name(&self) -> &'static str {
@@ -500,6 +591,26 @@ mod grpc_backends {
 
         fn name(&self) -> &'static str {
             "dotnet_async"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
+
+    impl AdminBackendFactory for CGrpcFactory {
+        type Admin = MultilanguageAdmin;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, KafkaError> {
+            MultilanguageAdmin::new(self.channel.clone(), config, "c").await
+        }
+
+        async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, KafkaError> {
+            MultilanguageAdmin::new_mock(self.channel.clone(), num_brokers, "c").await
+        }
+
+        fn name(&self) -> &'static str {
+            "c"
         }
 
         fn needs_container_bootstrap(&self) -> bool {
