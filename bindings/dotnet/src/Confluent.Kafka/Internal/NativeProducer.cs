@@ -285,6 +285,42 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     internal Task FlushWithCallback(CancellationToken cancellationToken = default)
     {
+        SendAccumulator? accumulator = AccumulatorToStop();
+        if (accumulator is null)
+        {
+            // No async send ever started an accumulator — nothing is buffered on this side, so this
+            // is the unchanged core flush.
+            return FlushCore(cancellationToken);
+        }
+
+        // Preconditions must still be SYNCHRONOUS (ffi §A5), so they run here rather than inside the
+        // async continuation below.
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+        return FlushAfterDrain(accumulator, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drains the accumulator, then flushes the core (M11/P3.1 §3.5) — the deliberate divergence
+    /// <b>toward Java</b> that the Python anchor lacks.
+    /// </summary>
+    /// <remarks>
+    /// Python's <c>flush()</c> never signals its send thread, so it can return while records are
+    /// still buffered inside the binding — arguably violating Java's contract that <c>flush()</c>
+    /// blocks until every <em>previously sent</em> record completes, since from the caller's view
+    /// those records <b>were</b> sent (<c>send()</c> returned). Draining first is what makes
+    /// "flushed" mean the same thing on both sides of the accumulator. The teardown flush needs no
+    /// equivalent change: <see cref="StopAccumulator"/> already drains at step 4, before it.
+    /// </remarks>
+    private async Task FlushAfterDrain(SendAccumulator accumulator, CancellationToken cancellationToken)
+    {
+        await accumulator.DrainPendingAsync(cancellationToken).ConfigureAwait(false);
+        await FlushCore(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The core half of the flush: <c>Producer_flush_async</c> over the completion bridge.</summary>
+    private Task FlushCore(CancellationToken cancellationToken)
+    {
         return SubmitVoidOperation(cancellationToken, (producer, callback, userData) =>
             NativeMethods.ProducerFlushAsync(producer, callback, userData));
     }
@@ -699,6 +735,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     internal void Flush()
     {
         ThrowIfClosed();
+
+        // Drain the accumulator first (§3.5), for the same reason the async flush does. Reachable
+        // only when the same NativeProducer was driven through BOTH surfaces — the sync producer
+        // never starts an accumulator — but a flush that silently skipped buffered records would be
+        // wrong there too, and the blocking form is the right one on an already-blocking method.
+        _ = AccumulatorToStop()?.DrainPending(s_accumulatorDrainTimeout);
 
         NativeMethods.ProducerFlush(_handle, out IntPtr error);
         KafkaException? failure = KafkaException.FromHandle(error);

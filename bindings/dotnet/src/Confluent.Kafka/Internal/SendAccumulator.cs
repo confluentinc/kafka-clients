@@ -14,6 +14,7 @@
 
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -75,6 +76,8 @@ internal sealed class SendAccumulator
     // anchor's record_batches_mutex + record_batches_new_record_cnd pair.
     private readonly object _gate = new object();
 
+    private static readonly Task s_alreadyDrained = Task.FromResult(true);
+
     private readonly Thread _thread;
     private readonly long _windowTicks;
 
@@ -99,6 +102,10 @@ internal sealed class SendAccumulator
     private bool _closed;     // no further appends; the thread drains once more and exits
     private bool _forceDrain; // a DrainPending caller is waiting; skip the rest of the window
     private bool _draining;   // a taken chain is being sent right now (outside the lock)
+    // Awaiters of DrainPendingAsync, released when the accumulator next reaches empty-and-idle.
+    // Guarded by _gate.
+    private readonly List<TaskCompletionSource<bool>> _idleWaiters = new List<TaskCompletionSource<bool>>();
+
     private long _sendBatchCalls;
     private long _sendBatchRecords;
     private int _largestSendBatch;
@@ -376,6 +383,94 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
+    /// The awaitable form of <see cref="DrainPending"/>: completes once every record appended before
+    /// the call has been handed to <c>send_batch</c> and its future enqueued to the completion pump.
+    /// Used by <c>Flush</c>, which must not block its caller's thread.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the deliberate divergence TOWARD Java that the anchor lacks (§3.5).</b> Python's
+    /// <c>flush()</c> never signals its send thread — <c>record_batches_new_record_cnd</c> has three
+    /// signal sites and none is a flush entry point — so it can return with records still buffered
+    /// inside the binding, although from the caller's view those records <em>were</em> sent, because
+    /// <c>send()</c> returned. Java's contract is that <c>flush()</c> blocks until every previously
+    /// sent record completes, so the .NET flush drains first.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels this caller's wait only; the drain itself continues.</param>
+    internal Task DrainPendingAsync(CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<bool> waiter;
+        lock (_gate)
+        {
+            if (_head is null && !_draining)
+            {
+                return s_alreadyDrained;
+            }
+
+            // RunContinuationsAsynchronously so completing this under the accumulator's lock cannot
+            // run a continuation inline on the batch thread.
+            waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _idleWaiters.Add(waiter);
+            _forceDrain = true;
+            Monitor.PulseAll(_gate);
+        }
+
+        if (!cancellationToken.CanBeCanceled)
+        {
+            return waiter.Task;
+        }
+
+        // Per-waiter cancellation: a cancelled waiter simply stops observing, and the drain it asked
+        // for carries on for everyone else. Its TCS stays in the list and the idle signal's
+        // TrySetResult on it is a harmless no-op.
+        CancellationTokenRegistration registration = cancellationToken.Register(
+            static state =>
+            {
+                (TaskCompletionSource<bool> tcs, CancellationToken token) =
+                    ((TaskCompletionSource<bool>, CancellationToken))state!;
+                tcs.TrySetCanceled(token);
+            },
+            (waiter, cancellationToken));
+
+        waiter.Task.ContinueWith(
+            static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+            registration,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return waiter.Task;
+    }
+
+    /// <summary>
+    /// Releases every <see cref="DrainPendingAsync"/> waiter if the accumulator is now empty and
+    /// idle, and re-arms the force flag if it is not. Caller holds <see cref="_gate"/>.
+    /// </summary>
+    private void SignalIdleLocked()
+    {
+        if (_idleWaiters.Count == 0)
+        {
+            return;
+        }
+
+        if (_head is not null || _draining)
+        {
+            // Not idle yet — a record landed after the drain that was forced for these waiters took
+            // its chain. Re-arm rather than let them wait out the window (the same reason
+            // DrainPending re-arms on every iteration).
+            _forceDrain = true;
+            Monitor.PulseAll(_gate);
+            return;
+        }
+
+        foreach (TaskCompletionSource<bool> waiter in _idleWaiters)
+        {
+            waiter.TrySetResult(true);
+        }
+
+        _idleWaiters.Clear();
+    }
+
+    /// <summary>
     /// Teardown steps 2–4 of the §3.8 handshake: cancel the backpressure gate, close the
     /// accumulator to new appends, wake the batch thread, and wait — <b>bounded</b> — for it to
     /// finish its final drain and exit. Idempotent.
@@ -467,6 +562,7 @@ internal sealed class SendAccumulator
             chain = TakeChainLocked(out freed);
             _draining = false;
             Monitor.PulseAll(_gate);
+            SignalIdleLocked();
         }
 
         ReleaseSpace(freed);
@@ -525,10 +621,11 @@ internal sealed class SendAccumulator
                 {
                     _draining = true;
                 }
-                else if (stopping)
+                else
                 {
-                    // Nothing left and closing: wake any DrainPending waiter before exiting.
+                    // Idle: release any drain waiter (and, when closing, do it before exiting).
                     Monitor.PulseAll(_gate);
+                    SignalIdleLocked();
                 }
             }
 
@@ -549,6 +646,7 @@ internal sealed class SendAccumulator
                     {
                         _draining = false;
                         Monitor.PulseAll(_gate);
+                        SignalIdleLocked();
                     }
                 }
             }
