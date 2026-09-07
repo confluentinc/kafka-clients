@@ -119,12 +119,36 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 
 ### Cluster
 - `--brokers N` (3) — broker count
-- `--partitions N` (6) — partitions on the chaos topic (RF = min(brokers, 3))
-- `--topic NAME` (`chaos-run`)
+- `--num-topics N` (1) — number of test topics. With `>1`, `--topic` is used as a
+  **prefix** and topics are named `<topic>_0`, `<topic>_1`, …, `<topic>_{N-1}`
+  (librdkafka's naming). One producer runs **per topic** (each at `--rps`, so the
+  aggregate rate is `N × rps`); consumers subscribe to **all** topics. Leader
+  migrations (change-leader/reassign) iterate every topic per librdkafka.
+
+  > **Known limitation — multi-topic + topic-recreate is not yet supported.**
+  > `--num-topics > 1` together with `--topic-recreate` is **rejected** up front
+  > with a clear error (clean exit, not a mid-run panic); `--random` under
+  > multi-topic silently **drops** topic-recreate from its candidate set (broker
+  > roll / change-leader / reassign still randomize across topics) and prints a
+  > notice. The reason is a genuine consumer offset-reset gap, not a harness
+  > artifact: a new-generation (new topic-id) recreate leaves the KIP-848
+  > consumer positioned past the new generation's tail **without** an offset
+  > reset, so that topic's post-recreate tail is genuinely unconsumed. Diagnosed
+  > and deferred as a separate consumer-side investigation. Single-topic recreate
+  > (`--num-topics 1 --topic-recreate`) and multi-topic without recreate both
+  > work and are covered.
+- `--partitions N` (6) — partitions on each chaos topic
+- `--replication-factor N` — replication factor per topic; default `min(brokers,
+  3)`. FATAL (panics) if `N > brokers`, matching librdkafka.
+- `--topic NAME` (`chaos-run`) — topic name (or prefix when `--num-topics > 1`)
 
 ### Workload
 - `--workload role:backend` (`producer:rust`, `consumer:rust`) — repeatable
-- `--rps N` (200) — producer target records/sec, `0` = max rate
+- `--rps N` (200) — producer target records/sec (per topic), `0` = max rate
+- `--msg-size N` (100) — producer value payload size in bytes. The 8-byte logical
+  index is written into the first bytes of the value and padded to this size; the
+  key stays the 8-byte index (logical identity is preserved even for
+  `--msg-size < 8`).
 - `--commit sync|async` (`sync`)
 
 ### Chaos
@@ -183,7 +207,12 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--idle-threshold-s N` (3) — end the drain early once consumption has been
   quiet this long (0 = always wait the full `--drain-s`). Keeps runs that end on
   a heavy fault (reassign/recreate) from falsely reporting loss, without a large
-  fixed drain.
+  fixed drain. A topic recreate **arms a settle**: the early-drain will not
+  declare quiescence until the consumer has demonstrably resumed after the most
+  recent recreate (a post-recreate consume-progress advance), so the transient
+  re-discovery / truncation-rewind stall right after a recreate is never mistaken
+  for "caught up" and the just-recreated topic's tail is not dropped as false
+  loss. Still capped by `--drain-s`.
 
 ### Reports & loop
 - `--reports` — write `target/chaos-runs/<id>/` (verdict, leader changes,
