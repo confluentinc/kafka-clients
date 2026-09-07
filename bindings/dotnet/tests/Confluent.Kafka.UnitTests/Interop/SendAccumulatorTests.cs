@@ -364,6 +364,94 @@ public sealed class SendAccumulatorTests
         harness.Dispose();
     }
 
+    // ------------------------------------- immediate errors: the phase's NEW firing site (§6.1) -
+
+    [Fact]
+    public async Task ImmediateError_FiresTheDeliveryCallbackExactlyOnce_AndFaultsThatSend()
+    {
+        // PLAN §6.1: "This phase adds ONE new firing site: the immediate-error compaction on the
+        // batch thread (§4.5). It must fire exactly once for those indices, and those indices must
+        // not also reach the pump." Plan tests 13 and 21. The site is CompleteNode's error branch,
+        // and it had no coverage: PublicProducerDeliveryCallbackTests covers only the pump's and
+        // the sync send's sites, and ProducerSendBatchTests proves the ABI's per-index (future,
+        // error) contract without ever reaching CompleteNode.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+
+        harness.CloseCoreProducer();
+
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<RecordMetadata>[] sends = harness.Append(3, callback);
+        harness.DrainNow();
+
+        foreach (Task<RecordMetadata> send in sends)
+        {
+            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+                () => TestTimeout.Run(() => send, s_deadline));
+
+            // The core's own per-record rejection, surfaced unchanged — asserted by CONTENT
+            // (DoD §3), so this cannot pass on some other failure that also faults the send.
+            Assert.Equal("MockProducer is already closed.", failure.Message);
+        }
+
+        // Exactly once per record, after a settle window: a first observation of 3 cannot rule out
+        // a fourth invocation arriving late (ffi §A6 form C's exactly-once obligation).
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(3, callback.Count);
+
+        // Java's -1 placeholder metadata, never null (D2/D6), carrying the record's own topic and
+        // explicit partition.
+        Assert.NotNull(callback.LastMetadata);
+        Assert.Equal(Topic, callback.LastMetadata!.Topic);
+        Assert.Equal(0, callback.LastMetadata.Partition);
+        Assert.Equal(-1L, callback.LastMetadata.Offset);
+        Assert.NotNull(callback.LastException);
+        Assert.Equal("MockProducer is already closed.", callback.LastException!.Message);
+    }
+
+    [Fact]
+    public async Task ImmediateError_TheFailedIndicesNeverReachThePump_ButTheSurvivorsDo()
+    {
+        // The compaction half of plan test 13. "Settle in place" must mean the errored index is
+        // handled ENTIRELY on the batch thread — its future destroyed, its callback fired, its
+        // awaiter faulted — and never also handed to the pump, which would fire the callback a
+        // second time. A duplicate is strictly worse than a drop under the exactly-once obligation
+        // (root CLAUDE.md §9.5).
+        //
+        // A mixed batch is not reachable broker-free: the injection closes the core, so from that
+        // point EVERY record is rejected. The survivors are therefore an earlier batch, which is
+        // enough to pin both halves — DrainedSendCount must equal the survivors and must not move
+        // when the rejected batch drains.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+
+        RecordingDeliveryCallback survivors = new RecordingDeliveryCallback();
+        Task<RecordMetadata>[] accepted = harness.Append(4, survivors);
+        harness.DrainNow();
+        await TestTimeout.Run(() => Task.WhenAll(accepted), s_deadline);
+
+        Assert.Equal(4, harness.DrainedSendCount);
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(4, survivors.Count);
+
+        harness.CloseCoreProducer();
+
+        RecordingDeliveryCallback rejected = new RecordingDeliveryCallback();
+        Task<RecordMetadata>[] failed = harness.Append(5, rejected);
+        harness.DrainNow();
+        foreach (Task<RecordMetadata> send in failed)
+        {
+            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => send, s_deadline));
+        }
+
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+
+        // The five rejected indices were settled on the batch thread and nowhere else.
+        Assert.Equal(5, rejected.Count);
+        Assert.Equal(4, harness.DrainedSendCount);
+        Assert.Equal(4, survivors.Count);
+    }
+
     // ------------------------------------------------- the batch thread's own failure path -----
 
     [Fact]
@@ -598,6 +686,34 @@ public sealed class SendAccumulatorTests
         internal SendAccumulator Accumulator { get; }
 
         internal PinnedTopicCache Topics { get; }
+
+        /// <summary>
+        /// How many sends the completion pump has taken off its queue — the witness for "this
+        /// index was handed to the pump" (and, by its absence, for "this index was not").
+        /// </summary>
+        internal long DrainedSendCount => _pump.DrainedSendCount;
+
+        /// <summary>
+        /// <b>The injection for the per-record immediate-error branch</b>: closes the CORE producer
+        /// underneath a live accumulator, so the mock's own <c>send</c> rejects every subsequent
+        /// record with <c>illegal_state("MockProducer is already closed.")</c> and
+        /// <c>send_batch</c> writes it into that index's error slot.
+        /// </summary>
+        /// <remarks>
+        /// It is the only broker-free way to reach the branch. The accumulator's own marshalling
+        /// cannot produce a rejected record — <c>Fill</c> always writes a non-null interned topic
+        /// pointer and the §4.2 sentinel for an empty key/value, and <c>send_batch_inner</c>'s only
+        /// other per-record failures are a null topic / key / value pointer — and the public surface
+        /// cannot reach it either, because closing through the client also latches the managed
+        /// closed flag, so the next <c>Send</c> throws <see cref="ObjectDisposedException"/> before
+        /// anything is appended. This closes only the core, leaving the binding-side state alone.
+        /// The call is production's own shape (<c>NativeProducer.Dispose</c>'s graceful close).
+        /// </remarks>
+        internal void CloseCoreProducer()
+        {
+            NativeMethods.ProducerClose(_producer.Handle.DangerousGetHandle(), out IntPtr error);
+            _ = KafkaException.FromHandle(error);
+        }
 
         /// <summary>
         /// Appends <paramref name="count"/> records through the SAME primitives
