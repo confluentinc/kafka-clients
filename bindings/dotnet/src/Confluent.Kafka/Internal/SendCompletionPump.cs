@@ -118,6 +118,16 @@ internal sealed class SendCompletionPump
 
     private readonly ConcurrentQueue<PendingSend> _queue = new ConcurrentQueue<PendingSend>();
 
+    // The three marshalling arrays get_all reads and writes, allocated ONCE (§12.3) now that the
+    // drain is capped — the anchor allocates nothing per batch either (its equivalents are
+    // fixed-size stack arrays, _confluentkafka.c:429-430). Touched only by the pump thread inside
+    // ProcessBatch, so they need no synchronization. ⚠ They retain the previous pass's values past
+    // the current batch's count: see ProcessBatch's remarks for why every loop over them is bounded
+    // by that count and never by Length.
+    private readonly IntPtr[] _futures = new IntPtr[DrainCap];
+    private readonly IntPtr[] _metadata = new IntPtr[DrainCap];
+    private readonly IntPtr[] _errors = new IntPtr[DrainCap];
+
     // Signals "items may be available". Reset-before-drain (see RunLoop) avoids a lost wakeup.
     private readonly ManualResetEventSlim _signal = new ManualResetEventSlim(initialState: false);
 
@@ -318,9 +328,9 @@ internal sealed class SendCompletionPump
                 catch (Exception exception)
                 {
                     // ProcessBatch already freed the batch's future handles on every one of its own
-                    // paths (its `finally`'s destroy_all, or — for a throw that precedes that try,
-                    // i.e. an allocation failure building its marshalling arrays — its allocation
-                    // `catch`), but a throw that escaped it — a native failure surfacing from
+                    // paths (its `finally`'s destroy_all — since M11/P3.1 §12.3 that is the ONLY
+                    // future-free site, because the marshalling arrays are reused fields and there
+                    // is no pre-`try` allocation left to fail), but a throw that escaped it — a native failure surfacing from
                     // get_all, or OOM either side of its per-index completion loop — left the
                     // batch's TCSes UNcompleted, so their awaiters would hang forever. Fault them
                     // here (TCS-only — the handles are already freed, so do NOT free them again).
@@ -380,13 +390,34 @@ internal sealed class SendCompletionPump
     /// native handle on every path — each consumed index's metadata/error as it is read, all
     /// future handles via <c>destroy_all</c> in the <c>finally</c>, plus a <c>finally</c> sweep of
     /// any metadata/error handles for indices left unconsumed by a partway throw (e.g. an OOM in
-    /// the error branch). Consumed slots are nulled so the sweep never double-frees. A throw that
-    /// precedes that <c>try</c> altogether — an allocation failure building the three marshalling
-    /// arrays — frees the batch's future handles from <paramref name="batch"/> itself, in the
-    /// allocation <c>catch</c>; exactly one of those two future-free sites can ever run, because
-    /// that <c>catch</c> rethrows and so the <c>try</c>/<c>finally</c> below is never entered.
+    /// the error branch). Consumed slots are nulled so the sweep never double-frees.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>The three marshalling arrays are REUSED FIELDS, not per-batch allocations</b> (M11/P3.1
+    /// §12.3), which is what the drain cap makes possible and is strictly more faithful: the anchor
+    /// uses fixed-size <b>stack</b> arrays (<c>_confluentkafka.c:429-430</c>) and allocates nothing
+    /// per batch. It also removes a per-drain allocation from the DoD §10 gate — and it removed a
+    /// failure mode outright: this method used to allocate them <em>outside</em> its
+    /// <c>try</c>/<c>finally</c> and needed an allocation <c>catch</c> to free the batch's futures on
+    /// that one path. With no allocation left to fail, that <c>catch</c> is gone rather than left as
+    /// misleading dead code, and the <c>finally</c> below is now the <em>only</em> future-free site.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Reuse means stale values live past the batch count — so every loop is bounded by the
+    /// batch's count, NEVER by <c>Length</c>.</b> A reused array still holds the previous pass's
+    /// handle values beyond this pass's count; reading <c>Length</c> anywhere would treat those as
+    /// live and free them a SECOND time. The <c>0..count</c> range is additionally cleared on entry,
+    /// so a partially-filled batch cannot read a stale slot either. Both properties are covered by a
+    /// large-drain-then-small-drain test, which is the only shape that can catch a <c>Length</c>
+    /// bound.
+    /// </para>
+    /// <para>
+    /// <b><see cref="RunLoop"/> is the only caller</b>, and its drain is capped at
+    /// <see cref="DrainCap"/>, so <c>count</c> can never exceed the arrays' length. Were that ever
+    /// to change, the <c>Array.Clear</c> below throws rather than overrunning, and
+    /// <see cref="RunLoop"/>'s <c>catch</c> faults the batch — loud, not silent.
+    /// </para>
     /// <b>This is the async surface's delivery-callback firing site (M14/P1).</b> Where an index
     /// carries a <see cref="DeliveryRegistration"/>, it is invoked <b>immediately before</b> that
     /// index's <c>TrySetResult</c> / <c>TrySetException</c> — Java's ordering exactly
@@ -400,41 +431,22 @@ internal sealed class SendCompletionPump
     /// Do not wrap the <c>Fire</c> calls in a second <c>try</c>/<c>catch</c> — it would shadow the
     /// real guard without adding anything.
     /// </remarks>
-    private static void ProcessBatch(List<PendingSend> batch)
+    private void ProcessBatch(List<PendingSend> batch)
     {
         int count = batch.Count;
-        IntPtr[] futures;
-        IntPtr[] metadata;
-        IntPtr[] errors;
-        try
-        {
-            futures = new IntPtr[count];
-            metadata = new IntPtr[count];
-            errors = new IntPtr[count];
-        }
-        catch
-        {
-            // These three arrays are allocated OUTSIDE the try/finally below, so a failure here
-            // (OOM) used to skip that finally and leak the whole batch's future handles — the one
-            // hole in the "free every handle on every path" pattern (ffi §A2) this method otherwise
-            // completes. Free them from `batch`, the one source that is valid before anything is
-            // allocated, using the SINGULAR destroy per element: building the array `destroy_all`
-            // requires is exactly what just failed, so the recovery path must not allocate.
-            //
-            // Freed EXACTLY once, and never double-freed: reaching the try/finally below requires
-            // this try to complete normally, and this catch always rethrows — so of the two
-            // future-free sites precisely one ever runs. No metadata/error handle exists yet either
-            // (get_all has not been called), so there is nothing else to release here.
-            for (int i = 0; i < count; i++)
-            {
-                NativeMethods.FutureRecordMetadataDestroy(batch[i].Future);
-            }
+        IntPtr[] futures = _futures;
+        IntPtr[] metadata = _metadata;
+        IntPtr[] errors = _errors;
 
-            throw;
-        }
+        // Wipe this pass's range in all three before anything reads it, so no slot can carry a
+        // previous pass's handle into this one. Bounded by `count`, not Length: the slots past it
+        // are stale by design and are never read (see the remarks).
+        Array.Clear(futures, 0, count);
+        Array.Clear(metadata, 0, count);
+        Array.Clear(errors, 0, count);
 
         // Cannot throw: a List<T> indexer read below its own Count plus a readonly-struct property
-        // read, with no allocation. So `futures` is either fully populated or never allocated.
+        // read, with no allocation.
         for (int i = 0; i < count; i++)
         {
             futures[i] = batch[i].Future;
@@ -523,9 +535,9 @@ internal sealed class SendCompletionPump
             // already-freed handle (no double-free). Both destroys are null-safe; the != Zero
             // guard skips needless P/Invokes on the normal path (every slot already nulled).
             // Completes the "free every handle on every path" pattern (ffi §A2) that the RunLoop
-            // catch (faults the TCSes) and Send's orphaned-future catch established — together with
-            // the allocation catch above, which covers the one window this finally cannot reach
-            // (a throw before the try was entered).
+            // catch (faults the TCSes) established. Since the marshalling arrays became reused
+            // fields (§12.3) there is no pre-`try` allocation left to fail, so this finally is now
+            // the ONLY future-free site and no companion allocation-catch is needed.
             for (int i = 0; i < count; i++)
             {
                 if (metadata[i] != IntPtr.Zero)

@@ -172,12 +172,18 @@ namespace Confluent.Kafka;
 /// <em>whole</em> batch, so the core <em>did</em> report these completions; the indices the pump had
 /// already reached fired normally and the rest are faulted with none. This is the sub-case that
 /// makes firing from the fault
-/// path unsafe (see below). <b>(b) Before</b> the read reported: the pump threw while setting the
-/// batch up, or out of the batched read itself, so no completion was ever in hand and the whole
-/// batch is faulted. This condition does <b>not</b> need an allocation failure to be reachable: a
+/// path unsafe (see below). <b>(b) Before</b> the read reported: the pump threw out of the batched
+/// read itself, so no completion was ever in hand and the whole batch is faulted. This condition
+/// does <b>not</b> need an allocation failure to be reachable: a
 /// native-side failure surfacing from the pump's first batched read, for example an
 /// <see cref="System.EntryPointNotFoundException"/> against a stale or mismatched native library,
 /// lands here.
+/// ⚠ <b>Sub-case (b) NARROWED in M11/P3.1 (§12.3) — it did not vanish.</b> It used to have two
+/// triggers: the batched read itself, and the pump throwing while <em>setting the batch up</em> (the
+/// three marshalling arrays, allocated per batch outside the processing <c>try</c>). Those arrays
+/// are now reused fields allocated once, so there is no pre-read allocation left to fail and that
+/// trigger is gone. The batched read remains, which is why this stays a recorded residual rather
+/// than a closed one.
 /// <b>This is the residual the synchronous surface shares, and it shares BOTH conditions</b>: that
 /// surface has the same narrow window for its own single record, between the blocking
 /// <c>get</c> reporting and the callback being invoked — reading that record's reported error can
@@ -245,9 +251,9 @@ namespace Confluent.Kafka;
 /// calls the singular <c>Producer_send</c> on the caller's thread, which M11/P3.1 deliberately left
 /// unchanged. <b>Residual 3 is
 /// the one the synchronous surface shares</b>, in both of its conditions (see there). What is
-/// async-only <em>inside</em> residual 3 is sub-case (b)'s batch-setup half and the wholesale-fault
-/// site itself — the synchronous surface has no batch, so its own throw simply propagates out of
-/// <c>Send</c>. Residuals 1 and 2 match Python, whose <c>close()</c>
+/// async-only <em>inside</em> residual 3 is the wholesale-fault site itself — the synchronous surface
+/// has no batch, so its own throw simply propagates out of <c>Send</c>. (Sub-case (b)'s
+/// batch-setup half used to be listed here too; §12.3 removed that trigger.) Residuals 1 and 2 match Python, whose <c>close()</c>
 /// likewise cancels the pending futures without invoking <c>on_delivery</c>. Await your sends, or
 /// <c>Flush</c>, before closing if you need the notification.
 /// </para>

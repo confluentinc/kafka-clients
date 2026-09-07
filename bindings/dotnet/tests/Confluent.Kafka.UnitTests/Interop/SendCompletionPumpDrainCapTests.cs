@@ -13,10 +13,12 @@
 // limitations under the License.
 
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
@@ -146,6 +148,109 @@ public sealed class SendCompletionPumpDrainCapTests
         }
 
         Assert.Equal(Total, settled);
+    }
+
+    [Fact]
+    public void LargeDrainThenSmallDrain_FreesOnlyTheSmallBatchesHandles()
+    {
+        // ⚠ TEST 27 — the STALE-SLOT / DOUBLE-FREE guard for the reused marshalling arrays (§12.3).
+        // A reused array keeps the previous pass's handle values past the current pass's count, so a
+        // loop bounded by Length instead of count would hand `destroy_all` (or the finally sweep) the
+        // PREVIOUS batch's already-freed handles — a double free.
+        //
+        // This test needs REAL futures: with the null-future stand-in the other tests use there is
+        // nothing to double-free, so the bug would pass unnoticed. A large pass at exactly the cap
+        // fills every slot, then a 2-record pass must touch only its own two. A double free of a
+        // FutureRecordMetadata_t corrupts the allocator, so — as with the other use-after-free
+        // guards in this project — the assertion is that this completes at all, plus that both
+        // batches settled.
+        const int Large = SendCompletionPump.DrainCap;
+        const int Small = 2;
+
+        using NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
+        SendCompletionPump pump = new SendCompletionPump();
+        try
+        {
+            TaskCompletionSource<RecordMetadata>[] large = EnqueueRealSends(producer, pump, Large);
+            TestTimeout.Run(() => Task.WaitAll(Tasks(large), s_deadline), s_deadline);
+
+            // The arrays now hold Large live-looking values in every slot.
+            TaskCompletionSource<RecordMetadata>[] small = EnqueueRealSends(producer, pump, Small);
+            TestTimeout.Run(() => Task.WaitAll(Tasks(small), s_deadline), s_deadline);
+
+            foreach (TaskCompletionSource<RecordMetadata> completion in large)
+            {
+                Assert.Equal(TaskStatus.RanToCompletion, completion.Task.Status);
+            }
+
+            foreach (TaskCompletionSource<RecordMetadata> completion in small)
+            {
+                Assert.Equal(TaskStatus.RanToCompletion, completion.Task.Status);
+            }
+
+            Assert.True(pump.LargestProcessedBatch <= SendCompletionPump.DrainCap);
+        }
+        finally
+        {
+            pump.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Sends <paramref name="count"/> real records through <c>send_batch</c> and hands the resulting
+    /// futures to the pump — the shape the accumulator's batch thread produces.
+    /// </summary>
+    private static TaskCompletionSource<RecordMetadata>[] EnqueueRealSends(
+        NativeProducer producer, SendCompletionPump pump, int count)
+    {
+        ProducerRecordNative[] records = new ProducerRecordNative[count];
+        IntPtr[] futures = new IntPtr[count];
+        IntPtr[] errors = new IntPtr[count];
+
+        using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin("pump-cap-topic");
+        GCHandle valuePin = GCHandle.Alloc(new byte[] { 1, 2, 3 }, GCHandleType.Pinned);
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                records[i].Topic = topic.Pointer;
+                records[i].Partition = -1;
+                records[i].Timestamp = -1;
+                records[i].Key = IntPtr.Zero;
+                records[i].KeyLength = -1;
+                records[i].Value = valuePin.AddrOfPinnedObject();
+                records[i].ValueLength = 3;
+            }
+
+            int accepted = ProducerSendBatchMarshal.SendBatch(
+                producer.Handle, records, offset: 0, count: count, futures, errors);
+            Assert.Equal(count, accepted);
+        }
+        finally
+        {
+            valuePin.Free();
+        }
+
+        TaskCompletionSource<RecordMetadata>[] completions = new TaskCompletionSource<RecordMetadata>[count];
+        for (int i = 0; i < count; i++)
+        {
+            completions[i] = new TaskCompletionSource<RecordMetadata>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            pump.Enqueue(futures[i], completions[i], delivery: null);
+        }
+
+        return completions;
+    }
+
+    private static Task[] Tasks(TaskCompletionSource<RecordMetadata>[] completions)
+    {
+        Task[] tasks = new Task[completions.Length];
+        for (int i = 0; i < completions.Length; i++)
+        {
+            tasks[i] = completions[i].Task;
+        }
+
+        return tasks;
     }
 
     private static TaskCompletionSource<RecordMetadata>[] EnqueueMany(SendCompletionPump pump, int count)
