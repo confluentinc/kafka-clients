@@ -140,14 +140,27 @@ pub struct WorkloadContext {
     /// client runs inside a sibling container and must reach the broker by
     /// container hostname.
     pub container_bootstrap: String,
+    /// The topic THIS workload's producer sends to (one producer per topic).
+    /// For consumers this is the first topic and is not used for subscription —
+    /// consumers subscribe to every topic in [`Self::topics`].
     pub topic: String,
+    /// All topics in the run. Consumers subscribe to the full set (librdkafka
+    /// passes every `-t` to each consumer); producers use only [`Self::topic`].
+    pub topics: Vec<String>,
     /// Current topic id, for the physical `(topic_id, partition, offset)`
     /// verification key. `Uuid::zero()` if the harness could not resolve it.
     /// After a topic recreate the id changes, so this is the id at workload
     /// construction; the producer stamps the id it delivered against.
     pub topic_id: Uuid,
+    /// Per-topic current topic id (all topics in the run), for the consumer's
+    /// physical key: a consumer reads from every topic, so it maps the record's
+    /// own topic name to that topic's id. `Uuid::zero()` for any topic the
+    /// harness could not resolve.
+    pub topic_ids: std::collections::HashMap<String, Uuid>,
     pub group: String,
     pub target_rps: u32,
+    /// Producer value payload size in bytes (`--msg-size`).
+    pub msg_size: usize,
     pub commit_mode: CommitMode,
 }
 
@@ -280,6 +293,22 @@ async fn build_grpc_workload(
     })
 }
 
+/// Build the producer value payload: the 8-byte big-endian logical `index`
+/// followed by zero padding to reach `msg_size` bytes. If `msg_size < 8`, only
+/// the first `msg_size` bytes of the index are sent (the key still carries the
+/// full 8-byte index, so logical identity is preserved).
+fn build_value(index: u64, msg_size: usize) -> Vec<u8> {
+    let idx = index.to_be_bytes();
+    if msg_size <= idx.len() {
+        idx[..msg_size].to_vec()
+    } else {
+        let mut v = Vec::with_capacity(msg_size);
+        v.extend_from_slice(&idx);
+        v.resize(msg_size, 0);
+        v
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Producer workload — generic over any ProducerBackendFactory.
 // ---------------------------------------------------------------------------
@@ -317,10 +346,17 @@ where
 
         let topic = self.ctx.topic.clone();
         let topic_id = self.ctx.topic_id;
+        let msg_size = self.ctx.msg_size;
         let mut index: u64 = 0;
         while !stop.load(Ordering::Relaxed) {
+            // Key = the 8-byte big-endian logical index (the record's logical
+            // identity, read back by the consumer). Value = the same index in
+            // its first 8 bytes, padded with zeros up to `msg_size` so the wire
+            // payload matches librdkafka's `-s <msg_size>`. When `msg_size < 8`
+            // the value is just its first `msg_size` bytes; the key is unchanged.
             let key = index.to_be_bytes().to_vec();
-            let record = ProducerRecord::with_key(topic.clone(), Some(key.clone()), Some(key));
+            let value = build_value(index, msg_size);
+            let record = ProducerRecord::with_key(topic.clone(), Some(key), Some(value));
             let event = match producer.send_with_callback(record, None).await {
                 Ok(future) => match future.get_timeout(Duration::from_secs(120)).await {
                     Ok(meta) => WorkloadEvent::Delivered {
@@ -374,8 +410,11 @@ where
             .await
             .expect("failed to build chaos consumer");
 
+        // Subscribe to EVERY topic in the run (librdkafka passes all `-t` flags
+        // to each consumer), not just one — so a multi-topic run's consumers
+        // cover all topics.
         consumer
-            .subscribe(vec![self.ctx.topic.clone()])
+            .subscribe(self.ctx.topics.clone())
             .await
             .expect("chaos consumer subscribe failed");
 
@@ -394,10 +433,15 @@ where
                 if let Some(bytes) = record.key()
                     && let Ok(arr) = bytes.as_slice().try_into()
                 {
+                    let topic = record.topic();
+                    // Map the record's own topic to that topic's id (a consumer
+                    // reads from every topic; ids differ per topic and per
+                    // recreate generation). Falls back to zero if unresolved.
+                    let topic_id = self.ctx.topic_ids.get(topic).copied().unwrap_or_else(Uuid::zero);
                     self.verifier.record(WorkloadEvent::Consumed {
                         index: u64::from_be_bytes(arr),
-                        topic: record.topic().to_string(),
-                        topic_id: self.ctx.topic_id,
+                        topic: topic.to_string(),
+                        topic_id,
                         partition: record.partition(),
                         offset: record.offset(),
                     });
