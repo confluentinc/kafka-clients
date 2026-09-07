@@ -291,7 +291,14 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///
 /// Flags (defaults mirror librdkafka's chaos.py where they overlap):
 ///   --brokers N            broker count (3)
+///   --num-topics N         number of test topics (1). With >1, --topic is the
+///                          prefix and topics are named <topic>_0.._N-1; one
+///                          producer runs per topic (each at --rps, aggregate =
+///                          N*rps) and consumers subscribe to all topics
 ///   --partitions N         partitions per topic (6)
+///   --replication-factor N replication factor per topic (default min(brokers,3);
+///                          FATAL if > brokers)
+///   --msg-size N           producer value payload size in bytes (100)
 ///   --cycles N             chaos cycles (3)
 ///   (broker rolling is the default fault; layer more faults on with the flags
 ///    below, each taking an OPTIONAL cadence N = every N cycles, else every cycle)
@@ -487,7 +494,10 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
     // (flag, env-var) pairs that take a value.
     let valued: &[(&str, &str)] = &[
         ("--brokers", "CHAOS_BROKERS"),
+        ("--num-topics", "CHAOS_NUM_TOPICS"),
         ("--partitions", "CHAOS_PARTITIONS"),
+        ("--replication-factor", "CHAOS_REPLICATION_FACTOR"),
+        ("--msg-size", "CHAOS_MSG_SIZE"),
         ("--cycles", "CHAOS_CYCLES"),
         ("--rps", "CHAOS_RPS"),
         ("--stop-s", "CHAOS_STOP_S"),
