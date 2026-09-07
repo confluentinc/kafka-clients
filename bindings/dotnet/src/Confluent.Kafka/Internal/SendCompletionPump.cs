@@ -634,34 +634,26 @@ internal sealed class SendCompletionPump
     /// </summary>
     /// <remarks>
     /// <b>This path does NOT invoke the batch's <see cref="IDeliveryCallback"/>s</b> — recorded
-    /// residual 3 on <see cref="IDeliveryCallback"/>. This residual
-    /// spans <b>both sides of the completion's arrival</b>,
-    /// because <see cref="ProcessBatch"/> can throw on either side of its <c>get_all</c> and both
-    /// land here. <b>(a)</b> After <c>get_all</c> reported — it reported for the <em>whole</em>
-    /// batch, so the core <em>did</em> report these completions; the indices the per-index loop had
-    /// already reached fired normally and the rest are faulted here with none.
-    /// <b>(b)</b> Before it reported — the throw came from the batch setup (the marshalling-array
-    /// allocation) or out of the <c>get_all</c> P/Invoke itself, as <see cref="RunLoop"/>'s
-    /// <c>catch</c> spells out, so no completion was ever in hand and the whole batch is faulted
-    /// with none.
-    /// <b>Firing them here is deliberately NOT the fix</b>, and sub-case (a) alone is enough to
-    /// settle it: this method faults the batch <em>wholesale</em> (that is exactly why
-    /// <c>TrySetException</c>'s no-op-on-completed behavior is load-bearing above) and it has no
-    /// per-index record of which callbacks already fired, so firing would deliver a
-    /// <em>duplicate</em> notification for every index that completed before the throw — trading a
-    /// rare dropped notification for a rare double invocation, which the exactly-once-per-record
-    /// obligation (root <c>CLAUDE.md</c> §9.5) makes strictly worse. In sub-case (b) nothing was
-    /// reported at all, so anything fired would instead be an <em>invented</em> failure for a record
-    /// the core may still deliver. A per-index "already fired" latch would close sub-case (a), at
-    /// the cost of per-send state on a path reachable only under out-of-memory or an unexpected
-    /// managed or native failure in the batch read; the drop is recorded on the public surface
-    /// instead (ffi §A6 form C's at-most-once boundary).
+    /// residual 3 on <see cref="IDeliveryCallback"/>. <b>Firing them here is deliberately not the
+    /// fix</b>, and the local reason is this method's own shape: it faults the batch
+    /// <em>wholesale</em> (that is exactly why <c>TrySetException</c>'s no-op-on-completed behavior
+    /// is load-bearing above) and keeps no per-index record of which callbacks already fired, so
+    /// firing here would deliver a <em>duplicate</em> notification for every index that completed
+    /// before the throw — trading a rare dropped notification for a rare double invocation, which
+    /// the exactly-once-per-record obligation (root <c>CLAUDE.md</c> §9.5) makes strictly worse. A
+    /// per-index "already fired" latch is what would close that, at the cost of per-send state on a
+    /// path reachable only under an unexpected managed or native failure in the batch read; the drop
+    /// is recorded on the public surface instead (ffi §A6 form C's at-most-once boundary).
     /// <para>
-    /// How this residual compares with the others — teardown or not, completion arrived or not,
-    /// a throw versus a faulted <see cref="Task"/> — is stated <b>once</b>, under <b>the
-    /// distinguishing axes</b> in the remarks on <see cref="IDeliveryCallback"/>. Do not restate
-    /// those axes here, and do not re-scope one either: several review rounds went on paraphrases of
-    /// them that went stale one at a time, this note's own included.
+    /// The conditions this residual spans, how it compares with the others — teardown or not,
+    /// completion arrived or not, a throw versus a faulted <see cref="Task"/> — and why firing is
+    /// not the fix on the side where nothing had been reported either, are stated <b>once</b>, under
+    /// <b>the distinguishing axes</b> in the remarks on <see cref="IDeliveryCallback"/>. Do not
+    /// restate them here, and do not re-scope them either: several review rounds went on paraphrases
+    /// that went stale one at a time — this note's own included, which named the per-batch
+    /// marshalling-array allocation as a live trigger after §12.3 had removed it, and cited
+    /// <see cref="RunLoop"/>'s <c>catch</c> as spelling that out when the same slice had rewritten
+    /// it to say the opposite.
     /// </para>
     /// </remarks>
     private static void FaultBatchCompletions(List<PendingSend> batch, Exception cause)

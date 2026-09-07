@@ -794,7 +794,7 @@ internal sealed class SendAccumulator
     /// <b>A second deliberate deviation from the anchor, and the one that makes the steady-state
     /// send path allocation-free.</b> The anchor <c>PyMem_RawFree</c>s each node once its completions
     /// are read, and mallocs a fresh one per drain; a node there is five pointer arrays. Here a node
-    /// is nine arrays of by-value slots, so allocating one per drain would charge the <em>caller</em>
+    /// is eight arrays of by-value slots, so allocating one per drain would charge the <em>caller</em>
     /// thread a fresh growth sequence every window — a per-record cost on the hot path that the DoD
     /// §10 audit is precisely about. Reuse is safe because by the time <see cref="SendNode"/> has
     /// returned, every slot of the node is settled: the pins were released, each future was either
@@ -1064,13 +1064,17 @@ internal sealed class SendAccumulator
     /// <b>Deliberate deviation from the anchor: the arrays GROW to that cap instead of being
     /// allocated at it</b> — every constant is unchanged (a node still holds at most
     /// <c>SLOT_CAPACITY</c> records, and the chunk still equals it), only the allocation strategy
-    /// differs. The anchor's arrays are fixed because a C struct has no other option, and its ten
-    /// slots are five <em>pointers</em> — 44 KB per node. .NET's slots are by-value
-    /// (<see cref="SerializedProducerRecord"/>, <see cref="ProducerRecordNative"/>, two
-    /// <see cref="MemoryHandle"/>s, a <see cref="PinnedTopicCache.TopicPin"/>), so the same shape
-    /// costs ~232 B per slot — <b>~254 KB per node, roughly 6× the anchor's</b>. A node is allocated
+    /// differs. The anchor's arrays are fixed because a C struct has no other option, and its five
+    /// slots are <em>pointers</em> — 44 KB per node (5 × 1100 × 8). .NET's eight slots are mostly
+    /// by-value: a <see cref="PinnedTopicCache.TopicPin"/> (16 B), two
+    /// <see cref="MemoryHandle"/>s (24 B each), a <see cref="ProducerRecordNative"/> (56 B), two
+    /// references and two <see cref="IntPtr"/> result slots (8 B each) — <b>~152 B per slot, so
+    /// ~167 KB per node, roughly 3.8× the anchor's</b>. (Not ~232 B: that figure counts a
+    /// <see cref="SerializedProducerRecord"/> slot this node does <em>not</em> have — §4.3's type
+    /// sketch had one and <see cref="Append"/> marshals in its place, which is where its ~80 B
+    /// went.) A node is allocated
     /// per drain once the previous chain is taken, so at a low send rate (a handful of records per
-    /// window) a fixed node would turn ~100 drains/second into ~25 MB/second of garbage for a
+    /// window) a fixed node would turn ~100 drains/second into ~17 MB/second of garbage for a
     /// handful of records — a .NET-only cost with no counterpart in the design being mirrored.
     /// Growing from <see cref="InitialCapacity"/> makes the node cost track what the drain actually
     /// used, and a full node still ends up at exactly the anchor's capacity.
@@ -1126,7 +1130,7 @@ internal sealed class SendAccumulator
         /// Grows every parallel array so index <see cref="Count"/> is writable. Called under the
         /// accumulator's lock, and only from <see cref="SendAccumulator.Append"/> — never while the
         /// batch thread is sending this node, which happens only after the node has been taken out of
-        /// the chain. Grows all nine together or not at all: a partial growth would leave the
+        /// the chain. Grows all eight together or not at all: a partial growth would leave the
         /// parallel arrays at different lengths, and the index that walks them assumes they match.
         /// </summary>
         internal void EnsureSlot()
@@ -1135,8 +1139,8 @@ internal sealed class SendAccumulator
 
             // Gate on the LAST array resized below, not the first: an out-of-memory part way through
             // the sequence leaves the earlier arrays longer than the later ones, and gating on
-            // `Records` would then wave through a write that indexes past `Errors`. Errors reaching
-            // `required` means all nine did.
+            // `TopicPins` (the first) would then wave through a write that indexes past `Errors`.
+            // Errors reaching `required` means all eight did.
             if (required <= Errors.Length)
             {
                 return;

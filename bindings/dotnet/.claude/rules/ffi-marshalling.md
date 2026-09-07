@@ -793,10 +793,11 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
         reported: `get_all` has already reported for the **whole** batch, so
         the core *did* report completions, yet the indices not yet reached are faulted
         with no callback — and the duplicate-risk argument applies to that half. The
-        *before* half (the batch **setup** — the marshalling arrays the
-        `get_all` needs, allocated outside the method's own `try` — or a throw out of
-        the `get_all` P/Invoke itself) does **not** need an allocation failure to be
-        reachable: a stale or
+        *before* half (a throw out of the `get_all` P/Invoke itself, or out of the
+        defensive bound check that precedes it — the per-batch allocation of the
+        marshalling arrays used to be a second trigger here and is **gone**, the arrays
+        being reused fields since M11/P3.1 §12.3) does **not** need an allocation
+        failure to be reachable: a stale or
         mismatched native surfaces an `EntryPointNotFoundException` from the pump's
         *first* batched read, so the "OOM-only, therefore theoretical" defence is
         unavailable for it. Neither half is a teardown path, so a residual clause that
@@ -1064,10 +1065,12 @@ defers the consumer's copy-out-vs-keep-alive).
         is what makes this residual span the completion's arrival. If the throw
         came *after* `get_all` reported, completions had arrived for **every** index,
         so the indices the batch loop never reached lose their delivery notification
-        even though the core did report them. If it came *before* — from the batch
-        **setup** (the marshalling arrays, allocated outside the processing `try`) or
-        from the `get_all` P/Invoke itself against a stale native — nothing was
-        reported and the whole batch loses it. So, unlike the pre-enqueue window
+        even though the core did report them. If it came *before* — from the `get_all`
+        P/Invoke itself against a stale native, or from the defensive bound check that
+        precedes it — nothing was reported and the whole batch loses it. (The batch
+        **setup** used to belong on this side too, when the three marshalling arrays
+        were allocated per batch outside the processing `try`; M11/P3.1 §12.3 made them
+        reused fields, so that trigger is gone.) So, unlike the pre-enqueue window
         above, this residual is **not** OOM-only.
     These are *non-teardown* members of §A6 form C's at-most-once boundary, and must
     be enumerated on the public surface alongside the teardown paths — the enumeration
