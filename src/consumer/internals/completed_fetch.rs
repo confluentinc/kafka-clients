@@ -671,7 +671,7 @@ impl CompletedFetch {
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
-                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
+                        .deserialize_from_shared_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
                         .map(Some),
                 };
                 // Java's `parseRecord` is two sequential `try` blocks and the first
@@ -686,7 +686,7 @@ impl CompletedFetch {
                     match record.value() {
                         None => Ok(None),
                         Some(value_bytes) => value_deserializer
-                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
+                            .deserialize_from_shared_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
                             .map(Some),
                     }
                 };

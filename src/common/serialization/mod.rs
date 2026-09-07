@@ -92,7 +92,7 @@ pub trait Serializer<T: ?Sized> {
     /// [`serialize_headers`](Serializer::serialize_headers).
     /// Implementations for types that are already byte buffers (e.g. `Vec<u8>`)
     /// can override this to pass ownership through without copying.
-    fn serialize_owned_with_headers(
+    fn serialize_owned_headers(
         &self,
         topic: &str,
         headers: &RecordHeaders,

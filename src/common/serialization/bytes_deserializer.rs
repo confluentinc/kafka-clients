@@ -62,7 +62,7 @@ impl Deserializer<Bytes> for BytesDeserializer {
         Ok(source.slice_ref(data))
     }
 
-    fn deserialize_from_shared_with_headers(
+    fn deserialize_from_shared_headers(
         &self,
         _topic: &str,
         _headers: &dyn Headers,
@@ -108,14 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_from_shared_with_headers_delegates() {
+    fn test_deserialize_from_shared_headers_delegates() {
         let de = BytesDeserializer::new();
         let source = Bytes::from(vec![9u8, 8, 7, 6]);
         let data: &[u8] = &source[1..3];
         let headers = RecordHeaders::new();
-        let result = de
-            .deserialize_from_shared_with_headers("topic", &headers, &source, data)
-            .unwrap();
+        let result = de.deserialize_from_shared_headers("topic", &headers, &source, data).unwrap();
         assert_eq!(&result[..], &[8, 7]);
         assert_eq!(result.as_ptr(), data.as_ptr());
     }

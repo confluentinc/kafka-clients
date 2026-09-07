@@ -1136,10 +1136,7 @@ impl<K, V> KafkaProducer<K, V> {
         // as `Err` (`:1073` / `:1077`). Rewriting every serializer error as
         // `SerializationException` flipped `is_retriable_error()` for the first
         // case and skipped its callback entirely.
-        let serialized_key = match self
-            .key_serializer
-            .serialize_owned_with_headers(&record_topic, &record_headers, key)
-        {
+        let serialized_key = match self.key_serializer.serialize_owned_headers(&record_topic, &record_headers, key) {
             Ok(bytes) => bytes,
             Err(e) if e.is_api_error() => {
                 return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
@@ -1150,7 +1147,7 @@ impl<K, V> KafkaProducer<K, V> {
         let serialized_value =
             match self
                 .value_serializer
-                .serialize_owned_with_headers(&record_topic, &record_headers, value)
+                .serialize_owned_headers(&record_topic, &record_headers, value)
             {
                 Ok(bytes) => bytes,
                 Err(e) if e.is_api_error() => {

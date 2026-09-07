@@ -46,7 +46,7 @@ impl Serializer<Vec<u8>> for ByteArraySerializer {
         Ok(data.cloned())
     }
 
-    fn serialize_owned_with_headers(
+    fn serialize_owned_headers(
         &self,
         _topic: &str,
         _headers: &RecordHeaders,

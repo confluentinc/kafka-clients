@@ -127,7 +127,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// override this method directly (see [`BytesDeserializer`]).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    fn deserialize_from_shared_with_headers(
+    fn deserialize_from_shared_headers(
         &self,
         topic: &str,
         headers: &dyn Headers,
