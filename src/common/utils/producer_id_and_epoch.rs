@@ -16,23 +16,23 @@
 
 use std::fmt;
 
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 
 /// A producer ID and epoch pair, identifying a producer session to the broker.
 ///
 /// Translated from `org.apache.kafka.common.utils.ProducerIdAndEpoch`.
 ///
 /// `producer_id` is `i64` (Java `long`) rather than `u64`: it is compared
-/// against the [`RecordBatch::NO_PRODUCER_ID`] sentinel (`-1`), and signed
+/// against the `RecordBatch::NO_PRODUCER_ID` sentinel (`-1`), and signed
 /// versus unsigned comparison would order high-bit values differently.
 ///
 /// This type is two scalars, so it is `Copy` and lives on the stack — Java
 /// allocates an object here, but there is nothing to own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProducerIdAndEpoch {
-    /// The producer ID assigned by the broker, or [`RecordBatch::NO_PRODUCER_ID`].
+    /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
     pub producer_id: i64,
-    /// The producer epoch, or [`RecordBatch::NO_PRODUCER_EPOCH`].
+    /// The producer epoch, or `RecordBatch::NO_PRODUCER_EPOCH`.
     pub epoch: i16,
 }
 

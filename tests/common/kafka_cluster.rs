@@ -267,6 +267,17 @@ fn is_port_allocation_error(err: &str) -> bool {
     err.contains("port is already allocated") || err.contains("address already in use")
 }
 
+/// A broker container that came up but exited during startup — most commonly
+/// "unable to register with the controller quorum" on a loaded CI runner,
+/// which surfaces as the wait-for-log hitting end of stream. Transient by
+/// nature (a fresh container on the same ports normally succeeds), so it is
+/// worth spending a bounded retry on, unlike the subnet-exhaustion class the
+/// no-retry rule below protects against.
+fn is_transient_broker_startup_error(err: &str) -> bool {
+    err.contains("End of stream reached before finding message")
+        || err.contains("unable to register with the controller quorum")
+}
+
 /// Kafka image configured for one broker in a KRaft cluster.
 ///
 /// Uses the standard `apache/kafka` Docker image entrypoint and its
@@ -514,13 +525,14 @@ impl KafkaCluster {
             match Self::try_start_with_config(config).await {
                 Ok(cluster) => return cluster,
                 Err(err) => {
-                    // Only a lost port race is worth retrying. Every attempt
-                    // also creates a fresh Docker network, and Docker's default
-                    // address pool holds only ~30 of them — retrying an
-                    // unrelated failure (notably "all predefined address pools
-                    // have been fully subnetted") burns two more subnets and
-                    // makes the real problem worse.
-                    if !is_port_allocation_error(&err) {
+                    // Only a lost port race or a transient broker-startup
+                    // failure is worth retrying. Every attempt also creates a
+                    // fresh Docker network, and Docker's default address pool
+                    // holds only ~30 of them — retrying an unrelated failure
+                    // (notably "all predefined address pools have been fully
+                    // subnetted") burns two more subnets and makes the real
+                    // problem worse.
+                    if !is_port_allocation_error(&err) && !is_transient_broker_startup_error(&err) {
                         panic!("Failed to start Kafka cluster: {err}");
                     }
                     // Partially-started containers are dropped with the failed

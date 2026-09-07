@@ -42,7 +42,10 @@ pub struct ConsumerGroupDescription {
     group_type: GroupType,
     group_state: GroupState,
     coordinator: Option<Node>,
-    authorized_operations: BTreeSet<AclOperation>,
+    /// `Option` because Java's field is nullable: the admin client fills it
+    /// from `AdminUtils.validAclOperations`, which returns `null` when the broker
+    /// did not report the operations.
+    authorized_operations: Option<BTreeSet<AclOperation>>,
     group_epoch: Option<i32>,
     target_assignment_epoch: Option<i32>,
 }
@@ -64,7 +67,7 @@ impl ConsumerGroupDescription {
         group_type: GroupType,
         group_state: GroupState,
         coordinator: Option<Node>,
-        authorized_operations: BTreeSet<AclOperation>,
+        authorized_operations: Option<BTreeSet<AclOperation>>,
         group_epoch: Option<i32>,
         target_assignment_epoch: Option<i32>,
     ) -> Self {
@@ -125,9 +128,10 @@ impl ConsumerGroupDescription {
         self.coordinator.as_ref()
     }
 
-    /// The authorized operations for this group. Mirrors `authorizedOperations()`.
-    pub fn authorized_operations(&self) -> &BTreeSet<AclOperation> {
-        &self.authorized_operations
+    /// The authorized operations for this group, or `None` if the broker did not
+    /// report them (Java returns `null`). Mirrors `authorizedOperations()`.
+    pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
+        self.authorized_operations.as_ref()
     }
 
     /// The epoch of the consumer group. Mirrors `groupEpoch()`.
@@ -167,7 +171,7 @@ mod tests {
                 GroupType::Consumer,
                 group_state,
                 None,
-                BTreeSet::new(),
+                Some(BTreeSet::new()),
                 None,
                 None,
             );
