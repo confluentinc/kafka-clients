@@ -160,7 +160,9 @@ impl ChaosAction {
 async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) {
     eprintln!("chaos: change-leader for topic {topic}");
 
-    let before = partition_state(topic, admin).await;
+    let before = partition_state(topic, admin)
+        .await
+        .expect("describe_topics for change-leader before-snapshot failed");
 
     // Reorder replicas (rotate) — same set, different preferred leader. `plan`
     // records the intended new leader per partition (rotated[0]).
@@ -216,7 +218,9 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
     eprintln!("chaos: reassigning partitions for topic {topic}");
 
     // 1. Read current leader + replica assignments (the BEFORE snapshot).
-    let before = partition_state(topic, admin).await;
+    let before = partition_state(topic, admin)
+        .await
+        .expect("describe_topics for reassign before-snapshot failed");
 
     // 2. Rotate each partition's replica list by one. `plan` records the
     //    intended new leader per partition (rotated[0]).
@@ -267,7 +271,9 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
     // 6. Prove the replica sets actually changed (an empty pending list is also
     //    the state where nothing moved). Reassign moves data, so this is a
     //    distinct check from the leader-plan verification below.
-    let after = partition_state(topic, admin).await;
+    let after = partition_state(topic, admin)
+        .await
+        .expect("describe_topics for reassign after-snapshot failed");
     let mut replicas_changed = 0usize;
     for (partition, b) in &before {
         if b.replicas.len() < 2 {
@@ -316,14 +322,19 @@ async fn verify_leader_plan(
 
     // Poll for the planned leaders to settle.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut after;
+    let mut after = std::collections::BTreeMap::new();
     loop {
-        after = partition_state(topic, admin).await;
-        let matched = eligible
-            .iter()
-            .filter(|p| after.get(p).and_then(|s| s.leader) == plan.get(p).copied())
-            .count();
-        if matched == eligible.len() || Instant::now() >= deadline {
+        if let Some(state) = partition_state(topic, admin).await {
+            after = state;
+            let matched = eligible
+                .iter()
+                .filter(|p| after.get(p).and_then(|s| s.leader) == plan.get(p).copied())
+                .count();
+            if matched == eligible.len() {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -382,8 +393,10 @@ async fn leaders_of_topics(
 ) -> std::collections::BTreeMap<(String, i32), Option<i32>> {
     let mut out = std::collections::BTreeMap::new();
     for topic in topics {
-        for (p, s) in partition_state(topic, admin).await {
-            out.insert((topic.clone(), p), s.leader);
+        if let Some(state) = partition_state(topic, admin).await {
+            for (p, s) in state {
+                out.insert((topic.clone(), p), s.leader);
+            }
         }
     }
     out
@@ -447,8 +460,9 @@ struct PartitionState {
     replicas: Vec<i32>,
 }
 
-/// Current `(leader, replicas)` for each partition of `topic`.
-async fn partition_state(topic: &str, admin: &dyn Admin) -> std::collections::BTreeMap<i32, PartitionState> {
+/// Current `(leader, replicas)` for each partition of `topic`, or `None` if the
+/// describe could not complete (tolerated on the leader-sampling path).
+async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collections::BTreeMap<i32, PartitionState>> {
     let described = admin
         .describe_topics(
             TopicCollection::of_topic_names(vec![topic.to_string()]),
@@ -456,19 +470,30 @@ async fn partition_state(topic: &str, admin: &dyn Admin) -> std::collections::BT
         )
         .all_topic_names()
         .expect("describe_topics by name yields a name-keyed result");
-    let descriptions = described.get().await.expect("describe_topics failed");
-    let description = descriptions.get(topic).expect("described topic present");
-    description
-        .partitions()
-        .iter()
-        .map(|info| {
-            (
-                info.partition(),
-                PartitionState {
-                    leader: info.leader().map(|n| n.id()),
-                    replicas: info.replicas().iter().map(|n| n.id()).collect(),
-                },
-            )
-        })
-        .collect()
+    let descriptions = match described.get().await {
+        Ok(d) => d,
+        Err(err) => {
+            eprintln!("chaos: describe_topics for {topic} failed (tolerated, sampling continues): {err}");
+            return None;
+        },
+    };
+    let Some(description) = descriptions.get(topic) else {
+        eprintln!("chaos: describe_topics returned no entry for {topic} (tolerated)");
+        return None;
+    };
+    Some(
+        description
+            .partitions()
+            .iter()
+            .map(|info| {
+                (
+                    info.partition(),
+                    PartitionState {
+                        leader: info.leader().map(|n| n.id()),
+                        replicas: info.replicas().iter().map(|n| n.id()).collect(),
+                    },
+                )
+            })
+            .collect(),
+    )
 }
