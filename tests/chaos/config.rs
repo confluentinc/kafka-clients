@@ -92,8 +92,10 @@ pub struct ChaosConfig {
     /// Chaos-monkey mode (`--random`): ignore the per-fault cadences and, each
     /// cycle, let the seeded RNG choose whether an action fires, WHICH fault
     /// (broker-roll / topic-recreate / reassign / change-leader — all are
-    /// candidates), and that fault's parameters (broker index, clean/unclean,
-    /// down duration, dwell). Fully reproducible for a given `seed`.
+    /// candidates for a single-topic run; topic-recreate is EXCLUDED from the
+    /// candidate set under `--num-topics > 1`, a known limitation), and that
+    /// fault's parameters (broker index, clean/unclean, down duration, dwell).
+    /// Fully reproducible for a given `seed`.
     pub random: bool,
     /// In `--random` mode, the per-cycle probability that some action fires
     /// (`--action-prob`, default 0.7). Cycles below the draw are quiet.
@@ -123,8 +125,20 @@ pub struct ChaosConfig {
     pub workloads: Vec<WorkloadSpec>,
     /// Consumer commit mode.
     pub commit_mode: CommitMode,
-    /// Topic name.
+    /// Topic name (or, with `num_topics > 1`, the prefix — topics are then
+    /// named `<topic>_0`, `<topic>_1`, …). See [`Self::topics`].
     pub topic: String,
+    /// Number of test topics (`--num-topics`, default 1). With `> 1`, one
+    /// producer runs per topic (each at `rps`, so aggregate = `num_topics *
+    /// rps`) and consumers subscribe to all topics — mirrors librdkafka.
+    pub num_topics: u16,
+    /// Producer value payload size in bytes (`--msg-size`, default 100). The
+    /// 8-byte big-endian logical index is written into the first bytes of the
+    /// value, padded to this size; the key stays the 8-byte index.
+    pub msg_size: usize,
+    /// Explicit replication factor override (`--replication-factor`). `None` =
+    /// librdkafka's default of `min(brokers, 3)`.
+    pub replication_factor: Option<i16>,
 }
 
 impl ChaosConfig {
@@ -132,6 +146,8 @@ impl ChaosConfig {
     /// librdkafka's defaults for anything unset.
     pub fn from_env() -> Result<Self, String> {
         let brokers = env_parse("CHAOS_BROKERS", 3)?;
+        let num_topics: u16 = env_parse("CHAOS_NUM_TOPICS", 1)?;
+        let random = env_str("CHAOS_RANDOM", "0") == "1";
         let workloads = parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?;
         if workloads.is_empty() {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
@@ -164,6 +180,25 @@ impl ChaosConfig {
             );
         }
 
+        // KNOWN LIMITATION: multi-topic + topic-recreate is not yet supported.
+        // A new-generation (new topic-id) recreate leaves the KIP-848 consumer
+        // positioned past the new generation's tail WITHOUT an offset reset, so
+        // that topic's post-recreate tail is genuinely unconsumed. This is a
+        // separate consumer offset-reset investigation, not a verifier
+        // relaxation. Reject the EXPLICIT combination up front (clean exit, not a
+        // mid-run panic). Single-topic recreate and multi-topic without recreate
+        // both work and are shipped. `--random` handles this by dropping
+        // TopicRecreate from its candidate set under multi-topic (see
+        // `random_plan`), so it is not rejected here.
+        if num_topics > 1 && !random && actions.iter().any(|a| a.kind == ActionKind::TopicRecreate) {
+            return Err("--num-topics > 1 together with topic-recreate is not yet supported: a \
+                 new-generation (new topic-id) recreate leaves the KIP-848 consumer positioned past \
+                 the new generation's tail without an offset reset, so its tail is genuinely \
+                 unconsumed. Tracked as a known limitation. Use --num-topics 1 with \
+                 --topic-recreate, or --num-topics N without recreate."
+                .to_string());
+        }
+
         let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
             "sync" => CommitMode::Sync,
             "async" => CommitMode::Async,
@@ -193,7 +228,7 @@ impl ChaosConfig {
             rps: env_parse("CHAOS_RPS", 200)?,
             leave_broker_down,
             seed: env_parse("CHAOS_SEED", 0)?,
-            random: env_str("CHAOS_RANDOM", "0") == "1",
+            random,
             action_prob: env_parse("CHAOS_ACTION_PROB", 0.7_f64)?,
             dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
             reports: env_str("CHAOS_REPORTS", "0") == "1",
@@ -204,7 +239,27 @@ impl ChaosConfig {
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
+            num_topics,
+            msg_size: env_parse("CHAOS_MSG_SIZE", 100)?,
+            replication_factor: match std::env::var("CHAOS_REPLICATION_FACTOR") {
+                Ok(v) if !v.is_empty() => Some(
+                    v.parse()
+                        .map_err(|_| "CHAOS_REPLICATION_FACTOR must be an integer".to_string())?,
+                ),
+                _ => None,
+            },
         })
+    }
+
+    /// The resolved topic names for this run (librdkafka's topic-naming rule):
+    /// `num_topics == 1` yields `[topic]`; `num_topics > 1` yields
+    /// `[topic_0, topic_1, …, topic_{n-1}]` using `topic` as the prefix.
+    pub fn topics(&self) -> Vec<String> {
+        if self.num_topics <= 1 {
+            vec![self.topic.clone()]
+        } else {
+            (0..self.num_topics).map(|i| format!("{}_{i}", self.topic)).collect()
+        }
     }
 
     pub fn stop_dur(&self) -> Duration {
@@ -249,9 +304,15 @@ impl ChaosConfig {
             format!("[{}]", actions.join(", "))
         };
         format!(
-            "brokers={} partitions={} cycles={} actions={} unclean={} rps={} seed={} workloads=[{}]",
+            "brokers={} topics={} partitions={} replication={} msg_size={} cycles={} actions={} \
+             unclean={} rps={} seed={} workloads=[{}]",
             self.brokers,
+            self.num_topics,
             self.partitions,
+            self.replication_factor
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| format!("min({},3)", self.brokers)),
+            self.msg_size,
             self.cycles,
             actions_desc,
             self.unclean,
