@@ -143,6 +143,19 @@ internal sealed class SendCompletionPump
     private long _processedBatches;
     private int _largestProcessedBatch;
 
+    // Instrumentation: how many sends this pump has taken OFF its queue, counted in DrainAll and so
+    // covering both consumers — RunLoop's capped drain and Stop's terminal one.
+    //
+    // It exists for the M11/P3.1 §3.8 teardown-ordering guard, and it is counted here rather than in
+    // Enqueue or ProcessBatch because only this point is reached on EVERY path a queued send can
+    // take: a send that was enqueued is dequeued exactly once, by one of those two callers, whether
+    // or not the pump loop won the race against Stop's _stopping. So "the accumulator's final drain
+    // reached an OPEN gate" reads as "this equals the number of sends", with no dependence on that
+    // out-of-scope race — whereas ProcessedBatchCount is zero whenever Stop's terminal drain got
+    // there first, which would make the guard flaky in exactly the way it exists to stop being.
+    // Written by the pump thread and by the disposing thread (under _stopLock), hence Interlocked.
+    private long _drainedSends;
+
     // Set by Stop before waking the loop; read by the loop to break out of its wait.
     private volatile bool _stopping;
 
@@ -165,6 +178,13 @@ internal sealed class SendCompletionPump
 
     /// <summary>The record count of the largest batch any pass carried — never above <see cref="DrainCap"/>.</summary>
     internal int LargestProcessedBatch => Volatile.Read(ref _largestProcessedBatch);
+
+    /// <summary>
+    /// The number of sends this pump has taken off its queue — i.e. the number that reached
+    /// <see cref="Enqueue"/> while the gate was still <b>open</b>. The witness for the M11/P3.1
+    /// §3.8 teardown ordering (see <c>_drainedSends</c>).
+    /// </summary>
+    internal long DrainedSendCount => Interlocked.Read(ref _drainedSends);
 
     /// <summary>
     /// Enqueues a resolved-later send. On the normal path the pump completes
@@ -379,6 +399,13 @@ internal sealed class SendCompletionPump
         while (batch.Count < cap && _queue.TryDequeue(out PendingSend pending))
         {
             batch.Add(pending);
+        }
+
+        if (batch.Count > 0)
+        {
+            // Instrumentation only (see _drainedSends) — the single point every queued send passes
+            // through exactly once, whichever of the two callers takes it.
+            Interlocked.Add(ref _drainedSends, batch.Count);
         }
 
         return batch;

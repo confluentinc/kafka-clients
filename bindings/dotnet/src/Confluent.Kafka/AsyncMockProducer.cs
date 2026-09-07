@@ -264,6 +264,14 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         }
     }
 
+    /// <summary>
+    /// <b>Internal test observation point (M11/P3.1 §3.8), not public API.</b> The number of sends
+    /// the completion pump has taken off its queue — the witness for "the accumulator was drained
+    /// into a still-OPEN pump gate". See <c>NativeProducer.DrainedSendCount</c> for why the send
+    /// <see cref="Task"/>s cannot witness that ordering themselves.
+    /// </summary>
+    internal long DrainedSendCount => _native.DrainedSendCount;
+
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 

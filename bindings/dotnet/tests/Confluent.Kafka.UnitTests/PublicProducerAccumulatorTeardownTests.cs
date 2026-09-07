@@ -34,6 +34,13 @@ namespace Confluent.Kafka.UnitTests;
 /// completion loss dressed up as an accepted residual (the pump's fault-in-place branch fires no
 /// delivery callback), which is exactly the kind of defect a "teardown returned" assertion misses.
 /// So these tests assert what the records DID, not merely that <c>Dispose</c> came back.
+/// <para>
+/// ⚠ <b>And "what the records did" has to mean something the inverted ordering cannot also
+/// produce.</b> It did not, at first: the sends' own outcomes are indistinguishable between the two
+/// orderings, because both can fault with the same teardown exception — so the whole suite passed
+/// with the ordering inverted. The witness is now <c>DrainedSendCount</c>; see
+/// <see cref="AssertDrainedIntoTheOpenGate"/> for why it is the only deterministic one.
+/// </para>
 /// </remarks>
 public sealed class PublicProducerAccumulatorTeardownTests
 {
@@ -44,7 +51,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
     private const int SendCount = 24;
 
     [Fact]
-    public void Dispose_DrainsAccumulatorRecords_TheyCompleteRatherThanFault()
+    public void Dispose_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -53,11 +60,11 @@ public sealed class PublicProducerAccumulatorTeardownTests
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        AssertAllCompletedSuccessfully(sends, nameof(producer.Dispose));
+        AssertDrainedIntoTheOpenGate(producer, sends, nameof(producer.Dispose));
     }
 
     [Fact]
-    public async Task DisposeAsync_DrainsAccumulatorRecords_TheyCompleteRatherThanFault()
+    public async Task DisposeAsync_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -66,11 +73,11 @@ public sealed class PublicProducerAccumulatorTeardownTests
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
-        AssertAllCompletedSuccessfully(sends, nameof(producer.DisposeAsync));
+        AssertDrainedIntoTheOpenGate(producer, sends, nameof(producer.DisposeAsync));
     }
 
     [Fact]
-    public async Task Close_DrainsAccumulatorRecords_TheyCompleteRatherThanFault()
+    public async Task Close_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         using AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -79,11 +86,11 @@ public sealed class PublicProducerAccumulatorTeardownTests
 
         await TestTimeout.Run(() => producer.Close(), s_deadline);
 
-        AssertAllCompletedSuccessfully(sends, nameof(producer.Close));
+        AssertDrainedIntoTheOpenGate(producer, sends, nameof(producer.Close));
     }
 
     [Fact]
-    public async Task CloseWithCancellationToken_DrainsAccumulatorRecords_TheyCompleteRatherThanFault()
+    public async Task CloseWithCancellationToken_DrainsAccumulatorRecords_IntoTheStillOpenPumpGate()
     {
         // The fourth flavor: Close(CancellationToken) — the same worker, reached with a live token.
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -94,7 +101,7 @@ public sealed class PublicProducerAccumulatorTeardownTests
 
         await TestTimeout.Run(() => producer.Close(cts.Token), s_deadline);
 
-        AssertAllCompletedSuccessfully(sends, "Close(CancellationToken)");
+        AssertDrainedIntoTheOpenGate(producer, sends, "Close(CancellationToken)");
     }
 
     [Fact]
@@ -238,29 +245,35 @@ public sealed class PublicProducerAccumulatorTeardownTests
             Topic, Encoding.UTF8.GetBytes($"value-{index}"), partition: 0);
 
     /// <summary>
-    /// Asserts the property the §3.8 handshake actually adds: <b>no record the accumulator accepted
-    /// is abandoned</b> — every one settles, and a settled record that carries a result carries the
-    /// right one.
+    /// Asserts the two properties the §3.8 handshake adds: every record the accumulator accepted
+    /// <b>reached the pump's still-open gate</b>, and none of them is left pending.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>Why this does not assert "all succeeded".</b> Two orderings decide a drained record's
-    /// outcome, and only the first belongs to this phase:
-    /// <list type="number">
-    /// <item>the accumulator is drained <b>before</b> the pump's gate closes, so its futures are
-    /// handed over normally instead of taking <c>Enqueue</c>'s fault-in-place branch (residual 1,
-    /// which fires no delivery callback). That is what this slice guarantees, and getting it wrong
-    /// would leave records pending forever — which the pending assertion below catches.</item>
-    /// <item>whether the pump's loop reaches the handed-over batch before <c>Stop</c> sets
-    /// <c>_stopping</c> — if not, <c>Stop</c>'s terminal drain faults it instead. That race is
-    /// <b>pre-existing</b> (it is the same one an Option-C send followed immediately by
-    /// <c>Dispose</c> had), it is a property of <c>SendCompletionPump.Stop</c>, and
-    /// <c>SendCompletionPump.Stop</c> is explicitly out of scope for this phase (§1.5's carve-out
-    /// table). Asserting "all succeeded" would therefore be asserting which side of an unrelated
-    /// race won, and it flaked accordingly.</item>
-    /// </list>
+    /// <para>
+    /// ⚠ <b>The ordering assertion is the count, NOT the sends' outcomes — and that is the whole
+    /// point.</b> Under the inverted ordering (gate closed first) every drained future takes
+    /// <c>Enqueue</c>'s fault-in-place branch, which faults the send with
+    /// <c>SendCompletionPump.TeardownException()</c>: <i>"The producer was closed before the send
+    /// completed."</i> Under the CORRECT ordering a send can fault with that <em>identical</em>
+    /// exception, because the pump's loop may lose the race to <c>Stop</c>'s terminal drain — an
+    /// out-of-scope, pre-existing property of <c>SendCompletionPump.Stop</c> (§1.5's carve-out
+    /// table). So the accepted outcome and the defect share an observable, and no assertion on the
+    /// <see cref="Task"/>s can separate them: this file's earlier "contains 'closed'" tolerance
+    /// accepted both, and the whole suite passed with the ordering inverted.
+    /// </para>
+    /// <para>
+    /// <c>DrainedSendCount</c> separates them, and does so <b>deterministically</b>. It counts sends
+    /// taken off the pump's queue, so it counts exactly those that reached <c>Enqueue</c> while the
+    /// gate was open; every queued send is dequeued exactly once by one of the pump's two
+    /// consumers, whichever won that race. Correct ordering ⇒ all of them; inverted ⇒ none were
+    /// ever queued.
+    /// </para>
     /// </remarks>
-    private static void AssertAllCompletedSuccessfully(Task<RecordMetadata>[] sends, string flavor)
+    private static void AssertDrainedIntoTheOpenGate(
+        AsyncMockProducer<byte[], byte[]> producer, Task<RecordMetadata>[] sends, string flavor)
     {
+        Assert.Equal(sends.Length, producer.DrainedSendCount);
+
         for (int i = 0; i < sends.Length; i++)
         {
             Task<RecordMetadata> send = sends[i];
@@ -274,8 +287,8 @@ public sealed class PublicProducerAccumulatorTeardownTests
             }
             else
             {
-                // Faulted is acceptable ONLY as the teardown outcome above; anything else means the
-                // record failed for a reason this teardown path should not produce.
+                // Faulted is acceptable ONLY as the out-of-scope pump race above; anything else
+                // means the record failed for a reason this teardown path should not produce.
                 KafkaException failure = Assert.IsType<KafkaException>(send.Exception?.InnerException);
                 Assert.Contains("closed", failure.Message, StringComparison.OrdinalIgnoreCase);
             }

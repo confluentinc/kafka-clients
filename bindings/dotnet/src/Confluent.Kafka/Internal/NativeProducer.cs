@@ -1027,6 +1027,23 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         AccumulatorToStop()?.DrainPending(timeout) ?? true;
 
     /// <summary>
+    /// <b>Test observation point (M11/P3.1 §3.8), not public API:</b> how many sends the completion
+    /// pump has taken off its queue — i.e. how many reached <see cref="SendCompletionPump.Enqueue"/>
+    /// while the gate was still <b>open</b>.
+    /// </summary>
+    /// <remarks>
+    /// The teardown ordering (drain the accumulator, THEN close the pump's gate) has no other
+    /// observable: get it the wrong way round and every drained future takes <c>Enqueue</c>'s
+    /// fault-in-place branch, whose exception type and message are the same ones a send legitimately
+    /// gets when the pump's loop lost the race to <c>Stop</c>'s terminal drain — so the accepted
+    /// outcome and the defect share an observable and no assertion on the send's <see cref="Task"/>
+    /// can separate them. This counter can: it is the number that were <em>queued</em>, which the
+    /// inverted ordering drives to zero. Deliberately readable <b>after</b> teardown (no closed
+    /// guard), because after teardown is the only useful time to read it.
+    /// </remarks>
+    internal long DrainedSendCount => PumpToStop()?.DrainedSendCount ?? 0;
+
+    /// <summary>
     /// Completes the next pending mock send successfully (Java <c>MockProducer.completeNext()</c> /
     /// Python <c>complete_next()</c>). Mock only; returns <see langword="false"/> if there is no
     /// pending completion. Inherent on the public <c>AsyncMockProducer</c>, not on the interface.
