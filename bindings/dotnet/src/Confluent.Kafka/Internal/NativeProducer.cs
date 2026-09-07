@@ -470,6 +470,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         // Best-effort cancellation: cancel the WAIT, never abort the enqueued send. Only wire it
         // for a cancelable token so the common Send(record) path stays allocation-free (DoD §10).
+        //
+        // Hoisted out of the `if` so the fast path below can dispose it when Submit throws: the
+        // disposing continuation is chained to `completion`, which that throw leaves unsettled, so
+        // the registration would otherwise stay alive on the caller's token for the token's whole
+        // lifetime. `default` is the not-cancelable case, whose Dispose is a no-op.
+        CancellationTokenRegistration cancellationRegistration = default;
         if (cancellationToken.CanBeCanceled)
         {
             // Cancel WITH the token (M11/P8, Minor 9), so the resulting OperationCanceledException
@@ -482,7 +488,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // The extra allocation is one boxed value tuple on the CANCELABLE path only — the
             // CanBeCanceled guard keeps plain Send(record) allocation-free, so the DoD §10 send-path
             // budget is unaffected.
-            CancellationTokenRegistration registration = cancellationToken.Register(
+            cancellationRegistration = cancellationToken.Register(
                 static state =>
                 {
                     (TaskCompletionSource<RecordMetadata> tcs, CancellationToken token) =
@@ -495,7 +501,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // long-lived token does not retain it.
             completion.Task.ContinueWith(
                 static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
-                registration,
+                cancellationRegistration,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -513,7 +519,22 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // yields, in the separate async method below.
         if (accumulator.TryAcquireSpace())
         {
-            accumulator.Submit(record, completion, delivery);
+            try
+            {
+                accumulator.Submit(record, completion, delivery);
+            }
+            catch (Exception)
+            {
+                // Submit can throw ObjectDisposedException when teardown closed the accumulator
+                // between the guards above and the append. The throw is the documented outcome
+                // (nothing reached the core, so it stays SYNCHRONOUS — D5), but it leaves
+                // `completion` unsettled, so the disposing continuation chained to it never runs.
+                // Release the registration here instead; the slow path routes the same failure
+                // through `completion` and so disposes it that way.
+                cancellationRegistration.Dispose();
+                throw;
+            }
+
             return completion.Task;
         }
 
@@ -731,7 +752,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// flush error via <see cref="KafkaException.FromHandle(IntPtr)"/> — unlike teardown's swallow.
     /// </summary>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a flush failure.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a flush failure, or the binding-side send accumulator did not drain within
+    /// its bound so records buffered in the binding are not covered by this flush.
+    /// </exception>
     internal void Flush()
     {
         ThrowIfClosed();
@@ -740,7 +764,24 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // only when the same NativeProducer was driven through BOTH surfaces — the sync producer
         // never starts an accumulator — but a flush that silently skipped buffered records would be
         // wrong there too, and the blocking form is the right one on an already-blocking method.
-        _ = AccumulatorToStop()?.DrainPending(s_accumulatorDrainTimeout);
+        //
+        // The expiry is SURFACED, not discarded. Returning success here with records still buffered
+        // in the binding is precisely §3.5's Observation-1 failure — flush() returning while records
+        // the caller believes were sent have not reached the core — which this drain exists to fix,
+        // so reintroducing it on a bounded timer would be the same defect with a 30 s fuse.
+        //
+        // The asymmetry with FlushAfterDrain (which awaits DrainPendingAsync with NO timeout) is
+        // deliberate and one-directional: the async caller has a CancellationToken to bound its own
+        // wait with, so an unbounded drain there is Java-faithful (flush() blocks until every
+        // previously-sent record completes) and still escapable. This surface has neither a token
+        // nor any other escape, so it takes a bound — and a bound that expires has to say so.
+        if (AccumulatorToStop()?.DrainPending(s_accumulatorDrainTimeout) == false)
+        {
+            throw new KafkaException(
+                "The producer's send accumulator did not drain within " +
+                $"{s_accumulatorDrainTimeout.TotalSeconds:0} seconds, so records buffered in the " +
+                "binding have not reached the core and this flush did not include them.");
+        }
 
         NativeMethods.ProducerFlush(_handle, out IntPtr error);
         KafkaException? failure = KafkaException.FromHandle(error);
