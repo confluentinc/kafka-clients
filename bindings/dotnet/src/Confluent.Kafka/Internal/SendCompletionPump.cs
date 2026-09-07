@@ -56,10 +56,17 @@ namespace Confluent.Kafka.Internal;
 /// runtime's worker pool (ffi §A1), so a blocked pump delays result delivery but never sending.
 /// </para>
 /// <para>
-/// <b>Backpressure.</b> The queue is structurally unbounded but practically bounded by the core's
-/// <c>buffer.memory</c> backpressure: the inline <c>Producer_send</c> on the caller thread blocks
-/// up to <c>max.block.ms</c> when the core buffer is full, so callers cannot outrun the drain
-/// (PLAN §4 decision 4). No managed bound / hand-cap is added.
+/// <b>Backpressure — the conclusion holds, the mechanism changed (M11/P3.1 §12.4).</b> The queue is
+/// structurally unbounded but remains practically bounded by the core's <c>buffer.memory</c>
+/// backpressure, because <b>a future only enters this queue after the core has accepted its
+/// record</b> — so whatever bounds acceptance bounds the queue. What changed is <em>who</em> waits:
+/// this paragraph used to say the inline <c>Producer_send</c> blocks the <b>caller</b> thread up to
+/// <c>max.block.ms</c>, and on the async path that is no longer true. The caller now appends to the
+/// <see cref="SendAccumulator"/> and returns; it is the <b>send-batch thread</b> that calls
+/// <c>send_batch</c> and blocks on a full core buffer, while the caller is bounded by the
+/// accumulator instead. "No managed bound is added" is likewise no longer true — the accumulator has
+/// its own (Python's <c>PRODUCER_MAX_ACCUMULATED_RECORDS</c>). The <b>sync</b> send still blocks its
+/// own caller inline, exactly as described before.
 /// </para>
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the

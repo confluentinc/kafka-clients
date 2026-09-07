@@ -43,6 +43,9 @@ public sealed class PublicProducerMockControlTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         // The send is pending (manual mode) until completeNext resolves it.
+        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
+        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
+        producer.WaitForSendsToReachCore(s_deadline);
         Assert.True(producer.CompleteNext());
 
         RecordMetadata metadata = null!;
@@ -69,6 +72,12 @@ public sealed class PublicProducerMockControlTests
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+
+        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
+
+        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
+
+        producer.WaitForSendsToReachCore(s_deadline);
 
         Assert.True(producer.ErrorNext(2, "mock-error"));
 

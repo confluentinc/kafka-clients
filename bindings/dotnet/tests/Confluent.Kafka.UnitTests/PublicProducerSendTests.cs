@@ -126,6 +126,9 @@ public sealed class PublicProducerSendTests
         // The next pending send is completed with an error carrying the code + message (code 2 =
         // CorruptMessage, which the core classifies retriable, non-fatal). error_next returns true
         // because there is a pending completion.
+        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
+        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
+        producer.WaitForSendsToReachCore(s_deadline);
         Assert.True(producer.ErrorNext(2, "boom-corrupt-message"));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
@@ -146,6 +149,9 @@ public sealed class PublicProducerSendTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
 
         // A null message uses the code's default message (the ABI's null convention).
+        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
+        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
+        producer.WaitForSendsToReachCore(s_deadline);
         Assert.True(producer.ErrorNext(2));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
@@ -332,6 +338,9 @@ public sealed class PublicProducerSendTests
         // Now resolve the still-pending native send: the pump's TrySetResult on the already-canceled
         // TCS is a safe no-op, and the future handle is freed. complete_next returns true (there was
         // a pending completion), and nothing crashes / hangs.
+        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
+        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
+        producer.WaitForSendsToReachCore(s_deadline);
         Assert.True(producer.CompleteNext());
 
         // The producer stays healthy and disposes cleanly (no leaked/blocked pump).

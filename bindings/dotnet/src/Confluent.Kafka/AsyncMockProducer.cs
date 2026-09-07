@@ -233,6 +233,30 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
 
+    /// <summary>
+    /// <b>Internal test hook (M11/P3.1 §9), not public API.</b> Blocks until every <c>Send</c> made
+    /// so far has been handed to the core by the send-batch thread — the deterministic replacement
+    /// for a <c>Thread.Sleep</c> in the manual-completion tests.
+    /// </summary>
+    /// <remarks>
+    /// Since M11/P3.1 the async <c>Send</c> is <b>deferred</b>: it appends to a binding-side
+    /// accumulator and returns, and a batch thread hands the record to the core on a threshold or a
+    /// free-running window. A manual-mode test that calls <see cref="CompleteNext"/> immediately
+    /// after <c>Send</c> can therefore find no pending completion yet — a timing shift, not a defect.
+    /// <see cref="Flush"/> is not the answer for those tests: on a mock it <em>completes</em> the
+    /// pending sends, which is exactly what they are trying to drive by hand.
+    /// </remarks>
+    /// <param name="timeout">How long to wait for the accumulator to reach the core.</param>
+    /// <exception cref="TimeoutException">The pending sends did not reach the core in time.</exception>
+    internal void WaitForSendsToReachCore(TimeSpan timeout)
+    {
+        if (!_native.DrainPendingSends(timeout))
+        {
+            throw new TimeoutException(
+                $"Pending sends did not reach the core within {timeout}.");
+        }
+    }
+
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 

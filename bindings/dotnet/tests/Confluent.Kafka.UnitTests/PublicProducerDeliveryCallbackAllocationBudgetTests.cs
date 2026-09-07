@@ -64,11 +64,22 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 
     private const int LargeValueSize = 512 * 1024;
 
-    // MEASURED on this branch (net10.0, arm64): the plain path costs exactly 280 B/send on the
-    // caller thread — the ProducerRecord, the TCS + its Task, and the small topic pin. The ceiling
-    // leaves headroom for runtime / TFM variation while still catching what it guards: a
-    // value-sized managed copy would add ~LargeValueSize bytes per send, and a Task-scoped pin
-    // would show here too.
+    // MEASURED on this branch (net10.0, arm64): the plain path costs ~280 B/send on the caller
+    // thread — the ProducerRecord and the TCS + its Task. The ceiling leaves headroom for runtime /
+    // TFM variation while still catching what it guards: a value-sized managed copy would add
+    // ~LargeValueSize bytes per send, and a Task-scoped pin would show here too.
+    //
+    // RE-BASELINED for M11/P3.1 (the DoD §10 obligation the accumulator brings). Two send-path costs
+    // moved and the budget still holds at 512 B:
+    //   * GONE — the per-send topic pin. The async path interns ONE permanently-pinned buffer per
+    //     DISTINCT topic (§4.1), so a steady-state send allocates nothing for its topic at all.
+    //   * NEW — the accumulator node's parallel arrays, which are a per-NODE cost the caller thread
+    //     pays when it grows or allocates one. Two things keep it off the per-send budget: the
+    //     record is marshalled into its blittable slot at append time rather than stored (so the
+    //     node has no per-slot SerializedProducerRecord, its widest field), and a drained node is
+    //     RECYCLED rather than re-allocated — so at steady state the node contributes zero.
+    // The remaining measurement is therefore essentially unchanged from Option C, which is why this
+    // number did not have to move.
     private const long PlainPerSendBudgetBytes = 512;
 
     // MEASURED: the callback path costs 320 B/send — a delta of EXACTLY 40 B, which is one
