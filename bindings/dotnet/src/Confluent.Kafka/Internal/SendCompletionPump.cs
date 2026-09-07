@@ -101,6 +101,21 @@ namespace Confluent.Kafka.Internal;
 /// </remarks>
 internal sealed class SendCompletionPump
 {
+    /// <summary>
+    /// The maximum number of completions one <c>get_all</c> pass handles — Python's
+    /// <c>PRODUCER_RECORD_SLOT_CAPACITY</c> (1100), the size of the anchor's own <c>get_all</c>
+    /// output arrays (<c>_confluentkafka.c:429-430</c>) and of one <c>BatchNode</c>, which is what
+    /// its poll thread processes per iteration (<c>:480-513</c>).
+    /// </summary>
+    /// <remarks>
+    /// Derived from the <b>default</b> constants, not from a producer's (possibly overridden)
+    /// settings, exactly as the anchor's arrays are sized by a compile-time <c>#define</c>: this is a
+    /// bound on one marshalling pass, not a tuning knob, and the pump is shared machinery that
+    /// predates any per-producer settings.
+    /// </remarks>
+    internal const int DrainCap =
+        SendAccumulatorSettings.DefaultSlotThreshold + SendAccumulatorSettings.SlotCapacityHeadroom;
+
     private readonly ConcurrentQueue<PendingSend> _queue = new ConcurrentQueue<PendingSend>();
 
     // Signals "items may be available". Reset-before-drain (see RunLoop) avoids a lost wakeup.
@@ -111,6 +126,12 @@ internal sealed class SendCompletionPump
     private readonly object _stopLock = new object();
 
     private readonly Thread _thread;
+
+    // Instrumentation, written only by the pump thread: the number of ProcessBatch passes and the
+    // largest batch any pass carried. The cap (§12.2) is asserted by these — "the completions all
+    // resolved" would be satisfied by an uncapped drain too, so it cannot tell the cap is in force.
+    private long _processedBatches;
+    private int _largestProcessedBatch;
 
     // Set by Stop before waking the loop; read by the loop to break out of its wait.
     private volatile bool _stopping;
@@ -128,6 +149,12 @@ internal sealed class SendCompletionPump
         };
         _thread.Start();
     }
+
+    /// <summary>The number of <c>ProcessBatch</c> passes the pump thread has run.</summary>
+    internal long ProcessedBatchCount => Interlocked.Read(ref _processedBatches);
+
+    /// <summary>The record count of the largest batch any pass carried — never above <see cref="DrainCap"/>.</summary>
+    internal int LargestProcessedBatch => Volatile.Read(ref _largestProcessedBatch);
 
     /// <summary>
     /// Enqueues a resolved-later send. On the normal path the pump completes
@@ -241,6 +268,13 @@ internal sealed class SendCompletionPump
 
             // Reset BEFORE draining so an Enqueue during/after the drain re-sets the event (no lost
             // wakeup): a missed item's Set lands after this Reset, so the next Wait returns.
+            //
+            // ⚠ THIS ORDERING IS STILL LOAD-BEARING AND STILL DOES ITS OWN JOB, alongside the inner
+            // loop below. The two cover different things: the inner loop handles leftovers this
+            // thread already KNOWS about (the drain hit the cap), while the Reset ordering handles
+            // items arriving CONCURRENTLY — their Set lands after this Reset, so the next Wait
+            // returns. Neither subsumes the other; do not "simplify" the ordering away because the
+            // inner loop looks like it covers the same ground.
             _signal.Reset();
 
             if (_stopping)
@@ -249,9 +283,34 @@ internal sealed class SendCompletionPump
                 break;
             }
 
-            List<PendingSend> batch = DrainAll();
-            if (batch.Count > 0)
+            // ⚠ INNER DRAIN LOOP — THE HANG FIX (M11/P3.1 §12.2.1). DrainAll is now CAPPED, and the
+            // outer loop's correctness used to rest on it always emptying the queue. Capping without
+            // this loop is a DETERMINISTIC hang, not a race, and needs no concurrency to reproduce:
+            // a queue of 3000 leaves 1900 behind, the next iteration blocks on _signal.Wait() — reset
+            // above and only Set by a new Enqueue — and with no further sends those 1900 completions
+            // and every awaiting Task hang forever.
+            //
+            // Keep draining and processing capped batches until a drain comes back SHORT (fewer than
+            // the cap, i.e. the queue is empty), and only then fall through to the Wait. That is
+            // precisely the anchor's shape: its poll thread completes one node, advances to
+            // next_batch, and cnd_waits ONLY while that is NULL (_confluentkafka.c:504-506).
+            //
+            // Deliberately NOT "call _signal.Set() when items remain": the loop is clearer, is what
+            // the anchor does, and does not depend on reasoning about a self-signal racing a Reset.
+            while (true)
             {
+                List<PendingSend> batch = DrainAll(DrainCap);
+                if (batch.Count == 0)
+                {
+                    break;
+                }
+
+                Interlocked.Increment(ref _processedBatches);
+                if (batch.Count > _largestProcessedBatch)
+                {
+                    Volatile.Write(ref _largestProcessedBatch, batch.Count);
+                }
+
                 try
                 {
                     ProcessBatch(batch);
@@ -274,15 +333,40 @@ internal sealed class SendCompletionPump
                     // marshalling throw that escapes ProcessBatch.)
                     FaultBatchCompletions(batch, exception);
                 }
+
+                if (batch.Count < DrainCap)
+                {
+                    // A SHORT drain means the queue ran out, so there is nothing known to be left —
+                    // fall through to the Wait. Exactly-at-the-cap loops again, because the queue may
+                    // hold more.
+                    break;
+                }
             }
         }
     }
 
-    /// <summary>Drains every currently-queued send into a batch (lock-free).</summary>
-    private List<PendingSend> DrainAll()
+    /// <summary>
+    /// Drains up to <paramref name="cap"/> queued sends into a batch (lock-free). Pass
+    /// <see cref="int.MaxValue"/> for "everything".
+    /// </summary>
+    /// <remarks>
+    /// <b>The cap is Python parity</b> (M11/P3.1 §12.2). The anchor's poll-futures thread processes
+    /// <b>one <c>BatchNode</c> at a time</b> (<c>_confluentkafka.c:480-513</c>) and sizes its
+    /// <c>get_all</c> output arrays at <c>PRODUCER_RECORD_SLOT_CAPACITY</c> (<c>:429-430</c>), so its
+    /// per-call completion batch is at most 1100. This drain used to empty the whole
+    /// <see cref="ConcurrentQueue{T}"/> and allocate three <c>IntPtr[count]</c> over whatever it
+    /// found — unbounded by construction, and the one place the two bindings' constants diverged.
+    /// <para>
+    /// ⚠ <b>Capping this made <see cref="RunLoop"/>'s inner drain loop mandatory</b> — see the hang
+    /// analysis there. And the cap belongs <b>here only</b>: see
+    /// <see cref="DrainAndFaultRemaining"/> for why capping the terminal drain would be a defect
+    /// rather than a symmetry.
+    /// </para>
+    /// </remarks>
+    private List<PendingSend> DrainAll(int cap)
     {
         List<PendingSend> batch = new List<PendingSend>();
-        while (_queue.TryDequeue(out PendingSend pending))
+        while (batch.Count < cap && _queue.TryDequeue(out PendingSend pending))
         {
             batch.Add(pending);
         }
@@ -471,10 +555,18 @@ internal sealed class SendCompletionPump
     /// <c>close()</c> cancels the pending futures without invoking <c>on_delivery</c>). Firing a
     /// fabricated failure here would also reintroduce a double-fire hazard, since the core may still
     /// deliver these records.
+    /// <para>
+    /// ⚠ <b>This drain is deliberately UNCAPPED, and capping it would be a defect, not a symmetry</b>
+    /// (M11/P3.1 §12.2.2). Two reasons, either sufficient: it <b>faults</b> rather than calling
+    /// <c>get_all</c>, so it allocates <b>none</b> of the three marshalling arrays the cap exists to
+    /// bound; and it is the <b>last thing that ever touches the queue</b>, so a cap would strand
+    /// every send past it — their <see cref="TaskCompletionSource{TResult}"/>s never completed, their
+    /// awaiters hanging forever, and their future handles never destroyed.
+    /// </para>
     /// </remarks>
     private void DrainAndFaultRemaining()
     {
-        List<PendingSend> batch = DrainAll();
+        List<PendingSend> batch = DrainAll(int.MaxValue);
         if (batch.Count == 0)
         {
             return;
