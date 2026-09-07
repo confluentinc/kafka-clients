@@ -28,8 +28,10 @@ row below is out of scope until KIP-932 lands in `src/`
 | Flag | librdkafka default | Ours |
 |---|---|---|
 | `--brokers` | 3 | ✅ CLI flag |
+| `--num-topics` | 1 | ✅ `--num-topics` — `>1` uses `--topic` as prefix (`<topic>_0..N-1`), one producer per topic (each at `--rps`, aggregate = N×rps), consumers subscribe to all; change-leader/reassign iterate all topics (matches librdkafka). **topic-recreate is not supported with `>1`** — rejected up front / dropped from random (see limitation row) |
 | `--partitions` | 3 | ✅ CLI flag |
-| `--replication` | 3 | 🟡 derived (min(brokers,3)), not a flag |
+| `--replication-factor` | min(brokers,3) | ✅ `--replication-factor` (default min(brokers,3); FATAL if > brokers, matches librdkafka) |
+| `--msg-size` | 100 | ✅ `--msg-size` — value = 8-byte index padded to N bytes; key stays the 8-byte index |
 | `--cycles` | 3 | ✅ CLI flag (multi-cycle) |
 | `--stop-s` / `--up-s` | 5 / 5 | ✅ `--stop-s` / `--up-wait-s` |
 | `--drain-s` | 30 | ✅ `--drain-s` |
@@ -58,7 +60,8 @@ row below is out of scope until KIP-932 lands in `src/`
 | Multi-cycle roll, seeded order | ✅ | ✅ `--cycles` + `--seed` (verified 3 brokers × 1 cycle) | — |
 | `change-leader` (preferred election, no data move) | ✅ | ✅ `--change-leader` (effect-verified) | reorder replicas (same set, no data move) → elect preferred → **verify EACH partition's leader == planned first replica** (A3, ≥⅔ tolerance for transient election failures) |
 | `reassign-partitions` (data move) | ✅ | ✅ `--reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert replica set changed AND verify EACH partition's leader == planned first replica** (A3) |
-| Topic delete/recreate (immediate) | ✅ | ✅ `--topic-recreate` (effect-verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted; **asserts the topic_id changed** (new generation, not the old topic lingering) |
+| Topic delete/recreate (immediate) | ✅ | ✅ `--topic-recreate` (effect-verified, **single-topic only** — see limitation row) | delete → wait-absent → recreate; auto-create disabled; per-topic expected-loss accounted via a **recreate blackout window** (unobserved records below the consumer's post-recreate resume point on the recreated topic are excused — the same-id reset skip — while loss on other topics still fails); a recreate arms a **drain settle** so early-drain waits for the consumer to resume before quiescing; delayed recreate additionally **asserts the topic_id changed** |
+| Multi-topic + topic-recreate | ✅ | ⏸ **deferred (known limitation)** | `--num-topics > 1` with `--topic-recreate` is **rejected** with a clear error; `--random` under multi-topic drops recreate from candidates. Root cause (diagnosed, not a harness artifact): a new-generation (new topic-id) recreate leaves the KIP-848 consumer positioned past the new generation's tail **without** an offset reset (no `OffsetOutOfRange`/reset fires), so that topic's post-recreate tail is genuinely unconsumed. Tracked as a separate consumer offset-reset investigation. Single-topic recreate and multi-topic-without-recreate both ship and pass with 0 loss. |
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
 | Rebalance overlapping a broker roll in time (`--rebalance-mid-roll`) | ✅ | ✅ `--rebalance-mid-roll` | fires the add/remove **inside the roll's down-window** (`ChaosAction::execute_with_hook`), so the group reassignment is in flight while leaders migrate — a leader change and an assignment change around the same time. Falls back to top-of-cycle when no roll fires that cycle. |
