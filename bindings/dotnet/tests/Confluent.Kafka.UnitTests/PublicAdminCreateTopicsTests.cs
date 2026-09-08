@@ -57,9 +57,13 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("mixed-bad", 1, 5),
         });
 
-        TopicMetadataAndConfig created = default!;
-        await TestTimeout.Run(async () => created = await result.Values["mixed-ok"], s_deadline);
-        Assert.Equal(2, created.NumPartitions());
+        // `Values` is Java's `values()` — Map<String, KafkaFuture<Void>>: it says whether
+        // the topic was created, and the metadata comes from the typed accessors.
+        await TestTimeout.Run(() => result.Values["mixed-ok"], s_deadline);
+
+        int numPartitions = 0;
+        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("mixed-ok"), s_deadline);
+        Assert.Equal(2, numPartitions);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.Values["mixed-bad"], s_deadline));
@@ -147,7 +151,7 @@ public sealed class PublicAdminCreateTopicsTests
         });
 
         int numPartitions = 0;
-        short replicationFactor = 0;
+        int replicationFactor = 0;
         Uuid topicId = Uuid.Zero;
         Config config = default!;
 
@@ -157,7 +161,7 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(async () => config = await result.Config(Topic), s_deadline);
 
         Assert.Equal(4, numPartitions);
-        Assert.Equal((short)2, replicationFactor);
+        Assert.Equal(2, replicationFactor);
         Assert.NotEqual(Uuid.Zero, topicId);
 
         // The id round-trips through the ABI's base64 text form.

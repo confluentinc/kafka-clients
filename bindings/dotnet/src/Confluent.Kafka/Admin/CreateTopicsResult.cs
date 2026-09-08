@@ -46,16 +46,51 @@ namespace Confluent.Kafka.Admin;
 public sealed class CreateTopicsResult
 {
     private readonly IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> _values;
+    private readonly IReadOnlyDictionary<string, Task> _erasedValues;
 
     internal CreateTopicsResult(IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> values)
     {
         _values = values;
+
+        // Java's `values()` publishes `Map<String, KafkaFuture<Void>>` — the metadata is
+        // deliberately erased and the private map is never handed out. Restore that:
+        // this view is the ONLY thing `Values` exposes, and the metadata is reachable
+        // solely through the four typed accessors below.
+        Dictionary<string, Task> erased =
+            new Dictionary<string, Task>(values.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in values)
+        {
+            erased.Add(entry.Key, entry.Value);
+        }
+
+        _erasedValues = erased;
     }
 
     /// <summary>
-    /// One awaitable per requested topic, keyed by topic name — Java's <c>values()</c>.
+    /// One awaitable per requested topic, keyed by topic name — Java's
+    /// <c>values()</c>, whose declared type is
+    /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>.
     /// </summary>
-    public IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> Values => _values;
+    /// <remarks>
+    /// <para>
+    /// Awaiting one of these tells you <b>whether that topic was created</b> and nothing
+    /// more: it completes on success and faults with that topic's own
+    /// <see cref="KafkaException"/> on failure. That is Java's contract exactly —
+    /// <c>CreateTopicsResult.java:43-48</c> derives this view from its private
+    /// <c>Map&lt;String, KafkaFuture&lt;TopicMetadataAndConfig&gt;&gt;</c> with
+    /// <c>thenApply(v -&gt; null)</c>, so a Java caller never receives the metadata from
+    /// <c>values()</c> either. Read the metadata through <see cref="Config"/>,
+    /// <see cref="TopicId"/>, <see cref="NumPartitions"/> or
+    /// <see cref="ReplicationFactor"/>.
+    /// </para>
+    /// <para>
+    /// The erasure is expressed here as a reference upcast rather than as a derived task
+    /// — the declared surface is identical, and it keeps a failed topic's exception
+    /// <em>identity</em> intact, where a derived continuation would nest it a level
+    /// deeper than the typed accessors report.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyDictionary<string, Task> Values => _erasedValues;
 
     /// <summary>
     /// Completes when <b>every</b> topic has been created, and faults with the first
@@ -100,7 +135,7 @@ public sealed class CreateTopicsResult
     /// <returns>The replication factor the topic was created with.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="topic"/> was not part of this request.</exception>
-    public Task<short> ReplicationFactor(string topic) => Apply(topic, static value => value.ReplicationFactor());
+    public Task<int> ReplicationFactor(string topic) => Apply(topic, static value => value.ReplicationFactor());
 
     /// <summary>
     /// The .NET spelling of Java's <c>KafkaFuture.thenApply</c>: derive a narrower

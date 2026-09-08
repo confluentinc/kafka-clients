@@ -27,8 +27,21 @@ namespace Confluent.Kafka.Admin;
 /// <c>config_is_sensitive</c> / <c>config_is_read_only</c>), so those five are what a
 /// <see cref="ConfigEntry"/> can carry here. Java's <c>source()</c>, <c>type()</c>,
 /// <c>documentation()</c> and <c>synonyms()</c> arrive with <c>describeConfigs</c>,
-/// whose <c>kafka_admin_ConfigEntry_t</c> accessors do expose them; adding them later
-/// is purely additive.
+/// whose <c>kafka_admin_ConfigEntry_t</c> accessors do expose them.
+/// <para>
+/// ⚠ <b><see cref="IsDefault"/> is where that growth is not merely additive.</b> In Java
+/// <c>isDefault()</c> is <em>derived</em> — <c>return source == ConfigSource.DEFAULT_CONFIG</c>
+/// (<c>ConfigEntry.java:102-104</c>) — and neither public Java constructor takes it. The
+/// ABI, however, flattens it into its own accessor
+/// (<c>kafka_admin_TopicMetadataAndConfig_config_is_default</c>) with no source alongside
+/// it, so carrying it as a stored <b>property</b> is forced. Publishing a
+/// <em>constructor</em> parameter for it is not, and would let a caller build an entry
+/// whose <see cref="IsDefault"/> and future <c>Source</c> disagree — a state Java cannot
+/// represent. Hence the flag-taking constructor is <see langword="internal"/>: only the
+/// result marshaller, which reads both from the same broker response, sets it. When
+/// <c>Source</c> lands it becomes the source of truth and
+/// <see cref="IsDefault"/> derives from it, exactly as in Java.
+/// </para>
 /// </remarks>
 public sealed class ConfigEntry
 {
@@ -46,16 +59,22 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// Initializes a configuration entry with its flags. Used by the result marshaller
-    /// to reproduce what the broker reported.
+    /// Initializes a configuration entry with its flags, for the result marshaller to
+    /// reproduce what the broker reported.
     /// </summary>
+    /// <remarks>
+    /// <b>Deliberately <see langword="internal"/>, and it has no Java counterpart</b>
+    /// (<c>definition-of-done.md</c> §7): Java's two public constructors take
+    /// <c>source</c>, never <c>isDefault</c> — see the type remarks for why publishing
+    /// this one would create a state Java cannot represent.
+    /// </remarks>
     /// <param name="name">The configuration key.</param>
     /// <param name="value">The configuration value, or <see langword="null"/>.</param>
     /// <param name="isDefault">Whether the value is the broker default (Java's <c>isDefault()</c>).</param>
     /// <param name="isSensitive">Whether the value is sensitive and therefore redacted (Java's <c>isSensitive()</c>).</param>
     /// <param name="isReadOnly">Whether the entry cannot be changed (Java's <c>isReadOnly()</c>).</param>
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
-    public ConfigEntry(string name, string? value, bool isDefault, bool isSensitive, bool isReadOnly)
+    internal ConfigEntry(string name, string? value, bool isDefault, bool isSensitive, bool isReadOnly)
     {
         Name = name ?? throw new ArgumentNullException(nameof(name));
         Value = value;

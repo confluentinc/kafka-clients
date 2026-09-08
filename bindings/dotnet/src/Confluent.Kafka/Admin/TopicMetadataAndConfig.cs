@@ -44,7 +44,11 @@ public sealed class TopicMetadataAndConfig
     private readonly KafkaException? _exception;
     private readonly Uuid _topicId;
     private readonly int _numPartitions;
-    private readonly short _replicationFactor;
+
+    // `int`, not `short` — Java's RESULT side is `int replicationFactor`
+    // (CreateTopicsResult.java:112/115/141) and the ABI agrees (`int32_t`). `short` is
+    // the REQUEST side only (NewTopic.replicationFactor()).
+    private readonly int _replicationFactor;
     private readonly Config? _config;
 
     /// <summary>
@@ -55,7 +59,7 @@ public sealed class TopicMetadataAndConfig
     /// <param name="replicationFactor">The replication factor.</param>
     /// <param name="config">The topic's configuration.</param>
     /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
-    public TopicMetadataAndConfig(Uuid topicId, int numPartitions, short replicationFactor, Config config)
+    public TopicMetadataAndConfig(Uuid topicId, int numPartitions, int replicationFactor, Config config)
     {
         _topicId = topicId;
         _numPartitions = numPartitions;
@@ -102,7 +106,7 @@ public sealed class TopicMetadataAndConfig
     /// <summary>The replication factor (Java's <c>replicationFactor()</c>).</summary>
     /// <returns>The replication factor the topic was created with.</returns>
     /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
-    public short ReplicationFactor()
+    public int ReplicationFactor()
     {
         EnsureSuccess();
         return _replicationFactor;

@@ -148,9 +148,12 @@ internal abstract class AdminOperation
 /// <b>Foreign-thread completion.</b> Every source is built with
 /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>. This is
 /// <b>mandatory</b>, and sharper here than for the consumer: an admin callback can fire
-/// <em>synchronously on the submitting thread, before the entry point returns</em>, on
-/// ordinary bad input — so without it an awaiter's continuation would run inside the
-/// caller's own P/Invoke.
+/// <em>synchronously on the submitting thread, before the entry point returns</em> — so
+/// without it an awaiter's continuation would run inside the caller's own P/Invoke. The
+/// header documents that inline path for both of P1's entry points (trigger: a NULL
+/// <c>admin</c> handle); the wider "ordinary bad input" trigger set belongs to
+/// later-phase entry points and is stated in <c>src/ffi/admin.rs:56-63</c>, not in the
+/// header — see <see cref="Interop.AdminCallbacks"/>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TValue">The already-marshalled managed per-key result type.</typeparam>

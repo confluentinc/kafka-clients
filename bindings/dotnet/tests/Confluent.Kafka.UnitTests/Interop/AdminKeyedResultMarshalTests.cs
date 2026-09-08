@@ -167,7 +167,7 @@ public sealed class AdminKeyedResultMarshalTests
         TopicMetadataAndConfig value = await operation.Tasks[GoodTopic];
         Assert.True(value.HasMetadata);
         Assert.Equal(3, value.NumPartitions());
-        Assert.Equal((short)1, value.ReplicationFactor());
+        Assert.Equal(1, value.ReplicationFactor());
         Assert.NotEqual(Uuid.Zero, value.TopicId());
 
         ConfigEntry entry = Assert.IsType<ConfigEntry>(value.Config().Get("cleanup.policy"));

@@ -41,8 +41,15 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// <summary>The number of bytes a Kafka <see cref="Uuid"/> occupies.</summary>
     private const int ByteCount = 16;
 
-    /// <summary>The length of the unpadded base64 text form of 16 bytes.</summary>
-    private const int TextLength = 22;
+    /// <summary>
+    /// Java's own "too long" bound — <c>str.length() &gt; 24</c> (<c>Uuid.java:131</c>).
+    /// The canonical form is 22 unpadded characters, but the extra two are Java's
+    /// tolerance for the <b>padded</b> 24-character form, which
+    /// <c>Base64.getUrlDecoder()</c> decodes to exactly 16 bytes and <c>fromString</c>
+    /// therefore accepts. Gating at 22 would reject that, and would also report a 23- or
+    /// 24-character input as "too long" where Java reports the decoded byte count.
+    /// </summary>
+    private const int MaxTextLength = 24;
 
     /// <summary>
     /// Initializes a new instance from its two 64-bit halves (Java's
@@ -84,13 +91,28 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// Parses the URL-safe, unpadded base64 text form — Java's
     /// <c>Uuid.fromString(String)</c>.
     /// </summary>
-    /// <param name="value">The 22-character base64 text.</param>
+    /// <param name="value">The 22-character base64 text (a padded 24-character form is accepted too).</param>
     /// <returns>The parsed identifier.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="value"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="value"/> is longer than 22 characters, or does not decode to
-    /// exactly 16 bytes — the two conditions Java rejects with
-    /// <c>IllegalArgumentException</c>, with the same messages.
+    /// <paramref name="value"/> is rejected. Three conditions do that, and each matches
+    /// what Java's <c>fromString</c> rejects:
+    /// <list type="bullet">
+    /// <item><description>
+    /// longer than 24 characters (Java's own bound, <c>Uuid.java:131</c>) — <b>same
+    /// message</b> as Java;
+    /// </description></item>
+    /// <item><description>
+    /// it decodes to some number of bytes other than 16 — <b>same message</b> as Java;
+    /// </description></item>
+    /// <item><description>
+    /// it is not valid URL-safe base64 — including a literal <c>+</c> or <c>/</c>, which
+    /// Java's <c>Base64.getUrlDecoder()</c> rejects. The <b>message here is this
+    /// binding's own</b>, not Java's: Java surfaces the JDK decoder's text
+    /// (<c>"Illegal base64 character 2b"</c>), which is an implementation detail of the
+    /// decoder rather than part of Kafka's contract.
+    /// </description></item>
+    /// </list>
     /// </exception>
     public static Uuid Parse(string value)
     {
@@ -99,20 +121,20 @@ public readonly struct Uuid : IEquatable<Uuid>
             throw new ArgumentNullException(nameof(value));
         }
 
-        if (value.Length > TextLength)
+        if (value.Length > MaxTextLength)
         {
             throw new ArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string with prefix `{0}` is too long to be decoded as a base64 UUID",
-                    value.Substring(0, TextLength)),
+                    value.Substring(0, MaxTextLength)),
                 nameof(value));
         }
 
         byte[] bytes;
         try
         {
-            bytes = Convert.FromBase64String(ToStandardBase64(value));
+            bytes = DecodeUrlSafeBase64(value);
         }
         catch (FormatException exception)
         {
@@ -150,7 +172,7 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// <returns><see langword="true"/> if <paramref name="value"/> parsed.</returns>
     public static bool TryParse(string? value, out Uuid result)
     {
-        if (value is null || value.Length > TextLength)
+        if (value is null || value.Length > MaxTextLength)
         {
             result = Zero;
             return false;
@@ -159,7 +181,7 @@ public readonly struct Uuid : IEquatable<Uuid>
         byte[] bytes;
         try
         {
-            bytes = Convert.FromBase64String(ToStandardBase64(value));
+            bytes = DecodeUrlSafeBase64(value);
         }
         catch (FormatException)
         {
@@ -210,9 +232,35 @@ public readonly struct Uuid : IEquatable<Uuid>
     }
 
     /// <summary>
-    /// Converts the URL-safe, unpadded form back to standard base64 so
-    /// <see cref="Convert.FromBase64String(string)"/> can read it (the floor has no
-    /// base64url decoder).
+    /// Decodes the URL-safe base64 text the way Java's
+    /// <c>Base64.getUrlDecoder()</c> does, throwing <see cref="FormatException"/> on
+    /// anything it would reject.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The alphabet screen is the load-bearing part. The floor has no base64url
+    /// decoder, so the text is translated to the standard alphabet and handed to
+    /// <see cref="Convert.FromBase64String(string)"/> — which <b>accepts</b> the standard
+    /// <c>+</c> and <c>/</c> that Java's URL decoder rejects. Without this screen,
+    /// <c>Parse("AAAAAAAAAAAAAAAAAAAA+/")</c> would succeed here and throw in Java, and
+    /// the resulting <see cref="Uuid"/> would print a <em>different</em> string from the
+    /// one it was parsed from.
+    /// </remarks>
+    private static byte[] DecodeUrlSafeBase64(string value)
+    {
+        // IndexOf(char) is ordinal, so this is a plain character scan.
+        if (value.IndexOf('+') >= 0 || value.IndexOf('/') >= 0)
+        {
+            throw new FormatException(
+                "Input contains a character outside the URL-safe base64 alphabet.");
+        }
+
+        return Convert.FromBase64String(ToStandardBase64(value));
+    }
+
+    /// <summary>
+    /// Converts the URL-safe form back to standard base64, re-padding to a multiple of
+    /// four, so <see cref="Convert.FromBase64String(string)"/> can read it (the floor has
+    /// no base64url decoder).
     /// </summary>
     private static string ToStandardBase64(string value)
     {

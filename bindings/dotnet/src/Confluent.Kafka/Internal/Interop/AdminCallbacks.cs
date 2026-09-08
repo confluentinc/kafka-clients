@@ -31,13 +31,25 @@ namespace Confluent.Kafka.Internal.Interop;
 /// ⚠ <b>An admin callback can fire on one of three threads, and one of them is
 /// yours.</b> Normally it runs on the client's dispatcher thread. It runs
 /// <b>synchronously on the submitting thread, before the entry point returns</b>, when
-/// the RPC cannot be submitted at all — and the header is explicit that this covers
-/// argument-marshaling failure on <em>ordinary bad input</em>, not merely a programming
-/// error, so the path is reachable in normal operation. And it runs on a tokio worker
-/// thread if the dispatcher died. The header therefore disclaims serialisation
-/// outright: "callbacks are not guaranteed to be serialised on one thread. Do not hold a
-/// lock across this call and re-acquire it in the callback, and publish everything the
-/// callback needs (including <c>user_data</c>) before calling rather than after."
+/// the RPC cannot be submitted at all. And it runs on a tokio worker thread if the
+/// dispatcher died. The header therefore disclaims serialisation outright: "callbacks
+/// are not guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in the callback, and publish everything the callback needs
+/// (including <c>user_data</c>) before calling rather than after."
+/// </para>
+/// <para>
+/// <b>How wide the inline path is, cited precisely.</b> For the two entry points this
+/// class serves, the header documents exactly one trigger: <em>a NULL <c>admin</c>
+/// handle</em> (<c>confluent_kafka.h</c>, <c>create_topics_async</c> /
+/// <c>close_async</c>). The family-wide trigger set is larger and does include
+/// argument-marshaling failure on ordinary bad input — an unparseable base64 topic id,
+/// an unknown <c>AlterConfigOp.OpType</c> code — but that statement lives in
+/// <c>src/ffi/admin.rs:56-63</c>, a <c>//!</c> module doc <b>cbindgen does not emit</b>,
+/// and its triggers belong to entry points later phases will declare. This class is the
+/// family-wide one, so it is written for the wider set deliberately: every consequence
+/// below is a no-cost invariant, and being ready for an inline callback that cannot
+/// happen yet costs nothing, while not being ready when P2 declares
+/// <c>delete_topics_by_ids_async</c> would cost a great deal.
 /// </para>
 /// <para>
 /// Three consequences are enforced here and at the submit site: the delegates are

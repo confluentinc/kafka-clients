@@ -74,9 +74,10 @@ internal static class TopicMetadataAndConfigMarshal
 
         int numPartitions = NativeMethods.TopicMetadataAndConfigNumPartitions(metadataAndConfig);
 
-        // The ABI widens Java's `short` replication factor to int32_t; narrow it back.
-        short replicationFactor =
-            (short)NativeMethods.TopicMetadataAndConfigReplicationFactor(metadataAndConfig);
+        // `int` end to end: the ABI reports `int32_t` and Java's result-side accessor is
+        // `int replicationFactor()` (CreateTopicsResult.java:141), so nothing is narrowed
+        // here. (`short` belongs to the request side, NewTopic.replicationFactor().)
+        int replicationFactor = NativeMethods.TopicMetadataAndConfigReplicationFactor(metadataAndConfig);
 
         return new TopicMetadataAndConfig(topicId, numPartitions, replicationFactor, CopyOutConfig(metadataAndConfig));
     }

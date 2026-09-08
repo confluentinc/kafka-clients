@@ -95,19 +95,33 @@ public sealed class PublicUuidTests
     }
 
     /// <summary>
-    /// The two conditions Java's <c>fromString</c> rejects, with the same messages.
+    /// The three conditions Java's <c>fromString</c> rejects. The two length conditions
+    /// carry Java's own messages verbatim, <b>including Java's bound of 24</b>
+    /// (<c>Uuid.java:131</c>) rather than the canonical 22 — see
+    /// <see cref="Parse_AcceptsThePaddedFormJavaAccepts"/> for why the two extra
+    /// characters are not slack.
     /// </summary>
     [Fact]
     public void Parse_RejectsWhatJavaRejects()
     {
         Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => Uuid.Parse(null!)).ParamName);
 
-        // 23 characters — longer than a base64 UUID can be.
-        ArgumentException tooLong = Assert.Throws<ArgumentException>(
-            () => Uuid.Parse("AAAAAAAAAAAAAAAAAAAAAAA"));
+        // 25 characters — past Java's own bound, so Java reports it as too long, quoting
+        // the first 24 (Uuid.java:132-133).
+        string twentyFive = new string('A', 25);
+        ArgumentException tooLong = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyFive));
         Assert.StartsWith(
-            "Input string with prefix `AAAAAAAAAAAAAAAAAAAAAA` is too long to be decoded as a base64 UUID",
+            "Input string with prefix `" + new string('A', 24) + "` is too long to be decoded as a base64 UUID",
             tooLong.Message,
+            StringComparison.Ordinal);
+
+        // 23 characters is NOT "too long" to Java: it decodes — to 17 bytes — so Java
+        // reports the byte count instead. Gating at 22 would report the wrong condition.
+        string twentyThree = new string('A', 23);
+        ArgumentException wrongCount = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyThree));
+        Assert.StartsWith(
+            "Input string `" + twentyThree + "` decoded as 17 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
+            wrongCount.Message,
             StringComparison.Ordinal);
 
         // Well-formed base64, but only 3 bytes.
@@ -124,12 +138,69 @@ public sealed class PublicUuidTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// <b>The alphabet is not a formality.</b> Java decodes with
+    /// <c>Base64.getUrlDecoder()</c>, which <b>rejects</b> the standard alphabet's
+    /// <c>+</c> and <c>/</c>; <c>Convert.FromBase64String</c> accepts them. Left
+    /// unscreened, <c>Parse</c> would admit an id Java rejects — and, worse, one whose
+    /// <c>ToString()</c> prints a <em>different</em> string from the text it was parsed
+    /// from, since <c>ToString</c> always emits the URL-safe alphabet.
+    /// </summary>
+    [Fact]
+    public void Parse_RejectsTheStandardBase64Alphabet()
+    {
+        // Derived from a canonical form so the two spellings provably encode the SAME 16
+        // bytes and differ in nothing but the alphabet: -1/-1 is all ones, whose
+        // URL-safe form is all '_', and whose standard form is all '/'.
+        string urlSafe = new Uuid(-1L, -1L).ToString();
+        string standard = urlSafe.Replace('_', '/');
+        Assert.NotEqual(urlSafe, standard);
+
+        ArgumentException slash = Assert.Throws<ArgumentException>(() => Uuid.Parse(standard));
+        Assert.StartsWith(
+            "Input string `" + standard + "` is not a valid base64 UUID",
+            slash.Message,
+            StringComparison.Ordinal);
+        Assert.Equal("value", slash.ParamName);
+
+        Assert.False(Uuid.TryParse(standard, out Uuid rejected));
+        Assert.Equal(Uuid.Zero, rejected);
+
+        // '+' is rejected for the same reason. This one has 16 decodable bytes and a
+        // canonical URL-safe twin, so the alphabet is the ONLY thing wrong with it.
+        Assert.Throws<ArgumentException>(() => Uuid.Parse("AAAAAAAAAAAAAAAAAAAA+A"));
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAA-A", Uuid.Parse("AAAAAAAAAAAAAAAAAAAA-A").ToString());
+
+        // …while the URL-safe spelling of the rejected value parses and round-trips.
+        Assert.Equal(new Uuid(-1L, -1L), Uuid.Parse(urlSafe));
+    }
+
+    /// <summary>
+    /// Java's bound is <c>length() &gt; 24</c>, not 22, because
+    /// <c>Base64.getUrlDecoder()</c> accepts the <b>padded</b> 24-character form and
+    /// decodes it to exactly 16 bytes — so <c>fromString</c> accepts it too. Gating at 22
+    /// would reject an input Java parses.
+    /// </summary>
+    [Fact]
+    public void Parse_AcceptsThePaddedFormJavaAccepts()
+    {
+        Uuid expected = new Uuid(1L, 2L);
+
+        Assert.Equal(expected, Uuid.Parse("AAAAAAAAAAEAAAAAAAAAAg=="));
+        Assert.True(Uuid.TryParse("AAAAAAAAAAEAAAAAAAAAAg==", out Uuid parsed));
+        Assert.Equal(expected, parsed);
+
+        // ToString still emits the canonical unpadded form.
+        Assert.Equal("AAAAAAAAAAEAAAAAAAAAAg", parsed.ToString());
+    }
+
     [Fact]
     public void TryParse_ReportsFailureWithoutThrowing()
     {
         Assert.False(Uuid.TryParse(null, out Uuid fromNull));
         Assert.Equal(Uuid.Zero, fromNull);
 
+        Assert.False(Uuid.TryParse("AAAAAAAAAAAAAAAAAAAAAAAAA", out _));
         Assert.False(Uuid.TryParse("AAAAAAAAAAAAAAAAAAAAAAA", out _));
         Assert.False(Uuid.TryParse("AAAA", out _));
         Assert.False(Uuid.TryParse("!!!!", out _));

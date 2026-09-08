@@ -139,7 +139,7 @@ public sealed class AdminOperationLifetimeTests
         AdminCallbacks.CreateTopics(IntPtr.Zero, MakeError(7, "could not submit"), capturedUserData);
 
         Assert.Equal(3, result.Values.Count);
-        foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in result.Values)
+        foreach (KeyValuePair<string, Task> entry in result.Values)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
                 () => TestTimeout.Run(() => entry.Value, s_deadline));
@@ -154,10 +154,12 @@ public sealed class AdminOperationLifetimeTests
     /// <summary>
     /// The awaiter's continuation must <b>not</b> run inside the callback. That matters
     /// more for admin than for the consumer: the header says an admin callback can fire
-    /// synchronously on the submitting thread, before the entry point returns, on
-    /// <em>ordinary bad input</em> — so without
-    /// <c>RunContinuationsAsynchronously</c> a caller's own P/Invoke would execute
-    /// arbitrary continuation code.
+    /// synchronously on the submitting thread, before the entry point returns — so
+    /// without <c>RunContinuationsAsynchronously</c> a caller's own P/Invoke would
+    /// execute arbitrary continuation code. (For P1's two entry points the header's
+    /// documented trigger is a NULL <c>admin</c> handle; the wider "ordinary bad input"
+    /// trigger set is stated in <c>src/ffi/admin.rs:56-63</c>, which cbindgen does not
+    /// emit, and belongs to later-phase entry points.)
     /// </summary>
     /// <remarks>
     /// <para>
