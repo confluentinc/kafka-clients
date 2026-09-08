@@ -94,15 +94,25 @@ internal static class AdminCallbacks
     /// <c>createTopics</c>' result-table accessor set — result shape 1 (a value per key).
     /// Built once, so walking a result allocates no delegates.
     /// </summary>
-    private static readonly KeyedResultMarshal.Accessors s_createTopicsAccessors =
+    /// <remarks>
+    /// Internal rather than private so a test can walk a real result with the <b>same</b>
+    /// accessor set production uses (<c>definition-of-done.md</c> §12): a test that
+    /// assembled its own could keep passing after production started pointing at a
+    /// different function.
+    /// </remarks>
+    internal static readonly KeyedResultMarshal.Accessors CreateTopicsAccessors =
         new KeyedResultMarshal.Accessors(
             NativeMethods.CreateTopicsResultCount,
             NativeMethods.CreateTopicsResultGetKey,
             NativeMethods.CreateTopicsResultGetError,
             NativeMethods.CreateTopicsResultGetValue);
 
-    /// <summary>The per-key value marshaller, hoisted so it is not re-allocated per call.</summary>
-    private static readonly Func<IntPtr, TopicMetadataAndConfig> s_topicMetadataAndConfig =
+    /// <summary>
+    /// The per-key value marshaller, hoisted so it is not re-allocated per call — and,
+    /// like <see cref="CreateTopicsAccessors"/>, shared with the tests that drive the
+    /// walker directly.
+    /// </summary>
+    internal static readonly Func<IntPtr, TopicMetadataAndConfig> TopicMetadataAndConfigValue =
         TopicMetadataAndConfigMarshal.CopyOut;
 
     private static void OnClose(IntPtr error, IntPtr userData)
@@ -163,7 +173,7 @@ internal static class AdminCallbacks
             else
             {
                 KeyedResultMarshal.Complete(
-                    result, s_createTopicsAccessors, context, s_topicMetadataAndConfig);
+                    result, CreateTopicsAccessors, context, TopicMetadataAndConfigValue);
             }
         }
         catch (Exception exception)
