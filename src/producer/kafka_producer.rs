@@ -63,7 +63,6 @@ use crate::producer::Producer;
 use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::internals::BufferPool;
-use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::KafkaProducerMetrics;
@@ -75,6 +74,7 @@ use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::TransactionManager;
 use crate::producer::internals::sender::throttle_time_sensor;
 use crate::producer::internals::{AppendError, PartitionerConfig, RecordAccumulator};
+use crate::producer::internals::{BuiltInPartitioner, KeyHasher};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
 use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
@@ -1125,7 +1125,7 @@ impl<K, V> KafkaProducer<K, V> {
         {
             let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
             if num_partitions > 0 {
-                BuiltInPartitioner::partition_for_key(k, num_partitions)
+                BuiltInPartitioner::partition_for_key(k, num_partitions, KeyHasher::default())
             } else {
                 record_metadata::UNKNOWN_PARTITION
             }
@@ -1477,7 +1477,7 @@ impl<K, V> KafkaProducer<K, V> {
         {
             let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
             if num_partitions > 0 {
-                return BuiltInPartitioner::partition_for_key(key, num_partitions);
+                return BuiltInPartitioner::partition_for_key(key, num_partitions, KeyHasher::default());
             }
         }
 
