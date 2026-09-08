@@ -1,0 +1,74 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Internal;
+
+namespace Confluent.Kafka.Admin;
+
+/// <summary>
+/// A broker-less, in-memory admin client for tests — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.admin.MockAdminClient</c>, and the only unit-test vehicle
+/// for this binding.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The ABI returns the <em>same</em> client handle type as the real constructor, so the
+/// entire RPC surface works against the mock unchanged — a test exercises the real
+/// marshalling, the real bridge and the real teardown, differing only in what the core
+/// does behind them.
+/// </para>
+/// <para>
+/// Brokers are <c>localhost:1000+id</c>, the controller is broker 0, the default
+/// partition count is 1 and the default replication factor is
+/// <c>min(numBrokers, 3)</c>. <b>Clipped to today's ABI:</b> Java's mock also accepts an
+/// explicit broker list and controller; the ABI exposes only the broker count, so that
+/// is what this constructor takes.
+/// </para>
+/// </remarks>
+public sealed class MockAdminClient : IAdmin
+{
+    private readonly NativeAdminClient _native;
+
+    /// <summary>
+    /// Creates a mock admin client simulating <paramref name="numBrokers"/> brokers —
+    /// Java's <c>MockAdminClient.create().numBrokers(n).build()</c>.
+    /// </summary>
+    /// <param name="numBrokers">
+    /// The number of brokers to simulate; at least 1. Java rejects fewer by throwing,
+    /// because the mock places every partition leader and the controller on broker 0.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="numBrokers"/> is less than 1.</exception>
+    /// <exception cref="KafkaException">The core could not create the mock.</exception>
+    public MockAdminClient(int numBrokers = 1)
+    {
+        _native = NativeAdminClient.CreateMock(numBrokers);
+    }
+
+    /// <inheritdoc/>
+    public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null) =>
+        _native.CreateTopics(newTopics, options);
+
+    /// <inheritdoc/>
+    public Task Close(TimeSpan timeout) => _native.Close(timeout);
+
+    /// <inheritdoc/>
+    public void Dispose() => _native.Dispose();
+
+    /// <inheritdoc/>
+    public ValueTask DisposeAsync() => _native.DisposeAsync();
+}
