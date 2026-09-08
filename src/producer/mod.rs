@@ -17,6 +17,8 @@
 pub mod callback;
 pub(crate) mod internals;
 pub mod kafka_producer;
+#[cfg(test)]
+pub(crate) mod mock_partitioner;
 pub mod mock_producer;
 pub mod partitioner;
 pub mod producer_config;
