@@ -32,6 +32,7 @@ use crate::common::config::{SaslConfig, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::common_client_configs;
+use crate::producer::internals::KeyHasher;
 
 /// Process-wide counter for deriving a default `client.id`.
 ///
@@ -183,6 +184,21 @@ pub struct ProducerConfig {
     /// Default: false.
     pub(crate) partitioner_ignore_keys: bool,
 
+    /// `partitioner.class` - Selects the key hash used to map a record key to a
+    /// partition. Default: `None` (unset), which uses IEEE CRC-32
+    /// ([`KeyHasher::Crc32`], librdkafka `consistent_random` parity).
+    ///
+    /// Accepted values (Phase 1):
+    /// - `ConsistentRandomPartitioner` — CRC-32, identical to the unset default.
+    /// - `Murmur2RandomPartitioner` — murmur2, identical to the Java client's
+    ///   built-in partitioner (exact Java parity).
+    ///
+    /// Any other value is rejected by [`from_properties`](Self::from_properties)
+    /// with the Java `ConfigException` "could not be found" message. Unlike
+    /// Java, this Rust client's default is CRC-32, not murmur2 — see
+    /// `design/current/partitioner.md`.
+    pub(crate) partitioner_class: Option<String>,
+
     // --- Transactions ---
     /// `transactional.id` - TransactionalId for transactional delivery.
     /// Default: `None` (no transactions).
@@ -259,6 +275,7 @@ impl Default for ProducerConfig {
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
+            partitioner_class: None,
             transactional_id: None,
             transaction_timeout_ms: 60_000,
             metrics_sample_window_ms: 30_000,
@@ -334,6 +351,14 @@ impl ProducerConfig {
     pub const PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG: &'static str = "partitioner.availability.timeout.ms";
     /// Config key: `partitioner.ignore.keys`
     pub const PARTITIONER_IGNORE_KEYS_CONFIG: &'static str = "partitioner.ignore.keys";
+    /// Config key: `partitioner.class`
+    pub const PARTITIONER_CLASS_CONFIG: &'static str = "partitioner.class";
+    /// Accepted `partitioner.class` value selecting the CRC-32 key hash
+    /// ([`KeyHasher::Crc32`]) — the default, librdkafka `consistent_random` parity.
+    pub const CONSISTENT_RANDOM_PARTITIONER: &'static str = "ConsistentRandomPartitioner";
+    /// Accepted `partitioner.class` value selecting the murmur2 key hash
+    /// ([`KeyHasher::Murmur2`]) — exact Java-client parity.
+    pub const MURMUR2_RANDOM_PARTITIONER: &'static str = "Murmur2RandomPartitioner";
     /// Config key: `transactional.id`
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
     /// Config key: `transaction.timeout.ms`
@@ -448,6 +473,19 @@ impl ProducerConfig {
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
                 },
+                Self::PARTITIONER_CLASS_CONFIG => {
+                    // Only the two known partitioner names resolve. Java's
+                    // `ConfigDef` reflectively loads the class named here and
+                    // throws `ConfigException` when it cannot be found; we mirror
+                    // that error text exactly for any unrecognised value.
+                    if value != Self::CONSISTENT_RANDOM_PARTITIONER && value != Self::MURMUR2_RANDOM_PARTITIONER {
+                        return Err(KafkaError::illegal_argument(format!(
+                            "Invalid value {value} for configuration {}: Class {value} could not be found.",
+                            Self::PARTITIONER_CLASS_CONFIG,
+                        )));
+                    }
+                    config.partitioner_class = Some(value.to_string());
+                },
                 Self::TRANSACTIONAL_ID_CONFIG => {
                     config.transactional_id = if value.is_empty() {
                         None
@@ -533,6 +571,29 @@ impl ProducerConfig {
         config.maybe_override_client_id();
 
         Ok(config)
+    }
+
+    /// Resolves `partitioner.class` to the [`KeyHasher`] used on the keyed
+    /// partition path.
+    ///
+    /// This helper has no direct Java counterpart (Java resolves a `Partitioner`
+    /// instance instead); it exists only to map the validated
+    /// [`partitioner_class`](Self::partitioner_class) string to the internal
+    /// [`KeyHasher`] enum. Unset (`None`) and `ConsistentRandomPartitioner` both
+    /// map to the CRC-32 default; `Murmur2RandomPartitioner` maps to murmur2.
+    // Exercised by the unit tests below; `KafkaProducer` wires it into its
+    // keyed partition path in the next step (Step 3). `allow(dead_code)` bridges
+    // that gap so this step still builds under `#![deny(warnings)]`, mirroring
+    // the same-file-later-phase pattern in `internals/mod.rs`.
+    #[allow(dead_code)]
+    pub(crate) fn key_hasher(&self) -> KeyHasher {
+        match self.partitioner_class.as_deref() {
+            Some(Self::MURMUR2_RANDOM_PARTITIONER) => KeyHasher::Murmur2,
+            // `None` (unset) and `ConsistentRandomPartitioner` are the CRC-32
+            // default. `from_properties` rejects every other value, so no other
+            // string can reach here.
+            _ => KeyHasher::Crc32,
+        }
     }
 
     /// Whether the user set `key` explicitly.
@@ -712,6 +773,10 @@ mod tests {
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
+        assert!(config.partitioner_class.is_none());
+        // The default (unset) key hash is CRC-32 (librdkafka parity), NOT the
+        // Java-client murmur2 default.
+        assert_eq!(config.key_hasher(), KeyHasher::Crc32);
         assert!(config.transactional_id.is_none());
         assert_eq!(config.transaction_timeout_ms, 60_000);
         assert_eq!(config.metrics_sample_window_ms, 30_000);
@@ -853,6 +918,47 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let config = ProducerConfig::from_properties(&props).unwrap();
         assert_eq!(config.bootstrap_servers, vec!["localhost:9092"]);
+    }
+
+    /// `partitioner.class=ConsistentRandomPartitioner` selects the CRC-32 hash
+    /// (identical to the unset default, librdkafka `consistent_random` parity).
+    #[test]
+    fn test_partitioner_class_consistent_random() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "ConsistentRandomPartitioner".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.partitioner_class.as_deref(), Some("ConsistentRandomPartitioner"));
+        assert_eq!(config.key_hasher(), KeyHasher::Crc32);
+    }
+
+    /// `partitioner.class=Murmur2RandomPartitioner` selects the murmur2 hash
+    /// (exact Java-client parity).
+    #[test]
+    fn test_partitioner_class_murmur2_random() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.partitioner_class.as_deref(), Some("Murmur2RandomPartitioner"));
+        assert_eq!(config.key_hasher(), KeyHasher::Murmur2);
+    }
+
+    /// An unrecognised `partitioner.class` is rejected with the EXACT Java
+    /// `ConfigException` text (DoD §3: error messages are the contract).
+    #[test]
+    fn test_partitioner_class_unknown_rejected_with_exact_message() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "com.example.MyPartitioner".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        // `err.to_string()` prepends the variant tag (`IllegalArgumentError: `),
+        // so assert on the exact inner `ConfigException` text with `ends_with`,
+        // matching `test_metrics_recording_level_validator` above.
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value com.example.MyPartitioner for configuration partitioner.class: \
+                 Class com.example.MyPartitioner could not be found."
+            ),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
