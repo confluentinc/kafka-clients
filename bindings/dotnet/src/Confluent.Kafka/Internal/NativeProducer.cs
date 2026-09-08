@@ -756,7 +756,31 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// The core reported a flush failure, or the binding-side send accumulator did not drain within
     /// its bound so records buffered in the binding are not covered by this flush.
     /// </exception>
-    internal void Flush()
+    internal void Flush() => FlushWithAccumulatorDrainBound(s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="Flush()"/> with the accumulator-drain bound supplied rather than defaulted — the
+    /// <c>internal</c> seam that makes the expiry branch below reachable without a broker.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why a seam at all.</b> The expiry fires whenever
+    /// <see cref="SendAccumulator.DrainPending"/> returns <see langword="false"/>, which needs no
+    /// broker — only an accumulator that is not empty-and-idle at the deadline. What made it
+    /// untestable was purely that <see cref="s_accumulatorDrainTimeout"/> is a private static, so a
+    /// test could not shorten it. This follows the precedent
+    /// <see cref="SendAccumulatorSettings"/> already set with its <c>internal</c> constructor: a
+    /// test reaches an explicit value through an <c>internal</c> entry point instead of mutating
+    /// process-wide state that a parallel test class could observe.
+    /// <para>
+    /// Production behaviour is unchanged: <see cref="Flush()"/> is the only production caller and it
+    /// passes the same <see cref="s_accumulatorDrainTimeout"/> the body used to read directly.
+    /// </para>
+    /// </remarks>
+    /// <param name="accumulatorDrainTimeout">
+    /// How long to wait for the binding-side accumulator to reach empty-and-idle. <b>Not</b> a flush
+    /// timeout — the core flush below is unbounded, as Java's <c>flush()</c> is.
+    /// </param>
+    internal void FlushWithAccumulatorDrainBound(TimeSpan accumulatorDrainTimeout)
     {
         ThrowIfClosed();
 
@@ -775,11 +799,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // wait with, so an unbounded drain there is Java-faithful (flush() blocks until every
         // previously-sent record completes) and still escapable. This surface has neither a token
         // nor any other escape, so it takes a bound — and a bound that expires has to say so.
-        if (AccumulatorToStop()?.DrainPending(s_accumulatorDrainTimeout) == false)
+        if (AccumulatorToStop()?.DrainPending(accumulatorDrainTimeout) == false)
         {
             throw new KafkaException(
                 "The producer's send accumulator did not drain within " +
-                $"{s_accumulatorDrainTimeout.TotalSeconds:0} seconds, so records buffered in the " +
+                $"{accumulatorDrainTimeout.TotalSeconds:0} seconds, so records buffered in the " +
                 "binding have not reached the core and this flush did not include them.");
         }
 

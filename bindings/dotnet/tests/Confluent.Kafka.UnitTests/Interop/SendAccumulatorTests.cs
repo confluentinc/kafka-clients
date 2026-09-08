@@ -603,6 +603,90 @@ public sealed class SendAccumulatorTests
         Assert.IsType<IndexOutOfRangeException>(failure.InnerException);
     }
 
+    // ------------------------------------- Flush's accumulator drain and its expiry (§3.5) ------
+
+    [Fact]
+    public async Task Flush_WhenTheAccumulatorDrainExpires_ThrowsRatherThanReportingSuccess()
+    {
+        // The sync Flush drains the accumulator first and SURFACES an expiry, because returning
+        // success with records still buffered in the binding is §3.5's Observation-1 failure — the
+        // very thing the drain exists to fix — reintroduced on a timer. This is that branch.
+        //
+        // It needs no broker and no parked send_batch: the throw fires whenever DrainPending returns
+        // false, i.e. whenever the accumulator is not empty-and-idle at the deadline. The only thing
+        // that used to block the test was that the bound is a private static, which
+        // FlushWithAccumulatorDrainBound now supplies instead.
+        //
+        // The accumulator is held non-idle DETERMINISTICALLY rather than by racing the free-running
+        // window: closing the CORE producer makes send_batch reject every record per index, and
+        // CompleteNode fires the delivery callback for such a record on the BATCH THREAD — the
+        // accumulator's one call-out into user code. Parked there, `_draining` stays set, so no
+        // bound can observe empty-and-idle and a zero bound expires immediately.
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+
+        NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
+        Task<RecordMetadata>? send = null;
+        try
+        {
+            NativeMethods.ProducerClose(producer.Handle.DangerousGetHandle(), out IntPtr closeError);
+            _ = KafkaException.FromHandle(closeError);
+
+            SerializedProducerRecord record =
+                new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x7A, 0xAA, 0xBB });
+            send = producer.SendViaPump(
+                record,
+                new DeliveryRegistration(new BlockingDeliveryCallback(entered, release), Topic, 0));
+
+            Assert.True(
+                entered.Wait(s_deadline), "the batch thread never entered the delivery callback");
+
+            KafkaException failure = Assert.Throws<KafkaException>(
+                () => producer.FlushWithAccumulatorDrainBound(TimeSpan.Zero));
+
+            // Asserted by content (DoD §3): the message has to name the condition, or a caller who
+            // catches it learns nothing about which half of the flush did not happen.
+            Assert.Equal(
+                "The producer's send accumulator did not drain within 0 seconds, so records " +
+                "buffered in the binding have not reached the core and this flush did not " +
+                "include them.",
+                failure.Message);
+        }
+        finally
+        {
+            // Always release: the parked batch thread would otherwise hold teardown, and the event
+            // it waits on is disposed on the way out of this method.
+            release.Set();
+        }
+
+        // The record was rejected by the closed core, so it faults. Observed out here rather than
+        // in the finally so it can be awaited (xUnit1031 forbids blocking on it).
+        Assert.NotNull(send);
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => send!, s_deadline));
+
+        producer.Dispose();
+    }
+
+    [Fact]
+    public async Task Flush_WhenTheAccumulatorDrains_ReachesTheCoreFlushInstead()
+    {
+        // The control for the test above, and the half that makes its bound meaningful: the same
+        // producer, the same zero bound, an accumulator that IS empty-and-idle — no throw. Without
+        // this a Flush that threw unconditionally would pass the expiry test.
+        NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
+
+        SerializedProducerRecord record =
+            new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x7B, 0xAA, 0xBB });
+        Task<RecordMetadata> send = producer.SendViaPump(record, delivery: null);
+
+        Assert.True(producer.DrainPendingSends(s_deadline), "the accumulator did not drain in time");
+
+        producer.FlushWithAccumulatorDrainBound(TimeSpan.Zero);
+
+        await TestTimeout.Run(() => send, s_deadline);
+        producer.Dispose();
+    }
+
     // ------------------------------------------------------------------- backpressure (§4.6) ----
 
     [Fact]
@@ -698,6 +782,35 @@ public sealed class SendAccumulatorTests
         ObjectDisposedException failure = await Assert.ThrowsAsync<ObjectDisposedException>(
             () => TestTimeout.Run(() => blocked, TimeSpan.FromSeconds(10)));
         Assert.Contains(nameof(NativeProducer), failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Parks the thread that fires it until the test releases it. Used to hold the <b>batch</b>
+    /// thread inside a drain deterministically: <c>CompleteNode</c>'s immediate-error branch is the
+    /// accumulator's only call-out into user code, so it is the only broker-free lever on that
+    /// thread's progress.
+    /// </summary>
+    /// <remarks>
+    /// The wait is bounded so a test that never releases it fails rather than hanging the run, and
+    /// the whole body is inside <see cref="DeliveryRegistration.Fire"/>'s no-throw boundary, so a
+    /// timeout here cannot unwind into the batch thread.
+    /// </remarks>
+    private sealed class BlockingDeliveryCallback : IDeliveryCallback
+    {
+        private readonly ManualResetEventSlim _entered;
+        private readonly ManualResetEventSlim _release;
+
+        internal BlockingDeliveryCallback(ManualResetEventSlim entered, ManualResetEventSlim release)
+        {
+            _entered = entered;
+            _release = release;
+        }
+
+        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        {
+            _entered.Set();
+            _ = _release.Wait(s_deadline);
+        }
     }
 
     /// <summary>
