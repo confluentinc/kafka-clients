@@ -581,11 +581,6 @@ impl ProducerConfig {
     /// [`partitioner_class`](Self::partitioner_class) string to the internal
     /// [`KeyHasher`] enum. Unset (`None`) and `ConsistentRandomPartitioner` both
     /// map to the CRC-32 default; `Murmur2RandomPartitioner` maps to murmur2.
-    // Exercised by the unit tests below; `KafkaProducer` wires it into its
-    // keyed partition path in the next step (Step 3). `allow(dead_code)` bridges
-    // that gap so this step still builds under `#![deny(warnings)]`, mirroring
-    // the same-file-later-phase pattern in `internals/mod.rs`.
-    #[allow(dead_code)]
     pub(crate) fn key_hasher(&self) -> KeyHasher {
         match self.partitioner_class.as_deref() {
             Some(Self::MURMUR2_RANDOM_PARTITIONER) => KeyHasher::Murmur2,

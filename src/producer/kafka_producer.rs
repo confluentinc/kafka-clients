@@ -185,6 +185,10 @@ pub struct KafkaProducer<K, V> {
     max_block_ms: i64,
     /// Whether to ignore keys for partitioning.
     partitioner_ignore_keys: bool,
+    /// Which hash the keyed partition path uses, resolved from
+    /// `partitioner.class` (default [`KeyHasher::Crc32`], librdkafka
+    /// `consistent_random` parity). Copy-cheap; consulted once per keyed record.
+    key_hasher: KeyHasher,
     /// Whether the sender task is still running.
     running: Arc<AtomicBool>,
     /// Whether the caller wants to force-close.
@@ -270,6 +274,7 @@ impl<K, V> KafkaProducer<K, V> {
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            key_hasher: config.key_hasher(),
             running,
             force_close,
             wakeup,
@@ -618,6 +623,7 @@ impl<K, V> KafkaProducer<K, V> {
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            key_hasher: config.key_hasher(),
             running,
             force_close,
             wakeup,
@@ -1118,19 +1124,9 @@ impl<K, V> KafkaProducer<K, V> {
         remaining_wait_ms: i64,
         cluster: &Cluster,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
-        let partition = if let Some(p) = partition {
-            p
-        } else if let Some(k) = key
-            && !self.partitioner_ignore_keys
-        {
-            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
-            if num_partitions > 0 {
-                BuiltInPartitioner::partition_for_key(k, num_partitions, KeyHasher::default())
-            } else {
-                record_metadata::UNKNOWN_PARTITION
-            }
-        } else {
-            record_metadata::UNKNOWN_PARTITION
+        let partition = match partition {
+            Some(p) => p,
+            None => self.partition_for_key_or_unknown(key, topic, cluster),
         };
 
         let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
@@ -1454,6 +1450,33 @@ impl<K, V> KafkaProducer<K, V> {
         Ok(())
     }
 
+    /// Resolve the key-based partition when no explicit partition was supplied,
+    /// or [`UNKNOWN_PARTITION`](record_metadata::UNKNOWN_PARTITION) to defer to
+    /// the keyless (sticky, KIP-794) path.
+    ///
+    /// Mirrors the key branch of Java's `KafkaProducer.partition()`: the key is
+    /// hashed only when it is present, keys are not being ignored
+    /// (`partitioner.ignore.keys=false`), the configured [`KeyHasher`] actually
+    /// hashes this key ([`KeyHasher::hashes_key`] — CRC-32 leaves an *empty* key
+    /// to the keyless path, matching librdkafka `consistent_random`; murmur2
+    /// hashes it, matching the Java client), and the topic has known partitions.
+    ///
+    /// Both send call sites ([`do_send_bytes`](Self::do_send_bytes) and
+    /// [`partition`](Self::partition)) route their key branch through this one
+    /// helper so the hashing gate cannot diverge between them.
+    fn partition_for_key_or_unknown(&self, key: Option<&[u8]>, topic: &str, cluster: &Cluster) -> i32 {
+        if let Some(k) = key
+            && !self.partitioner_ignore_keys
+            && self.key_hasher.hashes_key(k)
+        {
+            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
+            if num_partitions > 0 {
+                return BuiltInPartitioner::partition_for_key(k, num_partitions, self.key_hasher);
+            }
+        }
+        record_metadata::UNKNOWN_PARTITION
+    }
+
     /// Compute partition for the given record.
     ///
     /// If the record has a partition, return it. Otherwise, try to calculate
@@ -1472,16 +1495,7 @@ impl<K, V> KafkaProducer<K, V> {
             return p;
         }
 
-        if let Some(key) = serialized_key
-            && !self.partitioner_ignore_keys
-        {
-            let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
-            if num_partitions > 0 {
-                return BuiltInPartitioner::partition_for_key(key, num_partitions, KeyHasher::default());
-            }
-        }
-
-        record_metadata::UNKNOWN_PARTITION
+        self.partition_for_key_or_unknown(serialized_key, record.topic(), cluster)
     }
 
     /// Initiate a graceful close of the sender.
@@ -1767,6 +1781,7 @@ mod tests {
     use crate::common::protocol::Errors;
     use crate::common::requests::ConcreteResponse;
     use crate::common::serialization::StringSerializer;
+    use crate::common::utils::{murmur2, to_positive};
     use crate::mock_client::MockClient;
     use crate::producer::ProducerConfig;
     use crate::producer::internals::BufferPool;
@@ -2192,6 +2207,132 @@ mod tests {
         let cluster = metadata.fetch();
         let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
         assert_eq!(record_metadata::UNKNOWN_PARTITION, partition);
+    }
+
+    /// Builds a `KafkaProducer` whose `partitioner.class` selects
+    /// `Murmur2RandomPartitioner` (the `KeyHasher::Murmur2` hash).
+    fn create_murmur2_producer(
+        metadata: Arc<ProducerMetadata>,
+        accumulator: Arc<RecordAccumulator>,
+    ) -> KafkaProducer<String, String> {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("murmur2 partitioner config is valid");
+        create_producer_with_config(config, metadata, accumulator)
+    }
+
+    /// The default (unset `partitioner.class`) keyed partition path uses the
+    /// IEEE CRC-32 (librdkafka `consistent_random`) hash taken UNSIGNED modulo
+    /// the partition count — NOT murmur2 / `Utils.toPositive`. This is the
+    /// deliberate, user-approved deviation from Java parity.
+    #[test]
+    fn test_partition_default_hasher_is_crc32() {
+        let metadata = create_metadata_with_topic(TOPIC, 7);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata.clone(), accumulator);
+        assert_eq!(KeyHasher::Crc32, producer.key_hasher);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
+        assert_eq!((crc32fast::hash(b"key") % 7) as i32, partition);
+        // Both send call sites route through the same helper, so it agrees.
+        assert_eq!(partition, producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster));
+    }
+
+    /// Under the CRC-32 default, an EMPTY (but non-null) key defers to the
+    /// keyless sticky (KIP-794) path — `UNKNOWN_PARTITION` — matching
+    /// librdkafka `consistent_random` (which treats `keylen == 0` as no key).
+    /// Asserted through both send call sites' shared helper.
+    #[test]
+    fn test_partition_empty_key_crc32_defers_to_sticky() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata.clone(), accumulator);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some(String::new()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        // via KafkaProducer.partition()
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition(&record, Some(b""), Some(b"value"), &cluster)
+        );
+        // via the helper do_send_bytes uses
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition_for_key_or_unknown(Some(b""), TOPIC, &cluster)
+        );
+    }
+
+    /// `Murmur2RandomPartitioner` reproduces the exact Java-client formula
+    /// `Utils.toPositive(Utils.murmur2(key)) % numPartitions` for a non-empty
+    /// key.
+    #[test]
+    fn test_partition_murmur2_matches_java_formula() {
+        let metadata = create_metadata_with_topic(TOPIC, 7);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+        assert_eq!(KeyHasher::Murmur2, producer.key_hasher);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
+        assert_eq!(to_positive(murmur2(b"key")) % 7, partition);
+        assert_eq!(partition, producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster));
+    }
+
+    /// murmur2 hashes an EMPTY (non-null) key rather than deferring to the
+    /// sticky path — exact Java-client parity, and the point of contrast with
+    /// the CRC-32 default (`test_partition_empty_key_crc32_defers_to_sticky`).
+    #[test]
+    fn test_partition_empty_key_murmur2_is_hashed() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+
+        let cluster = metadata.fetch();
+        let partition = producer.partition_for_key_or_unknown(Some(b""), TOPIC, &cluster);
+        assert_eq!(to_positive(murmur2(b"")) % 3, partition);
+        assert_ne!(record_metadata::UNKNOWN_PARTITION, partition);
+    }
+
+    /// An explicit record partition wins over key hashing regardless of the
+    /// selected hasher (here: murmur2). Complements
+    /// `test_partition_returns_explicit_partition` (which covers the default).
+    #[test]
+    fn test_partition_explicit_partition_wins_under_murmur2() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+
+        let record = ProducerRecord::with_partition(
+            TOPIC.to_string(),
+            Some(2),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .unwrap();
+        let cluster = metadata.fetch();
+        assert_eq!(2, producer.partition(&record, Some(b"key"), Some(b"value"), &cluster));
+    }
+
+    /// `partitioner.ignore.keys=true` forces `UNKNOWN_PARTITION` even when a
+    /// non-empty key would otherwise hash, under murmur2 as well as the default.
+    #[test]
+    fn test_partition_ignore_keys_overrides_murmur2() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        props.insert("partitioner.ignore.keys".to_string(), "true".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_producer_with_config(config, metadata.clone(), accumulator);
+
+        let cluster = metadata.fetch();
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster)
+        );
     }
 
     /// Tests that a record can be successfully sent and appended to the accumulator.
