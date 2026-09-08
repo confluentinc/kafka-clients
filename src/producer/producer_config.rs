@@ -33,6 +33,7 @@ use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::common_client_configs;
 use crate::producer::internals::KeyHasher;
+use crate::producer::{Partitioner, RoundRobinPartitioner};
 
 /// Process-wide counter for deriving a default `client.id`.
 ///
@@ -657,6 +658,40 @@ impl ProducerConfig {
         }
     }
 
+    /// Resolves `partitioner.class` to a built-in [`Partitioner`] instance, if
+    /// the configured value names one that has a dedicated partitioner type.
+    ///
+    /// This is the Rust stand-in for Java's
+    /// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class,
+    /// ...)` (`KafkaProducer.java:382-385`), which reflectively loads and
+    /// instantiates the named class. Rust has no reflection, so only the
+    /// built-in names resolve here:
+    ///
+    /// - the two [`RoundRobinPartitioner`](crate::producer::RoundRobinPartitioner)
+    ///   spellings ([`ROUND_ROBIN_PARTITIONER`](Self::ROUND_ROBIN_PARTITIONER) and
+    ///   [`ROUND_ROBIN_PARTITIONER_FQCN`](Self::ROUND_ROBIN_PARTITIONER_FQCN)) →
+    ///   `Some(Box::new(RoundRobinPartitioner::new()))`;
+    /// - every other accepted value (unset, `ConsistentRandomPartitioner`,
+    ///   `Murmur2RandomPartitioner`) → `None`, meaning the built-in default
+    ///   partitioner's keyed path is used (see [`key_hasher`](Self::key_hasher)).
+    ///
+    /// A user-supplied `Partitioner` is instead passed as an instance through
+    /// [`KafkaProducer::from_config_with_partitioner`](crate::producer::KafkaProducer::from_config_with_partitioner).
+    ///
+    /// `from_properties` has already rejected any value that is neither a
+    /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches
+    /// here.
+    pub(crate) fn resolve_partitioner<K, V>(&self) -> Option<Box<dyn Partitioner<K, V>>>
+    where
+        K: 'static,
+        V: 'static,
+    {
+        match self.partitioner_class.as_deref() {
+            Some(value) if Self::is_round_robin_partitioner(value) => Some(Box::new(RoundRobinPartitioner::new())),
+            _ => None,
+        }
+    }
+
     /// Whether the user set `key` explicitly.
     ///
     /// Java's `this.originals().containsKey(key)`: a key is "user configured"
@@ -1063,6 +1098,59 @@ mod tests {
             Some(ProducerConfig::ROUND_ROBIN_PARTITIONER_FQCN)
         );
         assert_eq!(config.key_hasher(), KeyHasher::Crc32);
+    }
+
+    /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
+    /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
+    /// Rust stand-in for Java's reflective `getConfiguredInstance` of
+    /// `partitioner.class` (`KafkaProducer.java:382-385`).
+    #[test]
+    fn test_resolve_partitioner_round_robin_simple_name() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "RoundRobinPartitioner".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert!(config.resolve_partitioner::<String, String>().is_some());
+    }
+
+    /// `resolve_partitioner` also resolves the fully-qualified Java class name,
+    /// so a Java producer config naming the round-robin partitioner works.
+    #[test]
+    fn test_resolve_partitioner_round_robin_fqcn() {
+        let mut props = HashMap::new();
+        props.insert(
+            "partitioner.class".to_string(),
+            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_string(),
+        );
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert!(config.resolve_partitioner::<String, String>().is_some());
+    }
+
+    /// With no `partitioner.class`, `resolve_partitioner` returns `None`: the
+    /// built-in default partitioner's keyed path is used, not a partitioner
+    /// instance.
+    #[test]
+    fn test_resolve_partitioner_default_none() {
+        let config = ProducerConfig::from_properties(&HashMap::new()).unwrap();
+        assert!(config.partitioner_class.is_none());
+        assert!(config.resolve_partitioner::<String, String>().is_none());
+    }
+
+    /// The other accepted `partitioner.class` values name Java's built-in
+    /// random/sticky partitioners, which in this client are handled by the
+    /// key-hash path (see [`key_hasher`](ProducerConfig::key_hasher)), not by a
+    /// [`Partitioner`] instance. So `resolve_partitioner` returns `None` for
+    /// both — only the round-robin names map to a dedicated partitioner type.
+    #[test]
+    fn test_resolve_partitioner_random_names_none() {
+        for name in ["ConsistentRandomPartitioner", "Murmur2RandomPartitioner"] {
+            let mut props = HashMap::new();
+            props.insert("partitioner.class".to_string(), name.to_string());
+            let config = ProducerConfig::from_properties(&props).unwrap();
+            assert!(
+                config.resolve_partitioner::<String, String>().is_none(),
+                "{name} must not resolve to a Partitioner instance"
+            );
+        }
     }
 
     /// Java's `originals()` holds the user-supplied map verbatim and never
