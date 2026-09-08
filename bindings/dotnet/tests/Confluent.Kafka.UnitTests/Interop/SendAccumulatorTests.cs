@@ -16,6 +16,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -527,6 +528,81 @@ public sealed class SendAccumulatorTests
         harness.Dispose();
     }
 
+    [Fact]
+    public async Task BatchThreadFailure_INSIDESendNode_StillSettlesTheRestOfThatNode()
+    {
+        // 65.3 named TWO triggers for the stranded in-flight chain, and the test above reaches only
+        // the first: AppendWithoutAPermit's over-release throws BETWEEN the take and the send, so
+        // SendChain is never entered and _inFlight's advance ordering is never exercised at all.
+        // Hoisting `_inFlight = node.Next` ABOVE `SendNode(node)` — the tempting simplification,
+        // which SendChain's comment used to defend only against RecycleNode — therefore left the
+        // whole suite green while re-opening 65.3 for the second trigger. This is that half's guard.
+        //
+        // Reaching it needs a throw that ESCAPES SendNode. SendNode's own catch swallows everything
+        // that happens inside it (a SendBatch failure, a ReleasePins failure in its finally, a
+        // CompleteNode failure) into FaultNode and returns normally, so the only escape is FaultNode
+        // itself failing — which is what TruncateDeliveriesOfPendingNode injects, and why it is a
+        // truncation of THAT array rather than of Natives.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<RecordMetadata>[] sends = harness.Append(3, callback);
+
+        // A 60 s window with the threshold far above three records means the batch thread is parked
+        // in its wait loop, so the truncation lands before it has looked at the node.
+        harness.TruncateDeliveriesOfPendingNode(keep: 1);
+
+        Assert.True(
+            harness.Accumulator.DrainPending(s_deadline), "the accumulator did not drain in time");
+
+        // Index 0 was handed to the pump before the throw, so it resolves normally.
+        await TestTimeout.Run(() => sends[0], s_deadline);
+
+        // Index 1 is where CompleteNode threw. SendNode's own FaultNode settles it and then throws
+        // out of SendNode on its very next statement.
+        await AssertSettledByTheBatchThreadFailure(sends[1]);
+
+        // Index 2 is THE assertion of this test: FaultNode never reached it, so it settles only if
+        // AbandonOnThreadFailure can still find this node through _inFlight. With the advance
+        // hoisted above SendNode it cannot, and this await hits its deadline instead.
+        await AssertSettledByTheBatchThreadFailure(sends[2]);
+
+        // No delivery callback for 1 or 2: the core accepted both and their futures are destroyed
+        // unread, so firing here would invent a failure for a record that may still be delivered
+        // (§6.2, recorded residual). Only index 0's success fires, from the pump — asserted after a
+        // settle window, since a first observation of 1 cannot rule out 2.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(1, callback.Count);
+
+        // The abandon path really ran — it closes the accumulator and lets the thread exit. Without
+        // this the guard could go inert without saying so: a refactor that stopped FaultNode from
+        // throwing would leave every assertion above passing while exercising none of SendChain's
+        // failure ordering.
+        Assert.True(
+            harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+            "the failed batch thread did not exit");
+        Assert.True(harness.Accumulator.TryAcquireSpace());
+        Func<object> refused = () => harness.AppendWithoutAPermit(0x6A);
+        Assert.Throws<ObjectDisposedException>(refused);
+
+        harness.Dispose();
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="send"/> was faulted by the batch thread's handler of last
+    /// resort — <see cref="KafkaException"/> wrapping the injected
+    /// <see cref="IndexOutOfRangeException"/>, under a deadline so a record that is never settled
+    /// fails fast instead of hanging the run.
+    /// </summary>
+    private static async Task AssertSettledByTheBatchThreadFailure(Task<RecordMetadata> send)
+    {
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => send, TimeSpan.FromSeconds(10)));
+        Assert.Equal("The producer send-batch thread failed to process a batch.", failure.Message);
+        Assert.IsType<IndexOutOfRangeException>(failure.InnerException);
+    }
+
     // ------------------------------------------------------------------- backpressure (§4.6) ----
 
     [Fact]
@@ -793,6 +869,83 @@ public sealed class SendAccumulatorTests
             TaskCompletionSource<RecordMetadata> completion = NewCompletion();
             Accumulator.Submit(NewRecord(tag), completion, NewDelivery(callback));
             return completion.Task;
+        }
+
+        /// <summary>
+        /// <b>The injection for a failure that ESCAPES <c>SendNode</c></b> — 65.3's second trigger,
+        /// which <see cref="AppendWithoutAPermit"/> cannot reach because its over-release throws
+        /// before <c>SendChain</c> is ever entered. Shortens the pending node's <c>Deliveries</c>
+        /// array to <paramref name="keep"/> entries, leaving the other seven parallel arrays intact.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why this array, and why a truncation.</b> <c>SendNode</c> wraps everything it does in
+        /// a <c>catch (Exception) → FaultNode(...)</c>, so a failure of <c>send_batch</c>, of
+        /// <c>ReleasePins</c> in its <c>finally</c>, or of <c>CompleteNode</c> is swallowed and
+        /// <c>SendNode</c> returns normally — none of them escapes, and none of them exercises
+        /// <c>SendChain</c>'s advance ordering. (The obvious-looking alternative, a short
+        /// <c>Natives</c> array so the <c>send_batch</c> marshaller throws, is exactly one of those
+        /// swallowed cases and would produce a test that passes with the ordering either way.) The
+        /// only escape left is <c>FaultNode</c> itself failing, and a short <c>Deliveries</c> is the
+        /// one way to make that happen with the arrays it walks otherwise intact.
+        /// </para>
+        /// <para>
+        /// <b>Why it heals in time for the abandon path.</b> With <c>keep = 1</c> and three records,
+        /// <c>CompleteNode</c> hands index 0 to the pump and then throws reading
+        /// <c>Deliveries[1]</c>; <c>FaultNode</c> resumes at index 1, faults that awaiter, nulls
+        /// <c>Completions[1]</c>, and only then throws on <c>Deliveries[1] = null</c> — the last
+        /// statement of the body. <c>AbandonOnThreadFailure</c>'s own <c>FaultNode</c> then walks
+        /// the node from 0, skips indices 0 and 1 on their now-null completions, and settles index
+        /// 2 before hitting the same wall. So the injected fault is self-healing for exactly the
+        /// indices already settled, which is what makes "index 2 completes" a clean witness for
+        /// "the failing node was still reachable from <c>_inFlight</c>".
+        /// </para>
+        /// <para>
+        /// <b>Reflection, and why the fixture is allowed it here.</b> The node type is private to
+        /// <see cref="SendAccumulator"/>, and no production state can make one array shorter than
+        /// its siblings (<c>EnsureSlot</c> grows all eight or none). Everything else stays
+        /// production's own primitive — the records, the awaiters, the pins and <c>Submit</c> itself
+        /// (DoD §12); only the one array is corrupted, because corrupting it <em>is</em> the
+        /// injected fault. The read is unsynchronized, which is safe only under the caller's
+        /// contract below.
+        /// </para>
+        /// </remarks>
+        /// <param name="keep">
+        /// How many <c>Deliveries</c> entries survive. Must be smaller than the node's record count.
+        /// </param>
+        internal void TruncateDeliveriesOfPendingNode(int keep)
+        {
+            // Caller's contract: no drain may be possible yet (a long window, a threshold above the
+            // record count), so the batch thread is parked in its wait loop and this node is owned
+            // by nobody.
+            object node = PendingNode();
+            FieldInfo deliveries = node.GetType().GetField(
+                "Deliveries", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                ?? throw new InvalidOperationException(
+                    "SendAccumulator's node no longer exposes a Deliveries array — this injection " +
+                    "needs to be re-derived against the new shape rather than silently skipped.");
+
+            DeliveryRegistration?[] full = (DeliveryRegistration?[])deliveries.GetValue(node)!;
+            Assert.True(
+                keep < full.Length,
+                "the injection must actually shorten the array, or it injects nothing");
+
+            DeliveryRegistration?[] truncated = new DeliveryRegistration?[keep];
+            Array.Copy(full, truncated, keep);
+            deliveries.SetValue(node, truncated);
+        }
+
+        /// <summary>The single node the accumulator is currently filling.</summary>
+        private object PendingNode()
+        {
+            FieldInfo head = typeof(SendAccumulator).GetField(
+                "_head", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException(
+                    "SendAccumulator no longer exposes a _head field.");
+
+            return head.GetValue(Accumulator)
+                ?? throw new InvalidOperationException(
+                    "the accumulator holds no pending node — it drained before the injection landed");
         }
 
         private static SerializedProducerRecord NewRecord(byte tag) =>

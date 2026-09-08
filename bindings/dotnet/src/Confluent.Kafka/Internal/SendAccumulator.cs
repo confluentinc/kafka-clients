@@ -773,14 +773,22 @@ internal sealed class SendAccumulator
         {
             Node node = _inFlight;
 
-            // SendNode settles (or faults) every slot of this node. A throw out of it — from
-            // ReleasePins in its finally, or from FaultNode in its catch — leaves this node and
-            // its successors unsettled, and _inFlight still names all of them, which is what lets
-            // AbandonOnThreadFailure finish them instead of stranding them.
+            // SendNode settles (or faults) every slot of this node, and its own catch swallows
+            // everything that happens inside it into FaultNode — so the ONLY throw that escapes is
+            // FaultNode itself failing. When it does, this node is left partly unsettled and
+            // _inFlight must still name IT, which is what lets AbandonOnThreadFailure finish it
+            // instead of stranding every record it holds.
             SendNode(node);
 
-            // Fully settled: step past it BEFORE recycling, so the failure handler can never
-            // re-enter a node that is already back in the spare slot.
+            // The advance is pinned between TWO neighbours and BOTH directions are load-bearing:
+            //
+            //   * AFTER SendNode — hoisting it above the call drops the failing node out of
+            //     _inFlight the instant SendNode throws, so the handler of last resort cannot see
+            //     it and its remaining records are stranded forever (awaiters never completed,
+            //     futures never destroyed). That is the second of 65.3's two triggers, and
+            //     BatchThreadFailure_INSIDESendNode_StillSettlesTheRestOfThatNode guards it.
+            //   * BEFORE RecycleNode — deferring it past the recycle lets the failure handler
+            //     re-enter a node that is already back in the spare slot and re-fillable by Append.
             _inFlight = node.Next;
             node.Next = null;
             RecycleNode(node);
