@@ -289,9 +289,16 @@ internal sealed class NativeAdminClient : IDisposable
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
-        IntPtr[] handles = new IntPtr[requested.Count];
+        // Deliberately EMPTY here and allocated inside the try. Everything between the
+        // GCHandle allocation above and the try is a window in which a throw would root
+        // the operation for the process lifetime, because neither the catch nor the
+        // finally covers it — so the window is kept to nothing at all.
+        // Array.Empty allocates nothing.
+        IntPtr[] handles = Array.Empty<IntPtr>();
         try
         {
+            handles = new IntPtr[requested.Count];
+
             // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
             // through AbandonBeforeSubmit rather than rooting the GCHandle forever. It
             // keeps the native client alive from here until the completion callback

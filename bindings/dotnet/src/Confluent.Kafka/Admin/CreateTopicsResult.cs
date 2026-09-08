@@ -109,11 +109,14 @@ public sealed class CreateTopicsResult
     /// accessors report "created, but the broker sent no metadata" — faults the derived
     /// task rather than the caller.
     /// </summary>
-    private async Task<TResult> Apply<TResult>(string topic, Func<TopicMetadataAndConfig, TResult> map)
+    private Task<TResult> Apply<TResult>(string topic, Func<TopicMetadataAndConfig, TResult> map)
     {
-        // Preconditions are checked inside the async method deliberately: these members
-        // return a Task, so a caller that stores the Task and awaits later still sees the
-        // failure. (Java throws NullPointerException from `futures.get(topic)` instead.)
+        // Argument validation is SYNCHRONOUS — this method is deliberately not `async`,
+        // so a caller mistake surfaces at the call site rather than only when the
+        // returned Task is awaited (which may be much later, or never). That matches
+        // Java, where `futures.get(topic)` throws NullPointerException immediately, and
+        // is the .NET guidance for a Task-returning method: a usage error is not an
+        // operation outcome.
         if (topic is null)
         {
             throw new ArgumentNullException(nameof(topic));
@@ -129,6 +132,10 @@ public sealed class CreateTopicsResult
                 nameof(topic));
         }
 
-        return map(await source.ConfigureAwait(false));
+        return Project(source, map);
+
+        static async Task<TResult> Project(
+            Task<TopicMetadataAndConfig> source, Func<TopicMetadataAndConfig, TResult> map) =>
+            map(await source.ConfigureAwait(false));
     }
 }

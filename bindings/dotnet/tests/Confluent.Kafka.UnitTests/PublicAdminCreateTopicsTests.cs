@@ -171,26 +171,31 @@ public sealed class PublicAdminCreateTopicsTests
     /// <summary>
     /// A derived accessor for a topic that was not part of the request reports the
     /// mistake as an argument error, naming the parameter — a precondition, not a Kafka
-    /// outcome (ffi §B5).
+    /// outcome (ffi §B5). It is raised <b>synchronously</b>, at the call site: a usage
+    /// error is not an operation outcome, so it must not be deferred into a
+    /// <see cref="Task"/> the caller might await much later, or never.
     /// </summary>
     [Fact]
-    public async Task DerivedAccessor_ForAnUnrequestedTopic_ThrowsArgumentException()
+    public async Task DerivedAccessor_ForAnUnrequestedTopic_ThrowsArgumentExceptionSynchronously()
     {
         using MockAdminClient admin = new MockAdminClient(1);
 
         CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
         await TestTimeout.Run(result.All, s_deadline);
 
-        ArgumentException failure = await Assert.ThrowsAsync<ArgumentException>(
-            () => TestTimeout.Run(() => result.Config("unknown"), s_deadline));
+        // Assert.Throws (not ThrowsAsync): the exception must escape the call itself,
+        // before any Task is handed back.
+        ArgumentException failure =
+            Assert.Throws<ArgumentException>(() => { _ = result.Config("unknown"); });
         Assert.Equal("topic", failure.ParamName);
         Assert.StartsWith(
             "Topic 'unknown' was not part of this createTopics request.",
             failure.Message,
             StringComparison.Ordinal);
 
-        await Assert.ThrowsAsync<ArgumentNullException>(
-            () => TestTimeout.Run(() => result.TopicId(null!), s_deadline));
+        ArgumentNullException nullTopic =
+            Assert.Throws<ArgumentNullException>(() => { _ = result.TopicId(null!); });
+        Assert.Equal("topic", nullTopic.ParamName);
     }
 
     /// <summary>
