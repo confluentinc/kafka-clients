@@ -194,6 +194,46 @@ public sealed class PublicUuidTests
         Assert.Equal("AAAAAAAAAAEAAAAAAAAAAg", parsed.ToString());
     }
 
+    /// <summary>
+    /// <b>Padding that is present but incomplete is a rejection, not something to
+    /// repair.</b> Accepting the padded 24-character form (above) means tolerating an
+    /// <c>=</c>, and the way <c>Parse</c> reaches
+    /// <c>Convert.FromBase64String</c> is by padding to a multiple of four — which would
+    /// just as happily <em>complete</em> a terminal unit that is short of its own padding.
+    /// <c>"…Ag="</c> is two data characters and a single <c>=</c> where two are required;
+    /// Java's <c>Base64.Decoder.decode0</c> labels that case
+    /// <c>xx= shiftto==6&amp;&amp;sp==sl missing last =</c> and throws
+    /// <c>"Input byte array has wrong 4-byte ending unit"</c>. Repaired instead of
+    /// rejected, it yields an id that prints a <em>different</em> string from the text it
+    /// was parsed from — the same symptom that makes the alphabet screen worth having.
+    /// </summary>
+    [Fact]
+    public void Parse_RejectsPaddingJavaRejects()
+    {
+        // Derived from a value Parse accepts, by deleting one '=', so the padding shape is
+        // provably the ONLY thing wrong with it.
+        string padded = new Uuid(1L, 2L) + "==";
+        Assert.Equal(24, padded.Length);
+        Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded));
+
+        string shortOfPadding = padded.Substring(0, padded.Length - 1);
+        Assert.Equal(23, shortOfPadding.Length);
+
+        ArgumentException rejected =
+            Assert.Throws<ArgumentException>(() => Uuid.Parse(shortOfPadding));
+        Assert.StartsWith(
+            "Input string `" + shortOfPadding + "` is not a valid base64 UUID",
+            rejected.Message,
+            StringComparison.Ordinal);
+        Assert.Equal("value", rejected.ParamName);
+
+        Assert.False(Uuid.TryParse(shortOfPadding, out Uuid fromTryParse));
+        Assert.Equal(Uuid.Zero, fromTryParse);
+
+        // …and the screen is narrow: unpadded text still gets its padding synthesized.
+        Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded.Substring(0, 22)));
+    }
+
     [Fact]
     public void TryParse_ReportsFailureWithoutThrowing()
     {

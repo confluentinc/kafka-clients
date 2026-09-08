@@ -56,6 +56,10 @@ public sealed class CreateTopicsResult
         // deliberately erased and the private map is never handed out. Restore that:
         // this view is the ONLY thing `Values` exposes, and the metadata is reachable
         // solely through the four typed accessors below.
+        //
+        // The erasure is a reference upcast: each entry here is the SAME Task instance as
+        // the typed map's, so the view adds no per-key allocation and introduces no second
+        // Task whose fault could go unobserved.
         Dictionary<string, Task> erased =
             new Dictionary<string, Task>(values.Count, StringComparer.Ordinal);
         foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in values)
@@ -82,12 +86,6 @@ public sealed class CreateTopicsResult
     /// <c>values()</c> either. Read the metadata through <see cref="Config"/>,
     /// <see cref="TopicId"/>, <see cref="NumPartitions"/> or
     /// <see cref="ReplicationFactor"/>.
-    /// </para>
-    /// <para>
-    /// The erasure is expressed here as a reference upcast rather than as a derived task
-    /// — the declared surface is identical, and it keeps a failed topic's exception
-    /// <em>identity</em> intact, where a derived continuation would nest it a level
-    /// deeper than the typed accessors report.
     /// </para>
     /// </remarks>
     public IReadOnlyDictionary<string, Task> Values => _erasedValues;

@@ -95,8 +95,7 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// <returns>The parsed identifier.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="value"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="value"/> is rejected. Three conditions do that, and each matches
-    /// what Java's <c>fromString</c> rejects:
+    /// <paramref name="value"/> is rejected, for one of:
     /// <list type="bullet">
     /// <item><description>
     /// longer than 24 characters (Java's own bound, <c>Uuid.java:131</c>) — <b>same
@@ -106,11 +105,13 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// it decodes to some number of bytes other than 16 — <b>same message</b> as Java;
     /// </description></item>
     /// <item><description>
-    /// it is not valid URL-safe base64 — including a literal <c>+</c> or <c>/</c>, which
-    /// Java's <c>Base64.getUrlDecoder()</c> rejects. The <b>message here is this
-    /// binding's own</b>, not Java's: Java surfaces the JDK decoder's text
-    /// (<c>"Illegal base64 character 2b"</c>), which is an implementation detail of the
-    /// decoder rather than part of Kafka's contract.
+    /// it is not valid URL-safe base64. That covers a literal <c>+</c> or <c>/</c>, which
+    /// Java's <c>Base64.getUrlDecoder()</c> rejects, and a terminal unit that carries
+    /// padding yet is short of it (<c>"…Ag="</c>), which the same decoder rejects as a
+    /// wrong 4-byte ending unit — see <see cref="DecodeUrlSafeBase64"/>. The
+    /// <b>message here is this binding's own</b>, not Java's: Java surfaces the JDK
+    /// decoder's text (<c>"Illegal base64 character 2b"</c>), which is an implementation
+    /// detail of the decoder rather than part of Kafka's contract.
     /// </description></item>
     /// </list>
     /// </exception>
@@ -232,35 +233,69 @@ public readonly struct Uuid : IEquatable<Uuid>
     }
 
     /// <summary>
-    /// Decodes the URL-safe base64 text the way Java's
-    /// <c>Base64.getUrlDecoder()</c> does, throwing <see cref="FormatException"/> on
-    /// anything it would reject.
+    /// Decodes URL-safe base64 text into bytes, screening two inputs
+    /// <see cref="Convert.FromBase64String(string)"/> would otherwise let through, then
+    /// translating to the standard alphabet and decoding. Throws
+    /// <see cref="FormatException"/> on either screen or on a decoder failure.
     /// </summary>
     /// <remarks>
-    /// ⚠ The alphabet screen is the load-bearing part. The floor has no base64url
-    /// decoder, so the text is translated to the standard alphabet and handed to
-    /// <see cref="Convert.FromBase64String(string)"/> — which <b>accepts</b> the standard
-    /// <c>+</c> and <c>/</c> that Java's URL decoder rejects. Without this screen,
-    /// <c>Parse("AAAAAAAAAAAAAAAAAAAA+/")</c> would succeed here and throw in Java, and
-    /// the resulting <see cref="Uuid"/> would print a <em>different</em> string from the
-    /// one it was parsed from.
+    /// <para>
+    /// ⚠ Both screens are load-bearing, and both exist for the same reason: the floor has
+    /// no base64url decoder, so the text is handed to
+    /// <see cref="Convert.FromBase64String(string)"/>, which is more permissive than
+    /// Java's <c>Base64.getUrlDecoder()</c> in exactly these two places.
+    /// </para>
+    /// <para>
+    /// <b>Alphabet.</b> <see cref="Convert.FromBase64String(string)"/> <b>accepts</b> the
+    /// standard <c>+</c> and <c>/</c> that Java's URL decoder rejects. Without this
+    /// screen, <c>Parse("AAAAAAAAAAAAAAAAAAAA+/")</c> would succeed here and throw in
+    /// Java, and the resulting <see cref="Uuid"/> would print a <em>different</em> string
+    /// from the one it was parsed from.
+    /// </para>
+    /// <para>
+    /// <b>Padding shape.</b> <see cref="ToStandardBase64"/> synthesizes the padding an
+    /// unpadded input needs, and pads by length alone — so it would just as happily
+    /// <em>complete</em> a terminal unit that carries padding but is short of it, turning
+    /// <c>"…Ag="</c> (two data characters and a single <c>=</c>) into the well-formed
+    /// <c>"…Ag=="</c> and admitting an id Java rejects. Java's
+    /// <c>Base64.Decoder.decode0</c> labels that case
+    /// <c>xx=&#160;&#160;&#160;shiftto==6&amp;&amp;sp==sl missing last =</c> and throws
+    /// <c>IllegalArgumentException("Input byte array has wrong 4-byte ending unit")</c>.
+    /// So text carrying any padding of its own must already be a whole number of
+    /// 4-character units; only unpadded text gets padding synthesized.
+    /// </para>
+    /// <para>
+    /// This is <b>not</b> a stand-in for Java's decoder and must not be reused as one:
+    /// <see cref="Convert.FromBase64String(string)"/> silently ignores embedded
+    /// whitespace, which Java rejects as an illegal character.
+    /// <see cref="Parse(string)"/> is unaffected — whitespace only shortens the decodable
+    /// text, so such an input is rejected outright or decodes to fewer than 16 bytes, and
+    /// reaching 16 would take 25 or more characters, past the length gate.
+    /// </para>
     /// </remarks>
     private static byte[] DecodeUrlSafeBase64(string value)
     {
-        // IndexOf(char) is ordinal, so this is a plain character scan.
+        // IndexOf(char) is ordinal, so these are plain character scans.
         if (value.IndexOf('+') >= 0 || value.IndexOf('/') >= 0)
         {
             throw new FormatException(
                 "Input contains a character outside the URL-safe base64 alphabet.");
         }
 
+        if (value.IndexOf('=') >= 0 && value.Length % 4 != 0)
+        {
+            throw new FormatException(
+                "Input carries base64 padding but is not a whole number of 4-character units.");
+        }
+
         return Convert.FromBase64String(ToStandardBase64(value));
     }
 
     /// <summary>
-    /// Converts the URL-safe form back to standard base64, re-padding to a multiple of
-    /// four, so <see cref="Convert.FromBase64String(string)"/> can read it (the floor has
-    /// no base64url decoder).
+    /// Converts the URL-safe form back to standard base64, synthesizing the padding
+    /// <see cref="Convert.FromBase64String(string)"/> requires (the floor has no base64url
+    /// decoder). It pads by length alone and so cannot tell absent padding from malformed
+    /// padding; <see cref="DecodeUrlSafeBase64"/> screens the latter out before calling.
     /// </summary>
     private static string ToStandardBase64(string value)
     {
