@@ -420,3 +420,15 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   phase-branch merge into `dev_python-interface-implementation` and at P7; the original hook
   (`exec make verify-sandbox`) is restored when P7 closes.
 - **Status:** decided; revert-at-end tracked in the plan file.
+
+### C38 — `MockProducer` is pure Python; the Rust core's `MockProducer` + FFI mock surface back only the legacy module (Critic 67 note on C22)
+- **Where:** `confluent_kafka/producer/mock_producer.py` vs `src/producer/mock_producer.rs` + `kafka_producer_MockProducer_*`.
+- **Question:** the spec's motivation is "one Rust core serves every binding". Critic 67 verified the Rust
+  mock IS synchronous, but the FFI dispatcher forces asynchronous completion delivery and there is no
+  synchronous FFI mock surface, so Java's synchronous `MockProducer` contract (which `MockProducerTest`
+  depends on: `send(...).isDone()` immediately with autoComplete, synchronous `completeNext()`) is only
+  reachable today via a Python re-implementation of `MockProducer.java`.
+- **Assumption taken:** pure-Python `MockProducer` (option a). The FFI mock stays for the legacy
+  `producer.py` until that is retired (C24).
+- **Alternatives:** (b) add a synchronous FFI mock surface and wrap it from Python; (c) keep both.
+- **Status:** open — owner to confirm (a) or request (b).
