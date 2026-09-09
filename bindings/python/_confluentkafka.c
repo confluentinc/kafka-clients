@@ -2450,7 +2450,10 @@ static PyObject* py_Consumer_subscribe_with_listener_async(PyObject* self, PyObj
 static void pending_notify_trampoline(void* user_data) {
     PyObject* notify = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunction(notify, NULL);
+    // Nullary call — PyObject_CallNoArgs is statically arity-checkable (the
+    // check-bindings scanner rejects PyObject_CallFunction(cb, NULL) because its
+    // format argument is not a string literal).
+    PyObject* r = PyObject_CallNoArgs(notify);
     if (r) Py_DECREF(r); else PyErr_Print();
     PyGILState_Release(g);
 }

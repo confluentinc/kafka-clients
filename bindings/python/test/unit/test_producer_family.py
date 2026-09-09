@@ -41,6 +41,7 @@ harness), not by a unit test.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 
 import pytest
@@ -56,6 +57,7 @@ from confluent_kafka.common.errors._generated import (
 )
 from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 from confluent_kafka.producer import (
+    AsyncKafkaProducer,
     AsyncMockProducer,
     AsyncProducer,
     KafkaProducer,
@@ -811,12 +813,16 @@ class TestAsyncProducerFamily:
 # Migrated from the retired test_producer.py (legacy flat-API MockProducer).
 #
 # Only cases whose subject survives on the new pure-Python MockProducer surface
-# (C22/C38) are migrated. The legacy backpressure suite and the async-FFI-routing
-# / GIL / handle-lifecycle regressions targeted the retired FFI-backed mock's
-# `_c_producer` / `_lib.Producer_*_async` plumbing, which the pure-Python mock
-# does not have — their subject is gone, so they are dropped (not skipped). The
-# flat-error assertions (`err.code` / `err.is_retriable` / `err.txn_requires_abort`)
-# are re-expressed here as the typed error class the new hierarchy uses.
+# (C22/C38) are migrated here. The legacy backpressure suite ran against the
+# retired FFI-backed mock's send-task, which the pure-Python mock does not have —
+# but backpressure is a live contract of the REAL producer (the reason
+# `send` is `async`, spec principle 5), so it is re-expressed against
+# `KafkaProducer` / `AsyncKafkaProducer` further down (TestProducerBackpressure),
+# not dropped. The async-FFI-routing / GIL / handle-lifecycle regressions
+# targeted the retired mock's `_lib.Producer_*_async` plumbing and have no
+# public-surface subject, so they are dropped (not skipped). The flat-error
+# assertions (`err.code` / `err.is_retriable` / `err.txn_requires_abort`) are
+# re-expressed here as the typed error class the new hierarchy uses.
 # ===========================================================================
 
 class TestMockProducerCallbacks:
@@ -923,3 +929,92 @@ class TestAsyncMockProducerCallbacks:
         await p.send(record=RECORD1)
         await p.close()
         assert p.closed()
+
+
+# ===========================================================================
+# Producer backpressure — a live contract of the REAL producer.
+#
+# `AsyncKafkaProducer.send` / `KafkaProducer.send` are `async` / thread-blocking
+# precisely because Java's `send` blocks on buffer space (spec principle 5):
+# `Producer_send` returns `full` once PRODUCER_MAX_ACCUMULATED_RECORDS (1000)
+# records are accumulated un-taken, and the send then waits on
+# `Producer_on_space_available` (async_producer.py / producer.py). This is
+# re-expressed here from the retired FFI-mock backpressure suite; the subject is
+# the real producer's send path, not the retired mock.
+#
+# The `Producer_test_set_paused` hook (`_confluentkafka.c:884`) stalls the send
+# task's drain so the buffer fills deterministically WITHOUT a broker — records
+# accumulate regardless of broker reachability. The producer is pointed at an
+# UNREACHABLE bootstrap: with the task paused, filling to the bound and crossing
+# it exercises the full/space-available path, and `close()` (called while still
+# paused) fires the pending space waiters and releases the blocked/suspended
+# sender. The pure "resume-on-drain" leg (un-pause, delivery actually completes)
+# needs the send task to deliver to a broker, so it belongs to the integration
+# arm — see the module note below and C44.
+# ===========================================================================
+
+import _confluentkafka as _lib  # noqa: E402  (test-only Producer_test_set_paused)
+
+# PRODUCER_MAX_ACCUMULATED_RECORDS in _confluentkafka.c: the producer is "full"
+# once this many records are accumulated un-taken by the (paused) send task.
+BACKPRESSURE_BOUND = 1000
+_UNREACHABLE = {"bootstrap.servers": "127.0.0.1:59999"}
+
+
+class TestProducerBackpressure:
+    def test_sync_send_blocks_on_full_and_close_unblocks(self):
+        # KafkaProducer.send blocks the calling thread once the buffer is full
+        # (Java send() on a full buffer); close() must release it, not hang.
+        p = KafkaProducer(config=_UNREACHABLE)
+        _lib.Producer_test_set_paused(p._c_producer, True)
+        for _ in range(BACKPRESSURE_BOUND - 1):
+            p.send(record=RECORD1)  # below the bound: none block
+
+        done = threading.Event()
+
+        def crossing_send():
+            p.send(record=RECORD1)  # crosses the bound -> blocks on full
+            done.set()
+
+        t = threading.Thread(target=crossing_send)
+        t.start()
+        try:
+            assert not done.wait(timeout=0.4), "send should block while the buffer is full"
+            # close() while still paused fires the pending space waiter and
+            # releases the blocked sender (and tears down cleanly — the send task
+            # never tries to deliver to the unreachable broker).
+            p.close(timeout=2.0)
+            assert done.wait(timeout=10.0), "close must release the blocked sender"
+        finally:
+            t.join(timeout=10.0)
+
+    async def test_async_send_suspends_on_full_and_close_unblocks(self):
+        # AsyncKafkaProducer.send suspends (yields the loop) on a full buffer,
+        # never blocks it; close() releases the suspended sender.
+        p = AsyncKafkaProducer(config=_UNREACHABLE)
+        _lib.Producer_test_set_paused(p._c_producer, True)
+        for _ in range(BACKPRESSURE_BOUND - 1):
+            await p.send(record=RECORD1)
+
+        task = asyncio.ensure_future(p.send(record=RECORD1))
+        await asyncio.sleep(0.3)
+        assert not task.done(), "crossing send should suspend on backpressure"
+        # The loop stays responsive while the send is suspended.
+        assert await asyncio.sleep(0, result=True)
+
+        # close() while still paused releases the suspended sender cleanly.
+        await asyncio.wait_for(p.close(timeout=2.0), timeout=10.0)
+        await asyncio.wait_for(task, timeout=5.0)
+        assert task.done()
+
+    async def test_async_below_bound_never_suspends(self):
+        # When accumulation stays below the bound, no send suspends — backpressure
+        # is invisible. Paused so the task cannot drain, isolating the bound check.
+        p = AsyncKafkaProducer(config=_UNREACHABLE)
+        _lib.Producer_test_set_paused(p._c_producer, True)
+        for _ in range(50):
+            fut = p.send(record=RECORD1)
+            # Each send resolves promptly (no space wait) below the bound.
+            await asyncio.wait_for(fut, timeout=2.0)
+        # Teardown while paused (records never delivered to the unreachable broker).
+        await asyncio.wait_for(p.close(timeout=2.0), timeout=10.0)

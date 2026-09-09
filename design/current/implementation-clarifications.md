@@ -719,3 +719,26 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   reference-lib comparison and benchmark only our client; (c) port after the compat-module decision.
 - **Status:** open — owner to decide how the perf suite reaches the reference library under the
   `confluent_kafka` name.
+
+### C44 — Producer backpressure re-expressed against the real producer; resume-on-drain leg is integration-only (P6, Critic 69 finding 1)
+- **Where:** `bindings/python/test/unit/test_producer_family.py` (`TestProducerBackpressure`);
+  subject `async_producer.py` / `producer.py` `send` → `Producer_send` (full) /
+  `Producer_on_space_available`; hook `_confluentkafka.c` `Producer_test_set_paused`.
+- **Correction:** P6 first dropped the legacy backpressure suite as "retired FFI-mock plumbing".
+  Critic 69 finding 1 is right: backpressure is a live contract of the REAL producer (the reason
+  `send` is `async` / thread-blocking, spec principle 5), and the `Producer_test_set_paused` hook
+  still exists. Re-expressed against `KafkaProducer` / `AsyncKafkaProducer` pointed at an
+  unreachable bootstrap: with the send task paused, records accumulate broker-free, so filling to
+  `PRODUCER_MAX_ACCUMULATED_RECORDS` (1000) and crossing it exercises the full / space-available
+  path, and `close()` (called while still paused) fires the pending space waiters and releases the
+  blocked/suspended sender. Three tests: sync blocks-on-full + close-unblocks, async suspends +
+  close-unblocks, and below-bound never suspends.
+- **Assumption taken / integration-only leg:** the pure "resume-on-drain" case (un-pause, the send
+  task actually DELIVERS the backlog and the crossing send resolves *by drain* rather than by
+  close) needs the send task to deliver to a real broker: once un-paused, a real producer at an
+  unreachable bootstrap blocks its send task trying to deliver the accumulated batch, so any close
+  afterward hangs (verified — even `close(timeout=0)`). So the resume-by-delivery assertion is left
+  to the gRPC/multilanguage integration arm (which has a real broker); the unit tests prove the
+  suspend + close-unblocks + below-bound contracts, which are the broker-free half. This is a
+  faithful split, not a silent drop: the full/space-available path is now covered.
+- **Status:** resolved (unit coverage restored; the delivery-resume leg is an integration item).
