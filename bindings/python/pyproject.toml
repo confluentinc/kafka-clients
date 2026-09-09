@@ -17,12 +17,25 @@ dev = [
     "confluent-kafka>=2.13.0",
     "psutil",
     "matplotlib",
+    "mypy",
     "pytest",
     "pytest-asyncio",
     "testcontainers>=4.0",
 ]
 
 [tool.setuptools]
+# The new ``confluent_kafka`` package (spec §4 module layout). The legacy
+# top-level ``producer`` / ``consumer`` / ``admin`` modules are kept for now;
+# they are retired as their surfaces move into the package (P4/P5).
+packages = [
+    "confluent_kafka",
+    "confluent_kafka.common",
+    "confluent_kafka.common.config",
+    "confluent_kafka.common.errors",
+    "confluent_kafka.common.serialization",
+    "confluent_kafka.consumer",
+    "confluent_kafka.producer",
+]
 py-modules = ["producer", "consumer", "admin"]
 
 [tool.pytest.ini_options]

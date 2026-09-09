@@ -13,10 +13,11 @@
 // limitations under the License.
 
 mod check_bindings;
+mod error_hierarchy;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 fn main() -> anyhow::Result<()> {
     let task = env::args().nth(1);
@@ -316,6 +317,11 @@ fn generate_error_codes() -> anyhow::Result<()> {
     fs::write(ERROR_CODE_RS, error_codes_rust(&codes))?;
 
     println!("✅ Wrote {} constants to {ERROR_CODE_PY} and {ERROR_CODE_RS}", codes.len());
+
+    // Also regenerate the Python exception hierarchy from the Java sources,
+    // cross-checked against the same FFI enum (spec §5.5 / Design Decisions D1).
+    println!("🔧 Generating the Python error hierarchy from the Java sources...");
+    error_hierarchy::generate(Path::new("."))?;
     Ok(())
 }
 
@@ -335,13 +341,23 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
         }
     }
 
-    if !stale.is_empty() {
-        eprintln!("\n❌ Stale generated error-code constants: {}", stale.join(", "));
+    // The Python exception hierarchy generated from the Java sources.
+    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new("."))?;
+
+    if !stale.is_empty() || !hierarchy_stale.is_empty() {
+        if !stale.is_empty() {
+            eprintln!("\n❌ Stale generated error-code constants: {}", stale.join(", "));
+        }
+        if !hierarchy_stale.is_empty() {
+            let files: Vec<String> = hierarchy_stale.iter().map(|p| p.display().to_string()).collect();
+            eprintln!("\n❌ Stale generated error hierarchy: {}", files.join(", "));
+        }
         eprintln!("   Run: cargo xtask generate-error-codes");
         exit(1);
     }
 
     println!("✅ Error-code constants are up to date ({} codes)", codes.len());
+    println!("✅ Generated error hierarchy is up to date");
     Ok(())
 }
 
