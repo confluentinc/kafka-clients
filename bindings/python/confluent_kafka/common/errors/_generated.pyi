@@ -17,6 +17,7 @@
 from typing import ClassVar
 from confluent_kafka._generated_errors import IllegalStateError
 from confluent_kafka.common.errors._base import KafkaError
+from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__: list[str]
 
@@ -37,6 +38,8 @@ class ControllerMovedError(ApiError):
 
 class CorrelationIdMismatchError(IllegalStateError):
     _ffi_id: ClassVar[int]
+    def request_correlation_id(self) -> int: ...
+    def response_correlation_id(self) -> int: ...
 
 class DelegationTokenDisabledError(ApiError):
     _ffi_id: ClassVar[int]
@@ -55,6 +58,7 @@ class DuplicateBrokerRegistrationError(ApiError):
 
 class DuplicateResourceError(ApiError):
     _ffi_id: ClassVar[int]
+    def resource(self) -> str | None: ...
 
 class DuplicateSequenceError(ApiError):
     _ffi_id: ClassVar[int]
@@ -166,6 +170,7 @@ class InvalidTimestampError(ApiError):
 
 class InvalidTopicError(InvalidConfigurationError):
     _ffi_id: ClassVar[int]
+    def invalid_topics(self) -> set[str]: ...
 
 class InvalidTxnStateError(ApiError):
     _ffi_id: ClassVar[int]
@@ -202,6 +207,8 @@ class OffsetMovedToTieredStorageError(ApiError):
 
 class OffsetOutOfRangeError(InvalidOffsetError):
     _ffi_id: ClassVar[int]
+    def offset_out_of_range_partitions(self) -> dict[TopicPartition, int]: ...
+    def partitions(self) -> set[TopicPartition]: ...
 
 class OperationNotAttemptedError(ApiError):
     _ffi_id: ClassVar[int]
@@ -223,6 +230,10 @@ class ProducerFencedError(ApplicationRecoverableError):
 
 class QuotaViolationError(KafkaError):
     _ffi_id: ClassVar[int]
+    def metric_name(self) -> str | None: ...
+    def metric_group(self) -> str | None: ...
+    def value(self) -> float: ...
+    def bound(self) -> float: ...
 
 class ReassignmentInProgressError(ApiError):
     _ffi_id: ClassVar[int]
@@ -238,9 +249,11 @@ class RecordBatchTooLargeError(InvalidConfigurationError):
 
 class RecordTooLargeError(ApiError):
     _ffi_id: ClassVar[int]
+    def record_too_large_partitions(self) -> dict[TopicPartition, int] | None: ...
 
 class ResourceNotFoundError(ApiError):
     _ffi_id: ClassVar[int]
+    def resource(self) -> str | None: ...
 
 class RetriableError(ApiError):
     def __init__(self, *args: object) -> None: ...
@@ -283,6 +296,7 @@ class TelemetryTooLargeError(ApiError):
 
 class ThrottlingQuotaExceededError(RetriableError):
     _ffi_id: ClassVar[int]
+    def throttle_time_ms(self) -> int: ...
 
 class TimeoutError(RetriableError):
     _ffi_id: ClassVar[int]
@@ -394,6 +408,7 @@ class FetchSessionTopicIdError(RetriableError):
 
 class GroupAuthorizationError(AuthorizationError):
     _ffi_id: ClassVar[int]
+    def group_id(self) -> str | None: ...
 
 class IllegalSaslStateError(AuthenticationError):
     _ffi_id: ClassVar[int]
@@ -430,6 +445,7 @@ class SslAuthenticationError(AuthenticationError):
 
 class TopicAuthorizationError(AuthorizationError):
     _ffi_id: ClassVar[int]
+    def unauthorized_topics(self) -> set[str]: ...
 
 class TransactionalIdAuthorizationError(AuthorizationError):
     _ffi_id: ClassVar[int]

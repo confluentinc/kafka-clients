@@ -3156,6 +3156,209 @@ static PyObject* py_LongOffsetMap_drain(PyObject* self, PyObject* args) {
     return d;
 }
 
+// --- Typed-payload accessors for error classes (rule 5 / Critic 70 F1) -------
+//
+// Each Java exception with typed payload getters (`TopicAuthorizationException.
+// unauthorizedTopics()`, `LogTruncationException.divergentOffsets()`, ...) is
+// mirrored on the Python side by accessor methods on the generated error class.
+// The FFI exposes the payload through the two-step pattern
+// `kafka_common_Error_<type>(err)` -> a borrowed sub-handle, then
+// `kafka_common_<Type>Error_<getter>(sub)`. `KafkaError_payload` reads the
+// error's variant sub-handle before the handle is destroyed and returns the raw
+// payload as a Python dict keyed by the accessor name (raw tuples/lists/dicts;
+// the Python layer wraps them into `TopicPartition` / `OffsetAndMetadata` etc.).
+// Returns `None` when the error carries no typed payload.
+
+// Convert an OWNED `kafka_consumer_OffsetMap_t` into
+// `dict[(topic,int), (offset,metadata,epoch|None)]`, destroying the handle.
+static PyObject* offset_map_owned_to_py(kafka_consumer_OffsetMap_t* m) {
+    if (m == NULL) Py_RETURN_NONE;
+    int32_t n = kafka_consumer_OffsetMap_count(m);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_consumer_OffsetMap_destroy(m); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        const kafka_consumer_TopicPartition_t* k = kafka_consumer_OffsetMap_get_key(m, i);
+        const kafka_consumer_OffsetAndMetadata_t* v = kafka_consumer_OffsetMap_get_value(m, i);
+        int32_t epoch = 0;
+        int has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch);
+        PyObject* key = Py_BuildValue("(si)", kafka_consumer_TopicPartition_topic(k),
+                                      kafka_consumer_TopicPartition_partition(k));
+        PyObject* val = Py_BuildValue("(LsO)", kafka_consumer_OffsetAndMetadata_offset(v),
+                                      kafka_consumer_OffsetAndMetadata_metadata(v),
+                                      has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_consumer_OffsetMap_destroy(m); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_consumer_OffsetMap_destroy(m);
+    return d;
+}
+
+// Convert an OWNED `kafka_consumer_LongOffsetMap_t` into
+// `dict[(topic,int), int]`, destroying the handle. `null` (never-known) -> None.
+static PyObject* long_offset_map_owned_to_py(kafka_consumer_LongOffsetMap_t* m) {
+    if (m == NULL) Py_RETURN_NONE;
+    int32_t n = kafka_consumer_LongOffsetMap_count(m);
+    PyObject* d = PyDict_New();
+    if (d == NULL) { kafka_consumer_LongOffsetMap_destroy(m); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        const kafka_consumer_TopicPartition_t* k = kafka_consumer_LongOffsetMap_get_key(m, i);
+        PyObject* key = Py_BuildValue("(si)", kafka_consumer_TopicPartition_topic(k),
+                                      kafka_consumer_TopicPartition_partition(k));
+        PyObject* val = PyLong_FromLongLong(kafka_consumer_LongOffsetMap_get_value(m, i));
+        if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
+            Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
+            kafka_consumer_LongOffsetMap_destroy(m); return NULL;
+        }
+        Py_DECREF(key); Py_DECREF(val);
+    }
+    kafka_consumer_LongOffsetMap_destroy(m);
+    return d;
+}
+
+// Set dict[key] = value (a new ref), DECREF value. Returns -1 on failure.
+static int payload_set(PyObject* d, const char* key, PyObject* value) {
+    if (value == NULL) return -1;
+    int rc = PyDict_SetItemString(d, key, value);
+    Py_DECREF(value);
+    return rc;
+}
+
+// KafkaError_payload(err) -> dict of raw payload keyed by accessor name, or None.
+// The error handle is NOT consumed (the caller still destroys it).
+static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    const kafka_common_Error_t* e = (const kafka_common_Error_t*)(uintptr_t)ptr;
+    if (e == NULL) Py_RETURN_NONE;
+
+    PyObject* d = PyDict_New();
+    if (d == NULL) return NULL;
+    int ok = 0;
+
+    const kafka_common_TopicAuthorizationError_t* ta =
+        kafka_common_Error_topic_authorization(e);
+    if (ta != NULL) {
+        ok = payload_set(d, "unauthorized_topics",
+            string_list_to_py(kafka_common_TopicAuthorizationError_unauthorized_topics(ta))) == 0;
+        goto done;
+    }
+    const kafka_common_GroupAuthorizationError_t* ga =
+        kafka_common_Error_group_authorization(e);
+    if (ga != NULL) {
+        char* gid = kafka_common_GroupAuthorizationError_group_id(ga);
+        PyObject* v = gid ? PyUnicode_FromString(gid) : (Py_INCREF(Py_None), Py_None);
+        if (gid) kafka_consumer_string_destroy(gid);
+        ok = payload_set(d, "group_id", v) == 0;
+        goto done;
+    }
+    const kafka_common_InvalidTopicError_t* it =
+        kafka_common_Error_invalid_topic(e);
+    if (it != NULL) {
+        ok = payload_set(d, "invalid_topics",
+            string_list_to_py(kafka_common_InvalidTopicError_invalid_topics(it))) == 0;
+        goto done;
+    }
+    const kafka_common_ThrottlingQuotaExceededError_t* tq =
+        kafka_common_Error_throttling_quota_exceeded(e);
+    if (tq != NULL) {
+        ok = payload_set(d, "throttle_time_ms",
+            PyLong_FromLong(kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(tq))) == 0;
+        goto done;
+    }
+    const kafka_common_QuotaViolationError_t* qv =
+        kafka_common_Error_quota_violation(e);
+    if (qv != NULL) {
+        char* mn = kafka_common_QuotaViolationError_metric_name(qv);
+        char* mg = kafka_common_QuotaViolationError_metric_group(qv);
+        ok = payload_set(d, "metric_name",
+                 mn ? PyUnicode_FromString(mn) : (Py_INCREF(Py_None), Py_None)) == 0
+          && payload_set(d, "metric_group",
+                 mg ? PyUnicode_FromString(mg) : (Py_INCREF(Py_None), Py_None)) == 0
+          && payload_set(d, "value",
+                 PyFloat_FromDouble(kafka_common_QuotaViolationError_value(qv))) == 0
+          && payload_set(d, "bound",
+                 PyFloat_FromDouble(kafka_common_QuotaViolationError_bound(qv))) == 0;
+        if (mn) kafka_consumer_string_destroy(mn);
+        if (mg) kafka_consumer_string_destroy(mg);
+        goto done;
+    }
+    // LogTruncation is a subclass of OffsetOutOfRange; probe it first so a
+    // truncation error reports its own (richer) payload, mirroring Java.
+    const kafka_common_ConsumerLogTruncationError_t* lt =
+        kafka_common_Error_consumer_log_truncation(e);
+    if (lt != NULL) {
+        ok = payload_set(d, "offset_out_of_range_partitions",
+                 long_offset_map_owned_to_py(
+                     kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(lt))) == 0
+          && payload_set(d, "divergent_offsets",
+                 offset_map_owned_to_py(
+                     kafka_common_ConsumerLogTruncationError_divergent_offsets(lt))) == 0;
+        goto done;
+    }
+    const kafka_common_ConsumerOffsetOutOfRangeError_t* oor =
+        kafka_common_Error_consumer_offset_out_of_range(e);
+    if (oor != NULL) {
+        ok = payload_set(d, "offset_out_of_range_partitions",
+                 long_offset_map_owned_to_py(
+                     kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(oor))) == 0;
+        goto done;
+    }
+    const kafka_common_ConsumerNoOffsetForPartitionError_t* no =
+        kafka_common_Error_consumer_no_offset_for_partition(e);
+    if (no != NULL) {
+        ok = payload_set(d, "partitions",
+                 topic_partition_list_to_py(
+                     kafka_common_ConsumerNoOffsetForPartitionError_partitions(no))) == 0;
+        goto done;
+    }
+    const kafka_common_RecordTooLargeError_t* rtl =
+        kafka_common_Error_record_too_large(e);
+    if (rtl != NULL) {
+        ok = payload_set(d, "record_too_large_partitions",
+                 long_offset_map_owned_to_py(
+                     kafka_common_RecordTooLargeError_record_too_large_partitions(rtl))) == 0;
+        goto done;
+    }
+    const kafka_common_DuplicateResourceError_t* dr =
+        kafka_common_Error_duplicate_resource(e);
+    if (dr != NULL) {
+        char* res = kafka_common_DuplicateResourceError_resource(dr);
+        PyObject* v = res ? PyUnicode_FromString(res) : (Py_INCREF(Py_None), Py_None);
+        if (res) kafka_consumer_string_destroy(res);
+        ok = payload_set(d, "resource", v) == 0;
+        goto done;
+    }
+    const kafka_common_ResourceNotFoundError_t* rnf =
+        kafka_common_Error_resource_not_found(e);
+    if (rnf != NULL) {
+        char* res = kafka_common_ResourceNotFoundError_resource(rnf);
+        PyObject* v = res ? PyUnicode_FromString(res) : (Py_INCREF(Py_None), Py_None);
+        if (res) kafka_consumer_string_destroy(res);
+        ok = payload_set(d, "resource", v) == 0;
+        goto done;
+    }
+    const kafka_common_CorrelationIdMismatchError_t* cm =
+        kafka_common_Error_correlation_id_mismatch(e);
+    if (cm != NULL) {
+        ok = payload_set(d, "request_correlation_id",
+                 PyLong_FromLong(kafka_common_CorrelationIdMismatchError_request_correlation_id(cm))) == 0
+          && payload_set(d, "response_correlation_id",
+                 PyLong_FromLong(kafka_common_CorrelationIdMismatchError_response_correlation_id(cm))) == 0;
+        goto done;
+    }
+
+    // No typed payload for this error.
+    Py_DECREF(d);
+    Py_RETURN_NONE;
+
+done:
+    if (!ok) { Py_DECREF(d); return NULL; }
+    return d;
+}
+
 static PyObject* py_PartitionInfoList_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
@@ -7567,6 +7770,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Build a KafkaError handle from (code, message); returns error_int"},
     {"KafkaError_source", py_KafkaError_source, METH_VARARGS,
      "The cause of an error as a new owned handle int, or 0 (None)"},
+    {"KafkaError_payload", py_KafkaError_payload, METH_VARARGS,
+     "Typed payload of an error as a dict keyed by accessor name, or None"},
     // ---- Consumer ----
     {"Consumer_MockConsumer_new", py_Consumer_MockConsumer_new, METH_VARARGS, "Create a MockConsumer"},
     {"Consumer_KafkaConsumer_new", py_Consumer_KafkaConsumer_new, METH_VARARGS, "Create a KafkaConsumer"},

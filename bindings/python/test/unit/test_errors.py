@@ -471,3 +471,340 @@ def test_kafka_error_str_is_the_message() -> None:
 def test_duration_alias_exists() -> None:
     # Duration = float | timedelta (rule 3.7).
     assert confluent_kafka.Duration is not None
+
+
+# ----------------------------------------------------------------------------
+# Typed payload accessors (rule 5 — mirror Java's exception getters). The C
+# extension's ``KafkaError_payload`` returns the raw payload keyed by accessor
+# name (raw tuples for ``TopicPartition`` / ``OffsetAndMetadata``); the
+# ``build_payload`` layer wraps them into public types and the generated
+# accessor methods return them. These tests drive that path through a fake
+# ``_lib`` (no core error carrying such a payload can be constructed from
+# Python), one per accessor.
+# ----------------------------------------------------------------------------
+
+
+def _fake_lib_with_payload(ffi_id: int, message: str, payload: object):
+    class _FakeLib:
+        @staticmethod
+        def KafkaError_code(handle: int) -> int:
+            return ffi_id
+
+        @staticmethod
+        def KafkaError_message(handle: int) -> str:
+            return message
+
+        @staticmethod
+        def KafkaError_destroy(handle: int) -> None:
+            pass
+
+        @staticmethod
+        def KafkaError_payload(handle: int):
+            return payload
+
+    return _FakeLib
+
+
+def test_topic_authorization_unauthorized_topics(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import TopicAuthorizationError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            TopicAuthorizationError._ffi_id,
+            "no",
+            {"unauthorized_topics": ["a", "b"]},
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, TopicAuthorizationError)
+    assert err.unauthorized_topics() == {"a", "b"}
+
+
+def test_group_authorization_group_id(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import GroupAuthorizationError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            GroupAuthorizationError._ffi_id, "no", {"group_id": "g1"}
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, GroupAuthorizationError)
+    assert err.group_id() == "g1"
+
+
+def test_group_authorization_group_id_none(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import GroupAuthorizationError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            GroupAuthorizationError._ffi_id, "no", {"group_id": None}
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, GroupAuthorizationError)
+    assert err.group_id() is None
+
+
+def test_invalid_topic_invalid_topics(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import InvalidTopicError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            InvalidTopicError._ffi_id, "bad", {"invalid_topics": ["x"]}
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, InvalidTopicError)
+    assert err.invalid_topics() == {"x"}
+
+
+def test_throttling_quota_throttle_time_ms(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import ThrottlingQuotaExceededError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            ThrottlingQuotaExceededError._ffi_id,
+            "slow",
+            {"throttle_time_ms": 250},
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, ThrottlingQuotaExceededError)
+    assert err.throttle_time_ms() == 250
+
+
+def test_quota_violation_accessors(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import QuotaViolationError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            QuotaViolationError._ffi_id,
+            "over",
+            {
+                "metric_name": "rate",
+                "metric_group": "producer",
+                "value": 9.5,
+                "bound": 5.0,
+            },
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, QuotaViolationError)
+    assert err.metric_name() == "rate"
+    assert err.metric_group() == "producer"
+    assert err.value() == 9.5
+    assert err.bound() == 5.0
+
+
+def test_duplicate_resource_resource(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import DuplicateResourceError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            DuplicateResourceError._ffi_id, "dup", {"resource": "r1"}
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, DuplicateResourceError)
+    assert err.resource() == "r1"
+
+
+def test_resource_not_found_resource(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import ResourceNotFoundError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            ResourceNotFoundError._ffi_id, "missing", {"resource": None}
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, ResourceNotFoundError)
+    assert err.resource() is None
+
+
+def test_correlation_id_mismatch_accessors(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import CorrelationIdMismatchError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            CorrelationIdMismatchError._ffi_id,
+            "mismatch",
+            {
+                "request_correlation_id": 7,
+                "response_correlation_id": 8,
+            },
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, CorrelationIdMismatchError)
+    assert err.request_correlation_id() == 7
+    assert err.response_correlation_id() == 8
+
+
+def test_no_offset_for_partition_partitions(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.topic_partition import TopicPartition
+    from confluent_kafka.consumer._generated_errors import (
+        NoOffsetForPartitionError,
+    )
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            NoOffsetForPartitionError._ffi_id,
+            "no offset",
+            {"partitions": [("t", 0), ("t", 1)]},
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, NoOffsetForPartitionError)
+    assert err.partitions() == {
+        TopicPartition(topic="t", partition=0),
+        TopicPartition(topic="t", partition=1),
+    }
+
+
+def test_offset_out_of_range_accessors(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.topic_partition import TopicPartition
+    from confluent_kafka.consumer._generated_errors import OffsetOutOfRangeError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            OffsetOutOfRangeError._ffi_id,
+            "oor",
+            {"offset_out_of_range_partitions": {("t", 0): 42}},
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, OffsetOutOfRangeError)
+    tp = TopicPartition(topic="t", partition=0)
+    assert err.offset_out_of_range_partitions() == {tp: 42}
+    # partitions() is the key set (Java Map.keySet()).
+    assert err.partitions() == {tp}
+
+
+def test_log_truncation_accessors(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.topic_partition import TopicPartition
+    from confluent_kafka.consumer._generated_errors import LogTruncationError
+    from confluent_kafka.consumer.offset_and_metadata import OffsetAndMetadata
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            LogTruncationError._ffi_id,
+            "truncated",
+            {
+                "offset_out_of_range_partitions": {("t", 0): 10},
+                "divergent_offsets": {("t", 0): (7, "", None)},
+            },
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, LogTruncationError)
+    tp = TopicPartition(topic="t", partition=0)
+    # Inherited from OffsetOutOfRangeError.
+    assert err.offset_out_of_range_partitions() == {tp: 10}
+    assert err.partitions() == {tp}
+    # Declared on LogTruncationError.
+    assert err.divergent_offsets() == {tp: OffsetAndMetadata(offset=7)}
+
+
+def test_record_too_large_partitions(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import RecordTooLargeError
+    from confluent_kafka.common.topic_partition import TopicPartition
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            RecordTooLargeError._ffi_id,
+            "too big",
+            {"record_too_large_partitions": {("t", 3): 99}},
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, RecordTooLargeError)
+    assert err.record_too_large_partitions() == {
+        TopicPartition(topic="t", partition=3): 99
+    }
+
+
+def test_record_too_large_partitions_none(monkeypatch) -> None:
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import RecordTooLargeError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(
+            RecordTooLargeError._ffi_id,
+            "too big",
+            {"record_too_large_partitions": None},
+        ),
+    )
+    err = errmod.from_ffi_error(0)
+    assert isinstance(err, RecordTooLargeError)
+    assert err.record_too_large_partitions() is None
+
+
+def test_error_without_payload_has_no_attribute(monkeypatch) -> None:
+    """An error variant that carries no typed payload gets no ``_error_payload``
+    (the C extension returns None)."""
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import TopicAuthorizationError
+
+    monkeypatch.setattr(
+        errmod,
+        "_lib",
+        _fake_lib_with_payload(TopicAuthorizationError._ffi_id, "x", None),
+    )
+    err = errmod.from_ffi_error(0)
+    assert not hasattr(err, "_error_payload")
+
+
+def test_real_native_plain_error_has_no_payload() -> None:
+    """A round-trip through the real C extension: an error built with no typed
+    payload reports None from ``KafkaError_payload``."""
+    _lib = pytest.importorskip("_confluentkafka")
+
+    # UNKNOWN_SERVER_ERROR (-1) carries no typed payload.
+    handle = _lib.KafkaError_new(-1, "boom")
+    try:
+        assert _lib.KafkaError_payload(handle) is None
+    finally:
+        _lib.KafkaError_destroy(handle)

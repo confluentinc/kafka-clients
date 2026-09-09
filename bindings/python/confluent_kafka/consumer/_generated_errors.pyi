@@ -17,6 +17,8 @@
 from typing import ClassVar
 from confluent_kafka.common.errors._base import KafkaError
 from confluent_kafka.common.errors._generated import RetriableError
+from confluent_kafka.common.topic_partition import TopicPartition
+from confluent_kafka.consumer.offset_and_metadata import OffsetAndMetadata
 
 __all__: list[str]
 
@@ -28,13 +30,17 @@ class InvalidOffsetError(KafkaError):
 
 class NoOffsetForPartitionError(InvalidOffsetError):
     _ffi_id: ClassVar[int]
+    def partitions(self) -> set[TopicPartition]: ...
 
 class OffsetOutOfRangeError(InvalidOffsetError):
     _ffi_id: ClassVar[int]
+    def offset_out_of_range_partitions(self) -> dict[TopicPartition, int]: ...
+    def partitions(self) -> set[TopicPartition]: ...
 
 class RetriableCommitFailedError(RetriableError):
     _ffi_id: ClassVar[int]
 
 class LogTruncationError(OffsetOutOfRangeError):
     _ffi_id: ClassVar[int]
+    def divergent_offsets(self) -> dict[TopicPartition, OffsetAndMetadata]: ...
 

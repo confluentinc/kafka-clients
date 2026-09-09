@@ -1065,6 +1065,208 @@ const PY_HEADER: &str = "# Copyright 2025 Confluent Inc.\n\
 # See the License for the specific language governing permissions and\n\
 # limitations under the License.\n";
 
+/// One typed payload accessor on an error class (rule 5 — mirrors a Java
+/// getter). `method` is the Python (snake_case) name, `ret` the Python return
+/// annotation, `doc` the one-line rustdoc-from-javadoc summary, and `body` the
+/// method body expression.
+struct Accessor {
+    method: &'static str,
+    ret: &'static str,
+    doc: &'static str,
+    body: AccessorBody,
+}
+
+/// How an accessor produces its value from the instance's `_error_payload`.
+enum AccessorBody {
+    /// `return self._error_payload["<method>"]` — a stored typed value.
+    Payload,
+    /// `return set(self._error_payload["<source>"].keys())` — a derived key set
+    /// (Java `Map.keySet()`), for `partitions()` over an offset map.
+    PayloadKeys(&'static str),
+}
+
+/// The typed payload accessors for a generated Python class, keyed by class
+/// name. This is the single source of truth for rule-5 error getters: the C
+/// extension's `KafkaError_payload` fills `_error_payload`, and these methods
+/// read it. Java getters map to Python per R2.8 (`Set`→`set`, `Map`→`dict`).
+///
+/// Only concrete classes appear; an abstract Java base that *declares* a getter
+/// (`InvalidOffsetException.partitions()`) has it emitted on each concrete
+/// subclass instead, matching Java's abstract-then-override shape.
+fn accessors_for(py_name: &str) -> &'static [Accessor] {
+    match py_name {
+        "TopicAuthorizationError" => &[Accessor {
+            method: "unauthorized_topics",
+            ret: "set[str]",
+            doc: "The set of topics which failed authorization (possibly empty).",
+            body: AccessorBody::Payload,
+        }],
+        "GroupAuthorizationError" => &[Accessor {
+            method: "group_id",
+            ret: "str | None",
+            doc: "The group id that failed authorization, or None if not known.",
+            body: AccessorBody::Payload,
+        }],
+        "InvalidTopicError" => &[Accessor {
+            method: "invalid_topics",
+            ret: "set[str]",
+            doc: "The set of invalid topics.",
+            body: AccessorBody::Payload,
+        }],
+        "ThrottlingQuotaExceededError" => &[Accessor {
+            method: "throttle_time_ms",
+            ret: "int",
+            doc: "The throttle time in milliseconds.",
+            body: AccessorBody::Payload,
+        }],
+        "QuotaViolationError" => &[
+            Accessor {
+                method: "metric_name",
+                ret: "str | None",
+                doc: "The name of the metric that violated its quota.",
+                body: AccessorBody::Payload,
+            },
+            Accessor {
+                method: "metric_group",
+                ret: "str | None",
+                doc: "The group of the metric that violated its quota.",
+                body: AccessorBody::Payload,
+            },
+            Accessor {
+                method: "value",
+                ret: "float",
+                doc: "The observed metric value.",
+                body: AccessorBody::Payload,
+            },
+            Accessor {
+                method: "bound",
+                ret: "float",
+                doc: "The quota bound that was violated.",
+                body: AccessorBody::Payload,
+            },
+        ],
+        "DuplicateResourceError" => &[Accessor {
+            method: "resource",
+            ret: "str | None",
+            doc: "The duplicate resource, or None if not known.",
+            body: AccessorBody::Payload,
+        }],
+        "ResourceNotFoundError" => &[Accessor {
+            method: "resource",
+            ret: "str | None",
+            doc: "The resource that was not found, or None if not known.",
+            body: AccessorBody::Payload,
+        }],
+        "CorrelationIdMismatchError" => &[
+            Accessor {
+                method: "request_correlation_id",
+                ret: "int",
+                doc: "The correlation id of the request.",
+                body: AccessorBody::Payload,
+            },
+            Accessor {
+                method: "response_correlation_id",
+                ret: "int",
+                doc: "The correlation id of the response.",
+                body: AccessorBody::Payload,
+            },
+        ],
+        "NoOffsetForPartitionError" => &[Accessor {
+            method: "partitions",
+            ret: "set[TopicPartition]",
+            doc: "The partitions with no defined offset.",
+            body: AccessorBody::Payload,
+        }],
+        "OffsetOutOfRangeError" => &[
+            Accessor {
+                method: "offset_out_of_range_partitions",
+                ret: "dict[TopicPartition, int]",
+                doc: "A map of the out-of-range partitions to their requested \
+                      offsets.",
+                body: AccessorBody::Payload,
+            },
+            Accessor {
+                method: "partitions",
+                ret: "set[TopicPartition]",
+                doc: "The out-of-range partitions.",
+                body: AccessorBody::PayloadKeys("offset_out_of_range_partitions"),
+            },
+        ],
+        "LogTruncationError" => &[Accessor {
+            method: "divergent_offsets",
+            ret: "dict[TopicPartition, OffsetAndMetadata]",
+            doc: "A map of the truncated partitions to the divergent offsets at \
+                  which the logs diverged.",
+            body: AccessorBody::Payload,
+        }],
+        "RecordTooLargeError" => &[Accessor {
+            method: "record_too_large_partitions",
+            ret: "dict[TopicPartition, int] | None",
+            doc: "A map of the partitions to the size of their too-large \
+                  records, or None if not known.",
+            body: AccessorBody::Payload,
+        }],
+        _ => &[],
+    }
+}
+
+/// The consumer-package types an accessor return annotation references, for the
+/// module's typing imports. `(import_path, name)` pairs.
+fn accessor_type_imports(classes: &[&ClassInfo]) -> Vec<(&'static str, &'static str)> {
+    let mut needs_tp = false;
+    let mut needs_oam = false;
+    for c in classes {
+        for a in accessors_for(&c.py_name) {
+            if a.ret.contains("TopicPartition") {
+                needs_tp = true;
+            }
+            if a.ret.contains("OffsetAndMetadata") {
+                needs_oam = true;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if needs_tp {
+        out.push(("confluent_kafka.common.topic_partition", "TopicPartition"));
+    }
+    if needs_oam {
+        out.push(("confluent_kafka.consumer.offset_and_metadata", "OffsetAndMetadata"));
+    }
+    out
+}
+
+/// Emit the accessor methods for a class into its `.py` body.
+fn emit_accessors_py(py_name: &str) -> String {
+    let mut s = String::new();
+    for a in accessors_for(py_name) {
+        s.push_str(&format!("\n    def {}(self) -> {}:\n", a.method, a.ret));
+        s.push_str(&format!("        \"\"\"{}\"\"\"\n", a.doc));
+        match a.body {
+            AccessorBody::Payload => {
+                s.push_str(&format!(
+                    "        return self._error_payload[\"{}\"]  # type: ignore[attr-defined,no-any-return]\n",
+                    a.method
+                ));
+            },
+            AccessorBody::PayloadKeys(source) => {
+                s.push_str(&format!(
+                    "        return set(self._error_payload[\"{source}\"].keys())  # type: ignore[attr-defined]\n"
+                ));
+            },
+        }
+    }
+    s
+}
+
+/// Emit the accessor method stubs for a class into its `.pyi` body.
+fn emit_accessors_pyi(py_name: &str) -> String {
+    let mut s = String::new();
+    for a in accessors_for(py_name) {
+        s.push_str(&format!("    def {}(self) -> {}: ...\n", a.method, a.ret));
+    }
+    s
+}
+
 /// Emit one class's `.py` body (source form).
 fn emit_class_py(info: &ClassInfo) -> String {
     let mut s = String::new();
@@ -1087,6 +1289,8 @@ fn emit_class_py(info: &ClassInfo) -> String {
             "\n    _ffi_id: ClassVar[int] = {value}  # kafka_common_ErrorCode_{id}\n"
         ));
     }
+    // Typed payload accessors (rule 5). Only concrete classes carry them.
+    s.push_str(&emit_accessors_py(&info.py_name));
     s
 }
 
@@ -1099,6 +1303,7 @@ fn emit_class_pyi(info: &ClassInfo) -> String {
     } else {
         s.push_str("    _ffi_id: ClassVar[int]\n");
     }
+    s.push_str(&emit_accessors_pyi(&info.py_name));
     s
 }
 
@@ -1200,14 +1405,34 @@ fn render_module_py(module: Module, classes: &[&ClassInfo], all_classes: &[Class
         s.push_str("import builtins\n");
     }
     let needs_classvar = ordered.iter().any(|c| !c.is_abstract);
-    if needs_classvar {
-        s.push_str("from typing import ClassVar\n");
+    let type_imports = accessor_type_imports(classes);
+    if needs_classvar || !type_imports.is_empty() {
+        // ``ClassVar`` (for ``_ffi_id``) and ``TYPE_CHECKING`` (for the accessor
+        // return annotations, which are strings under ``from __future__ import
+        // annotations``) come from ``typing``.
+        let mut names = Vec::new();
+        if needs_classvar {
+            names.push("ClassVar");
+        }
+        if !type_imports.is_empty() {
+            names.push("TYPE_CHECKING");
+        }
+        s.push_str(&format!("from typing import {}\n", names.join(", ")));
     }
-    if needs_builtins || needs_classvar {
+    if needs_builtins || needs_classvar || !type_imports.is_empty() {
         s.push('\n');
     }
     for (path, name) in module_imports(classes, all_classes) {
         s.push_str(&format!("from {path} import {name}\n"));
+    }
+    if !type_imports.is_empty() {
+        // Payload types are needed only for type-checking the accessor return
+        // annotations; importing them at runtime would create an import cycle
+        // (consumer -> common.errors -> consumer).
+        s.push_str("\nif TYPE_CHECKING:\n");
+        for (path, name) in &type_imports {
+            s.push_str(&format!("    from {path} import {name}\n"));
+        }
     }
     s.push('\n');
 
@@ -1246,6 +1471,11 @@ fn render_module_pyi(classes: &[&ClassInfo], all_classes: &[ClassInfo]) -> Strin
         s.push_str("from typing import ClassVar\n");
     }
     for (path, name) in module_imports(classes, all_classes) {
+        s.push_str(&format!("from {path} import {name}\n"));
+    }
+    // Payload types referenced by accessor return annotations (rule 5). In a
+    // stub these are imported unconditionally (no runtime cycle in a ``.pyi``).
+    for (path, name) in accessor_type_imports(classes) {
         s.push_str(&format!("from {path} import {name}\n"));
     }
     s.push('\n');

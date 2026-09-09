@@ -22,10 +22,13 @@ GENERATED, DO NOT EDIT. Produced from the Java exception sources by
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka._generated_errors import IllegalStateError
 from confluent_kafka.common.errors._base import KafkaError
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__ = [
     "ApiError",
@@ -226,6 +229,14 @@ class CorrelationIdMismatchError(IllegalStateError):
 
     _ffi_id: ClassVar[int] = -24  # kafka_common_ErrorCode_CORRELATION_ID_MISMATCH
 
+    def request_correlation_id(self) -> int:
+        """The correlation id of the request."""
+        return self._error_payload["request_correlation_id"]  # type: ignore[attr-defined,no-any-return]
+
+    def response_correlation_id(self) -> int:
+        """The correlation id of the response."""
+        return self._error_payload["response_correlation_id"]  # type: ignore[attr-defined,no-any-return]
+
 
 class DelegationTokenDisabledError(ApiError):
     """Mirrors Java's ``org.apache.kafka.common.errors.DelegationTokenDisabledException``."""
@@ -261,6 +272,10 @@ class DuplicateResourceError(ApiError):
     """Mirrors Java's ``org.apache.kafka.common.errors.DuplicateResourceException``."""
 
     _ffi_id: ClassVar[int] = 92  # kafka_common_ErrorCode_DUPLICATE_RESOURCE
+
+    def resource(self) -> str | None:
+        """The duplicate resource, or None if not known."""
+        return self._error_payload["resource"]  # type: ignore[attr-defined,no-any-return]
 
 
 class DuplicateSequenceError(ApiError):
@@ -484,6 +499,10 @@ class InvalidTopicError(InvalidConfigurationError):
 
     _ffi_id: ClassVar[int] = 17  # kafka_common_ErrorCode_INVALID_TOPIC_ERROR
 
+    def invalid_topics(self) -> set[str]:
+        """The set of invalid topics."""
+        return self._error_payload["invalid_topics"]  # type: ignore[attr-defined,no-any-return]
+
 
 class InvalidTxnStateError(ApiError):
     """Mirrors Java's ``org.apache.kafka.common.errors.InvalidTxnStateException``."""
@@ -556,6 +575,14 @@ class OffsetOutOfRangeError(InvalidOffsetError):
 
     _ffi_id: ClassVar[int] = 1  # kafka_common_ErrorCode_OFFSET_OUT_OF_RANGE
 
+    def offset_out_of_range_partitions(self) -> dict[TopicPartition, int]:
+        """A map of the out-of-range partitions to their requested offsets."""
+        return self._error_payload["offset_out_of_range_partitions"]  # type: ignore[attr-defined,no-any-return]
+
+    def partitions(self) -> set[TopicPartition]:
+        """The out-of-range partitions."""
+        return set(self._error_payload["offset_out_of_range_partitions"].keys())  # type: ignore[attr-defined]
+
 
 class OperationNotAttemptedError(ApiError):
     """Mirrors Java's ``org.apache.kafka.common.errors.OperationNotAttemptedException``."""
@@ -598,6 +625,22 @@ class QuotaViolationError(KafkaError):
 
     _ffi_id: ClassVar[int] = -26  # kafka_common_ErrorCode_QUOTA_VIOLATION
 
+    def metric_name(self) -> str | None:
+        """The name of the metric that violated its quota."""
+        return self._error_payload["metric_name"]  # type: ignore[attr-defined,no-any-return]
+
+    def metric_group(self) -> str | None:
+        """The group of the metric that violated its quota."""
+        return self._error_payload["metric_group"]  # type: ignore[attr-defined,no-any-return]
+
+    def value(self) -> float:
+        """The observed metric value."""
+        return self._error_payload["value"]  # type: ignore[attr-defined,no-any-return]
+
+    def bound(self) -> float:
+        """The quota bound that was violated."""
+        return self._error_payload["bound"]  # type: ignore[attr-defined,no-any-return]
+
 
 class ReassignmentInProgressError(ApiError):
     """Mirrors Java's ``org.apache.kafka.common.errors.ReassignmentInProgressException``."""
@@ -628,11 +671,19 @@ class RecordTooLargeError(ApiError):
 
     _ffi_id: ClassVar[int] = 10  # kafka_common_ErrorCode_MESSAGE_TOO_LARGE
 
+    def record_too_large_partitions(self) -> dict[TopicPartition, int] | None:
+        """A map of the partitions to the size of their too-large records, or None if not known."""
+        return self._error_payload["record_too_large_partitions"]  # type: ignore[attr-defined,no-any-return]
+
 
 class ResourceNotFoundError(ApiError):
     """Mirrors Java's ``org.apache.kafka.common.errors.ResourceNotFoundException``."""
 
     _ffi_id: ClassVar[int] = 91  # kafka_common_ErrorCode_RESOURCE_NOT_FOUND
+
+    def resource(self) -> str | None:
+        """The resource that was not found, or None if not known."""
+        return self._error_payload["resource"]  # type: ignore[attr-defined,no-any-return]
 
 
 class RetriableError(ApiError):
@@ -722,6 +773,10 @@ class ThrottlingQuotaExceededError(RetriableError):
     """Mirrors Java's ``org.apache.kafka.common.errors.ThrottlingQuotaExceededException``."""
 
     _ffi_id: ClassVar[int] = 89  # kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED
+
+    def throttle_time_ms(self) -> int:
+        """The throttle time in milliseconds."""
+        return self._error_payload["throttle_time_ms"]  # type: ignore[attr-defined,no-any-return]
 
 
 class TimeoutError(RetriableError):
@@ -945,6 +1000,10 @@ class GroupAuthorizationError(AuthorizationError):
 
     _ffi_id: ClassVar[int] = 30  # kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED
 
+    def group_id(self) -> str | None:
+        """The group id that failed authorization, or None if not known."""
+        return self._error_payload["group_id"]  # type: ignore[attr-defined,no-any-return]
+
 
 class IllegalSaslStateError(AuthenticationError):
     """Mirrors Java's ``org.apache.kafka.common.errors.IllegalSaslStateException``."""
@@ -1021,6 +1080,10 @@ class TopicAuthorizationError(AuthorizationError):
     """Mirrors Java's ``org.apache.kafka.common.errors.TopicAuthorizationException``."""
 
     _ffi_id: ClassVar[int] = 29  # kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED
+
+    def unauthorized_topics(self) -> set[str]:
+        """The set of topics which failed authorization (possibly empty)."""
+        return self._error_payload["unauthorized_topics"]  # type: ignore[attr-defined,no-any-return]
 
 
 class TransactionalIdAuthorizationError(AuthorizationError):

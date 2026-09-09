@@ -35,6 +35,7 @@ from __future__ import annotations
 from . import _generated
 from ._base import KafkaError
 from ._generated import *  # noqa: F401,F403 -- re-export the whole hierarchy
+from ._payload import build_payload
 
 # The C extension owns the ``kafka_common_Error_*`` accessors. It is imported
 # lazily so this module (and its ``id -> class`` table) is usable in contexts
@@ -144,6 +145,14 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
             if source_handle:
                 # Recurses through the whole chain (each level reads its source).
                 source_cause = from_ffi_error(source_handle)
+    # Read the error's typed payload (rule 5) BEFORE destroying the handle, so
+    # the generated accessor methods (`unauthorized_topics()`, ...) can return
+    # it. Defensive via getattr so a caller/test that mocks `_lib` without the
+    # accessor still works (the payload is simply absent).
+    raw_payload: dict[str, object] | None = None
+    error_payload = getattr(_lib, "KafkaError_payload", None)
+    if error_payload is not None:
+        raw_payload = error_payload(handle)
     _lib.KafkaError_destroy(handle)
     cls = _class_for_ffi_id(ffi_id)
     error = cls(message)
@@ -151,6 +160,10 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         error.__cause__ = cause
     elif source_cause is not None:
         error.__cause__ = source_cause
+    payload = build_payload(raw_payload)
+    if payload is not None:
+        # ``_error_payload`` backs the generated typed accessor methods.
+        error._error_payload = payload  # type: ignore[attr-defined]
     return error
 
 
