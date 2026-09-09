@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
-# Pre-commit hook: run `make verify` (format-check + lint + tests) before
-# allowing the commit. Installed by `make init-hooks`, which sets
-# core.hooksPath to .githooks. Bypass with `git commit --no-verify`.
-set -e
-exec make verify-sandbox
+# Pre-commit hook: fast checks only (format-check + lint + Python type check).
+#
+# TEMPORARY (owner decision, 2026-09-10, "option 2" — see
+# design/current/implementation-clarifications.md C21): during the Python
+# interface implementation the full `make verify-sandbox` (release build, C
+# build, Docker integration tests, C tests; 15–25 min and flaky under load)
+# runs once before each phase merge and at the final audit (P7) instead of on
+# every commit. Restore `exec make verify-sandbox` when P7 closes.
+#
+# Installed by `make init-hooks`, which sets core.hooksPath to .githooks.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+cargo xtask format-check
+cargo xtask lint
+if [ -d venv ] && [ -f bindings/python/Makefile ]; then
+    # Type check of the Python package (mypy --strict), as `make verify` runs it.
+    ( . venv/bin/activate && make -C bindings/python typecheck )
+fi

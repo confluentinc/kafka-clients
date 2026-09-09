@@ -284,7 +284,9 @@ config entries. (`config` vs Java's `configs`/`conf` parameter name is an open o
 
 - `ConsumerRecords(*, records, next_offsets=None)`: the records-only form is Java's constructor
   deprecated in 4.3.1 (KIP-1094 / KAFKA-20660), kept per rule 3.13; an instance built that way
-  raises from `next_offsets()` as Java does — it cannot answer it.
+  answers `next_offsets()` exactly as Java 4.3.1 does — it logs a (rate-limited) warning and
+  returns an empty map (`ConsumerRecords.java:89`); it does NOT throw. (Corrected 2026-09-09 after
+  Critic 65 verified the Java; the earlier wording "raises" was wrong.)
 - `TopicIdPartition` appears in Java only on the share-consumer surface (`ShareConsumer.commitSync`,
   `AcknowledgementCommitCallback`); with the share consumer out of scope (C1) the type is defined in
   `common/` (two-stub constructor) but referenced by no producer/consumer method.

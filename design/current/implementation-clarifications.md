@@ -415,4 +415,8 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   `test_async_consumer_async_commit` (twice), `test_async_consumer_max_poll_records` (timestamp) — none
   touched by the change; 204/205 pass each time. The hook makes every commit pay ~15 min and a flake
   lottery; retries were authorised up to three per commit.
-- **Status:** open — owner to decide whether to change the hook.
+- **Owner decision (2026-09-10): option 2.** `.githooks/pre-commit` is TEMPORARILY reduced to
+  `format-check` + `lint` + Python `typecheck`; the full `make verify-sandbox` runs once before each
+  phase-branch merge into `dev_python-interface-implementation` and at P7; the original hook
+  (`exec make verify-sandbox`) is restored when P7 closes.
+- **Status:** decided; revert-at-end tracked in the plan file.
