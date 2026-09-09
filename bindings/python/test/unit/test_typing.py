@@ -113,6 +113,12 @@ def _serde_factory_types() -> None:
     assert_type(bool_deserializer(), "Deserializer[bool]")
     assert_type(uuid_serializer(), "Serializer[Uuid]")
     assert_type(uuid_deserializer(), "Deserializer[Uuid]")
+    # json_* are Object-typed (Java Object), so they are Serializer[Any] /
+    # Deserializer[Any]; assign to a concrete-typed name to confirm they satisfy
+    # the protocol (assert_type on Any is a no-op).
+    _js: Serializer[object] = json_serializer()
+    _jd: Deserializer[object] = json_deserializer()
+    del _js, _jd
 
     # A serde is just a callable of the right shape — a bare function type-checks.
     def value_deser(topic: str, data: memoryview | None,
@@ -188,9 +194,47 @@ def _consumer_family_types(c: object = None) -> None:
     c.seek(partition=TopicPartition(topic="t", partition=0), offset=5)
     c.seek(partition=TopicPartition(topic="t", partition=0),
            offset_and_metadata=OffsetAndMetadata(offset=5))
+    # The close @overload stubs must accept the timeout form and the option form.
+    from confluent_kafka.consumer import CloseOptions
+    from confluent_kafka.consumer.offset_reset_strategy import OffsetResetStrategy
+    c.close()
+    c.close(timeout=1.0)
+    c.close(option=CloseOptions())
+    # MockConsumer's constructor @overload stubs accept str OR OffsetResetStrategy
+    # (the enum form is Java's deprecated-but-kept variant).
+    _cs: MockConsumer[bytes, bytes] = MockConsumer(offset_reset_strategy="earliest")
+    _ce: MockConsumer[bytes, bytes] = MockConsumer(
+        offset_reset_strategy=OffsetResetStrategy.EARLIEST)
+    del _cs, _ce
     _kc: type[KafkaConsumer[bytes, bytes]] = KafkaConsumer
     _base: type[Consumer[bytes, bytes]] = MockConsumer
     del _kc, _base
+
+
+def _producer_family_types(p: object = None) -> None:
+    """The producer clients' constructor / send generics and overloads.
+
+    Type-check-only (guarded early return; never runs the FFI)."""
+    if p is None:
+        return
+    from concurrent.futures import Future
+
+    from confluent_kafka.common import PartitionInfo
+    from confluent_kafka.producer import (
+        KafkaProducer, MockProducer, Producer, ProducerRecord, RecordMetadata,
+    )
+
+    # send(*, record) returns a Future[RecordMetadata] on the sync producer;
+    # the record carries the K/V generics (the serdes default to Any).
+    pr: MockProducer[bytes, bytes] = MockProducer(auto_complete=True)
+    record: ProducerRecord[bytes, bytes] = ProducerRecord(
+        topic="t", key=b"k", value=b"v")
+    assert_type(pr.send(record=record), "Future[RecordMetadata]")
+    assert_type(pr.partitions_for(topic="t"), "list[PartitionInfo]")
+    del PartitionInfo
+    _kp: type[KafkaProducer[bytes, bytes]] = KafkaProducer
+    _base: type[Producer[bytes, bytes]] = MockProducer
+    del _kp, _base, Future, RecordMetadata
 
 
 def test_typing_module_imports() -> None:
@@ -203,3 +247,4 @@ def test_typing_module_imports() -> None:
     _serde_factory_types()
     _error_reexport_is_typed()
     _consumer_family_types()
+    _producer_family_types()
