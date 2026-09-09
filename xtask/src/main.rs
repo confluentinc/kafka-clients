@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
         Some("coverage-all") => coverage_all()?,
         Some("test-multilanguage") => test_multilanguage()?,
         Some("producer-perf-test") => producer_perf_test()?,
+        Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
         _ => print_help(),
     }
 
@@ -299,11 +300,11 @@ fn test_multilanguage() -> anyhow::Result<()> {
 
 /// Run the producer performance test as an env-driven benchmark binary.
 ///
-/// Runs the same `producer_perf_test` that ships in the integration suite, but in
-/// release mode and driven entirely by environment variables
+/// Runs the same `producer_perf_test` that ships in the `performance` test
+/// target, but in release mode and driven entirely by environment variables
 /// (`BOOTSTRAP_SERVERS`, `VALUE_SIZE`, `LIMIT_RPS`, `TEST_DURATION_SECONDS`,
 /// `COMPRESSION_TYPE`, `P99_LIMIT_MS`, ... — see the doc comment at the top of
-/// `tests/integration/producer_perf_test.rs`). It writes `metrics.jsonl` in the
+/// `tests/performance/producer_perf_test.rs`). It writes `metrics.jsonl` in the
 /// schema `tools/performance_metrics_plot/plot_metrics.py` consumes. Keep this
 /// in sync with the other producer performance tests in the project.
 ///
@@ -314,7 +315,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
     println!("   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,");
     println!("   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).");
     println!("   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.");
-    println!("   See tests/integration/producer_perf_test.rs for the full list.");
+    println!("   See tests/performance/producer_perf_test.rs for the full list.");
 
     let mut args: Vec<String> = vec![
         "test".into(),
@@ -322,10 +323,53 @@ fn producer_perf_test() -> anyhow::Result<()> {
         "--features".into(),
         "integration-tests".into(),
         "--test".into(),
-        "integration".into(),
+        "performance".into(),
         "--".into(),
         "--exact".into(),
         "producer_perf_test::producer_perf_test".into(),
+        "--nocapture".into(),
+    ];
+    // Forward any extra args (e.g. --test-threads=1) to the test binary.
+    args.extend(env::args().skip(2));
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_command("cargo", &arg_refs)
+}
+
+/// Run the transactional producer performance test as an env-driven benchmark
+/// binary (Phase 1: `TXN_MODE=produce`).
+///
+/// Runs the same `transactional_producer_perf_test` that ships in the
+/// `performance` test target, but in release mode and driven entirely by
+/// environment variables (`BOOTSTRAP_SERVERS`, `RECORDS_PER_TRANSACTION`,
+/// `ABORT_RATE`, `NUM_TRANSACTIONAL_PRODUCERS`, `TRANSACTIONAL_ID`, `TXN_MODE`,
+/// plus every knob the non-transactional `producer-perf-test` accepts — see the
+/// doc comment at the top of
+/// `tests/performance/transactional_producer_perf_test.rs`). It writes
+/// `metrics.jsonl` / `results.json` in the schema
+/// `tools/performance_metrics_plot/plot_metrics.py` consumes. Keep this in sync
+/// with the sibling transactional producer performance tests in the project.
+///
+/// Extra arguments after `transactional-producer-perf-test` are forwarded to
+/// the test binary, e.g. `cargo xtask transactional-producer-perf-test --test-threads=1`.
+fn transactional_producer_perf_test() -> anyhow::Result<()> {
+    println!("🚀 Running env-driven transactional producer performance benchmark...");
+    println!("   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,");
+    println!("   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, RECORDS_PER_TRANSACTION,");
+    println!("   ABORT_RATE, NUM_TRANSACTIONAL_PRODUCERS, TRANSACTIONAL_ID, TXN_MODE, ...).");
+    println!("   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.");
+    println!("   See tests/performance/transactional_producer_perf_test.rs for the full list.");
+
+    let mut args: Vec<String> = vec![
+        "test".into(),
+        "--release".into(),
+        "--features".into(),
+        "integration-tests".into(),
+        "--test".into(),
+        "performance".into(),
+        "--".into(),
+        "--exact".into(),
+        "transactional_producer_perf_test::transactional_producer_perf_test".into(),
         "--nocapture".into(),
     ];
     // Forward any extra args (e.g. --test-threads=1) to the test binary.
@@ -505,6 +549,7 @@ fn print_help() {
   coverage-all    Run all test coverage including integration (requires Docker)
   test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
+  transactional-producer-perf-test  Run the env-driven transactional producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
 
 Usage:
   cargo xtask format
@@ -518,6 +563,7 @@ Usage:
   cargo xtask coverage-lcov
   cargo xtask coverage-all
   cargo xtask test-multilanguage
-  cargo xtask producer-perf-test"
+  cargo xtask producer-perf-test
+  cargo xtask transactional-producer-perf-test"
     );
 }
