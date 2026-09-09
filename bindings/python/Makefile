@@ -14,8 +14,11 @@ build:
 
 # Static type check of the new `confluent_kafka` package (spec §11 / rule 11):
 # `mypy --strict` catches stub/implementation drift so it fails `make verify`.
+# `test/unit/test_typing.py` carries `typing.assert_type` assertions that
+# machine-verify the `@overload` stubs and the generics inference, so it is type
+# checked here too — a broken stub fails `make verify`.
 typecheck:
-	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka test/unit/test_typing.py
 
 test: build typecheck
 	pip install .[dev] || pip install --no-dependencies .[dev]

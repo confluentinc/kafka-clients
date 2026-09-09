@@ -15,11 +15,17 @@
 """``confluent_kafka.producer`` — mirror of
 ``org.apache.kafka.clients.producer`` (the ``clients`` segment dropped, spec §4).
 
-Skeleton for this phase (P1). ``Producer`` / ``KafkaProducer`` / ``MockProducer``
-and their ``Async`` peers, ``ProducerRecord``, ``RecordMetadata`` and
+``ProducerRecord`` and ``RecordMetadata`` (the value types) live here (P2).
+``Producer`` / ``KafkaProducer`` / ``MockProducer`` and their ``Async`` peers and
 ``DeliveryCallback`` land here in P4.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from .producer_record import ProducerRecord
+from .record_metadata import RecordMetadata
+
+__all__ = [
+    "ProducerRecord",
+    "RecordMetadata",
+]
