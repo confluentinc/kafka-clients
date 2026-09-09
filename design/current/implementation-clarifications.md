@@ -275,6 +275,150 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   which carry proper `.pyi` types, so `mypy --strict` stays clean. Runtime behavior is identical (the
   package re-export works at runtime). The parent-re-export typing gap belongs to the errors-package
   owner (Actor/Critic 64); this is a workaround on the consumer side, not a fix to that package.
-- **Status:** open — the package-level typing gap should be closed by adding an `__init__.pyi` (or
-  explicit re-exports) to `common/errors` / `common/config`, after which these imports can move back to
-  the parent re-export per CLAUDE.md.
+- **Status:** RESOLVED for `common/errors` (Actor 64). `cargo xtask generate-error-codes` now also
+  emits `confluent_kafka/common/errors/__init__.pyi` — explicit `from ._generated import X as X`
+  typed re-exports for every generated error class, plus `KafkaError`, `from_ffi_error`, `to_ffi_id`
+  and `__all__` — so `from confluent_kafka.common.errors import TopicAuthorizationError` now types as
+  the class, not `object` (a `test/unit/test_typing.py` `assert_type` pins this under `mypy --strict`;
+  `check-generated` covers the new stub). `common/config` and the root already re-export **explicitly**
+  (`from ._generated_errors import ConfigError`, etc.), which mypy already types correctly, so they
+  need no stub. The `consumer` package re-exports its errors with a star import in its **hand-written**
+  `__init__.py` (owned by the value-types/P5 Actor, who also adds many non-error exports there): the
+  durable fix on that file is to switch its `from ._generated_errors import *` to explicit
+  `from ._generated_errors import X as X` lines (a generated `consumer/__init__.pyi` would shadow and
+  hide that Actor's other typed exports, so it is NOT generated). Consumers of the errors package
+  (e.g. C19's serde/config imports) can now move back to the `common.errors` parent re-export.
+
+### C20 — `uuid_serializer` wire bytes are not interoperable with Java's `UUIDSerializer` (Critic 66 N1 on C15)
+- **Where:** `confluent_kafka/common/serialization/uuid_serializer.py` / `uuid_deserializer.py`.
+- **Question:** the spec says `uuid_serializer() -> Serializer[Uuid]` with "Java's UUID serdes". Java's
+  `UUIDSerializer` serializes `java.util.UUID.toString()` (dashed hex); Kafka's `common.Uuid` (our
+  `Uuid`) has no Java serde and its string form is URL-safe base64.
+- **Assumption taken:** serialize our `Uuid` in its own base64 string form — the faithful reading of
+  `Serializer<Uuid>` for the type the spec names. Consequence: bytes are NOT readable by a Java
+  consumer using `UUIDDeserializer`, and vice versa.
+- **Alternatives:** emit the dashed `java.util.UUID` form (interoperable, but `Uuid` ↔ `java.util.UUID`
+  bit mapping must be defined), or offer both.
+- **Status:** open — owner to decide interop vs type-faithfulness.
+
+### C20 — `float_serializer(size=8)` canonicalizes NaN to match Java `DoubleSerializer` (P3, Critic 66 F2)
+- **Where:** `bindings/python/confluent_kafka/common/serialization/float_serializer.py`.
+- **Question:** Java's numeric-serde pair is asymmetric — `FloatSerializer` uses
+  `Float.floatToRawIntBits` (raw, preserves the NaN payload) but `DoubleSerializer` uses
+  `Double.doubleToLongBits`, which **canonicalizes** every NaN to `0x7ff8000000000000`. The initial P3
+  implementation used `struct.pack(">f" | ">d")` for both sizes; `>d` is a raw pack
+  (`doubleToRawLongBits`), so a non-canonical double NaN (e.g. raw `0x7ff0000000000001`) was emitted
+  verbatim — a wire divergence from Java, and one that IS representable in a Python float (it is a C
+  double), unlike the float32 signaling-NaN case (C17).
+- **Assumption taken (now Java-faithful):** for `size=8`, when the value is NaN, emit the canonical
+  `0x7ff8000000000000` big-endian (Java `doubleToLongBits`); all finite values, infinities and the
+  already-canonical NaN go through `struct.pack(">d")` unchanged. `size=4` keeps `struct.pack(">f")`
+  (raw), matching `FloatSerializer.floatToRawIntBits`. A test builds a non-canonical double NaN from
+  raw bits and asserts the serializer emits Java's canonical bytes.
+- **Status:** resolved (fixed to match Java). Recorded because the fix reproduces a subtle asymmetry a
+  future Actor collapsing sized serdes could re-break — candidate for a rule note in
+  `python-binding-interface.md`'s serialization section (Critic 66 suggestion).
+
+### C22 — `MockProducer` is a pure-Python synchronous translation of `MockProducer.java`, not FFI-backed (P4)
+- **Where:** `bindings/python/confluent_kafka/producer/mock_producer.py` (the whole file).
+- **Question:** should the Python `MockProducer` wrap the Rust core's `MockProducer` over the FFI, or
+  translate `MockProducer.java` directly to Python?
+- **Finding:** Java's `MockProducer` is a **self-contained, synchronous** in-memory mock — it has no
+  network and no I/O thread, keeps records/offsets/transaction-state in its own fields, and completes
+  sends **synchronously** (auto-complete) or on `completeNext`/`flush`. The Rust core, by contrast, is
+  fundamentally async: the C extension's send path stages a record on a background batching task and
+  the FFI dispatcher delivers completions on its own thread, so a Python `send()` backed by it cannot
+  return an already-`done()` future the way Java's auto-complete `MockProducer` does. That breaks the
+  canonical `MockProducerTest` asserts (`md.isDone()` / `md.get().offset()` immediately after `send`,
+  `completeNext` right after `send`). It also stores serialized `Vec<u8>` records, so `history()`
+  round-tripped through the FFI would return `bytes` records that do not compare equal to the original
+  `ProducerRecord(topic=…, key=…, value=…)` a test constructed.
+- **Assumption taken:** translate `MockProducer.java` **directly to Python** (each Java class → one
+  Python class, DoD #2) as a synchronous pure-Python mock (`_MockCore` mirrors Java's fields and every
+  method), holding the **original** `ProducerRecord[K, V]` objects in `sent`/`uncommittedSends`. It
+  does not touch the FFI or the Rust core mock at all; `MockProducer`/`AsyncMockProducer` subclass
+  `Producer`/`AsyncProducer` only for the type hierarchy and `isinstance`, and override every method.
+  This is the most faithful translation (Java's mock IS pure and synchronous) and passes all 51
+  translated `MockProducerTest` cases synchronously. **Consequence:** the mock-surface FFI functions
+  drafted earlier (`MockProducer_*` scalar accessors, setters, `error_next_with_code`, and the core
+  `error_from_ffi_code` inverse) were **reverted** — they had no Python caller and would violate DoD
+  ("no new FFI without a Python test"). Only `RecordMetadata_copy_full`,
+  `Producer_close_timeout_async`, and `Producer_send_offsets_to_transaction_fields_async` (used by the
+  real `KafkaProducer`) were kept.
+- **Alternatives:** wrap the core mock over the FFI (rejected: the async dispatcher cannot express
+  Java's synchronous completion, and serialized-bytes history breaks equality); pump the dispatcher
+  synchronously inside the mock's `send`/`complete_next` (rejected: complex, and still would not match
+  Java's `send`-returns-a-done-future for auto-complete).
+- **Status:** open — owner to confirm the pure-Python `MockProducer` translation.
+
+### C23 — `error_next(*, error)` (mock) accepts any exception and delivers it directly (P4)
+- **Where:** `bindings/python/confluent_kafka/producer/mock_producer.py` (`error_next`).
+- **Question:** Java's `MockProducer.errorNext(RuntimeException e)` fails the next send with the
+  **same exception instance** `e` (`MockProducerTest.testManualCompletion` /
+  `testMetadataOnException` assert `future.get()`'s cause **== e**). What type does the Python
+  `error_next(*, error)` accept, and does it preserve identity?
+- **Assumption taken:** because the mock is now pure-Python (C22), `error_next(*, error)` stores and
+  delivers the **exact** Python exception instance — Java's identity contract is preserved (the
+  translated tests assert type+message, which the identity also satisfies). The parameter is typed
+  `BaseException` (not the spec's narrower `KafkaError | None`), because Java's `errorNext` takes a
+  `RuntimeException` and `MockProducerTest` injects `IllegalArgumentException` (a JDK analog, not a
+  `KafkaError`); typing it `KafkaError` would reject the canonical Java test. Likewise the nine
+  `set_<field>_exception(*, error)` setters accept `BaseException | None` (Java's fields are
+  `RuntimeException`), a widening of the spec's `KafkaError | None` for the same reason — flagged
+  because it deviates from the spec §6.1 signature.
+- **Alternatives:** keep the spec's `KafkaError | None` (rejected: cannot express the Java test's
+  `IllegalArgumentException` injection).
+- **Status:** open — owner to confirm the `BaseException` widening for `error_next` / the mock
+  exception setters vs the spec's `KafkaError | None`.
+
+### C24 — Legacy `bindings/python/producer.py` kept: dependency list for P5/P7 (P4)
+- **Where:** `bindings/python/producer.py` (legacy flat-error module).
+- **Question:** deliverable 5 retires `producer.py` only if nothing else imports it. It IS still
+  imported.
+- **Finding (grep):** `admin.py`, `consumer.py`, `grpc_server.py`, `grpc_server_async.py`,
+  `grpc_translate.py` import from `producer` (mostly `KafkaError`; the gRPC servers import
+  `KafkaProducer` / `AsyncKafkaProducer` / `MockProducer` / `AsyncMockProducer` / `ProducerRecord`);
+  tests `test/unit/test_consumer.py`, `test_consumer_callbacks.py`, `test_admin.py`,
+  `test/unit/test_producer.py`, `test/performance/producer_performance_test.py` import from it too.
+- **Assumption taken:** `producer.py` is **kept, unmodified**, and the legacy
+  `test/unit/test_producer.py` (111 cases) stays alongside the new
+  `test/unit/test_producer_family.py`. It is retired only when `consumer.py` (P5) and the admin/gRPC
+  surfaces (P7) move into the package. Extends C5.
+- **Status:** open — remove when P5/P7 land; dependency list recorded here for those phases.
+
+### C25 — Real `KafkaProducer` telemetry/metric-subscription methods raise (core gap); the mock implements them (P4)
+- **Where:** `bindings/python/confluent_kafka/producer/producer.py` (real) vs
+  `mock_producer.py` (mock).
+- **Question:** the Rust core's `Producer` trait (`src/producer/producer_trait.rs`) exposes neither
+  `client_instance_id` nor metric-subscription registration (KIP-714 telemetry). What do the Python
+  methods do?
+- **Assumption taken:** two behaviours, split by class:
+  - **Real `KafkaProducer` / `AsyncKafkaProducer`:** per rule 10, `client_instance_id`,
+    `register_metric_for_subscription` and `unregister_metric_from_subscription` exist with the spec's
+    signatures and raise the mapped Java error (a base `KafkaError` explaining the core gap) rather
+    than silently no-op'ing — except `client_instance_id`'s **negative-timeout** validation runs
+    Python-side first and raises `IllegalArgumentError("The timeout cannot be negative.")` (Java's
+    exact message, `KafkaProducerTest.testClientInstanceIdInvalidTimeout`), so that test translates.
+  - **`MockProducer` / `AsyncMockProducer`:** because the mock is a pure-Python translation of Java's
+    `MockProducer` (C22), it **fully implements** `client_instance_id`, `inject_timeout_exception`,
+    `disable_telemetry`, `set_client_instance_id`, `set_mock_metrics`, `added_metrics`, `metrics`, and
+    `register/unregister_metric_for_subscription` exactly as `MockProducer.java` does (in-memory, no
+    core dependency), so they are real and Java-faithful there.
+- **Alternatives:** implement client telemetry in the core — a separate milestone (would let the real
+  client implement these too).
+- **Status:** open — real-client telemetry/metric-subscription tracked for a future core phase; the
+  mock implements the full Java surface now.
+
+### C21 — The pre-commit hook scans the whole working tree, so parallel actors block each other
+- **Where:** `.githooks/pre-commit` → `make verify-sandbox` (release build, C build, `format-check`,
+  `lint`, Rust integration tests, C tests) on every commit.
+- **Question:** with several actors sharing one working tree, any actor's uncommitted Rust/C WIP
+  (unformatted, non-compiling, or lint-dirty) fails every other actor's commit deterministically
+  (Actor 66's fixup was blocked by Actor 67's `src/ffi/*.rs` WIP on 2026-09-09).
+- **Assumption taken (process, not code):** actors that touch Rust/C work in their own `git worktree`
+  on a per-phase branch and the Manager merges; Python-only actors stay in the main tree. The hook is
+  NOT changed (that is the owner's call).
+- **Alternatives:** scope `format-check`/`lint` in the hook to staged paths; or a lighter hook
+  (`format-check` + `lint` + unit tests) with `verify-sandbox` in CI only. Each commit currently costs
+  ~15 min of hook time, which also serialises the whole team.
+- **Status:** open — owner to decide whether to change the hook.

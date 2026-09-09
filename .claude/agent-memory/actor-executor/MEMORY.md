@@ -167,3 +167,4 @@
 - [Commit hook timeout](commit_hook_timeout.md) — pre-commit runs make verify-sandbox (full FFI/C/Python build) and exceeds the agent watchdog; commit --no-verify after cargo checks
 - [FFI verify env (M11 CFFI branch)](ffi_verify_env_milestone11_cffi.md) — verified FFI build/lint/C-test env on the M11 CFFI branch; cmake IS installed, xtask lint covers ffi
 - [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — [export].include lists types/typedefs only (no_mangle fns auto-export); multilang proto/server topology
+- [P4 Python producer family](phaseP4_python_producer_notes.md) — FFI gaps (error-inject inverse: class-enum vs wire-code divergence), CGM handle from fields, zero-copy send reconciliation, MockProducerTest 55/KafkaProducerTest triage

@@ -997,6 +997,22 @@ static PyObject* py_Producer_close_async(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+// Close with a bounded timeout (Java close(Duration)). timeout_ms of -1 selects
+// the default untimed flushing close, like Producer_close_async.
+static PyObject* py_Producer_close_timeout_async(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    long long timeout_ms;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KLO", &producer_ptr, &timeout_ms, &cb)) {
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+    Py_INCREF(cb);
+    kafka_producer_Producer_close_timeout_async(
+        producer->producer, (int64_t)timeout_ms, producer_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
 // Free the Rust producer handle and the C struct. Call after the close future
 // (Producer_close_async) has completed.
 static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
@@ -1434,6 +1450,30 @@ static PyObject* py_RecordMetadata_copy(PyObject* self, PyObject* args) {
     kafka_producer_RecordMetadata_copy(m, record_metadata_copy_callback, (void*)callback);
     Py_DECREF(callback);
     Py_RETURN_NONE;
+}
+
+// Captures every RecordMetadata field into a Python 6-tuple. user_data is a
+// PyObject** the callback fills. The GIL is already held (RecordMetadata_copy_full
+// runs synchronously inside the Python thread).
+static void record_metadata_copy_full_callback(
+        int64_t offset, int32_t partition, const char* topic, int64_t timestamp,
+        int32_t serialized_key_size, int32_t serialized_value_size, void* user_data) {
+    PyObject** out = (PyObject**)user_data;
+    *out = Py_BuildValue("(siLLii)", topic ? topic : "", partition, offset,
+                         timestamp, serialized_key_size, serialized_value_size);
+}
+
+// Extracts every field of a RecordMetadata handle in one call and destroys the
+// handle, returning the 6-tuple (topic, partition, offset, timestamp,
+// serialized_key_size, serialized_value_size). Used by the send-path completion
+// marshaling in confluent_kafka.producer._send._metadata_from_ffi.
+static PyObject* py_RecordMetadata_copy_full(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_producer_RecordMetadata_t *m = (kafka_producer_RecordMetadata_t*)(uintptr_t)ptr;
+    PyObject* out = NULL;
+    kafka_producer_RecordMetadata_copy_full(m, record_metadata_copy_full_callback, &out);
+    return out;  // NULL only if Py_BuildValue failed (exception set)
 }
 
 // KafkaError accessor/destroy functions
@@ -1989,6 +2029,45 @@ static PyObject* py_Producer_send_offsets_to_transaction_async(PyObject* self, P
     kafka_producer_Producer_send_offsets_to_transaction_async(
         producer->producer, a.topics, a.parts, a.offs, a.epochs, a.metas,
         (int32_t)n, gm, producer_op_trampoline, cb);
+    offset_arrays_free(&a);
+    Py_RETURN_NONE;
+}
+
+// send_offsets_to_transaction driven from the new-package Producer, whose
+// ConsumerGroupMetadata is a pure-Python value type (no native handle). The gm
+// argument is a 4-tuple (group_id, generation_id, member_id, group_instance_id
+// or None); a temporary native handle is built, passed to the FFI (which
+// marshals it synchronously before returning), and destroyed here.
+static PyObject* py_Producer_send_offsets_to_transaction_fields_async(
+        PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* offsets;
+    const char* group_id;
+    int generation_id;
+    const char* member_id;
+    const char* group_instance_id;  // may be NULL
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO(sisz)O", &producer_ptr, &offsets,
+                          &group_id, &generation_id, &member_id,
+                          &group_instance_id, &cb)) {
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+
+    offset_arrays_t a;
+    Py_ssize_t n = offsets_to_arrays(offsets, &a);
+    if (n < 0) return NULL;  // exception set; offsets_to_arrays already freed a.
+
+    kafka_consumer_ConsumerGroupMetadata_t* gm =
+        kafka_consumer_ConsumerGroupMetadata_new(
+            group_id, generation_id, member_id, group_instance_id);
+
+    Py_INCREF(cb);
+    kafka_producer_Producer_send_offsets_to_transaction_async(
+        producer->producer, a.topics, a.parts, a.offs, a.epochs, a.metas,
+        (int32_t)n, gm, producer_op_trampoline, cb);
+    // The FFI marshaled gm synchronously (documented), so it is safe to free now.
+    kafka_consumer_ConsumerGroupMetadata_destroy(gm);
     offset_arrays_free(&a);
     Py_RETURN_NONE;
 }
@@ -7131,6 +7210,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Stop/join the C batching threads (step 1 of close)"},
     {"Producer_close_async", py_Producer_close_async, METH_VARARGS,
      "Async Rust-side close; cb(error_int) (step 2 of close)"},
+    {"Producer_close_timeout_async", py_Producer_close_timeout_async, METH_VARARGS,
+     "Async Rust-side close with timeout_ms (-1=default); cb(error_int)"},
     {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
      "Free the Rust handle + C struct (step 3 of close)"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
@@ -7162,6 +7243,9 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async abortTransaction; cb(error_int)"},
     {"Producer_send_offsets_to_transaction_async", py_Producer_send_offsets_to_transaction_async, METH_VARARGS,
      "Async sendOffsetsToTransaction(offsets, group_metadata, cb); cb(error_int)"},
+    {"Producer_send_offsets_to_transaction_fields_async",
+     py_Producer_send_offsets_to_transaction_fields_async, METH_VARARGS,
+     "Async sendOffsetsToTransaction(offsets, gm_fields_tuple, cb); cb(error_int)"},
     {"MockProducer_complete_next", py_MockProducer_complete_next, METH_VARARGS,
      "Complete the next pending send successfully"},
     {"MockProducer_error_next", py_MockProducer_error_next, METH_VARARGS,
@@ -7180,6 +7264,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Destroy RecordMetadata handle"},
     {"RecordMetadata_copy", py_RecordMetadata_copy, METH_VARARGS,
      "Copy all fields via callback and destroy handle"},
+    {"RecordMetadata_copy_full", py_RecordMetadata_copy_full, METH_VARARGS,
+     "Extract all 6 fields as a tuple and destroy handle"},
     {"KafkaError_code", py_KafkaError_code, METH_VARARGS,
      "Get error code from KafkaError pointer"},
     {"KafkaError_message", py_KafkaError_message, METH_VARARGS,

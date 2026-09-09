@@ -54,6 +54,26 @@ class RecordMetadata:
         self._serialized_value_size = serialized_value_size
         self._topic_partition = topic_partition
 
+    @classmethod
+    def _from_ffi(cls, *, topic: str, partition: int, offset: int,
+                  timestamp: int, serialized_key_size: int,
+                  serialized_value_size: int) -> RecordMetadata:
+        """Build a ``RecordMetadata`` from the fields the C FFI hands back.
+
+        The core's ``RecordMetadata.offset()`` already combines ``baseOffset +
+        batchIndex`` (or leaves the ``-1`` sentinel when the offset is unknown),
+        so the FFI exposes the single combined ``offset``. We reproduce it as
+        ``base_offset=offset, batch_index=0``: when ``offset == -1`` the ``__init__``
+        keeps the sentinel; otherwise ``offset + 0 == offset``.
+        """
+        self = cls.__new__(cls)
+        self._offset = offset
+        self._timestamp = timestamp
+        self._serialized_key_size = serialized_key_size
+        self._serialized_value_size = serialized_value_size
+        self._topic_partition = TopicPartition(topic=topic, partition=partition)
+        return self
+
     def topic(self) -> str:
         return self._topic_partition.topic()
 

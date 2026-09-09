@@ -2386,6 +2386,66 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_copy(
     }
 }
 
+/// Copies **every** metadata field to the caller via a callback, then destroys
+/// the handle.
+///
+/// Extends [`kafka_producer_RecordMetadata_copy`] with the two serialized sizes
+/// Java's `RecordMetadata` exposes (`serializedKeySize()` /
+/// `serializedValueSize()`), so the Python binding builds the full public
+/// `RecordMetadata` value type in a single FFI round trip. The offset carries
+/// Java's `-1` sentinel when unknown (`hasOffset()` is `offset != -1`) and the
+/// timestamp likewise, so no separate `has_*` accessors are needed.
+///
+/// The callback signature is:
+/// ```c
+/// void callback(int64_t offset, int32_t partition,
+///               const char *topic, int64_t timestamp,
+///               int32_t serialized_key_size, int32_t serialized_value_size,
+///               void *user_data);
+/// ```
+///
+/// # Safety
+///
+/// - `metadata` must be a valid, non-null handle.
+/// - `callback` must be a valid function pointer.
+/// - The `topic` pointer passed to the callback is only valid for the duration
+///   of the callback invocation.
+/// - After this call the metadata handle is destroyed and must not be used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_RecordMetadata_copy_full(
+    metadata: *mut kafka_producer_RecordMetadata_t,
+    callback: unsafe extern "C" fn(i64, i32, *const c_char, i64, i32, i32, *mut std::ffi::c_void),
+    user_data: *mut std::ffi::c_void,
+) {
+    if metadata.is_null() {
+        return;
+    }
+
+    let inner = unsafe { metadata_ref(metadata) };
+    let offset = inner.metadata.offset();
+    let partition = inner.metadata.partition();
+    let topic = inner.topic_cstring.as_ptr();
+    let timestamp = inner.metadata.timestamp();
+    let serialized_key_size = inner.metadata.serialized_key_size();
+    let serialized_value_size = inner.metadata.serialized_value_size();
+
+    unsafe {
+        callback(
+            offset,
+            partition,
+            topic,
+            timestamp,
+            serialized_key_size,
+            serialized_value_size,
+            user_data,
+        );
+    }
+
+    unsafe {
+        drop(Box::from_raw(metadata as *mut RecordMetadataInner));
+    }
+}
+
 /// Destroys a record metadata handle, freeing all associated resources.
 ///
 /// Safe to call with a null pointer (no-op).
@@ -2797,6 +2857,21 @@ fn flush_or_close_async(
     user_data: *mut std::ffi::c_void,
     is_close: bool,
 ) {
+    flush_or_close_async_timeout(producer, callback, user_data, is_close, -1);
+}
+
+/// Shared implementation supporting an optional close timeout.
+///
+/// `timeout_ms` of `-1` selects the default (untimed / flushing) close, matching
+/// Java's `close()`; a non-negative value selects `close(Duration)`. It is only
+/// consulted on the close path (`is_close`).
+fn flush_or_close_async_timeout(
+    producer: *mut kafka_producer_Producer_t,
+    callback: OperationCallbackFn,
+    user_data: *mut std::ffi::c_void,
+    is_close: bool,
+    timeout_ms: i64,
+) {
     if producer.is_null() {
         // Match the sync APIs: flush(null) is an error, close(null) is success.
         let error = if is_close {
@@ -2834,14 +2909,22 @@ fn flush_or_close_async(
             Ok(()) => match unsafe { producer_static_ref(ptr) } {
                 ProducerStaticRef::Kafka(k) => {
                     if is_close {
-                        k.close().await
+                        if timeout_ms >= 0 {
+                            k.close_timeout(std::time::Duration::from_millis(timeout_ms as u64)).await
+                        } else {
+                            k.close().await
+                        }
                     } else {
                         k.flush().await
                     }
                 },
                 ProducerStaticRef::Mock(m) => {
                     if is_close {
-                        m.close().await
+                        if timeout_ms >= 0 {
+                            m.close_timeout(std::time::Duration::from_millis(timeout_ms as u64)).await
+                        } else {
+                            m.close().await
+                        }
                     } else {
                         m.flush().await
                     }
@@ -2895,6 +2978,32 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_async(
     user_data: *mut std::ffi::c_void,
 ) {
     flush_or_close_async(producer, callback, user_data, true);
+}
+
+/// Asynchronously closes the producer with a bounded timeout (the async
+/// counterpart of Java's `close(Duration)`).
+///
+/// `timeout_ms` of `-1` selects the default untimed (flushing) close, exactly
+/// like [`kafka_producer_Producer_close_async`]; a non-negative value bounds the
+/// wait. Java's `close()` / `close(Duration)` differ only by the presence of the
+/// duration, so this one entry point serves both (CLAUDE.md §2), with the
+/// binding passing `-1` for the no-argument form.
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread
+/// with a null error on success or a non-null [`kafka_common_Error_t`] the
+/// caller must free on failure.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null (null is a no-op success).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_close_timeout_async(
+    producer: *mut kafka_producer_Producer_t,
+    timeout_ms: i64,
+    callback: kafka_producer_Producer_close_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    flush_or_close_async_timeout(producer, callback, user_data, true, timeout_ms);
 }
 
 /// Owned `partitions_for` completion payload, fired by the dispatcher thread.
@@ -4993,6 +5102,50 @@ mod tests {
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
+    /// `close_timeout_async` with a non-negative timeout closes a mock producer
+    /// and fires its callback exactly once with no error (Java `close(Duration)`).
+    #[test]
+    fn test_close_timeout_async_succeeds() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_close_timeout_async(
+                producer,
+                1000, // 1s timeout
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        wait_for_fired(&captured);
+        assert_eq!(captured.fired(), 1, "close_timeout_async must fire its callback exactly once");
+        assert!(
+            captured.message().is_none(),
+            "a clean close must deliver a null error, got: {:?}",
+            captured.message()
+        );
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// A `-1` timeout selects the default untimed flushing close (the no-arg
+    /// Java `close()` form), and still fires the callback with no error.
+    #[test]
+    fn test_close_timeout_async_default_sentinel() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_close_timeout_async(
+                producer,
+                -1,
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        wait_for_fired(&captured);
+        assert_eq!(captured.fired(), 1);
+        assert!(captured.message().is_none());
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
     /// Helper: asserts that calling `send_batch_inner` with the given arguments
     /// panics with a message containing `expected_msg`.
     unsafe fn assert_send_batch_panics(
@@ -5337,6 +5490,86 @@ mod tests {
             assert_eq!(topic_str, "my-topic");
 
             kafka_producer_RecordMetadata_destroy(metadata);
+            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
+    // Captures the six fields RecordMetadata_copy_full delivers.
+    struct CopyFullCapture {
+        offset: i64,
+        partition: i32,
+        topic: String,
+        timestamp: i64,
+        serialized_key_size: i32,
+        serialized_value_size: i32,
+    }
+
+    unsafe extern "C" fn copy_full_cb(
+        offset: i64,
+        partition: i32,
+        topic: *const c_char,
+        timestamp: i64,
+        serialized_key_size: i32,
+        serialized_value_size: i32,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let out = unsafe { &mut *(user_data as *mut CopyFullCapture) };
+        out.offset = offset;
+        out.partition = partition;
+        out.topic = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+        out.timestamp = timestamp;
+        out.serialized_key_size = serialized_key_size;
+        out.serialized_value_size = serialized_value_size;
+    }
+
+    #[test]
+    fn test_record_metadata_copy_full() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let topic = CString::new("my-topic").unwrap();
+
+        unsafe {
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
+                producer,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                std::ptr::null(),
+                -1,
+                &mut err,
+            );
+            assert_success(err);
+
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+            assert_success(err);
+            assert!(!metadata.is_null());
+
+            let mut capture = CopyFullCapture {
+                offset: -99,
+                partition: -99,
+                topic: String::new(),
+                timestamp: -99,
+                serialized_key_size: -99,
+                serialized_value_size: -99,
+            };
+            // copy_full destroys the handle after the callback returns.
+            kafka_producer_RecordMetadata_copy_full(
+                metadata,
+                copy_full_cb,
+                &mut capture as *mut CopyFullCapture as *mut std::ffi::c_void,
+            );
+
+            assert_eq!(capture.offset, 0);
+            assert_eq!(capture.partition, 0);
+            assert_eq!(capture.topic, "my-topic");
+            assert_eq!(capture.timestamp, -1);
+            assert_eq!(capture.serialized_key_size, 0);
+            assert_eq!(capture.serialized_value_size, 0);
+
             kafka_producer_FutureRecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
