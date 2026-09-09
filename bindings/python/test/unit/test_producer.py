@@ -898,10 +898,14 @@ async def test_backpressure_does_not_trigger_when_draining():
 # =============================================================================
 # Producer transaction tests (mock-backed)
 #
-# Translated from Java MockProducerTest transaction tests. Every transactional
-# test produces with send(): Python's send() calls the synchronous send FFI,
-# which registers the record before it returns, so an in-transaction record is
-# part of the transaction. Python does not expose an async/outbox send path.
+# Translated from Java MockProducerTest transaction tests. Each transactional
+# test below hands its records over before the control op -- most by awaiting the
+# send's .result(), the send/commit-race tests by relying on the control op's own
+# _wait_drained(). Python's send() does NOT register synchronously: it appends the
+# record to a C-side batch (the tray) that the background task later hands to Rust,
+# so the control ops and flush() drain that tray first, reconstructing Java's
+# synchronous doSend guarantee (see rules producer-transactions.md §13 and the
+# send/commit-race tests below).
 # (The transaction-control ops themselves are async-first -- they drive the
 # *_async FFI variants -- but that is invisible to the public API.)
 #
@@ -926,7 +930,8 @@ def test_txn_init_begin_send_commit():
     with MockProducer(auto_complete=True) as p:
         p.init_transactions()
         p.begin_transaction()
-        # §13: inside a transaction, produce with the synchronous send().
+        # §13: inside a transaction, produce with send() and await its result so
+        # the record is handed to the producer before the commit.
         future = p.send(ProducerRecord("test-topic", b"value", b"key"))
         meta = future.result(timeout=FUTURE_TIMEOUT)
         assert isinstance(meta, RecordMetadata)
@@ -1773,3 +1778,236 @@ async def test_async_flush_completes_unawaited_send():
         assert p.history_count() == 1
         meta = await asyncio.wait_for(fut, timeout=FUTURE_TIMEOUT)
         assert isinstance(meta, RecordMetadata)
+
+
+# =============================================================================
+# Pass-2 drain hardening: racing senders, ordering, close-release, cancellation,
+# and the sync/async drain-wait timeout (P2.4, T1-T7).
+#
+# Every wait below is bounded (a hang fails the test, it does not hang the run);
+# the close-release / cancellation / timeout tests genuinely park a waiter first
+# (they assert on_drained returned False, or the op did not complete before the
+# release), so they exercise the parked-waiter path rather than the fast path.
+#
+# T3 (an immediately-erroring record still counted as handed) is intentionally
+# NOT translated: it cannot be provoked through the mock. send_batch's only
+# synchronous-error paths are a null topic/key/value pointer (unreachable from the
+# Python ProducerRecord constructor -- topic is required and non-null; key/value
+# pointers are non-null whenever their length is >= 0) and mock.send() returning
+# Err, which happens only on closed / producer_fenced / a preset send_error --
+# none of which the Python MockProducer FFI exposes (fenceProducer / set-send-error
+# have no symbols; error_next is an async completion and set_commit_transaction_error
+# is commit-time). Faking it would test the fake, not the drain, so it is skipped.
+# =============================================================================
+
+
+def test_txn_racing_senders_no_hang():
+    # T1: a background thread floods un-awaited sends while the main-thread cycles
+    # run begin/send/commit-or-abort. The drain must never deadlock, nothing may be
+    # lost or stuck, and every committed in-txn record must reach history.
+    p = MockProducer(auto_complete=True)
+    p.init_transactions()
+
+    stop = threading.Event()
+
+    def racer():
+        while not stop.is_set():
+            try:
+                p.send(ProducerRecord("test-topic", b"race"))
+            except Exception:  # noqa: BLE001 - transient state / teardown; ignore
+                return
+
+    committed = [0]
+    txn_futures = []
+    cycles_done = threading.Event()
+
+    def cycles():
+        try:
+            for i in range(50):
+                p.begin_transaction()
+                txn_futures.append(p.send(ProducerRecord("test-topic", b"txn")))
+                if i % 2 == 0:
+                    p.commit_transaction()
+                    committed[0] += 1
+                else:
+                    p.abort_transaction()
+        finally:
+            cycles_done.set()
+
+    racer_t = threading.Thread(target=racer, daemon=True)
+    cycles_t = threading.Thread(target=cycles, daemon=True)
+    racer_t.start()
+    cycles_t.start()
+    try:
+        # A drain deadlock would hang here; the bound turns it into a failure.
+        assert cycles_done.wait(timeout=30), "begin/send/commit cycles hung"
+    finally:
+        stop.set()
+        racer_t.join(timeout=FUTURE_TIMEOUT)
+        cycles_t.join(timeout=FUTURE_TIMEOUT)
+    assert not cycles_t.is_alive()
+    assert not racer_t.is_alive()
+
+    p.flush()  # hand over anything still in the tray
+    # Nothing stuck: every in-txn record future resolved (auto_complete resolves
+    # the send regardless of the transaction's later commit/abort).
+    for f in txn_futures:
+        f.result(timeout=FUTURE_TIMEOUT)
+    # Nothing lost: at least the committed in-txn records reached history. The
+    # exact total also includes racer records the mock accepted out-of-txn, which
+    # is nondeterministic under the race -- hence the >= bound.
+    assert p.history_count() >= committed[0]
+    p.close()
+
+
+def test_txn_drain_before_begin_ordering():
+    # T2: init; un-awaited out-of-txn send; begin. begin's _wait_drained hands the
+    # record to the mock BEFORE begin runs, and the mock puts an out-of-txn send
+    # straight into history -- so history_count is already 1 when begin returns,
+    # proving the record was drained over before begin executed.
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.send(ProducerRecord("test-topic", b"pre"))  # no .result(), out-of-txn
+        p.begin_transaction()
+        assert p.history_count() == 1  # handed over before begin ran
+        p.commit_transaction()
+        assert p.history_count() == 1  # empty txn added nothing
+
+
+def test_close_releases_parked_drain_waiter():
+    # T4 (sync): a parked commit is released by close(); the P2.2 re-check then
+    # raises the closed error instead of submitting into the torn-down producer.
+    p = MockProducer(auto_complete=True)
+    p.init_transactions()
+    p.begin_transaction()
+    _lib.Producer_test_set_paused(p.c_producer, True)
+    p.send(ProducerRecord("test-topic", b"v"))  # accepted, not handed (paused)
+
+    result = {}
+    started = threading.Event()
+
+    def run_commit():
+        started.set()
+        try:
+            p.commit_transaction()
+            result["ok"] = True
+        except Exception as e:  # noqa: BLE001
+            result["exc"] = e
+
+    t = threading.Thread(target=run_commit, daemon=True)
+    t.start()
+    assert started.wait(timeout=FUTURE_TIMEOUT)
+    # Genuinely parked: paused -> record undrained -> _wait_drained is waiting.
+    time.sleep(0.1)
+    assert not result, "commit must park while the record is undrained"
+
+    p.close()  # releases the parked waiter; must not raise
+    t.join(timeout=FUTURE_TIMEOUT)
+    assert not t.is_alive()
+    assert "ok" not in result, "commit must not submit into a closing producer"
+    assert isinstance(result.get("exc"), RuntimeError)
+    assert "closed" in str(result["exc"]).lower()
+
+
+async def test_async_close_releases_parked_drain_waiter():
+    # T4 (async twin): same, on the event loop with a task + await close().
+    p = AsyncMockProducer(auto_complete=True)
+    await p.init_transactions()
+    await p.begin_transaction()
+    _lib.Producer_test_set_paused(p.c_producer, True)
+    await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+
+    task = asyncio.ensure_future(p.commit_transaction())
+    await asyncio.sleep(0.1)
+    assert not task.done(), "commit must park while the record is undrained"
+
+    await p.close()  # releases the parked waiter; must not raise
+    with pytest.raises(RuntimeError, match="closed"):
+        await asyncio.wait_for(task, timeout=FUTURE_TIMEOUT)
+
+
+async def test_async_drain_wait_cancellation_never_submits():
+    # T5: cancelling the awaiting task (via an outer wait_for timeout) while the
+    # commit is parked must propagate as a timeout, never submit the commit, and --
+    # after unpause fires the stale drain cb onto the cancelled fut -- raise NO
+    # InvalidStateError (the fut.done() guard in _resolve_drained absorbs it).
+    p = AsyncMockProducer(auto_complete=True)
+    loop = asyncio.get_running_loop()
+    loop_errors = []
+    loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
+    try:
+        await p.init_transactions()
+        await p.begin_transaction()
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(p.commit_transaction(), timeout=0.1)
+
+        # Unpause: the stale drain cb from the cancelled _wait_drained fires onto a
+        # cancelled fut -> guarded, no error; the record is now handed over.
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        await asyncio.sleep(0.1)  # let the late cb land on the loop
+        assert loop_errors == [], f"loop exception after cancellation: {loop_errors}"
+        assert p.history_count() == 0, "commit must not have been submitted"
+
+        # The transaction is still open; a fresh commit succeeds.
+        await p.commit_transaction()
+        assert p.history_count() == 1
+    finally:
+        await p.close()
+
+
+def test_sync_drain_wait_timeout(monkeypatch):
+    # T6: a parked sync commit whose drain never completes (paused) times out with
+    # a retriable, non-abortable KafkaError; after unpause a fresh commit succeeds
+    # and the stale drain entry firing later causes no error.
+    import producer as producer_module
+    p = MockProducer(auto_complete=True)
+    try:
+        p.init_transactions()
+        p.begin_transaction()
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        p.send(ProducerRecord("test-topic", b"v"))  # accepted, not handed (paused)
+
+        monkeypatch.setattr(producer_module, "_DRAIN_WAIT_TIMEOUT_S", 0.1)
+        with pytest.raises(KafkaError) as ei:
+            p.commit_transaction()
+        err = ei.value
+        assert err.is_retriable is True
+        assert err.txn_requires_abort is False
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        p.commit_transaction()  # record now drains; commit succeeds
+        assert p.history_count() == 1
+        time.sleep(0.05)  # the stale drain entry firing later must cause no error
+        assert p.history_count() == 1
+    finally:
+        p.close()
+
+
+async def test_async_drain_wait_timeout(monkeypatch):
+    # T7: async twin of T6 (relies on P2.1 bounding the async wait). asyncio.wait_for
+    # trips _DRAIN_WAIT_TIMEOUT_S and the op raises the same retriable KafkaError.
+    import producer as producer_module
+    p = AsyncMockProducer(auto_complete=True)
+    try:
+        await p.init_transactions()
+        await p.begin_transaction()
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+
+        monkeypatch.setattr(producer_module, "_DRAIN_WAIT_TIMEOUT_S", 0.1)
+        with pytest.raises(KafkaError) as ei:
+            await p.commit_transaction()
+        err = ei.value
+        assert err.is_retriable is True
+        assert err.txn_requires_abort is False
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        await p.commit_transaction()  # record now drains; commit succeeds
+        assert p.history_count() == 1
+        await asyncio.sleep(0.05)  # a stale drain entry firing later: no error
+        assert p.history_count() == 1
+    finally:
+        await p.close()
