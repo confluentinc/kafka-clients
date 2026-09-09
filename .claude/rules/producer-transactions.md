@@ -653,6 +653,20 @@ right thing. **Adding only the drain call to `with_txn_control` is the entire ch
     `begin_transaction` and `commit`/`abort`; the drain makes the outcome defined.
   - **The `flush`/`close` drain and the transaction-control drain now share the same
     `Barrier` primitive.** Refactoring the submission path must not break either.
+  - **The Python binding reconstructs the same guarantee one layer up, with its own
+    drain.** `producer.py`'s `send()` does NOT reach Rust: `py_Producer_send`
+    (`bindings/python/_confluentkafka.c`) appends the record to a C-side batch list that
+    the background `Producer_send_thread` hands to Rust later via the *synchronous*
+    `kafka_producer_Producer_send_batch` (every 10 ms or 1000 records). Python never
+    populates the Rust `send_async` outbox, so the Rust drain above sees nothing to drain
+    and cannot cover it. Therefore every control op and `flush()` in BOTH `Producer` and
+    `AsyncProducer` MUST call `_wait_drained()` (→ `Producer_on_drained`, modelled on
+    the `on_space_available` backpressure callback) before the FFI call, and
+    `Producer_send_thread` MUST advance the `handed` counter by the **pre-compaction**
+    take size after `send_batch` returns (immediately-failed records still count as
+    handed, or a waiter hangs). The resulting contract is the §13 one: records `send()`
+    accepted before the call are handed to the producer first; sends racing concurrently
+    on another thread/task are not ordered against it, as in Java.
 
 **Anti-patterns to flag in review:**
 
@@ -672,3 +686,9 @@ right thing. **Adding only the drain call to `with_txn_control` is the entire ch
   - Breaking the `flush`/`close` outbox drain, or the new transaction-control drain,
     when refactoring the submission path — both rely on the same
     `drain_submitted_sends_await` barrier.
+  - A Python control op or `flush()` that reaches the FFI without first draining the
+    C-side tray (`_wait_drained()` / `Producer_on_drained`), or a `Producer_send_thread`
+    change that advances `handed` by the post-compaction count, clears `drain_requested`
+    only on the non-empty take path, or fires drain callbacks while holding
+    `record_batches_mutex`. Treating the Rust outbox drain as sufficient for Python is
+    the same mistake: that queue is empty for Python by construction.
