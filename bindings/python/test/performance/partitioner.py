@@ -1,84 +1,76 @@
-"""Pure-Python translation of the Kafka Java client default partitioner.
+"""Pure-Python model of the Rust/librdkafka default key partitioner.
 
-Mirrors:
-  - org.apache.kafka.common.utils.Utils.murmur2
-    (kafka/clients/src/main/java/org/apache/kafka/common/utils/Utils.java)
-  - org.apache.kafka.clients.producer.internals.BuiltInPartitioner.partitionForKey
-    (kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/BuiltInPartitioner.java)
+The Rust producer's default key hasher is IEEE CRC-32 (``KeyHasher::Crc32`` in
+``src/producer/internals/built_in_partitioner.rs``), matching librdkafka's
+``consistent_random`` partitioner (``rd_crc32(key) % partition_cnt``). This is
+a deliberate deviation from the Apache Kafka Java client, whose default
+partitioner hashes keys with murmur2
+(``Utils.toPositive(Utils.murmur2(key)) % numPartitions``). The deviation lets
+the Rust client co-partition keyed records with the librdkafka-based Confluent
+client fleet — see ``design/current/partitioner.md`` for the rationale and the
+mixed-fleet warning.
+
+``zlib.crc32`` computes the identical IEEE CRC-32 (polynomial 0x04C11DB7,
+reflected) as ``crc32fast::hash`` and librdkafka's ``rd_crc32``, returning it
+as an unsigned 32-bit int — so ``zlib.crc32(key) % num_partitions`` matches the
+Rust client exactly, with no ``toPositive`` sign-bit masking (see
+``partition_for_key`` below).
 
 Used by the Python performance test to verify that messages produced with a key
-land in the partition the broker-side default partitioner would have chosen.
+land in the partition the configured default partitioner would have chosen.
 """
 
-_SEED = 0x9747B28C
-_M = 0x5BD1E995
-_R = 24
-_MASK_32 = 0xFFFFFFFF
-
-
-def murmur2(data: bytes) -> int:
-    """32-bit Murmur2 hash, returned as an unsigned int (0..2^32-1).
-
-    Byte-for-byte equivalent to Java's Utils.murmur2: 4-byte chunks are read
-    little-endian and all arithmetic is masked to 32 bits to mimic Java's
-    signed-int overflow semantics.
-    """
-    length = len(data)
-    h = (_SEED ^ length) & _MASK_32
-    length4 = length >> 2
-
-    for i in range(length4):
-        i4 = i << 2
-        k = int.from_bytes(data[i4:i4 + 4], "little", signed=False)
-        k = (k * _M) & _MASK_32
-        k ^= k >> _R
-        k = (k * _M) & _MASK_32
-        h = (h * _M) & _MASK_32
-        h ^= k
-
-    index = length4 << 2
-    tail = length - index
-    if tail >= 3:
-        h ^= (data[index + 2] & 0xFF) << 16
-    if tail >= 2:
-        h ^= (data[index + 1] & 0xFF) << 8
-    if tail >= 1:
-        h ^= data[index] & 0xFF
-        h = (h * _M) & _MASK_32
-
-    h ^= (h & _MASK_32) >> 13
-    h = (h * _M) & _MASK_32
-    h ^= (h & _MASK_32) >> 15
-    return h & _MASK_32
+import zlib
 
 
 def partition_for_key(key: bytes, num_partitions: int) -> int:
-    """Compute the partition the Java default partitioner would assign to `key`.
+    """Compute the partition the default (CRC-32) partitioner assigns to `key`.
 
-    Equivalent to BuiltInPartitioner.partitionForKey:
-        Utils.toPositive(Utils.murmur2(key)) % numPartitions
-    where toPositive is `n & 0x7fffffff`.
+    Mirrors ``BuiltInPartitioner::partition_for_key`` with ``KeyHasher::Crc32``:
+
+        (crc32fast::hash(key) % (num_partitions as u32)) as i32
+
+    i.e. the CRC is taken **unsigned** and reduced modulo the partition count.
+    Unlike the Java murmur2 path there is no ``toPositive`` (``& 0x7fffffff``)
+    step — ``zlib.crc32`` already returns an unsigned 32-bit value, exactly as
+    librdkafka's ``consistent_random`` does.
+
+    Empty keys never reach here in the perf test (a present key always has
+    ``key_size > 0``); the Rust client's ``KeyHasher::Crc32`` skips hashing an
+    empty key and defers to the sticky partitioner, matching librdkafka.
     """
-    return (murmur2(key) & 0x7FFFFFFF) % num_partitions
+    return zlib.crc32(key) % num_partitions
 
 
 if __name__ == "__main__":
-    # Cross-checked against UtilsTest.testMurmur2
-    # (kafka/clients/src/test/java/org/apache/kafka/common/utils/UtilsTest.java).
-    # Java values are signed; we compare against their unsigned-32 equivalents.
-    def _u32(signed: int) -> int:
-        return signed & _MASK_32
-
-    cases = {
-        b"21": -973932308,
-        b"foobar": -790332482,
-        b"a-little-bit-long-string": -985981536,
-        b"a-little-bit-longer-string": -1486304829,
-        b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8": -58897971,
-        b"abc": 479470107,
+    # Hash vectors cross-checked against
+    # built_in_partitioner.rs::test_crc32_golden_vectors
+    # (src/producer/internals/built_in_partitioner.rs) and zlib.crc32.
+    golden = {
+        b"": 0x00000000,
+        b"a": 0xE8B7BE43,
+        b"abc": 0x352441C2,
+        b"123456789": 0xCBF43926,
+        b"The quick brown fox jumps over the lazy dog": 0x414FA339,
     }
-    for data, expected_signed in cases.items():
-        got = murmur2(data)
-        expected = _u32(expected_signed)
-        assert got == expected, f"murmur2({data!r}) = {got}, want {expected}"
-    print(f"murmur2 self-check passed ({len(cases)} vectors)")
+    for data, expected in golden.items():
+        got = zlib.crc32(data)
+        assert got == expected, \
+            f"crc32({data!r}) = 0x{got:08X}, want 0x{expected:08X}"
+
+    # Key -> partition placements cross-checked against
+    # built_in_partitioner.rs::test_crc32_key_to_partition_table.
+    partition_cases = [
+        (b"a", 3, 0),
+        (b"abc", 7, 5),
+        (b"kafka", 12, 11),
+        (b"hello", 64, 6),
+        (b"123456789", 64, 38),
+    ]
+    for key, num_partitions, expected_p in partition_cases:
+        got_p = partition_for_key(key, num_partitions)
+        assert got_p == expected_p, \
+            f"partition_for_key({key!r}, {num_partitions}) = {got_p}, want {expected_p}"
+
+    print(f"crc32 self-check passed "
+          f"({len(golden)} hash vectors, {len(partition_cases)} partition cases)")

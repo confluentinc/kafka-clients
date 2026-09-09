@@ -41,6 +41,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::Partitioner;
 use super::Producer;
 use super::ProducerRecord;
 use super::RecordMetadata;
@@ -52,9 +53,11 @@ use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
+use crate::common::header::internals::RecordHeaders;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
+use crate::common::serialization::Serializer;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 
@@ -64,7 +67,7 @@ use super::Callback;
 // PHASE-7 METHOD ACCOUNTING (`definition-of-done.md` §2)
 //
 // `MockProducer.java` declares **40** distinct method names at class level.
-// **30** have a Rust `fn` in this file; the **10** absent are named below with
+// **33** have a Rust `fn` in this file; the **7** absent are named below with
 // what each is blocked on.
 //
 // Constructors are excluded by construction rather than by assertion: the
@@ -103,55 +106,61 @@ use super::Callback;
 //   for ln, n in missing: print(f"  {ln:4d} {n}")
 //   PY
 //
-//   40 declared, 30 present, 10 absent
-//     366 disableTelemetry
-//     373 injectTimeoutException
-//     377 setClientInstanceId
-//     382 clientInstanceId
-//     400 metrics
-//     407 setMockMetrics
-//     526 partition
-//     584 addedMetrics
-//     589 registerMetricForSubscription
-//     594 unregisterMetricFromSubscription
+//   40 declared, 33 present, 7 absent
+//     378 disableTelemetry
+//     387 injectTimeoutException
+//     396 setClientInstanceId
+//     401 clientInstanceId
+//     661 addedMetrics
+//     666 registerMetricForSubscription
+//     671 unregisterMetricFromSubscription
 //
-// All ten predate Phase 7 and none is in its scope — PLAN §Phase-7 enumerates
-// the transactional surface, and these are three other features:
+// All seven predate Phase 7 and none is in its scope — PLAN §Phase-7 enumerates
+// the transactional surface, and these are two other features:
 //
-//   `clientInstanceId` (382), `metrics` (400), `registerMetricForSubscription`
-//     (589), `unregisterMetricFromSubscription` (594) — `Producer`-interface
-//     methods the *Rust trait does not declare*. The gap is in
-//     `producer_trait.rs`, not here: a `MockProducer` impl would have nothing to
-//     override. Tracked as PLAN §9.23.
-//   `disableTelemetry` (366), `injectTimeoutException` (373),
-//     `setClientInstanceId` (377), `setMockMetrics` (407), `addedMetrics` (584)
-//     — the mock-only knobs that exist to drive those same two features. They
-//     follow whenever the four above land. Same §9.23.
-//   `partition` (526) — needs `Partitioner` plus the two `Serializer`s. The Rust
-//     mock takes pre-serialized bytes by design, stated at [`MockProducer::new`].
+//   `clientInstanceId` (401), `registerMetricForSubscription` (666),
+//     `unregisterMetricFromSubscription` (671) — `Producer`-interface methods
+//     the *Rust trait does not declare*. The gap is in `producer_trait.rs`, not
+//     here: a `MockProducer` impl would have nothing to override. Tracked as
+//     PLAN §9.23.
+//   `disableTelemetry` (378), `injectTimeoutException` (387),
+//     `setClientInstanceId` (396), `addedMetrics` (661) — the mock-only knobs
+//     that exist to drive those same two features. They follow whenever the
+//     three above land. Same §9.23.
 //
-// What that costs the test parity, precisely: nine of the ten appear **zero**
-// times in `MockProducerTest.java`, so they block nothing —
+// Three names the Phase-7 paste listed as absent are now present, which is why
+// this reads 33/7 where Phase 7 read 31/9:
+//   - `partition` (598) — the pluggable `Partitioner` phase gave the mock a
+//     `partitioner` field plus the two `Serializer`s and translated
+//     `partition()` onto `MockProducerInner`.
+//   - `metrics` (419) and `setMockMetrics` (426) — landed with the
+//     producer-metrics milestone (which post-dates the Phase-7 paste), as
+//     `fn metrics` / `fn set_mock_metrics`.
+//
+// What that costs the test parity, precisely: all seven appear **zero** times in
+// `MockProducerTest.java`, so they block nothing —
 //
 //   J=kafka/clients/src/test/java/org/apache/kafka/clients/producer/MockProducerTest.java
 //   for m in disableTelemetry injectTimeoutException setClientInstanceId \
-//            clientInstanceId 'metrics(' setMockMetrics addedMetrics \
-//            registerMetricForSubscription unregisterMetricFromSubscription; do
+//            clientInstanceId addedMetrics registerMetricForSubscription \
+//            unregisterMetricFromSubscription; do
 //     printf '%s %s\n' "$m" "$(grep -c "$m" $J)"; done
 //
-// prints `0` nine times. The tenth, `partition`, is driven by the
-// `RoundRobinPartitioner` that `testPartitioner` passes (Java 94-96) and by the
-// serializers `shouldThrowClassCastException` passes (690) — which is why the
-// first is translated in adapted form and the second is not applicable. Both are
-// stated at their entries in the test accounting block at the end of this file.
+// prints `0` seven times. `partition` is driven by the `RoundRobinPartitioner`
+// that `testPartitioner` passes (Java 94); that test is now translated
+// faithfully (it was previously present but weakened). The serializers
+// `shouldThrowClassCastException` passes (690) still have no Rust analogue —
+// static typing rules the mis-apply out — so that test remains not applicable.
+// Both are stated at their entries in the test accounting block at the end of
+// this file.
 //
-// Two Java names cover four Rust `fn`s, so "30 present" is not "30 signatures":
-// `send` (278, 288) → `send` / `send_with_callback`, and `close` (412, 417) →
+// Two Java names cover four Rust `fn`s, so "33 present" is not "33 signatures":
+// `send` (287, 297) → `send` / `send_with_callback`, and `close` (431, 436) →
 // `close` / `close_timeout`. The nested `Completion` class sits at 8-space
-// indent and so is outside the scan; its one method, `complete` (567), is
+// indent and so is outside the scan; its one method, `complete` (639), is
 // translated as `Completion::complete`.
 //
-// Java's nine public `RuntimeException` *fields* (79-87) are not methods and are
+// Java's nine public `RuntimeException` *fields* (80-96) are not methods and are
 // invisible to the derivation. All nine are present as `set_*_error` setters;
 // the five transactional ones landed in Phase 7, covered by
 // `test_set_transactional_errors`.
@@ -183,6 +192,13 @@ type ConsumerGroupOffsets = HashMap<String, HashMap<TopicPartition, OffsetAndMet
 
 struct MockProducerInner<K, V> {
     cluster: Cluster,
+    /// Java `partitioner` (`MockProducer.java:58`) — the partition strategy, or
+    /// `None` when the mock was created without one.
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    /// Java `keySerializer` (`MockProducer.java:65`), or `None`.
+    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+    /// Java `valueSerializer` (`MockProducer.java:66`), or `None`.
+    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
     auto_complete: bool,
     /// Java `sent` (`MockProducer.java:59`).
     sent: Vec<ProducerRecord<K, V>>,
@@ -310,6 +326,50 @@ impl<K, V> MockProducerInner<K, V> {
             None => false,
         }
     }
+
+    /// Computes the partition for the given record.
+    ///
+    /// Corresponds to Java's `partition(ProducerRecord, Cluster)`
+    /// (`MockProducer.java:598`). An explicit record partition is validated
+    /// against the topic's partition count and returned as-is; otherwise the
+    /// key/value are serialized (surfacing any serializer error, as Java does at
+    /// `:612-613`) and the partition is chosen by the partitioner — or, when
+    /// none is set, by the first partition of the topic (`:614-615`), exactly as
+    /// Java's `partitioner == null` branch.
+    fn partition(&self, record: &ProducerRecord<K, V>) -> Result<i32, KafkaError> {
+        let topic = record.topic();
+        if let Some(partition) = record.partition() {
+            let num_partitions = self.cluster.partitions_for_topic(topic).len() as i32;
+            // they have given us a partition, use it
+            if partition < 0 || partition >= num_partitions {
+                return Err(KafkaError::illegal_argument(format!(
+                    "Invalid partition given with record: {partition} is not in the range [0...{num_partitions}]."
+                )));
+            }
+            return Ok(partition);
+        }
+        let key_bytes = match self.key_serializer.as_ref() {
+            Some(key_serializer) => key_serializer.serialize_with_headers(topic, record.headers(), record.key())?,
+            None => None,
+        };
+        let value_bytes = match self.value_serializer.as_ref() {
+            Some(value_serializer) => {
+                value_serializer.serialize_with_headers(topic, record.headers(), record.value())?
+            },
+            None => None,
+        };
+        match self.partitioner.as_ref() {
+            None => Ok(self.cluster.partitions_for_topic(topic)[0].partition()),
+            Some(partitioner) => Ok(partitioner.partition(
+                topic,
+                record.key(),
+                key_bytes.as_deref(),
+                record.value(),
+                value_bytes.as_deref(),
+                &self.cluster,
+            )),
+        }
+    }
 }
 
 /// Internal completion record that holds the state needed to fulfill a
@@ -372,12 +432,42 @@ impl<K, V> MockProducer<K, V> {
     ///   to complete the call and resolve the [`FutureRecordMetadata`].
     ///
     /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
-    /// Serializer, Serializer)` constructor (without serializers or partitioner,
-    /// since the Rust producer works with pre-serialized bytes).
+    /// Serializer, Serializer)` constructor invoked with a null partitioner and
+    /// null serializers (`MockProducer.java:113`). Delegates to
+    /// [`with_partitioner`](Self::with_partitioner).
     pub fn new(cluster: Cluster, auto_complete: bool) -> Self {
+        Self::with_partitioner(cluster, auto_complete, None, None, None)
+    }
+
+    /// Create a mock producer with a custom partitioner and key/value
+    /// serializers.
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster holding metadata for this producer.
+    /// * `auto_complete` - If `true`, automatically complete all requests
+    ///   successfully. Otherwise the user must call [`complete_next()`](Self::complete_next)
+    ///   or [`error_next()`](Self::error_next) after [`send()`](Producer::send)
+    ///   to complete the call and resolve the [`FutureRecordMetadata`].
+    /// * `partitioner` - The partition strategy, or `None`.
+    /// * `key_serializer` - The key serializer, or `None`.
+    /// * `value_serializer` - The value serializer, or `None`.
+    ///
+    /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
+    /// Serializer, Serializer)` constructor (`MockProducer.java:113`).
+    pub fn with_partitioner(
+        cluster: Cluster,
+        auto_complete: bool,
+        partitioner: Option<Box<dyn Partitioner<K, V>>>,
+        key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+        value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    ) -> Self {
         Self {
             inner: Mutex::new(MockProducerInner {
                 cluster,
+                partitioner,
+                key_serializer,
+                value_serializer,
                 auto_complete,
                 sent: Vec::new(),
                 uncommitted_sends: Vec::new(),
@@ -961,7 +1051,28 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             return Err(err.clone());
         }
 
-        let partition = record.partition().unwrap_or(0);
+        // Java 309-316: with cluster metadata for the topic, delegate to
+        // `partition()`; otherwise serialize key/value (with fresh
+        // `RecordHeaders`) and leave the partition at 0.
+        let partition = if !inner.cluster.partitions_for_topic(record.topic()).is_empty() {
+            inner.partition(&record)?
+        } else {
+            // DEVIATION (`definition-of-done.md` §7): Java serializes here purely
+            // for the `ClassCastException` side effect (Java 313 comment) — a
+            // case static typing rules out in Rust — and then uses partition 0.
+            // Rust still consults the serializers when present, so a serializer
+            // error surfaces as Java's would, but honours an explicit
+            // `record.partition()` before falling back to 0 so the C FFI
+            // empty-cluster mock keeps working
+            // (`bindings/c/tests/test_mock_producer.c:133,600,640,735,1637`).
+            if let Some(key_serializer) = inner.key_serializer.as_ref() {
+                key_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.key())?;
+            }
+            if let Some(value_serializer) = inner.value_serializer.as_ref() {
+                value_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.value())?;
+            }
+            record.partition().unwrap_or(0)
+        };
         let tp = TopicPartition::new(record.topic().to_string(), partition);
 
         let result = Arc::new(ProduceRequestResult::new(tp.clone()));
@@ -1059,6 +1170,8 @@ fn next_offset(offsets: &mut HashMap<TopicPartition, i64>, tp: &TopicPartition) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::serialization::StringSerializer;
+    use crate::producer::RoundRobinPartitioner;
 
     // -----------------------------------------------------------------------
     // Fixtures, mirroring `MockProducerTest.java`'s fields (56-64)
@@ -1173,19 +1286,15 @@ mod tests {
         assert_eq!(0, producer.history().len(), "Clear should erase our history");
     }
 
-    /// Translated from `MockProducerTest.testPartitioner` (Java 86).
-    ///
-    /// Java's test uses a `RoundRobinPartitioner` with cluster metadata.
-    /// Since our Rust `MockProducer` doesn't use a partitioner (it uses
-    /// `record.partition().unwrap_or(0)` directly), we test that a record
-    /// with an explicit partition is assigned correctly.
-    #[tokio::test]
-    async fn test_partitioner() {
-        let node = crate::common::Node::new(0, "localhost".to_string(), 9092);
-        let pi0 = PartitionInfo::new("topic".to_string(), 0, Some(node.clone()), vec![], vec![]);
-        let pi1 = PartitionInfo::new("topic".to_string(), 1, Some(node), vec![], vec![]);
-
-        let cluster = Cluster::new(
+    /// Two-partition cluster whose partitions have **no** leader, matching Java's
+    /// `testPartitioner` fixture (`MockProducerTest.java:87-90`, `new
+    /// PartitionInfo(topic, n, null, null, null)`). The Rust `Cluster::new` takes
+    /// eight arguments where Java's constructor takes five; the extra three
+    /// (controller, topic-ids, unauthorized/invalid topics) default to empty.
+    fn two_partition_cluster() -> Cluster {
+        let pi0 = PartitionInfo::new(TOPIC.to_string(), 0, None, vec![], vec![]);
+        let pi1 = PartitionInfo::new(TOPIC.to_string(), 1, None, vec![], vec![]);
+        Cluster::new(
             None,
             vec![],
             vec![pi0, pi1],
@@ -1194,24 +1303,121 @@ mod tests {
             std::collections::HashSet::new(),
             None,
             HashMap::new(),
-        );
-        let producer: MockProducer<String, String> = MockProducer::new(cluster, true);
+        )
+    }
 
-        // Send with explicit partition=1
+    /// Translated from `MockProducerTest.testPartitioner` (Java 86).
+    ///
+    /// Drives a `RoundRobinPartitioner` over a two-partition cluster. Because the
+    /// partitions have no leader, `available_partitions_for_topic` is empty, so the
+    /// round-robin falls back to the full partition count and the first send lands
+    /// on partition 0 — the value Java asserts.
+    #[tokio::test]
+    async fn test_partitioner() {
+        let producer: MockProducer<String, String> = MockProducer::with_partitioner(
+            two_partition_cluster(),
+            true,
+            Some(Box::new(RoundRobinPartitioner::new())),
+            Some(Box::new(StringSerializer)),
+            Some(Box::new(StringSerializer)),
+        );
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let future = producer.send(record).await.unwrap();
+        let md = future.get().await.unwrap();
+        assert_eq!(0, md.partition(), "Partition should be correct");
+
+        producer.clear();
+        assert_eq!(0, producer.history().len(), "Clear should erase our history");
+        producer.close().await.unwrap();
+    }
+
+    /// Rust-only: an explicit record partition outside `[0, numPartitions)` is
+    /// rejected with Java's exact `IllegalArgumentException` message
+    /// (`MockProducer.java:605-609`). `MockProducerTest.java` has no dedicated
+    /// test for this branch, so it is local coverage of a translated behaviour.
+    #[tokio::test]
+    async fn test_partition_out_of_range_is_rejected() {
+        let producer: MockProducer<String, String> = MockProducer::new(two_partition_cluster(), true);
         let record = ProducerRecord::with_partition(
-            "topic".to_string(),
+            TOPIC.to_string(),
+            Some(2),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .unwrap();
+
+        let error = producer
+            .send(record)
+            .await
+            .expect_err("out-of-range partition should be rejected");
+        assert!(
+            matches!(error, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {error}"
+        );
+        assert_eq!(
+            "Invalid partition given with record: 2 is not in the range [0...2].",
+            error.message()
+        );
+    }
+
+    /// Rust-only: an in-range explicit record partition is honoured as-is
+    /// (`MockProducer.java:610`), taking priority over the partitioner.
+    #[tokio::test]
+    async fn test_explicit_partition_is_honoured() {
+        let producer: MockProducer<String, String> = MockProducer::with_partitioner(
+            two_partition_cluster(),
+            true,
+            Some(Box::new(RoundRobinPartitioner::new())),
+            Some(Box::new(StringSerializer)),
+            Some(Box::new(StringSerializer)),
+        );
+        let record = ProducerRecord::with_partition(
+            TOPIC.to_string(),
             Some(1),
             Some("key".to_string()),
             Some("value".to_string()),
         )
         .unwrap();
-        let future = producer.send(record).await.unwrap();
-        let md = future.get().await.unwrap();
-        assert_eq!(1, md.partition(), "Partition should be correct");
 
-        producer.clear();
-        assert_eq!(0, producer.history().len(), "Clear should erase our history");
-        producer.close().await.unwrap();
+        let md = producer.send(record).await.unwrap().get().await.unwrap();
+        assert_eq!(1, md.partition(), "explicit partition wins over the partitioner");
+    }
+
+    /// Rust-only: with no partitioner set, a keyed record on a populated cluster
+    /// lands on the topic's first partition, translating Java's `partitioner ==
+    /// null` branch (`MockProducer.java:614-615`).
+    #[tokio::test]
+    async fn test_no_partitioner_uses_first_partition() {
+        let producer: MockProducer<String, String> = MockProducer::new(two_partition_cluster(), true);
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+
+        let md = producer.send(record).await.unwrap().get().await.unwrap();
+        assert_eq!(0, md.partition(), "no-partitioner path uses the first partition");
+    }
+
+    /// Rust-only: on an **empty** cluster the mock keeps honouring an explicit
+    /// `record.partition()` and otherwise defaults to 0 — the documented deviation
+    /// from Java's empty-cluster branch (Java forces 0 and serializes only for a
+    /// `ClassCastException` side effect that static typing rules out). This is the
+    /// path the C FFI empty-cluster mock relies on.
+    #[tokio::test]
+    async fn test_empty_cluster_honours_explicit_partition() {
+        let producer: MockProducer<String, String> = MockProducer::new(Cluster::empty(), true);
+
+        let keyless = ProducerRecord::with_key(TOPIC.to_string(), None, Some("value".to_string()));
+        let md = producer.send(keyless).await.unwrap().get().await.unwrap();
+        assert_eq!(0, md.partition(), "empty cluster with no explicit partition defaults to 0");
+
+        let pinned = ProducerRecord::with_partition(
+            TOPIC.to_string(),
+            Some(7),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .unwrap();
+        let md = producer.send(pinned).await.unwrap().get().await.unwrap();
+        assert_eq!(7, md.partition(), "empty cluster still honours an explicit partition");
     }
 
     /// Translated from `MockProducerTest.testManualCompletion` (Java 107).
@@ -2572,11 +2778,11 @@ mod tests {
     //     `Objects.requireNonNull(groupId, "group.id can't be null")` at `:42` —
     //     before the mock is entered at all. With `Collections.emptyMap()` for the offsets
     //     there is no other reachable throw — `sendOffsetsToTransaction` would
-    //     return at `MockProducer.java:195`. Rust's
+    //     return at `MockProducer.java:204`. Rust's
     //     `ConsumerGroupMetadata::new(impl Into<String>)` cannot receive null, and
     //     `send_offsets_to_transaction` takes the metadata by value rather than as
     //     an `Option`, so Java's own `Objects.requireNonNull(groupMetadata)`
-    //     (`MockProducer.java:184`) is equally unrepresentable. The empty-offsets
+    //     (`MockProducer.java:193`) is equally unrepresentable. The empty-offsets
     //     path it incidentally exercises is covered by
     //     `should_ignore_empty_offsets_when_send_offsets_to_transaction_by_group_metadata`
     //     (Java 438).
@@ -2585,30 +2791,35 @@ mod tests {
     //     `ProducerRecord` carry a `String` key into an `IntegerSerializer`,
     //     producing `ClassCastException` inside `send`. Rust has no type erasure —
     //     `MockProducer<i32, String>` will not accept a `ProducerRecord<String,
-    //     String>` at compile time — and the mock holds no serializers to
-    //     mis-apply (see the method accounting block on `partition`, Java 526).
-    //     Justification carried over from before Phase 7, re-checked and still
-    //     accurate.
+    //     String>` at compile time. The pluggable-partitioner phase gave the mock
+    //     the `keySerializer`/`valueSerializer` fields (Java 65-66) that `partition`
+    //     (Java 598) invokes, but they are `Serializer<K>`/`Serializer<V>` — a
+    //     `MockProducer<i32, String>` can only hold an `i32`/`String` serializer, so
+    //     there is still no erased path on which a `String` key could reach an
+    //     `IntegerSerializer`. Re-checked for this phase and still accurate.
     //
     // What the derivation cannot see, and where each is pinned instead:
     //
-    //   - A test present but weakened. `test_partitioner` (Java 86) is the one
-    //     such case remaining: Java drives a `RoundRobinPartitioner` and asserts it
-    //     picks partition 0, while the Rust mock has no partitioner, so the
-    //     translation asserts an explicit `record.partition()` is honoured instead.
-    //     Its own rustdoc says so.
+    //   - No test remains weakened. `test_partitioner` (Java 86) was the last
+    //     such case: Java drives a `RoundRobinPartitioner` and asserts it picks
+    //     partition 0, and the translation now does the same through
+    //     `MockProducer::with_partitioner`, replacing the earlier stopgap that had
+    //     no partitioner and asserted an explicit `record.partition()` instead.
     //
-    //     **Four** others were weakened and are no longer. Naming all four matters
-    //     more than the number: the two artifacts that first recorded this each
-    //     said "three" and each named a *different* three, because each was written
-    //     beside the commit that made its own subset visible. A count-level check
-    //     finds nothing wrong with two lists that agree on `3`; only membership
-    //     does. So the set is re-derived from the diff rather than from either
-    //     list — normalise away this phase's two mechanical swaps
+    //     **Five** tests were weakened at some point and are no longer. Naming all
+    //     five matters more than the number: the two artifacts that first recorded
+    //     this each said "three" and each named a *different* three, because each
+    //     was written beside the commit that made its own subset visible. A
+    //     count-level check finds nothing wrong with two lists that agree on `3`;
+    //     only membership does. So the set is re-derived from the diff rather than
+    //     from either list — normalise away the two mechanical swaps
     //     (`MockProducer::with_auto_complete(x)` → `build_mock_producer(x)`, and
     //     `make_record("topic", "keyN", "valueN")` → `recordN()`), then compare
-    //     every pre-Phase-7 test body at `82aa2da` against its current form. Six
-    //     bodies differ before that normalisation and exactly these four after:
+    //     every pre-Phase-7 test body at `82aa2da` against its current form. Seven
+    //     bodies differ before that normalisation and exactly these five after
+    //     (the partitioner phase un-weakened `test_partitioner`, which uses neither
+    //     mechanical swap, so it is the seventh differing body and the fifth to
+    //     survive normalisation):
     //
     //       `testManualCompletion` (107) — Java compares the cause at 122; the
     //         translation asserted a bare `is_err()`. Now `assert_eq!("blah", ..)`.
@@ -2618,6 +2829,9 @@ mod tests {
     //         `shouldThrowOnFlushProducerIfProducerIsClosed` (673) — matched their
     //         message with `contains`. Now `assert_illegal_state`, i.e. variant plus
     //         exact message.
+    //       `testPartitioner` (86) — had no partitioner and asserted an explicit
+    //         `record.partition()`; now drives a `RoundRobinPartitioner` over a
+    //         leaderless two-partition cluster and asserts partition 0, as Java does.
     //   - A test that passes with the bug reintroduced. Twelve mutations of the
     //     Phase-7 surface were each applied and each failed the suite; the commit
     //     that landed them lists them.
@@ -2625,18 +2839,26 @@ mod tests {
     //     accounting block's job (`definition-of-done.md` §2), above the struct.
     //
     // The derivation classifies *Java* methods, so no Rust-only test appears in it
-    // at all. This module has 69 tests against the 53 translated, i.e. 16 with no
-    // Java counterpart, and 13 of those predate Phase 7. The three it adds are
-    // called out here because they are the only ones discharging a
+    // at all. This module has 74 tests against the 53 translated, i.e. 21 with no
+    // Java counterpart. Thirteen predate Phase 7; Phase 7 added three (the §2 ones
+    // below); a later producer-metrics milestone added `test_set_and_get_mock_metrics`
+    // (this block read 69/16 at Phase-7 close, which was correct then; the metrics
+    // merge added that 17th Rust-only test without revisiting this Phase-7 count, so
+    // the numbers had drifted by one before this phase); and the pluggable-partitioner
+    // phase adds four (`test_partition_out_of_range_is_rejected`,
+    // `test_explicit_partition_is_honoured`, `test_no_partitioner_uses_first_partition`
+    // and `test_empty_cluster_honours_explicit_partition` — edge cases of the new
+    // `partition` helper that `MockProducerTest.java` does not exercise). The three
+    // Phase-7 ones are called out here because they are the only ones discharging a
     // `definition-of-done.md` §2 obligation rather than adding local coverage:
     // `test_uncommitted_accessors`,
     // `test_clear_resets_staging_but_not_transaction_flags` and
-    // `test_set_transactional_errors` cover `uncommittedRecords` (Java 471),
-    // `uncommittedOffsets` (483) and the five transactional `*Exception` fields
-    // (79-83) — each of which appears **zero** times in `MockProducerTest.java`,
+    // `test_set_transactional_errors` cover `uncommittedRecords` (Java 538),
+    // `uncommittedOffsets` (555) and the five transactional `*Exception` fields
+    // (80-88) — each of which appears **zero** times in `MockProducerTest.java`,
     // its Java callers being Kafka Streams tests, out of scope. They sit with the
     // other Rust-only additions under "Additional unit tests".
     //
-    //   cargo test --lib producer::mock_producer   # 69 passed
+    //   cargo test --lib producer::mock_producer   # 74 passed
     // =====================================================================
 }
