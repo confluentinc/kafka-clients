@@ -46,6 +46,7 @@ from confluent_kafka.common.serialization import (
     uuid_deserializer,
     uuid_serializer,
 )
+from confluent_kafka.common.errors import KafkaError, TopicAuthorizationError
 from confluent_kafka.consumer import (
     ConsumerRecord,
     ConsumerRecords,
@@ -122,6 +123,27 @@ def _serde_factory_types() -> None:
     assert_type(d, "Deserializer[str]")
 
 
+def _error_reexport_is_typed() -> None:
+    # C19: importing a generated error class from the *package* path
+    # (confluent_kafka.common.errors) must resolve to the class, not ``object``.
+    # Without the generated ``common/errors/__init__.pyi`` the star re-export left
+    # mypy inferring ``object`` here, which this assert_type would then fail.
+    assert_type(TopicAuthorizationError, type[TopicAuthorizationError])
+    err = TopicAuthorizationError("nope")
+    assert_type(err, TopicAuthorizationError)
+    # A KafkaError-typed slot accepts it (the re-export carries the base relation).
+    base: KafkaError = err
+    assert_type(base, KafkaError)
+
+
+def test_error_reexport_derives_from_kafka_error() -> None:
+    """Runtime side of C19: the package-path re-export is a real ``KafkaError``
+    subclass (its static typing is enforced by ``_error_reexport_is_typed`` under
+    ``mypy --strict``)."""
+    assert issubclass(TopicAuthorizationError, KafkaError)
+    assert isinstance(TopicAuthorizationError("x"), KafkaError)
+
+
 def test_typing_module_imports() -> None:
     """Runtime smoke check that the typing module imports cleanly. The real
     assertions above are enforced statically by mypy --strict."""
@@ -130,3 +152,4 @@ def test_typing_module_imports() -> None:
     _record_generics_inference()
     _sentinel_return_types()
     _serde_factory_types()
+    _error_reexport_is_typed()

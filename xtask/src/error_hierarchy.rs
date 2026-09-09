@@ -1260,6 +1260,49 @@ fn render_module_pyi(classes: &[&ClassInfo], all_classes: &[ClassInfo]) -> Strin
     s
 }
 
+/// Render the **package** stub `common/errors/__init__.pyi`.
+///
+/// The runtime `__init__.py` re-exports the whole generated hierarchy with a star
+/// import (`from ._generated import *`), which mypy cannot follow — an importer of
+/// `confluent_kafka.common.errors.TopicAuthorizationError` sees `object` (C19).
+/// This stub makes every public error class an explicit **typed** re-export
+/// (`from ._generated import X as X`, the re-export form mypy honours), alongside
+/// the hand-written `KafkaError` base and the two conversion functions, so the
+/// package path is the typed import path.
+fn render_errors_init_pyi(classes: &[&ClassInfo]) -> String {
+    let mut names: Vec<&str> = classes.iter().map(|c| c.py_name.as_str()).collect();
+    names.sort_unstable();
+
+    let mut s = String::new();
+    s.push_str(PY_HEADER);
+    s.push('\n');
+    s.push_str("# GENERATED, DO NOT EDIT (typed re-export stub for confluent_kafka.common.errors).\n\n");
+    s.push_str("from typing import Any\n\n");
+    s.push_str("from ._base import KafkaError as KafkaError\n");
+    for n in &names {
+        s.push_str(&format!("from ._generated import {n} as {n}\n"));
+    }
+    s.push('\n');
+
+    // The conversion functions, matching the runtime signatures.
+    s.push_str("def from_ffi_error(handle: int, *, cause: BaseException | None = ...) -> BaseException: ...\n");
+    s.push_str("def to_ffi_id(error: BaseException) -> int: ...\n\n");
+
+    // ``_BY_FFI_ID`` is materialised lazily via ``__getattr__``; declare it for
+    // callers that read it (and keep ``__getattr__`` typed).
+    s.push_str("def __getattr__(name: str) -> Any: ...\n\n");
+
+    s.push_str("__all__ = [\n");
+    s.push_str("    \"KafkaError\",\n");
+    s.push_str("    \"from_ffi_error\",\n");
+    s.push_str("    \"to_ffi_id\",\n");
+    for n in &names {
+        s.push_str(&format!("    \"{n}\",\n"));
+    }
+    s.push_str("]\n");
+    s
+}
+
 fn module_docstring(module: Module) -> &'static str {
     match module {
         Module::CommonErrors => "Generated Kafka error hierarchy for ``confluent_kafka.common.errors``.",
@@ -1296,6 +1339,18 @@ pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, Strin
         outputs.push((py_path, render_module_py(module, &in_module, &classes)));
         outputs.push((pyi_path, render_module_pyi(&in_module, &classes)));
     }
+
+    // The package-level typed re-export stub for `common.errors` (C19): its runtime
+    // `__init__.py` re-exports the hierarchy with a star import mypy cannot follow.
+    // `common.config` and the root re-export explicitly (already typed), and the
+    // `consumer` package's own `__init__` is hand-written (P5), so only this one
+    // needs a generated `__init__.pyi`.
+    let common_errors: Vec<&ClassInfo> = classes.iter().filter(|c| c.module == Module::CommonErrors).collect();
+    outputs.push((
+        repo_root.join(PKG_ROOT).join("common/errors/__init__.pyi"),
+        render_errors_init_pyi(&common_errors),
+    ));
+
     Ok(outputs)
 }
 

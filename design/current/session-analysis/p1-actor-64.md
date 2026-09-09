@@ -152,3 +152,18 @@ on commit.
   wire code (`UNKNOWN_SERVER_ERROR`) is owned by the concrete `UnknownServerError`. 2 new
   pytest tests pin both; `pytest test/unit` → 398 passed / 2 skipped, `mypy --strict`
   clean.
+
+## C19 fix (typed package re-export for common.errors)
+
+The errors package `__init__.py` re-exports the hierarchy with a star import mypy
+cannot follow, so `from confluent_kafka.common.errors import TopicAuthorizationError`
+typed as `object` (Actor 66's C19). Fixed durably in the generator: `generate-error-codes`
+now also emits `confluent_kafka/common/errors/__init__.pyi` with explicit
+`from ._generated import X as X` typed re-exports for every generated class, plus
+`KafkaError`, `from_ffi_error`, `to_ffi_id`, `__getattr__` and `__all__`. `check-generated`
+covers the new stub. A `test/unit/test_typing.py` `assert_type` pins the class type under
+`mypy --strict`, and a runtime test asserts the re-export derives from `KafkaError`.
+`common/config` and the root re-export explicitly already (typed); the `consumer` package's
+hand-written `__init__.py` (value-types Actor) should switch its star error-import to explicit
+`as` re-exports rather than get a generated stub that would hide its other exports — logged
+on C19. mypy --strict clean (52 files), pytest 704 passed / 2 skipped, xtask 38.
