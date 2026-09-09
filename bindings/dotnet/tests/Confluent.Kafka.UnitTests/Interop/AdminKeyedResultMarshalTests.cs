@@ -93,14 +93,15 @@ public sealed class AdminKeyedResultMarshalTests
 
         try
         {
-            KeyedAdminOperation<TopicMetadataAndConfig> operation =
-                new KeyedAdminOperation<TopicMetadataAndConfig>(
-                    "createTopics", new[] { GoodTopic, BadTopic });
+            KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
+                new KeyedAdminOperation<string, TopicMetadataAndConfig>(
+                    "createTopics", new[] { GoodTopic, BadTopic }, StringComparer.Ordinal);
 
             KeyedResultMarshal.Complete(
                 result,
                 AdminCallbacks.CreateTopicsAccessors,
                 operation,
+                AdminCallbacks.CreateTopicsKey,
                 AdminCallbacks.TopicMetadataAndConfigValue);
 
             // Each key carries its OWN outcome — the discriminator against an
@@ -147,14 +148,16 @@ public sealed class AdminKeyedResultMarshalTests
 
         IntPtr result = SubmitAndCaptureResult(admin, topic);
 
-        KeyedAdminOperation<TopicMetadataAndConfig> operation =
-            new KeyedAdminOperation<TopicMetadataAndConfig>("createTopics", new[] { GoodTopic });
+        KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
+            new KeyedAdminOperation<string, TopicMetadataAndConfig>(
+                "createTopics", new[] { GoodTopic }, StringComparer.Ordinal);
         try
         {
             KeyedResultMarshal.Complete(
                 result,
                 AdminCallbacks.CreateTopicsAccessors,
                 operation,
+                AdminCallbacks.CreateTopicsKey,
                 AdminCallbacks.TopicMetadataAndConfigValue);
         }
         finally
@@ -196,14 +199,14 @@ public sealed class AdminKeyedResultMarshalTests
         {
             KeyedResultMarshal.Accessors voidShape = new KeyedResultMarshal.Accessors(
                 NativeMethods.CreateTopicsResultCount,
-                NativeMethods.CreateTopicsResultGetKey,
                 NativeMethods.CreateTopicsResultGetError,
                 getValue: null);
 
-            VoidKeyedAdminOperation operation =
-                new VoidKeyedAdminOperation("createTopics", new[] { GoodTopic, BadTopic });
+            VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+                "createTopics", new[] { GoodTopic, BadTopic }, StringComparer.Ordinal);
 
-            KeyedResultMarshal.Complete<bool>(result, voidShape, operation, marshalValue: null);
+            KeyedResultMarshal.Complete<string, bool>(
+                result, voidShape, operation, AdminCallbacks.CreateTopicsKey, marshalValue: null);
 
             // Success carries no value: the Task simply completes.
             Assert.Equal(TaskStatus.RanToCompletion, operation.Tasks[GoodTopic].Status);
@@ -242,13 +245,15 @@ public sealed class AdminKeyedResultMarshalTests
         IntPtr result = SubmitAndCaptureResult(admin, new NewTopic(Topic, 1, 1));
         try
         {
-            KeyedAdminOperation<TopicMetadataAndConfig> operation =
-                new KeyedAdminOperation<TopicMetadataAndConfig>("createTopics", new[] { Topic });
+            KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
+                new KeyedAdminOperation<string, TopicMetadataAndConfig>(
+                    "createTopics", new[] { Topic }, StringComparer.Ordinal);
 
             KeyedResultMarshal.Complete(
                 result,
                 AdminCallbacks.CreateTopicsAccessors,
                 operation,
+                AdminCallbacks.CreateTopicsKey,
                 AdminCallbacks.TopicMetadataAndConfigValue);
 
             // The key itself round-tripped, or TryGetValue below would have missed.
@@ -277,14 +282,17 @@ public sealed class AdminKeyedResultMarshalTests
         IntPtr result = SubmitAndCaptureResult(admin, new NewTopic(GoodTopic, 1, 1));
         try
         {
-            KeyedAdminOperation<TopicMetadataAndConfig> operation =
-                new KeyedAdminOperation<TopicMetadataAndConfig>(
-                    "createTopics", new[] { GoodTopic, "never-requested-of-the-core" });
+            KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
+                new KeyedAdminOperation<string, TopicMetadataAndConfig>(
+                    "createTopics",
+                    new[] { GoodTopic, "never-requested-of-the-core" },
+                    StringComparer.Ordinal);
 
             KeyedResultMarshal.Complete(
                 result,
                 AdminCallbacks.CreateTopicsAccessors,
                 operation,
+                AdminCallbacks.CreateTopicsKey,
                 AdminCallbacks.TopicMetadataAndConfigValue);
 
             Assert.False(operation.Tasks["never-requested-of-the-core"].IsCompleted);

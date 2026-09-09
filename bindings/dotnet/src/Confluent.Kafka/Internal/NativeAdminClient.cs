@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -60,6 +61,13 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     private const int UnsetTimeoutMs = -1;
 
+    /// <summary>
+    /// Java's own <c>DescribeTopicsOptions.partitionSizeLimitPerResponse</c> default
+    /// (<c>DescribeTopicsOptions.java:28</c>), used when the caller passes no options at
+    /// all so that <c>options: null</c> behaves exactly like a fresh instance.
+    /// </summary>
+    private const int DefaultPartitionSizeLimitPerResponse = 2000;
+
     private readonly SafeAdminHandle _handle;
     private int _closed;
 
@@ -91,6 +99,31 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see cref="SafeHandle.IsClosed"/> to observe when the native release actually
     /// happened; the public clients never expose it.
     /// </summary>
+    /// <summary>
+    /// The <c>delete_topics[_by_ids]_async</c> submit shape, injectable for the same
+    /// reason as <see cref="NativeCreateTopicsSubmit"/>: "an operation is in flight" has
+    /// to be a fact a test controls, not a race it hopes to win.
+    /// </summary>
+    internal delegate void NativeDeleteTopicsSubmit(
+        IntPtr admin,
+        IntPtr[] keys,
+        int count,
+        int timeoutMs,
+        bool retryOnQuotaViolation,
+        AdminCallbacks.DeleteTopicsCallback callback,
+        IntPtr userData);
+
+    /// <inheritdoc cref="NativeDeleteTopicsSubmit"/>
+    internal delegate void NativeDescribeTopicsSubmit(
+        IntPtr admin,
+        IntPtr[] keys,
+        int count,
+        int timeoutMs,
+        bool includeAuthorizedOperations,
+        int partitionSizeLimitPerResponse,
+        AdminCallbacks.DescribeTopicsCallback callback,
+        IntPtr userData);
+
     internal SafeAdminHandle Handle => _handle;
 
     /// <summary>
@@ -234,15 +267,7 @@ internal sealed class NativeAdminClient : IDisposable
         bool retryOnQuotaViolation = true;
         if (options is not null)
         {
-            if (options.TimeoutMs is < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(options),
-                    options.TimeoutMs,
-                    "CreateTopicsOptions.TimeoutMs must not be negative; leave it null to use the client default.");
-            }
-
-            timeoutMs = options.TimeoutMs ?? UnsetTimeoutMs;
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreateTopicsOptions));
             validateOnly = options.ValidateOnly;
             retryOnQuotaViolation = options.RetryOnQuotaViolation;
         }
@@ -284,8 +309,9 @@ internal sealed class NativeAdminClient : IDisposable
         // ---- Publish everything the callback needs BEFORE the call ----
         // The header requires it, and the inline-callback path makes it real: the callback
         // can run on this very thread before the entry point returns.
-        KeyedAdminOperation<TopicMetadataAndConfig> operation =
-            new KeyedAdminOperation<TopicMetadataAndConfig>("createTopics", keys);
+        KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
+            new KeyedAdminOperation<string, TopicMetadataAndConfig>(
+                "createTopics", keys, StringComparer.Ordinal);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -346,6 +372,185 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         return new CreateTopicsResult(operation.Tasks);
+    }
+
+    internal DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options) =>
+        DeleteTopics(
+            topics,
+            options,
+            NativeMethods.AdminClientDeleteTopicsAsync,
+            NativeMethods.AdminClientDeleteTopicsByIdsAsync);
+
+    /// <summary>
+    /// <b>Entry-point selection is the whole point of <see cref="TopicCollection"/>.</b>
+    /// The ABI gives the two forms separate functions rather than a tagged input struct,
+    /// so "names xor ids" cannot be violated; this switch is where the C# type's two
+    /// inhabitants are mapped onto them.
+    /// </summary>
+    internal DeleteTopicsResult DeleteTopics(
+        TopicCollection topics,
+        DeleteTopicsOptions? options,
+        NativeDeleteTopicsSubmit submitByName,
+        NativeDeleteTopicsSubmit submitByIds)
+    {
+        ThrowIfClosed();
+
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool retryOnQuotaViolation = true;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteTopicsOptions));
+            retryOnQuotaViolation = options.RetryOnQuotaViolation;
+        }
+
+        switch (topics)
+        {
+            case TopicCollection.TopicNameCollection names:
+                {
+                    List<string> keys = DistinctNames(names.TopicNames(), nameof(topics));
+                    VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+                        "deleteTopics", keys, StringComparer.Ordinal);
+
+                    Submit(
+                        operation,
+                        keys,
+                        (admin, pinned, count, callbackUserData) => submitByName(
+                            admin,
+                            pinned,
+                            count,
+                            timeoutMs,
+                            retryOnQuotaViolation,
+                            AdminCallbacks.DeleteTopicsByName,
+                            callbackUserData));
+
+                    return DeleteTopicsResult.OfTopicNames(operation.Tasks, operation.KeyComparer);
+                }
+
+            case TopicCollection.TopicIdCollection ids:
+                {
+                    List<Uuid> keys = DistinctIds(ids.TopicIds());
+                    VoidKeyedAdminOperation<Uuid> operation = new VoidKeyedAdminOperation<Uuid>(
+                        "deleteTopics", keys, EqualityComparer<Uuid>.Default);
+
+                    Submit(
+                        operation,
+                        ToBase64(keys),
+                        (admin, pinned, count, callbackUserData) => submitByIds(
+                            admin,
+                            pinned,
+                            count,
+                            timeoutMs,
+                            retryOnQuotaViolation,
+                            AdminCallbacks.DeleteTopicsById,
+                            callbackUserData));
+
+                    return DeleteTopicsResult.OfTopicIds(operation.Tasks, operation.KeyComparer);
+                }
+
+            default:
+                throw UnreachableCollection(nameof(topics));
+        }
+    }
+
+    internal DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options) =>
+        DescribeTopics(
+            topics,
+            options,
+            NativeMethods.AdminClientDescribeTopicsAsync,
+            NativeMethods.AdminClientDescribeTopicsByIdsAsync);
+
+    /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions, NativeDeleteTopicsSubmit, NativeDeleteTopicsSubmit)"/>
+    internal DescribeTopicsResult DescribeTopics(
+        TopicCollection topics,
+        DescribeTopicsOptions? options,
+        NativeDescribeTopicsSubmit submitByName,
+        NativeDescribeTopicsSubmit submitByIds)
+    {
+        ThrowIfClosed();
+
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool includeAuthorizedOperations = false;
+        int partitionSizeLimitPerResponse = DefaultPartitionSizeLimitPerResponse;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeTopicsOptions));
+
+            if (options.PartitionSizeLimitPerResponse < 0)
+            {
+                // The ABI reads a negative as "keep Java's 2000 default"
+                // (src/ffi/admin.rs:3712), so a negative would be silently reinterpreted
+                // rather than honoured — the same reasoning as the timeout guard.
+                throw new ArgumentOutOfRangeException(
+                    nameof(options),
+                    options.PartitionSizeLimitPerResponse,
+                    "DescribeTopicsOptions.PartitionSizeLimitPerResponse must not be negative.");
+            }
+
+            includeAuthorizedOperations = options.IncludeAuthorizedOperations;
+            partitionSizeLimitPerResponse = options.PartitionSizeLimitPerResponse;
+        }
+
+        switch (topics)
+        {
+            case TopicCollection.TopicNameCollection names:
+                {
+                    List<string> keys = DistinctNames(names.TopicNames(), nameof(topics));
+                    KeyedAdminOperation<string, TopicDescription> operation =
+                        new KeyedAdminOperation<string, TopicDescription>(
+                            "describeTopics", keys, StringComparer.Ordinal);
+
+                    Submit(
+                        operation,
+                        keys,
+                        (admin, pinned, count, callbackUserData) => submitByName(
+                            admin,
+                            pinned,
+                            count,
+                            timeoutMs,
+                            includeAuthorizedOperations,
+                            partitionSizeLimitPerResponse,
+                            AdminCallbacks.DescribeTopicsByName,
+                            callbackUserData));
+
+                    return DescribeTopicsResult.OfTopicNames(operation.Tasks, operation.KeyComparer);
+                }
+
+            case TopicCollection.TopicIdCollection ids:
+                {
+                    List<Uuid> keys = DistinctIds(ids.TopicIds());
+                    KeyedAdminOperation<Uuid, TopicDescription> operation =
+                        new KeyedAdminOperation<Uuid, TopicDescription>(
+                            "describeTopics", keys, EqualityComparer<Uuid>.Default);
+
+                    Submit(
+                        operation,
+                        ToBase64(keys),
+                        (admin, pinned, count, callbackUserData) => submitByIds(
+                            admin,
+                            pinned,
+                            count,
+                            timeoutMs,
+                            includeAuthorizedOperations,
+                            partitionSizeLimitPerResponse,
+                            AdminCallbacks.DescribeTopicsById,
+                            callbackUserData));
+
+                    return DescribeTopicsResult.OfTopicIds(operation.Tasks, operation.KeyComparer);
+                }
+
+            default:
+                throw UnreachableCollection(nameof(topics));
+        }
     }
 
     /// <summary>
@@ -457,7 +662,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// Bridges <c>close_async</c> to a <see cref="Task"/> via the shared void completion
     /// bridge (admin's one genuinely single-awaiter operation, so it reuses
     /// <see cref="OperationCompletionSource"/> rather than the per-key
-    /// <see cref="KeyedAdminOperation{TValue}"/>).
+    /// <see cref="KeyedAdminOperation{TKey, TValue}"/>).
     /// </summary>
     private Task CloseInternal(long timeoutMs)
     {
@@ -492,6 +697,184 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see cref="Dispose"/> / <see cref="DisposeAsync"/> / <see cref="Close(long)"/>
     /// performs the close and the handle release.
     /// </summary>
+    /// <summary>
+    /// Rejects a negative <c>TimeoutMs</c> before any native call (ffi §B5) and maps
+    /// <see langword="null"/> onto the ABI's "unset" sentinel.
+    /// </summary>
+    /// <remarks>
+    /// The ABI reads a negative <c>timeout_ms</c> as <em>unset</em>, so a negative would
+    /// silently mean "use the client default" rather than the timeout asked for — the
+    /// caller would never learn their value was discarded. Shared by every RPC so the
+    /// three options types cannot drift apart on the rule or on its message.
+    /// </remarks>
+    private static int ValidateTimeoutMs(int? timeoutMs, string optionsTypeName)
+    {
+        if (timeoutMs is < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                "options",
+                timeoutMs,
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0}.TimeoutMs must not be negative; leave it null to use the client default.",
+                    optionsTypeName));
+        }
+
+        return timeoutMs ?? UnsetTimeoutMs;
+    }
+
+    /// <summary>
+    /// De-duplicates the requested topic names, preserving request order, and rejects a
+    /// null element before it can reach the ABI.
+    /// </summary>
+    /// <remarks>
+    /// De-duplication mirrors Java, whose result is a <c>Map</c>, so a repeated key is one
+    /// entry — the same reasoning as <c>CreateTopics</c>. The null-element check is
+    /// mandatory rather than defensive: the header requires "<c>count</c> valid C
+    /// strings", and the ABI does not validate its own preconditions (ffi §B5). Java's
+    /// <c>TopicCollection.ofTopicNames</c> accepts a null element and fails later, so the
+    /// check lives at the submit rather than in the collection's factory.
+    /// </remarks>
+    private static List<string> DistinctNames(IReadOnlyCollection<string> names, string parameterName)
+    {
+        List<string> keys = new List<string>(names.Count);
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string name in names)
+        {
+            if (name is null)
+            {
+                throw new ArgumentException("The topic names must not contain a null element.", parameterName);
+            }
+
+            if (seen.Add(name))
+            {
+                keys.Add(name);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <inheritdoc cref="DistinctNames"/>
+    private static List<Uuid> DistinctIds(IReadOnlyCollection<Uuid> ids)
+    {
+        List<Uuid> keys = new List<Uuid>(ids.Count);
+        HashSet<Uuid> seen = new HashSet<Uuid>();
+        foreach (Uuid id in ids)
+        {
+            // No null check: Uuid is a value type, so there is no null element to reject.
+            if (seen.Add(id))
+            {
+                keys.Add(id);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <summary>
+    /// The out-half of the base64 topic-id round trip: the by-id entry points take
+    /// <c>const char *const *</c> base64 strings (Java's <c>Uuid.toString()</c> form), not
+    /// binary UUIDs, and the header states "result keys are the same base64" — which is
+    /// what lets the completion parse them straight back into <see cref="Uuid"/> keys.
+    /// </summary>
+    private static List<string> ToBase64(List<Uuid> ids)
+    {
+        List<string> text = new List<string>(ids.Count);
+        foreach (Uuid id in ids)
+        {
+            text.Add(id.ToString());
+        }
+
+        return text;
+    }
+
+    /// <summary>
+    /// The shared submit sequence for a keyed admin RPC: root the operation, take the
+    /// span-the-op client reference, pin the keys, call native, unpin.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The order is load-bearing. The <c>GCHandle</c> and the
+    /// <see cref="System.Runtime.InteropServices.SafeHandle.DangerousAddRef(ref bool)"/>
+    /// are both published <b>before</b> the P/Invoke because the callback can fire
+    /// <em>inside</em> it — the header requires everything the callback needs to be
+    /// published before the call, not after. The reference is released by the completion
+    /// (<c>AdminOperation.FreeGcHandle</c>), which is what makes a <c>Dispose</c> racing
+    /// an in-flight operation defer <c>AdminClient_destroy</c> instead of freeing the
+    /// client under it.
+    /// </para>
+    /// <para>
+    /// The key strings are pinned only for the call (ffi §A4's call-scoped rule): the ABI
+    /// copies them out during the submit, so nothing native holds them afterwards. The
+    /// <c>finally</c> unpins on every path, including the inline-callback one — which has
+    /// already run to completion by the time the P/Invoke returns.
+    /// </para>
+    /// </remarks>
+    private void Submit(
+        AdminOperation operation,
+        List<string> keys,
+        Action<IntPtr, IntPtr[], int, IntPtr> submit)
+    {
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        // Allocated INSIDE the try, for the same reason CreateTopics allocates its handle
+        // array there: everything between the GCHandle allocation above and the try is a
+        // window in which a throw would root the operation for the process lifetime,
+        // because neither the catch nor the finally covers it — so the window is kept to
+        // nothing at all. Declaring the local null allocates nothing; the finally
+        // null-checks precisely because the allocation itself is now inside the try.
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] pointers = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(keys[i]);
+                pinned.Add(key);
+                pointers[i] = key.Pointer;
+            }
+
+            submit(_handle.DangerousGetHandle(), pointers, pointers.Length, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String key in pinned)
+                {
+                    key.Dispose();
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The exhaustiveness arm for a <see cref="TopicCollection"/> switch. Unreachable by
+    /// construction — the outer constructor is private and both subclasses are sealed, so
+    /// there is no third inhabitant — but C# cannot see that, so the arm names the
+    /// invariant rather than being a bare <c>default</c>.
+    /// </summary>
+    private static ArgumentException UnreachableCollection(string parameterName) =>
+        new ArgumentException(
+            "The topic collection must come from TopicCollection.OfTopicNames or TopicCollection.OfTopicIds.",
+            parameterName);
+
     private bool TryBeginClose() => Interlocked.Exchange(ref _closed, 1) == 0;
 
     /// <summary>The use-after-dispose guard for every RPC.</summary>

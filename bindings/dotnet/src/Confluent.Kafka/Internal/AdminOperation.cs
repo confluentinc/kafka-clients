@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,7 +27,7 @@ namespace Confluent.Kafka.Internal;
 /// operation, and the <b>span-the-op</b> reference on the client's
 /// <see cref="SafeHandle"/> that keeps the native client alive for exactly as long.
 /// The completion half — how an operation's awaiters are resolved — is the derived
-/// <see cref="KeyedAdminOperation{TValue}"/>.
+/// <see cref="KeyedAdminOperation{TKey, TValue}"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -135,6 +136,27 @@ internal abstract class AdminOperation
 /// table carries every key's own outcome.
 /// </para>
 /// <para>
+/// ⚠ <b><typeparamref name="TKey"/> is generic because the ABI's key is not always a
+/// string, and not always a single accessor (M15/P2a).</b> Java keys these results by
+/// topic <em>name</em> (<c>createTopics</c>), by <em>topic id</em>
+/// (<c>deleteTopics(TopicCollection.ofTopicIds(…))</c> → <c>Map&lt;Uuid, …&gt;</c>), and
+/// by <em>topic-partition</em> (<c>deleteRecords</c>). The last one is why the key is
+/// read by a <c>Func&lt;IntPtr, int, TKey&gt;</c> over the result handle and the index
+/// rather than parsed from a string: <c>kafka_admin_DeleteRecordsResult_t</c> has
+/// <b>no</b> <c>get_key</c> at all — its key is composed from <c>get_topic(i)</c> and
+/// <c>get_partition(i)</c> — so a string-to-key parser could not express it. See
+/// <see cref="Interop.KeyedResultMarshal"/>.
+/// </para>
+/// <para>
+/// ⚠ <b>The key comparer is a required constructor argument, never inferred.</b> Falling
+/// back to <see cref="EqualityComparer{T}.Default"/> would silently give string keys
+/// culture-sensitive-looking behaviour that differs from the <see cref="StringComparer"/>
+/// the public <c>*Result</c> views use, and the two would then disagree about whether a
+/// key is present. Every caller passes the comparer the matching <c>*Result</c> will use,
+/// and <see cref="KeyComparer"/> hands it back so the result type cannot pick a different
+/// one.
+/// </para>
+/// <para>
 /// <b>Deviation, recorded (<c>definition-of-done.md</c> §7).</b> Per-key
 /// <em>granularity</em> is fully preserved: each <see cref="Task"/> carries exactly
 /// that key's value or that key's error. Per-key <em>timing independence</em> is not —
@@ -150,17 +172,21 @@ internal abstract class AdminOperation
 /// <b>mandatory</b>, and sharper here than for the consumer: an admin callback can fire
 /// <em>synchronously on the submitting thread, before the entry point returns</em> — so
 /// without it an awaiter's continuation would run inside the caller's own P/Invoke. The
-/// header documents that inline path for both of P1's entry points (trigger: a NULL
-/// <c>admin</c> handle); the wider "ordinary bad input" trigger set belongs to
-/// later-phase entry points and is stated in <c>src/ffi/admin.rs:56-63</c>, not in the
-/// header — see <see cref="Interop.AdminCallbacks"/>.
+/// header documents that inline path for every admin entry point (trigger: a NULL
+/// <c>admin</c> handle; the by-id entry points add "an unparseable or NULL base64 topic
+/// id"), and the wider family-wide trigger set is stated in
+/// <c>src/ffi/admin.rs:56-63</c>, which cbindgen does not emit — see
+/// <see cref="Interop.AdminCallbacks"/>.
 /// </para>
 /// </remarks>
+/// <typeparam name="TKey">The managed per-key key type — <c>string</c> or <see cref="Uuid"/> today.</typeparam>
 /// <typeparam name="TValue">The already-marshalled managed per-key result type.</typeparam>
-internal class KeyedAdminOperation<TValue> : AdminOperation
+internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
+    where TKey : notnull
 {
-    private readonly Dictionary<string, TaskCompletionSource<TValue>> _perKey;
-    private readonly Dictionary<string, Task<TValue>> _tasks;
+    private readonly Dictionary<TKey, TaskCompletionSource<TValue>> _perKey;
+    private readonly Dictionary<TKey, Task<TValue>> _tasks;
+    private readonly IEqualityComparer<TKey> _keyComparer;
     private readonly string _operationName;
 
     /// <summary>
@@ -175,12 +201,21 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
     /// The requested keys, already de-duplicated by the caller (Java keys its result on
     /// a <c>Map</c>, so a repeated key is one entry).
     /// </param>
-    internal KeyedAdminOperation(string operationName, IReadOnlyCollection<string> keys)
+    /// <param name="keyComparer">
+    /// The equality comparer for <typeparamref name="TKey"/> — required, so it can never
+    /// silently fall back to <see cref="EqualityComparer{T}.Default"/>. See the type
+    /// remarks.
+    /// </param>
+    internal KeyedAdminOperation(
+        string operationName,
+        IReadOnlyCollection<TKey> keys,
+        IEqualityComparer<TKey> keyComparer)
     {
         _operationName = operationName;
-        _perKey = new Dictionary<string, TaskCompletionSource<TValue>>(keys.Count, StringComparer.Ordinal);
-        _tasks = new Dictionary<string, Task<TValue>>(keys.Count, StringComparer.Ordinal);
-        foreach (string key in keys)
+        _keyComparer = keyComparer;
+        _perKey = new Dictionary<TKey, TaskCompletionSource<TValue>>(keys.Count, keyComparer);
+        _tasks = new Dictionary<TKey, Task<TValue>>(keys.Count, keyComparer);
+        foreach (TKey key in keys)
         {
             TaskCompletionSource<TValue> source =
                 new TaskCompletionSource<TValue>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -194,10 +229,16 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
     /// shape the public <c>*Result</c> exposes. Populated before the submit, so the
     /// synchronous C# method can hand it back immediately.
     /// </summary>
-    internal IReadOnlyDictionary<string, Task<TValue>> Tasks => _tasks;
+    internal IReadOnlyDictionary<TKey, Task<TValue>> Tasks => _tasks;
+
+    /// <summary>
+    /// The comparer <see cref="Tasks"/> is keyed by, so a <c>*Result</c> deriving a view
+    /// from it uses the same one and the two cannot disagree about key identity.
+    /// </summary>
+    internal IEqualityComparer<TKey> KeyComparer => _keyComparer;
 
     /// <summary>Resolves one key successfully with its marshalled value.</summary>
-    internal void SetResult(string key, TValue value)
+    internal void SetResult(TKey key, TValue value)
     {
         if (_perKey.TryGetValue(key, out TaskCompletionSource<TValue>? source))
         {
@@ -206,7 +247,7 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
     }
 
     /// <summary>Faults one key with its own error.</summary>
-    internal void SetException(string key, Exception exception)
+    internal void SetException(TKey key, Exception exception)
     {
         if (_perKey.TryGetValue(key, out TaskCompletionSource<TValue>? source))
         {
@@ -219,10 +260,10 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
     /// shape 2, where Java's per-key future is <c>KafkaFuture&lt;Void&gt;</c> and the
     /// ABI exposes no <c>_get_value</c> at all, so a null error <em>is</em> the success
     /// value. The value-carrying base cannot fabricate a <typeparamref name="TValue"/>,
-    /// so it defers to <see cref="VoidKeyedAdminOperation"/>; a shape-1 operation never
-    /// reaches here.
+    /// so it defers to <see cref="VoidKeyedAdminOperation{TKey}"/>; a shape-1 operation
+    /// never reaches here.
     /// </summary>
-    internal virtual void CompleteWithSuccessNoValue(string key)
+    internal virtual void CompleteWithSuccessNoValue(TKey key)
     {
     }
 
@@ -233,7 +274,7 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
     /// </summary>
     internal void FailAll(Exception exception)
     {
-        foreach (KeyValuePair<string, TaskCompletionSource<TValue>> entry in _perKey)
+        foreach (KeyValuePair<TKey, TaskCompletionSource<TValue>> entry in _perKey)
         {
             entry.Value.TrySetException(exception);
         }
@@ -247,12 +288,16 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
     /// </summary>
     internal void FailUncompleted()
     {
-        foreach (KeyValuePair<string, TaskCompletionSource<TValue>> entry in _perKey)
+        foreach (KeyValuePair<TKey, TaskCompletionSource<TValue>> entry in _perKey)
         {
             if (!entry.Value.Task.IsCompleted)
             {
                 entry.Value.TrySetException(new KafkaException(
-                    $"The {_operationName} result contained no entry for '{entry.Key}'."));
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "The {0} result contained no entry for '{1}'.",
+                        _operationName,
+                        entry.Key)));
             }
         }
     }
@@ -260,20 +305,25 @@ internal class KeyedAdminOperation<TValue> : AdminOperation
 
 /// <summary>
 /// The <b>void</b> per-key specialization (result shape 2): a
-/// <c>KeyedAdminOperation&lt;bool&gt;</c> whose success carries no value, mirroring the
-/// consumer bridge's <see cref="OperationCompletionSource"/> / <c>&lt;bool&gt;</c>
+/// <c>KeyedAdminOperation&lt;TKey, bool&gt;</c> whose success carries no value, mirroring
+/// the consumer bridge's <see cref="OperationCompletionSource"/> / <c>&lt;bool&gt;</c>
 /// precedent. Used by every RPC whose Java per-key future is
 /// <c>KafkaFuture&lt;Void&gt;</c> — for those the ABI exposes no <c>_get_value</c>, so
 /// a null per-key error <em>is</em> the success value.
 /// </summary>
-internal sealed class VoidKeyedAdminOperation : KeyedAdminOperation<bool>
+/// <typeparam name="TKey">The managed per-key key type.</typeparam>
+internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, bool>
+    where TKey : notnull
 {
-    /// <inheritdoc cref="KeyedAdminOperation{TValue}(string, IReadOnlyCollection{string})"/>
-    internal VoidKeyedAdminOperation(string operationName, IReadOnlyCollection<string> keys)
-        : base(operationName, keys)
+    /// <inheritdoc cref="KeyedAdminOperation{TKey, TValue}(string, IReadOnlyCollection{TKey}, IEqualityComparer{TKey})"/>
+    internal VoidKeyedAdminOperation(
+        string operationName,
+        IReadOnlyCollection<TKey> keys,
+        IEqualityComparer<TKey> keyComparer)
+        : base(operationName, keys, keyComparer)
     {
     }
 
     /// <inheritdoc/>
-    internal override void CompleteWithSuccessNoValue(string key) => SetResult(key, true);
+    internal override void CompleteWithSuccessNoValue(TKey key) => SetResult(key, true);
 }

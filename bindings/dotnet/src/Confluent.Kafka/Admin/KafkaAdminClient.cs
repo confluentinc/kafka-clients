@@ -53,6 +53,14 @@ public sealed class KafkaAdminClient : IAdmin
         _native.CreateTopics(newTopics, options);
 
     /// <inheritdoc/>
+    public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null) =>
+        _native.DeleteTopics(topics, options);
+
+    /// <inheritdoc/>
+    public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null) =>
+        _native.DescribeTopics(topics, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

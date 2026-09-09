@@ -83,6 +83,80 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null);
 
     /// <summary>
+    /// Deletes topics — Java's <c>deleteTopics(TopicCollection, DeleteTopicsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// awaitable per topic.
+    /// </summary>
+    /// <param name="topics">
+    /// The topics to delete, identified <b>either</b> by name <b>or</b> by id. Build one
+    /// with <see cref="TopicCollection.OfTopicNames"/> or
+    /// <see cref="TopicCollection.OfTopicIds"/>; the choice selects which of the two ABI
+    /// entry points runs, and which of
+    /// <see cref="DeleteTopicsResult.TopicNameValues"/> /
+    /// <see cref="DeleteTopicsResult.TopicIdValues"/> is non-null. A repeated topic yields
+    /// one entry, as Java's map-keyed result does.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per topic. A topic that fails faults only <em>its own</em>
+    /// awaitable; a partially failed batch is not a failed call.
+    /// </returns>
+    /// <remarks>
+    /// Java also declares <c>deleteTopics(Collection&lt;String&gt;)</c> convenience
+    /// overloads, but they are <c>default</c> interface methods that simply call
+    /// <c>TopicCollection.ofTopicNames(...)</c>. C# default interface methods need
+    /// .NET Standard 2.1 and this binding's floor is netstandard2.0 — the same constraint
+    /// that put <c>onPartitionsLost</c>'s default on
+    /// <see cref="ConsumerRebalanceListenerBase"/> — so the one-line call is left to the
+    /// caller rather than duplicated into both client classes.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topics"/> is a name collection containing a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
+    /// client default — the ABI reads a negative timeout as "unset", so a negative value
+    /// would be silently reinterpreted rather than honoured.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null);
+
+    /// <summary>
+    /// Describes topics — Java's
+    /// <c>describeTopics(TopicCollection, DescribeTopicsOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// awaitable per topic.
+    /// </summary>
+    /// <param name="topics">
+    /// The topics to describe, identified <b>either</b> by name <b>or</b> by id — see
+    /// <see cref="DeleteTopics"/>. The choice also selects which of
+    /// <see cref="DescribeTopicsResult.AllTopicNames"/> /
+    /// <see cref="DescribeTopicsResult.AllTopicIds"/> returns a task rather than
+    /// <see langword="null"/>.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per topic, each carrying that topic's own
+    /// <see cref="TopicDescription"/> or its own failure.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topics"/> is a name collection containing a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> or <c>options.PartitionSizeLimitPerResponse</c> is
+    /// negative — the ABI reads a negative of either as "unset" and would silently
+    /// substitute a default.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null);
+
+    /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background
     /// task to finish — Java's <c>close(Duration)</c>. Idempotent: closing an
     /// already-closed client completes without error.

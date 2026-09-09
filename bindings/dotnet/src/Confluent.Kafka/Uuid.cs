@@ -243,7 +243,7 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// ⚠ Both screens are load-bearing, and both exist for the same reason: the floor has
     /// no base64url decoder, so the text is handed to
     /// <see cref="Convert.FromBase64String(string)"/>, which is more permissive than
-    /// Java's <c>Base64.getUrlDecoder()</c> in exactly these two places.
+    /// Java's <c>Base64.getUrlDecoder()</c> in these two places.
     /// </para>
     /// <para>
     /// <b>Alphabet.</b> <see cref="Convert.FromBase64String(string)"/> <b>accepts</b> the

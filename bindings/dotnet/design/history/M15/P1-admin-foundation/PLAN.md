@@ -2,9 +2,15 @@
 
 **Status:** **APPROVED 2026-09-08.** Authorized to start. **N = 66.**
 
-**Parent roadmap:** `bindings/dotnet/design/current/PLAN-M15-admin-client.md`
-(approved 2026-09-08; decisions D1–D6 in its §1). Read it — this file is the
-phase contract, the roadmap holds the full design derivation and the evidence.
+**Parent roadmap:** the M15 admin roadmap under `bindings/dotnet/design/current/`
+(approved 2026-09-08; decisions D1–D6 in its §1). This file is the phase
+contract; the roadmap holds the full design derivation and the evidence.
+
+⚠ **The roadmap is deliberately UNTRACKED** (maintainer's decision), so it is
+present only in the working tree and **will not exist in a fresh clone**. That is
+intentional, not a missing file. This paragraph names it by description rather
+than by path so no tracked file carries a citation that cannot resolve — the same
+rule applied to `STATUS.md` in P2a's close-out.
 
 **Mode:** **A**. No Rust, no new ABI function, no `cbindgen.toml` change.
 

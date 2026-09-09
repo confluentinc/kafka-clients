@@ -296,4 +296,242 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_config_is_read_only", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool TopicMetadataAndConfigConfigIsReadOnly(IntPtr metadataAndConfig, int index);
+
+    // ---- deleteTopics (M15/P2a) — the by-name and by-id entry points ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_delete_topics_async</c> — Java's
+    /// <c>deleteTopics(TopicCollection.ofTopicNames(names), options)</c>.
+    /// <paramref name="names"/> is the <c>const char *const *</c> array of pinned,
+    /// NUL-terminated UTF-8 topic names; the caller keeps them pinned for the whole call.
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> means <b>unset</b> (the client default
+    /// applies), <em>not</em> a zero timeout.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_topics_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDeleteTopicsAsync(
+        IntPtr admin,
+        IntPtr[] names,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool retryOnQuotaViolation,
+        AdminCallbacks.DeleteTopicsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_delete_topics_by_ids_async</c> — Java's
+    /// <c>deleteTopics(TopicCollection.ofTopicIds(ids), options)</c>.
+    /// <para>
+    /// ⚠ <paramref name="topicIds"/> are <b>base64 topic-id strings</b> (Java's
+    /// <c>Uuid.toString()</c> form), not binary UUIDs, and the result's keys come back as
+    /// the same base64. ⚠ An unparseable or NULL id makes the callback fire
+    /// <b>synchronously on the calling thread, before this function returns</b> — the
+    /// inline path P1 built for and could not exercise.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_topics_by_ids_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDeleteTopicsByIdsAsync(
+        IntPtr admin,
+        IntPtr[] topicIds,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool retryOnQuotaViolation,
+        AdminCallbacks.DeleteTopicsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DeleteTopicsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteTopicsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteTopicsResult_get_key</c> — the key at
+    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated, ffi §B3 row 2): the
+    /// topic <em>name</em> for the by-name entry point, the base64 topic <em>id</em> for
+    /// the by-id one.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteTopicsResultGetKey(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteTopicsResult_get_error</c> — that topic's error, or null if it
+    /// was deleted successfully. There is deliberately <b>no</b> <c>get_value</c>: Java's
+    /// per-key future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the
+    /// success value (result shape 2).
+    /// <para>
+    /// ⚠ <b>The pointer is BORROWED from the result handle</b> — read it with the
+    /// <c>kafka_common_KafkaError_*</c> accessors, never destroy it. Use
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>, never
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteTopicsResultGetError(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteTopicsResult_destroy</c> — frees the result root,
+    /// invalidating every borrowed sub-handle taken from it. Null-safe, so the completion
+    /// trampoline can call it unconditionally in its <c>finally</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeleteTopicsResultDestroy(IntPtr result);
+
+    // ---- describeTopics (M15/P2a) — the by-name and by-id entry points ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_topics_async</c> — Java's
+    /// <c>describeTopics(TopicCollection.ofTopicNames(names), options)</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_topics_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeTopicsAsync(
+        IntPtr admin,
+        IntPtr[] names,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool includeAuthorizedOperations,
+        int partitionSizeLimitPerResponse,
+        AdminCallbacks.DescribeTopicsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_topics_by_ids_async</c> — Java's
+    /// <c>describeTopics(TopicCollection.ofTopicIds(ids), options)</c>. The same base64
+    /// topic-id contract, and the same inline-callback path on an unparseable id, as
+    /// <see cref="AdminClientDeleteTopicsByIdsAsync"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_topics_by_ids_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeTopicsByIdsAsync(
+        IntPtr admin,
+        IntPtr[] topicIds,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool includeAuthorizedOperations,
+        int partitionSizeLimitPerResponse,
+        AdminCallbacks.DescribeTopicsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeTopicsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeTopicsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="DeleteTopicsResultGetKey"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTopicsResultGetKey(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeTopicsResult_get_value</c> — the description for the topic
+    /// at <paramref name="index"/>, <b>borrowed</b>, or null if that topic failed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTopicsResultGetValue(IntPtr result, int index);
+
+    /// <inheritdoc cref="DeleteTopicsResultGetError"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTopicsResultGetError(IntPtr result, int index);
+
+    /// <inheritdoc cref="DeleteTopicsResultDestroy"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeTopicsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_TopicDescription_t — a borrowed child of the result ----
+
+    /// <summary><c>kafka_admin_TopicDescription_name</c> — borrowed, NUL-terminated.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicDescriptionName(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicDescription_topic_id</c> — the topic id as Java's
+    /// <c>Uuid.toString()</c> base64 form (borrowed).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_topic_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicDescriptionTopicId(IntPtr description);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_is_internal", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool TopicDescriptionIsInternal(IntPtr description);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_partition_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicDescriptionPartitionCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicDescription_partition</c> — the partition at
+    /// <paramref name="index"/>, <b>borrowed</b>, or null if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicDescriptionPartition(IntPtr description, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_authorized_operation_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicDescriptionAuthorizedOperationCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicDescription_has_authorized_operations</c> — ⚠ the
+    /// absent-versus-empty <b>discriminant</b>. <see langword="false"/> is Java's
+    /// <c>authorizedOperations() == null</c>; <see langword="true"/> with a count of 0 is
+    /// a reported-but-empty set. The count alone cannot tell them apart, which is why this
+    /// function exists and why the marshaller must read it.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_has_authorized_operations", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool TopicDescriptionHasAuthorizedOperations(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicDescription_authorized_operation</c> — the
+    /// <c>AclOperation</c> <b>wire code</b> at <paramref name="index"/> (Java's
+    /// <c>AclOperation.code()</c>), or -1 if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_authorized_operation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicDescriptionAuthorizedOperation(IntPtr description, int index);
+
+    // ---- kafka_admin_TopicPartitionInfo_t — a borrowed child of the description ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionInfoPartition(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicPartitionInfo_leader</c> — the leader, <b>borrowed</b>, or null
+    /// if there is none. The same <c>kafka_common_Node_t</c> the consumer surface already
+    /// marshals, so <see cref="NodeMarshal"/> is reused unchanged.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_leader", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoLeader(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionInfoReplicaCount(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoReplica(IntPtr info, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_isr_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionInfoIsrCount(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_isr", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoIsr(IntPtr info, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_elr_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionInfoElrCount(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicPartitionInfo_has_elr</c> — ⚠ the absent-versus-empty
+    /// <b>discriminant</b> for the eligible-leader-replica set, exactly as
+    /// <see cref="TopicDescriptionHasAuthorizedOperations"/> is for authorized operations.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_has_elr", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool TopicPartitionInfoHasElr(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_elr", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoElr(IntPtr info, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_last_known_elr_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TopicPartitionInfoLastKnownElrCount(IntPtr info);
+
+    /// <inheritdoc cref="TopicPartitionInfoHasElr"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_has_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool TopicPartitionInfoHasLastKnownElr(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicPartitionInfoLastKnownElr(IntPtr info, int index);
 }

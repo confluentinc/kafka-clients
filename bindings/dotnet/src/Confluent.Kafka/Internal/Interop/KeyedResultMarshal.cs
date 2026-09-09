@@ -22,11 +22,11 @@ namespace Confluent.Kafka.Internal.Interop;
 /// The shared walker over an admin <c>*Result_t</c> — the flattened, index-addressed,
 /// fully-settled table the ABI substitutes for Java's
 /// <c>Map&lt;K, KafkaFuture&lt;V&gt;&gt;</c>. It reads
-/// <c>count</c> / <c>get_key(i)</c> / <c>get_error(i)</c> / <c>get_value(i)</c>,
-/// copies every borrowed value out, and resolves the matching per-key
+/// <c>count</c> / <c>get_error(i)</c> / <c>get_value(i)</c> plus the RPC's own key
+/// reader, copies every borrowed value out, and resolves the matching per-key
 /// <see cref="System.Threading.Tasks.Task"/> on a
-/// <see cref="KeyedAdminOperation{TValue}"/> — once per RPC family rather than once per
-/// RPC.
+/// <see cref="KeyedAdminOperation{TKey, TValue}"/> — once per RPC family rather than once
+/// per RPC.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -37,6 +37,35 @@ namespace Confluent.Kafka.Internal.Interop;
 /// "Java's per-key future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <b>is</b>
 /// the success value." The remaining shapes are later phases; nothing here forecloses
 /// them, and nothing here builds them speculatively.
+/// </para>
+/// <para>
+/// ⚠ <b>The key is read by a delegate over <c>(result, index)</c>, and that is
+/// deliberate.</b> The obvious seam — parse a <c>string</c> the walker read from
+/// <c>get_key(i)</c> — fits every RPC bound so far and <em>cannot</em> fit
+/// <c>deleteRecords</c>: <c>kafka_admin_DeleteRecordsResult_t</c> declares no
+/// <c>get_key</c> whatsoever, and its key is composed from two accessors
+/// (<c>get_topic(i)</c> and <c>get_partition(i)</c>). Because <c>get_key</c> is therefore
+/// not universal, it is <b>not</b> part of <see cref="Accessors"/> at all; the key reader
+/// is the single place a key comes from. A reader is expected to be a
+/// <c>static readonly</c> field beside its accessor set, so walking a result allocates no
+/// delegates.
+/// </para>
+/// <para>
+/// ⚠ <b>Known limitation — the generalization above was applied to the KEY axis only.
+/// The VALUE axis is still pointer-shaped.</b> <see cref="Accessors.GetValue"/> is an
+/// <see cref="IndexedAccessor"/> (it returns an <see cref="IntPtr"/>) and
+/// <c>Complete</c>'s <c>marshalValue</c> is <c>Func&lt;IntPtr, TValue&gt;</c>, so both can
+/// only point at an accessor that returns a <em>pointer</em> to a borrowed child. A result
+/// whose per-key value is an <b>inline scalar</b> cannot be described:
+/// <c>kafka_admin_DeleteRecordsResult_t</c>'s value is
+/// <c>int64_t …_get_low_watermark(result, i)</c>, not a child handle. Passing
+/// <c>getValue: null</c> is <b>not</b> an escape — the walker reads a null
+/// <see cref="Accessors.GetValue"/> as shape 2 and calls
+/// <c>CompleteWithSuccessNoValue</c>, which would discard that watermark silently rather
+/// than fail. The fix is a value reader over <c>(result, index)</c> symmetric with the key
+/// reader; unlike the key change it is purely <b>additive</b> (a new overload, no existing
+/// call site touched), which is why it is left to the phase that binds such an RPC instead
+/// of being built here speculatively.
 /// </para>
 /// <para>
 /// ⚠ <b>The per-key error is BORROWED (ffi §B2 Category 4).</b> It is read with
@@ -74,6 +103,11 @@ internal static class KeyedResultMarshal
     /// <c>static readonly</c> field (method groups bind directly to the delegate
     /// types), so walking a result allocates no delegates.
     /// </summary>
+    /// <remarks>
+    /// The <b>key</b> accessor is deliberately absent — see the key-reader note in the
+    /// class remarks. Only <c>count</c>, <c>get_error</c> and the optional
+    /// <c>get_value</c> are universal across the keyed shapes.
+    /// </remarks>
     internal sealed class Accessors
     {
         /// <summary>
@@ -81,23 +115,15 @@ internal static class KeyedResultMarshal
         /// <paramref name="getValue"/> to describe a <b>shape 2</b> (per-key void)
         /// result — those RPCs have no <c>_get_value</c> function to point at.
         /// </summary>
-        internal Accessors(
-            CountAccessor count,
-            IndexedAccessor getKey,
-            IndexedAccessor getError,
-            IndexedAccessor? getValue)
+        internal Accessors(CountAccessor count, IndexedAccessor getError, IndexedAccessor? getValue)
         {
             Count = count;
-            GetKey = getKey;
             GetError = getError;
             GetValue = getValue;
         }
 
         /// <summary><c>*Result_count</c>.</summary>
         internal CountAccessor Count { get; }
-
-        /// <summary><c>*Result_get_key</c> — a borrowed, NUL-terminated UTF-8 key.</summary>
-        internal IndexedAccessor GetKey { get; }
 
         /// <summary>
         /// <c>*Result_get_error</c> — that key's error, <b>borrowed</b>, or null when
@@ -110,8 +136,31 @@ internal static class KeyedResultMarshal
         /// failed. <see langword="null"/> for a shape-2 result, which has no such
         /// function.
         /// </summary>
+        /// <remarks>
+        /// Being an <see cref="IndexedAccessor"/> this can only name a <em>pointer</em>-
+        /// returning accessor, and <see langword="null"/> here means shape 2 — so an
+        /// inline-scalar value is not expressible on this axis and must not be described
+        /// by leaving this null. See the value-axis note in the class remarks.
+        /// </remarks>
         internal IndexedAccessor? GetValue { get; }
     }
+
+    /// <summary>
+    /// Copies a borrowed, NUL-terminated <c>const char*</c> key out into an owned
+    /// <see cref="string"/> (ffi §B3 row 2), rejecting a null pointer rather than
+    /// returning one.
+    /// </summary>
+    /// <param name="key">The borrowed key pointer from that RPC's key accessor.</param>
+    /// <returns>The owned key.</returns>
+    /// <exception cref="KafkaException">
+    /// The ABI produced no key for an index inside its own <c>count</c>. Unreachable in
+    /// practice; throwing rather than returning <see langword="null"/> is what lets the
+    /// walker treat "no key" uniformly for every <c>TKey</c>, including value types where
+    /// <see langword="null"/> is not expressible.
+    /// </exception>
+    internal static string ReadStringKey(IntPtr key) =>
+        Utf8Marshal.PtrToString(key)
+        ?? throw new KafkaException("The admin result produced no key for an index within its own count.");
 
     /// <summary>
     /// Walks <paramref name="result"/> and resolves every per-key awaiter on
@@ -125,28 +174,39 @@ internal static class KeyedResultMarshal
     /// </param>
     /// <param name="accessors">That RPC's accessor set.</param>
     /// <param name="operation">The per-key bridge holding one source per requested key.</param>
+    /// <param name="readKey">
+    /// Reads the key at one index straight out of the result root — see the key-reader
+    /// note in the class remarks.
+    /// </param>
     /// <param name="marshalValue">
     /// Copies one borrowed <c>get_value(i)</c> into an owned managed
     /// <typeparamref name="TValue"/>. <see langword="null"/> for a shape-2 result,
     /// where success carries no value.
     /// </param>
+    /// <typeparam name="TKey">The managed per-key key type.</typeparam>
     /// <typeparam name="TValue">The managed per-key result type.</typeparam>
-    internal static void Complete<TValue>(
+    internal static void Complete<TKey, TValue>(
         IntPtr result,
         Accessors accessors,
-        KeyedAdminOperation<TValue> operation,
+        KeyedAdminOperation<TKey, TValue> operation,
+        Func<IntPtr, int, TKey> readKey,
         Func<IntPtr, TValue>? marshalValue)
+        where TKey : notnull
     {
         int count = accessors.Count(result);
         for (int index = 0; index < count; index++)
         {
-            // Borrowed, NUL-terminated (ffi §B3 row 2) — copied out here.
-            string? key = Utf8Marshal.PtrToString(accessors.GetKey(result, index));
-            if (key is null)
+            TKey key;
+            try
             {
-                // Defensive: guarded by `count`, so the ABI never returns null here.
-                // A key we cannot name has no source to resolve; FailUncompleted then
-                // faults whichever requested key went unaccounted for.
+                key = readKey(result, index);
+            }
+            catch (Exception)
+            {
+                // Defensive: the loop is bounded by `count`, so the ABI always has a key
+                // here. A key we cannot name has no source to resolve, and attributing the
+                // failure to some *other* key would be worse than not attributing it;
+                // FailUncompleted then faults whichever requested key went unaccounted for.
                 continue;
             }
 

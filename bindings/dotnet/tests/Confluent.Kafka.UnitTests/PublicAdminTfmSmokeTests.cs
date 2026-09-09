@@ -79,4 +79,41 @@ public sealed class PublicAdminTfmSmokeTests
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
     }
+
+    /// <summary>
+    /// M15/P2a's two RPCs on every TFM in the matrix (net462 via netstandard2.0, net8.0,
+    /// net10.0). Both key forms, because the by-id path marshals a base64 string the
+    /// by-name path does not.
+    /// </summary>
+    [Fact]
+    public async Task MockAdminClient_DeleteAndDescribeTopics_RoundTripOnEveryTfm()
+    {
+        const string Named = "tfm-p2a-by-name";
+        const string Identified = "tfm-p2a-by-id";
+
+        IAdmin admin = new MockAdminClient(1);
+        try
+        {
+            await TestTimeout.Run(
+                () => admin.CreateTopics(new[] { new NewTopic(Named, 1, 1), new NewTopic(Identified, 1, 1) }).All(),
+                s_deadline);
+
+            DescribeTopicsResult described =
+                admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Named, Identified }));
+            IReadOnlyDictionary<string, TopicDescription> all =
+                await TestTimeout.Run(() => described.AllTopicNames()!, s_deadline);
+            Assert.Equal(2, all.Count);
+
+            Uuid topicId = all[Identified].TopicId;
+
+            await TestTimeout.Run(
+                () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Named })).All(), s_deadline);
+            await TestTimeout.Run(
+                () => admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId })).All(), s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(5)), s_deadline);
+        }
+    }
 }

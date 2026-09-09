@@ -91,6 +91,26 @@ internal static class AdminCallbacks
     internal delegate void CreateTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_delete_topics_callback_t</c>:
+    /// <c>void (*)(kafka_admin_DeleteTopicsResult_t* result,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c>. Shared by <b>both</b>
+    /// delete entry points — the by-name and the by-id one — because they produce the same
+    /// result type. ⚠ A <b>per-topic</b> failure arrives inside
+    /// <paramref name="result"/>; a non-null <paramref name="error"/> means the request
+    /// could not be submitted at all.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DeleteTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_describe_topics_callback_t</c>,
+    /// shared by both describe entry points for the same reason as
+    /// <see cref="DeleteTopicsCallback"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
     /// The single rooted instance passed to every <c>close_async</c> submission. Rooted
     /// for the process lifetime, so the native thunk never dangles (ffi §B6 keep-alive).
     /// </summary>
@@ -115,9 +135,18 @@ internal static class AdminCallbacks
     internal static readonly KeyedResultMarshal.Accessors CreateTopicsAccessors =
         new KeyedResultMarshal.Accessors(
             NativeMethods.CreateTopicsResultCount,
-            NativeMethods.CreateTopicsResultGetKey,
             NativeMethods.CreateTopicsResultGetError,
             NativeMethods.CreateTopicsResultGetValue);
+
+    /// <summary>
+    /// <c>createTopics</c>' key reader — Java keys this result by topic <b>name</b>
+    /// (<c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt; values()</c>), so the borrowed
+    /// <c>get_key(i)</c> string is the key with no parsing. Hoisted for the same reason
+    /// as <see cref="CreateTopicsAccessors"/>: no delegate is allocated per walk.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> CreateTopicsKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(NativeMethods.CreateTopicsResultGetKey(result, index));
 
     /// <summary>
     /// The per-key value marshaller, hoisted so it is not re-allocated per call — and,
@@ -126,6 +155,95 @@ internal static class AdminCallbacks
     /// </summary>
     internal static readonly Func<IntPtr, TopicMetadataAndConfig> TopicMetadataAndConfigValue =
         TopicMetadataAndConfigMarshal.CopyOut;
+
+    /// <summary>
+    /// The single rooted instance passed to <b>both</b> <c>delete_topics_async</c> and
+    /// <c>delete_topics_by_ids_async</c>. One trampoline serves both because the ABI hands
+    /// back the same result type; which key type the awaiters are keyed by travels in the
+    /// <c>user_data</c> context, not in the delegate.
+    /// </summary>
+    internal static readonly DeleteTopicsCallback DeleteTopicsByName = OnDeleteTopicsByName;
+
+    /// <summary>
+    /// The by-<b>id</b> rooted instance. It is a separate delegate from
+    /// <see cref="DeleteTopicsByName"/> only because the two recover a differently-typed
+    /// context out of <c>user_data</c> (<c>Uuid</c> keys versus <c>string</c> keys); the
+    /// ABI signature is identical.
+    /// </summary>
+    internal static readonly DeleteTopicsCallback DeleteTopicsById = OnDeleteTopicsById;
+
+    /// <inheritdoc cref="DeleteTopicsByName"/>
+    internal static readonly DescribeTopicsCallback DescribeTopicsByName = OnDescribeTopicsByName;
+
+    /// <inheritdoc cref="DeleteTopicsById"/>
+    internal static readonly DescribeTopicsCallback DescribeTopicsById = OnDescribeTopicsById;
+
+    /// <summary>
+    /// <c>deleteTopics</c>' accessor set — result <b>shape 2</b>: the ABI declares no
+    /// <c>DeleteTopicsResult_get_value</c>, because Java's per-key future is
+    /// <c>KafkaFuture&lt;Void&gt;</c> and a null error <em>is</em> the success value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DeleteTopicsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DeleteTopicsResultCount,
+            NativeMethods.DeleteTopicsResultGetError,
+            getValue: null);
+
+    /// <summary>
+    /// <c>describeTopics</c>' accessor set — result shape 1 (a value per key).
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DescribeTopicsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeTopicsResultCount,
+            NativeMethods.DescribeTopicsResultGetError,
+            NativeMethods.DescribeTopicsResultGetValue);
+
+    /// <summary>
+    /// <c>deleteTopics</c>' by-<b>name</b> key reader: the borrowed <c>get_key(i)</c>
+    /// string is the key, as it is for <c>createTopics</c>.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> DeleteTopicsNameKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteTopicsResultGetKey(result, index));
+
+    /// <summary>
+    /// <c>deleteTopics</c>' by-<b>id</b> key reader — the other half of the base64
+    /// topic-id round trip. The header is explicit that "result keys are the same base64"
+    /// strings the request supplied, so the key is <c>get_key(i)</c> parsed back through
+    /// <see cref="Uuid.Parse"/>; a caller who passed <c>Uuid</c>s gets <c>Uuid</c>s back.
+    /// This is what <c>KeyedAdminOperation</c>'s generic key exists for.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, Uuid> DeleteTopicsIdKey =
+        static (result, index) =>
+            Uuid.Parse(KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteTopicsResultGetKey(result, index)));
+
+    /// <inheritdoc cref="DeleteTopicsNameKey"/>
+    internal static readonly Func<IntPtr, int, string> DescribeTopicsNameKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeTopicsResultGetKey(result, index));
+
+    /// <inheritdoc cref="DeleteTopicsIdKey"/>
+    internal static readonly Func<IntPtr, int, Uuid> DescribeTopicsIdKey =
+        static (result, index) =>
+            Uuid.Parse(KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeTopicsResultGetKey(result, index)));
+
+    /// <summary>
+    /// The per-key value marshaller for <c>describeTopics</c>, hoisted for the same reason
+    /// as <see cref="TopicMetadataAndConfigValue"/>.
+    /// </summary>
+    internal static readonly Func<IntPtr, TopicDescription> TopicDescriptionValue =
+        TopicDescriptionMarshal.CopyOut;
+
+    /// <summary>
+    /// The result-root destroys, hoisted for the same reason as the accessor sets: a
+    /// method group converted at the call site would allocate a delegate per completion.
+    /// Both are null-safe, so the trampoline's <c>finally</c> can call them
+    /// unconditionally.
+    /// </summary>
+    private static readonly Action<IntPtr> s_destroyDeleteTopicsResult = NativeMethods.DeleteTopicsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyDeleteTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDescribeTopicsResult = NativeMethods.DescribeTopicsResultDestroy;
 
     private static void OnClose(IntPtr error, IntPtr userData)
     {
@@ -168,11 +286,11 @@ internal static class AdminCallbacks
     /// </remarks>
     private static void OnCreateTopics(IntPtr result, IntPtr error, IntPtr userData)
     {
-        KeyedAdminOperation<TopicMetadataAndConfig>? context = null;
+        KeyedAdminOperation<string, TopicMetadataAndConfig>? context = null;
         try
         {
             GCHandle handle = GCHandle.FromIntPtr(userData);
-            context = (KeyedAdminOperation<TopicMetadataAndConfig>)handle.Target!;
+            context = (KeyedAdminOperation<string, TopicMetadataAndConfig>)handle.Target!;
 
             if (error != IntPtr.Zero)
             {
@@ -185,7 +303,7 @@ internal static class AdminCallbacks
             else
             {
                 KeyedResultMarshal.Complete(
-                    result, CreateTopicsAccessors, context, TopicMetadataAndConfigValue);
+                    result, CreateTopicsAccessors, context, CreateTopicsKey, TopicMetadataAndConfigValue);
             }
         }
         catch (Exception exception)
@@ -201,4 +319,109 @@ internal static class AdminCallbacks
             context?.FreeGcHandle();
         }
     }
+
+    /// <summary>
+    /// The one completion body every keyed admin trampoline delegates to, so the
+    /// ownership rules are stated once instead of once per RPC.
+    /// </summary>
+    /// <remarks>
+    /// The <c>finally</c> discharges three obligations on <b>every</b> path — including
+    /// the inline ones and the no-throw path: the owned result root is destroyed exactly
+    /// once (null-safe, so the top-level-error branch is a no-op); any awaiter the result
+    /// failed to account for is faulted, so no caller can be left holding a <c>Task</c>
+    /// that never completes; and the rooting <c>GCHandle</c> plus the span-the-op client
+    /// reference are released. The destroy runs strictly <em>after</em> the walk, because
+    /// every value the walk reads is borrowed from that root.
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">
+    /// The submit failure, or <c>IntPtr.Zero</c>. ⚠ <b>OWNED</b> — freed here with
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, the mirror image of the per-key
+    /// errors inside a result, which are borrowed and must never be freed.
+    /// </param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    /// <param name="accessors">That RPC's accessor set.</param>
+    /// <param name="readKey">That RPC's key reader.</param>
+    /// <param name="marshalValue">That RPC's value marshaller, or null for shape 2.</param>
+    /// <param name="destroyResult">That RPC's <c>*Result_destroy</c>.</param>
+    private static void CompleteKeyed<TKey, TValue>(
+        IntPtr result,
+        IntPtr error,
+        IntPtr userData,
+        KeyedResultMarshal.Accessors accessors,
+        Func<IntPtr, int, TKey> readKey,
+        Func<IntPtr, TValue>? marshalValue,
+        Action<IntPtr> destroyResult)
+        where TKey : notnull
+    {
+        KeyedAdminOperation<TKey, TValue>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (KeyedAdminOperation<TKey, TValue>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                // The request could not be submitted at all: there is no result table, so
+                // every requested key fails with this one error.
+                context.FailAll(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                KeyedResultMarshal.Complete(result, accessors, context, readKey, marshalValue);
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Tasks.
+            context?.FailAll(exception);
+        }
+        finally
+        {
+            destroyResult(result);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+    private static void OnDeleteTopicsByName(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed<string, bool>(
+            result,
+            error,
+            userData,
+            DeleteTopicsAccessors,
+            DeleteTopicsNameKey,
+            marshalValue: null,
+            s_destroyDeleteTopicsResult);
+
+    private static void OnDeleteTopicsById(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed<Uuid, bool>(
+            result,
+            error,
+            userData,
+            DeleteTopicsAccessors,
+            DeleteTopicsIdKey,
+            marshalValue: null,
+            s_destroyDeleteTopicsResult);
+
+    private static void OnDescribeTopicsByName(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeTopicsAccessors,
+            DescribeTopicsNameKey,
+            TopicDescriptionValue,
+            s_destroyDescribeTopicsResult);
+
+    private static void OnDescribeTopicsById(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeTopicsAccessors,
+            DescribeTopicsIdKey,
+            TopicDescriptionValue,
+            s_destroyDescribeTopicsResult);
 }
