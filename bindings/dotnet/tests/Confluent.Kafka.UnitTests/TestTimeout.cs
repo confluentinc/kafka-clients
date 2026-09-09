@@ -64,4 +64,23 @@ internal static class TestTimeout
         // Surface the action's result / exception.
         await task.ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The value-returning twin of <see cref="Run(Func{Task}, TimeSpan)"/>, so a test can
+    /// read an awaited result without the assign-inside-a-lambda dance. Same fail-fast
+    /// behaviour: a hang becomes a <see cref="TimeoutException"/>, and the action's own
+    /// exception is surfaced by the final <c>await</c>.
+    /// </summary>
+    internal static async Task<TResult> Run<TResult>(Func<Task<TResult>> action, TimeSpan timeout)
+    {
+        Task<TResult> task = action();
+        Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
+        if (winner != task)
+        {
+            throw new TimeoutException(
+                $"Operation did not complete within {timeout} — treated as a hang (fail fast).");
+        }
+
+        return await task.ConfigureAwait(false);
+    }
 }
