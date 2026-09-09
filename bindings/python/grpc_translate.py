@@ -37,13 +37,62 @@ arrange that before importing us.
 import datetime as _dt
 import threading  # noqa: E402  (CallbackLog's lock)
 
-import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
-import consumer as kc  # noqa: E402  (TopicPartition / OffsetAndMetadata / ...)
+# The gRPC integration servers speak the new ``confluent_kafka`` package
+# (spec §4), not the retired top-level ``producer.py`` / ``consumer.py``.
+from confluent_kafka import IllegalArgumentError, IllegalStateError  # noqa: E402
+from confluent_kafka.common import TopicPartition  # noqa: E402
+from confluent_kafka.common.errors import KafkaError, to_ffi_id  # noqa: E402
+# The broker wire ``TimeoutException`` (code 7), distinct from the JDK-analog
+# ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
+from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
+from confluent_kafka.consumer import (  # noqa: E402
+    ConsumerGroupMetadata,
+    ConsumerRebalanceListener,
+    OffsetAndMetadata,
+)
+from confluent_kafka.producer import ProducerRecord  # noqa: E402
+# The paused admin binding keeps its flat ``KafkaError`` and positional
+# ``OffsetAndMetadata`` (both live in the private legacy-compat shim). Admin
+# result translators speak that contract; producer/consumer translators speak
+# the new package's typed error and keyword-only value types.
+from confluent_kafka._legacy_compat import (  # noqa: E402
+    KafkaError as _AdminKafkaError,
+    OffsetAndMetadata as _AdminOffsetAndMetadata,
+)
 import admin as ka  # noqa: E402  (NewTopic / NewPartitions / RecordsToDelete / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
-import _error_code as ec  # noqa: E402  (generated: cargo xtask generate-error-codes)
+
+# Error codes formerly imported from the generated ``_error_code.py`` module
+# (retired in P6). The proto's ``KafkaError.code`` is the FFI error code
+# (``kafka_common_ErrorCode_t``), so a synthetic server-side error stamps the
+# code by reading the typed error class' private ``_ffi_id`` — the same value
+# the generator wrote into ``_error_code.py``. These are the only codes the
+# servers manufacture (LOCAL_ILLEGAL_ARGUMENT / LOCAL_ILLEGAL_STATE /
+# REQUEST_TIMED_OUT); everything else crosses via ``to_ffi_id`` on a real error.
+_LOCAL_ILLEGAL_ARGUMENT = IllegalArgumentError._ffi_id
+_LOCAL_ILLEGAL_STATE = IllegalStateError._ffi_id
+# ``REQUEST_TIMED_OUT`` is Java's wire code 7; the wire ``TimeoutException``
+# class carries it as ``_ffi_id``.
+_REQUEST_TIMED_OUT = _WireTimeout._ffi_id
+
+
+def _error_code_of(err):
+    """The proto ``KafkaError.code`` for a Python error.
+
+    Handles both error worlds the servers see: a new typed error from the
+    ``confluent_kafka`` package (mapped through ``to_ffi_id``) and the paused
+    admin binding's flat ``KafkaError`` (its own ``.code``). Any error class
+    without an ``_ffi_id`` (a plain Python exception) falls back to the
+    catch-all local-illegal-state code.
+    """
+    if isinstance(err, _AdminKafkaError):
+        return err.code
+    try:
+        return to_ffi_id(err)
+    except TypeError:
+        return _LOCAL_ILLEGAL_STATE
 
 
 class AdminRequestError(ValueError):
@@ -104,17 +153,20 @@ def _kafka_error_to_proto(err):
         # Request-validation failure: Java's IllegalArgumentException, and the
         # class the C++ server stamps for the same condition.
         return pb.KafkaError(
-            code=ec.LOCAL_ILLEGAL_ARGUMENT,
+            code=_LOCAL_ILLEGAL_ARGUMENT,
             message=f"python server: {err}",
         )
-    if isinstance(err, kp.KafkaError):
-        return pb.KafkaError(code=err.code, message=err.message or "")
+    # A real Kafka error, from either error world: the new typed hierarchy
+    # (producer/consumer) or the paused admin binding's flat ``KafkaError``.
+    # Both resolve to their FFI code via ``_error_code_of``.
+    if isinstance(err, (KafkaError, _AdminKafkaError)):
+        return pb.KafkaError(code=_error_code_of(err), message=str(err) or "")
     # Unexpected non-Kafka exception: this is the server's own bookkeeping
     # failure, not an error the client reported, so it is fabricated as
     # LocalIllegalState. That is inventing an error rather than guessing at
     # one, which is why this path survives while _guess_variant did not.
     return pb.KafkaError(
-        code=ec.LOCAL_ILLEGAL_STATE,
+        code=_LOCAL_ILLEGAL_STATE,
         message=f"python server: {type(err).__name__}: {err}",
     )
 
@@ -131,78 +183,83 @@ def _admin_synthetic_error(message):
     which is deliberate: it names which server manufactured it.
     """
     return pb.KafkaError(
-        code=ec.LOCAL_ILLEGAL_STATE,
+        code=_LOCAL_ILLEGAL_STATE,
         message=f"python server: {message}",
     )
 
 
 def _record_metadata_to_proto(meta):
-    """Translate a producer.py RecordMetadata to its proto form."""
+    """Translate a :class:`confluent_kafka.producer.RecordMetadata` to its proto
+    form. The new ``RecordMetadata`` exposes the serialized key/value sizes
+    (Java's 8 methods), so they cross faithfully instead of the old ``-1``."""
     return pb.RecordMetadata(
         offset=meta.offset(),
         timestamp=meta.timestamp(),
-        # producer.py's RecordMetadata doesn't expose serialized sizes
-        # today; the C FFI carries them but the Python wrapper drops
-        # them. Surface -1 so RecordMetadata::new on the Rust side still
-        # constructs validly.
-        serialized_key_size=-1,
-        serialized_value_size=-1,
+        serialized_key_size=meta.serialized_key_size(),
+        serialized_value_size=meta.serialized_value_size(),
         topic=meta.topic(),
         partition=meta.partition(),
     )
 
 
 def _proto_to_producer_record(proto_record):
-    """Translate a proto ProducerRecord to a producer.py ProducerRecord.
+    """Translate a proto ``ProducerRecord`` to a
+    :class:`confluent_kafka.producer.ProducerRecord` (keyword-only ctor).
 
-    The C extension's ProducerRecord init signature is
-    (topic, value, key, partition=-1, timestamp=-1). Note that value
-    is required (Python wrapper rejects None values today — Java's
-    null-value tombstones aren't surfaced) and partition / timestamp
-    use -1 as the sentinel for unset.
-
-    Header forwarding is not yet implemented in producer.py, so we
-    drop them. Existing integration tests don't use headers."""
-    # value must be bytes — proto carries optional bytes; if absent
-    # send a zero-length bytestring rather than None to satisfy the
-    # Python wrapper's not-None validation.
-    value = proto_record.value if proto_record.HasField("value") else b""
+    ``value`` is proto3 ``optional``: an absent value is Java's null-value
+    tombstone, which the new ``ProducerRecord`` accepts as ``None`` (unlike the
+    retired wrapper, which forced an empty bytestring). ``partition`` /
+    ``timestamp`` are ``None`` when unset (Java's null), not the old ``-1``
+    sentinel. Headers are not carried by the proto record, so they default to
+    empty."""
+    value = proto_record.value if proto_record.HasField("value") else None
     key = proto_record.key if proto_record.HasField("key") else None
-    partition = proto_record.partition if proto_record.HasField("partition") else -1
-    timestamp = proto_record.timestamp if proto_record.HasField("timestamp") else -1
-    return kp.ProducerRecord(
-        proto_record.topic,
-        value,
-        key,
-        partition,
-        timestamp,
+    partition = proto_record.partition if proto_record.HasField("partition") else None
+    timestamp = proto_record.timestamp if proto_record.HasField("timestamp") else None
+    return ProducerRecord(
+        topic=proto_record.topic,
+        value=value,
+        key=key,
+        partition=partition,
+        timestamp=timestamp,
     )
+
+
+def _member(obj, name):
+    """Read ``obj.name`` whether it is a method (new keyword-only value types,
+    accessors are methods) or a bare attribute (the paused admin binding's
+    positional ``Node`` / ``PartitionInfo``). The node/partition-info proto
+    helpers are shared by both worlds, so they go through this."""
+    attr = getattr(obj, name)
+    return attr() if callable(attr) else attr
 
 
 def _node_to_proto(node):
     if node is None:
         return None
-    return pb.Node(id=node.id, host=node.host, port=node.port,
-                    rack=node.rack if node.rack is not None else None)
+    rack = _member(node, "rack")
+    return pb.Node(id=_member(node, "id"), host=_member(node, "host"),
+                   port=_member(node, "port"),
+                   rack=rack if rack is not None else None)
 
 
 def _partition_info_to_proto(info):
     return pb.PartitionInfo(
-        topic=info.topic,
-        partition=info.partition,
-        leader=_node_to_proto(info.leader),
-        replicas=[_node_to_proto(n) for n in info.replicas],
-        in_sync_replicas=[_node_to_proto(n) for n in info.in_sync_replicas],
-        offline_replicas=[_node_to_proto(n) for n in info.offline_replicas],
+        topic=info.topic(),
+        partition=info.partition(),
+        leader=_node_to_proto(info.leader()),
+        replicas=[_node_to_proto(n) for n in info.replicas()],
+        in_sync_replicas=[_node_to_proto(n) for n in info.in_sync_replicas()],
+        offline_replicas=[_node_to_proto(n) for n in info.offline_replicas()],
     )
 
 
 def _tp(proto_tp):
-    return kc.TopicPartition(proto_tp.topic, proto_tp.partition)
+    return TopicPartition(topic=proto_tp.topic, partition=proto_tp.partition)
 
 
 def _tp_to_proto(tp):
-    return cpb.TopicPartition(topic=tp.topic, partition=tp.partition)
+    return cpb.TopicPartition(topic=tp.topic(), partition=tp.partition())
 
 
 def _proto_offsets_to_dict(entries):
@@ -212,9 +269,10 @@ def _proto_offsets_to_dict(entries):
     an empty dict, which both handlers turn into "commit the current positions".
     """
     return {
-        _tp(e.partition): kc.OffsetAndMetadata(
-            e.offset.offset, e.offset.metadata,
-            e.offset.leader_epoch if e.offset.HasField("leader_epoch") else None)
+        _tp(e.partition): OffsetAndMetadata(
+            offset=e.offset.offset, metadata=e.offset.metadata,
+            leader_epoch=(e.offset.leader_epoch
+                          if e.offset.HasField("leader_epoch") else None))
         for e in entries
     }
 
@@ -234,10 +292,11 @@ def _proto_offset_entries_to_dict(entries):
     ``entries`` yields an empty dict (a legitimate "stage nothing").
     """
     return {
-        _tp(e): kc.OffsetAndMetadata(
-            e.offset,
-            e.metadata if e.HasField("metadata") else "",
-            e.leader_epoch if e.HasField("leader_epoch") else None)
+        _tp(e): OffsetAndMetadata(
+            offset=e.offset,
+            metadata=e.metadata if e.HasField("metadata") else "",
+            leader_epoch=(e.leader_epoch
+                          if e.HasField("leader_epoch") else None))
         for e in entries
     }
 
@@ -253,74 +312,89 @@ def _proto_to_group_metadata(proto_gm):
     fresh Rust handle that ``Producer.send_offsets_to_transaction`` feeds back
     into the FFI.
     """
-    return kc.ConsumerGroupMetadata(
-        proto_gm.group_id,
-        proto_gm.generation_id,
-        proto_gm.member_id,
-        proto_gm.group_instance_id if proto_gm.HasField("group_instance_id") else None,
+    return ConsumerGroupMetadata(
+        group_id=proto_gm.group_id,
+        generation_id=proto_gm.generation_id,
+        member_id=proto_gm.member_id,
+        group_instance_id=(proto_gm.group_instance_id
+                           if proto_gm.HasField("group_instance_id") else None),
     )
 
 
 def _oam_to_proto(oam):
+    # Shared by the consumer ``Committed`` handler (new keyword-only
+    # ``OffsetAndMetadata``, method accessors) and the admin group-offsets
+    # response (paused admin binding's positional ``OffsetAndMetadata``,
+    # attribute accessors) — so read through ``_member``.
+    leader_epoch = _member(oam, "leader_epoch")
     return cpb.OffsetAndMetadata(
-        offset=oam.offset,
-        metadata=oam.metadata or "",
-        leader_epoch=oam.leader_epoch if oam.leader_epoch is not None else None,
+        offset=_member(oam, "offset"),
+        metadata=_member(oam, "metadata") or "",
+        leader_epoch=leader_epoch if leader_epoch is not None else None,
     )
 
 
-# Metric value kinds as reported by metrics()'s "kind" key; mirrors the Rust
-# MetricValue variants (see METRIC_VALUE_* in src/ffi/common.rs).
-_METRIC_KIND_DOUBLE = 0
-_METRIC_KIND_STRING = 1
-_METRIC_KIND_LONG = 2
-_METRIC_KIND_INT = 3
+def _metric_to_proto(metric):
+    """One entry of a producer/consumer ``metrics()`` snapshot -> ``pb.Metric``.
 
+    ``metric`` is a :class:`confluent_kafka.common.Metric` (the snapshot is now
+    ``dict[MetricName, Metric]``, spec §; the handlers iterate ``.values()``).
+    Its ``MetricName`` carries name/group/description/tags; ``metric_value()`` is
+    the value. The proto ``value`` oneof is picked from the Python type of the
+    value — ``str`` -> string, ``bool``/``int`` -> long, ``float`` -> double.
+    (The public ``Metric`` no longer distinguishes the Rust ``Long`` vs ``Int``
+    gauge cases — both are a Python ``int`` — so an integer value crosses as
+    ``long_value``; the integration metric assertions are structural on
+    name/group/tags, not on the numeric oneof member.)
 
-def _metric_to_proto(m):
-    """One entry of a producer/consumer metrics() snapshot -> pb.Metric.
-
-    `m` is a dict with keys name/group/description/tags/value/kind. `kind` picks
-    the `value` oneof member; it is load-bearing for the integer cases because
-    Python has a single `int` where Rust distinguishes Long from Int.
-
-    `Metric`/`MetricList`/`MetricsResponse` live in producer_service.proto (the
-    shared base that consumer_service.proto imports), so they are `pb.*` types
-    reused by both the producer and consumer gRPC servers.
+    ``Metric``/``MetricList``/``MetricsResponse`` live in producer_service.proto
+    (the shared base that consumer_service.proto imports), so they are ``pb.*``
+    types reused by both the producer and consumer gRPC servers.
     """
-    metric = pb.Metric(
-        name=m["name"],
-        group=m["group"],
-        description=m["description"],
+    name = metric.metric_name()
+    out = pb.Metric(
+        name=name.name(),
+        group=name.group(),
+        description=name.description(),
     )
-    metric.tags.update(m["tags"])
-    kind = m["kind"]
-    value = m["value"]
-    if kind == _METRIC_KIND_STRING:
-        metric.string_value = value
-    elif kind == _METRIC_KIND_LONG:
-        metric.long_value = int(value)
-    elif kind == _METRIC_KIND_INT:
-        metric.int_value = int(value)
+    out.tags.update(name.tags())
+    value = metric.metric_value()
+    if isinstance(value, str):
+        out.string_value = value
+    elif isinstance(value, bool):
+        # bool is an int subclass — check it first; the proto has no bool member,
+        # so a boolean gauge crosses as its integer value.
+        out.long_value = int(value)
+    elif isinstance(value, int):
+        out.long_value = value
     else:
-        metric.double_value = float(value)
-    return metric
+        out.double_value = float(value)
+    return out
 
 
 def _record_to_proto(r):
-    key = bytes(r.key) if r.key is not None else None
-    value = bytes(r.value) if r.value is not None else None
-    headers = [pb.Header(key=k, value=bytes(v) if v is not None else b"") for (k, v) in r.headers]
+    """A :class:`confluent_kafka.consumer.ConsumerRecord` (accessors are methods,
+    rule 15) -> ``pb.ConsumerRecord``.
+
+    ``key()`` / ``value()`` are ``bytes`` deserializer output (the gRPC servers
+    build byte-typed consumers), or ``None`` for a tombstone; ``headers()``
+    yields ``(str, memoryview)`` pairs; ``timestamp_type()`` is a
+    ``TimestampType`` int-enum whose value is the proto's ``int32``."""
+    key = bytes(r.key()) if r.key() is not None else None
+    value = bytes(r.value()) if r.value() is not None else None
+    headers = [pb.Header(key=k, value=bytes(v) if v is not None else b"")
+               for (k, v) in r.headers()]
+    leader_epoch = r.leader_epoch()
     return cpb.ConsumerRecord(
-        topic=r.topic,
-        partition=r.partition,
-        offset=r.offset,
-        timestamp=r.timestamp,
-        timestamp_type=r.timestamp_type,
+        topic=r.topic(),
+        partition=r.partition(),
+        offset=r.offset(),
+        timestamp=r.timestamp(),
+        timestamp_type=int(r.timestamp_type()),
         key=key,
         value=value,
         headers=headers,
-        leader_epoch=r.leader_epoch if r.leader_epoch is not None else None,
+        leader_epoch=leader_epoch if leader_epoch is not None else None,
     )
 
 
@@ -400,30 +474,28 @@ class CallbackLog:
 
 
 def _callback_log_partition(p):
-    """Accept either a TopicPartition or a plain ``(topic, partition)`` tuple."""
+    """Accept either a new ``TopicPartition`` (method accessors, rule 15) or a
+    plain ``(topic, partition)`` tuple."""
     if isinstance(p, tuple):
         topic, partition = p
     else:
-        topic, partition = p.topic, p.partition
+        topic, partition = p.topic(), p.partition()
     return pb.CallbackLogPartition(topic=topic, partition=partition)
 
 
-class LoggingRebalanceListener:
+class LoggingRebalanceListener(ConsumerRebalanceListener):
     """A real rebalance listener that records each invocation in a CallbackLog.
 
-    The three methods are deliberately plain functions, not coroutines, in both
-    servers: a coroutine listener method must not await AsyncConsumer methods
-    (the dispatcher thread is parked in ``run_coroutine_threadsafe(...).result()``
-    waiting for the listener, so the awaited FFI call could never complete — a
-    deadlock). Nothing here needs to touch the consumer, so plain methods are
-    both correct and the safe choice.
+    Subclasses the new ``ConsumerRebalanceListener`` (a multi-method interface
+    kept as a class, rule 3.9). The listener runs on the caller's task inside
+    ``poll()`` / ``close()`` (consumer-threading §31), so the sync server's plain
+    ``def`` methods run on the gRPC worker thread that called ``poll()``. They
+    only touch the log, never the consumer, so no reentrancy is involved.
 
     ``on_partitions_lost`` is implemented explicitly rather than left to the
     binding's Java-faithful "delegate to on_partitions_revoked" default, so a
     lost callback is distinguishable from a revoke in the log.
     """
-
-    __slots__ = ("_log", "_client_id")
 
     def __init__(self, log, client_id):
         self._log = log
@@ -440,14 +512,18 @@ class LoggingRebalanceListener:
 
 
 def make_logging_commit_callback(log, client_id):
-    """A real ``OffsetCommitCallback`` recording the committed offsets."""
+    """A real commit callback (``on_commit=``) recording the committed offsets.
+
+    The callback receives ``offsets: dict[TopicPartition, OffsetAndMetadata]``
+    (new keyword-only value types, method accessors) and an optional exception.
+    """
 
     def on_complete(offsets, exception):
         log.append(
             client_id,
             KIND_COMMIT,
             partitions=list(offsets.keys()),
-            offsets={_offset_key(tp.topic, tp.partition): oam.offset
+            offsets={_offset_key(tp.topic(), tp.partition()): oam.offset()
                      for tp, oam in offsets.items()},
             error="" if exception is None else str(exception),
         )
@@ -510,10 +586,10 @@ def _admin_constructor_error(err):
     C++ server. Without this the shared fallback in `_kafka_error_to_proto`
     would report LOCAL_ILLEGAL_STATE and the C and Python backends would
     disagree on a state neither one is wrong about."""
-    if isinstance(err, kp.KafkaError):
+    if isinstance(err, _AdminKafkaError):
         return _kafka_error_to_proto(err)
     return pb.KafkaError(
-        code=ec.LOCAL_ILLEGAL_ARGUMENT,
+        code=_LOCAL_ILLEGAL_ARGUMENT,
         message=f"python server: {type(err).__name__}: {err}",
     )
 
@@ -647,7 +723,7 @@ def _admin_create_topics_response(outcomes):
     entries = []
     for name, outcome in outcomes.items():
         entry = apb.CreateTopicsEntry(key=_admin_name_key(name))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             entry.value.CopyFrom(_admin_metadata_to_proto(outcome))
@@ -694,7 +770,7 @@ def _admin_describe_topics_response(outcomes, key_fn):
     entries = []
     for key, outcome in outcomes.items():
         entry = apb.DescribeTopicsEntry(key=key_fn(key))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             entry.value.CopyFrom(_admin_description_to_proto(outcome))
@@ -719,7 +795,7 @@ def _admin_delete_records_response(outcomes):
     entries = []
     for (topic, partition), outcome in outcomes.items():
         entry = apb.DeleteRecordsEntry(key=_admin_partition_key(topic, partition))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             entry.value.CopyFrom(apb.DeletedRecords(low_watermark=outcome.low_watermark))
@@ -837,7 +913,7 @@ def _admin_describe_configs_response(outcomes):
     entries = []
     for resource, outcome in outcomes.items():
         entry = apb.DescribeConfigsEntry(key=_admin_config_resource_key(resource))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             entry.value.CopyFrom(apb.AdminConfig(entries=[
@@ -891,7 +967,7 @@ def _admin_describe_log_dirs_response(outcomes):
     entries = []
     for broker, outcome in outcomes.items():
         entry = apb.DescribeLogDirsEntry(key=apb.ResultKey(broker_id=broker))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             value = apb.LogDirDescriptionMap()
@@ -908,7 +984,7 @@ def _admin_describe_replica_log_dirs_response(outcomes):
     entries = []
     for replica, outcome in outcomes.items():
         entry = apb.DescribeReplicaLogDirsEntry(key=_admin_replica_key(replica))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             value = apb.ReplicaLogDirInfo(
@@ -1036,7 +1112,7 @@ def _admin_list_offsets_response(outcomes):
     entries = []
     for (topic, partition), outcome in outcomes.items():
         entry = apb.ListOffsetsEntry(key=_admin_partition_key(topic, partition))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             value = apb.ListOffsetsResultInfo(offset=outcome.offset,
@@ -1232,7 +1308,7 @@ def _admin_describe_consumer_groups_response(outcomes):
     entries = []
     for group_id, outcome in outcomes.items():
         entry = apb.DescribeConsumerGroupsEntry(key=_admin_name_key(group_id))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             # Neither a description nor an error: a synthetic per-entry error,
@@ -1251,7 +1327,7 @@ def _admin_describe_classic_groups_response(outcomes):
     entries = []
     for group_id, outcome in outcomes.items():
         entry = apb.DescribeClassicGroupsEntry(key=_admin_name_key(group_id))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             # Neither a description nor an error: a synthetic per-entry error,
@@ -1309,7 +1385,7 @@ def _admin_list_consumer_group_offsets_response(outcomes):
     entries = []
     for group_id, outcome in outcomes.items():
         entry = apb.ListConsumerGroupOffsetsEntry(key=_admin_name_key(group_id))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             # Neither offsets nor an error: a synthetic per-entry error rather
@@ -1341,7 +1417,10 @@ def _admin_group_offset_commits(protos):
     out = {}
     for p in protos:
         key = (p.partition.topic, p.partition.partition)
-        out[key] = kc.OffsetAndMetadata(
+        # Admin group offsets use the paused admin binding's positional
+        # ``OffsetAndMetadata`` (its frozen contract); ``_oam_to_proto`` reads it
+        # through ``_member`` so the same helper serves both worlds.
+        out[key] = _AdminOffsetAndMetadata(
             p.offset.offset,
             p.offset.metadata,
             p.offset.leader_epoch if p.offset.HasField("leader_epoch") else None)
@@ -1492,7 +1571,7 @@ def _admin_delete_acls_response(outcomes):
     entries = []
     for acl_filter, outcome in outcomes.items():
         entry = apb.DeleteAclsEntry(key=_admin_acl_filter_key(acl_filter))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             value = apb.FilterResults()
@@ -1632,7 +1711,7 @@ def _admin_describe_user_scram_credentials_response(outcomes):
     entries = []
     for user, outcome in outcomes.items():
         entry = apb.DescribeUserScramCredentialsEntry(key=_admin_name_key(user))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         else:
             entry.value.CopyFrom(apb.UserScramCredentialsDescription(
@@ -1802,7 +1881,7 @@ def _admin_describe_producers_response(outcomes):
     entries = []
     for (topic, partition), outcome in outcomes.items():
         entry = apb.DescribeProducersEntry(key=_admin_partition_key(topic, partition))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             entry.error.CopyFrom(_admin_synthetic_error(
@@ -1826,7 +1905,7 @@ def _admin_describe_transactions_response(outcomes):
     entries = []
     for tid, outcome in outcomes.items():
         entry = apb.DescribeTransactionsEntry(key=_admin_name_key(tid))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             entry.error.CopyFrom(_admin_synthetic_error(
@@ -1879,7 +1958,7 @@ def _admin_list_transactions_response(outcomes):
     entries = []
     for broker_id, outcome in outcomes.items():
         entry = apb.ListTransactionsEntry(key=_admin_broker_id_key(broker_id))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             entry.error.CopyFrom(_admin_synthetic_error(
@@ -1904,7 +1983,7 @@ def _admin_fence_producers_response(outcomes):
     entries = []
     for tid, outcome in outcomes.items():
         entry = apb.FenceProducersEntry(key=_admin_name_key(tid))
-        if isinstance(outcome, kp.KafkaError):
+        if isinstance(outcome, _AdminKafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         elif outcome is None:
             entry.error.CopyFrom(_admin_synthetic_error(

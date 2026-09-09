@@ -17,6 +17,12 @@ build:
 # `test/unit/test_typing.py` carries `typing.assert_type` assertions that
 # machine-verify the `@overload` stubs and the generics inference, so it is type
 # checked here too — a broken stub fails `make verify`.
+#
+# REQUIRES `python` to be the repo venv interpreter (root `venv/`), where mypy
+# and the built `_confluentkafka` extension live. The pre-commit hook and
+# `make verify` activate that venv first; to run this target standalone, activate
+# it (`. venv/bin/activate`) or invoke mypy with the venv python directly
+# (`../../venv/bin/python -m mypy --strict confluent_kafka test/unit/test_typing.py`).
 typecheck:
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka test/unit/test_typing.py
 

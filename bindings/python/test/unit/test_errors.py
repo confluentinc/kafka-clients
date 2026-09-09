@@ -217,14 +217,28 @@ def test_ffi_ids_are_unique() -> None:
     assert len(seen) == 161
 
 
+def _error_code_constants() -> dict[str, int]:
+    """The FFI error-code constants, from the generated Rust mirror
+    ``tests/common/error_code.rs`` (``pub const NAME: i32 = VALUE;``).
+
+    The flat ``_error_code.py`` copy was retired in P6; this Rust mirror is the
+    surviving generated copy of the same ``kafka_common_ErrorCode_t`` enum, so it
+    is the ground truth for the cross-check below.
+    """
+    text = (_REPO_ROOT / "tests/common/error_code.rs").read_text()
+    return {name: int(value)
+            for name, value in re.findall(
+                r"pub const (\w+): i32 = (-?\d+);", text)}
+
+
 def test_ffi_id_equals_error_code_constant() -> None:
-    """Each ``_ffi_id`` equals the ``_error_code.py`` constant of the same name
+    """Each ``_ffi_id`` equals the FFI error-code constant of the same name
     named in the trailing comment of the generated class."""
-    import _error_code
+    constants = _error_code_constants()
 
     for _id, fqn in _BRIDGE.items():
         cls = _class_for_java(fqn)
-        expected = getattr(_error_code, _id)
+        expected = constants[_id]
         assert cls._ffi_id == expected, f"{cls.__name__}._ffi_id {cls._ffi_id} != {_id} {expected}"
 
 
@@ -416,11 +430,10 @@ def test_unknown_server_error_owns_wire_code_minus_one(monkeypatch) -> None:
     # The catch-all wire code -1 (UNKNOWN_SERVER_ERROR) maps to the concrete
     # UnknownServerError, NOT the base KafkaError — that is the class a mock
     # injects for it, and the class from_ffi_error builds for id -1.
-    import _error_code
     from confluent_kafka.common import errors as errmod
     from confluent_kafka.common.errors import UnknownServerError
 
-    assert UnknownServerError._ffi_id == _error_code.UNKNOWN_SERVER_ERROR == -1
+    assert UnknownServerError._ffi_id == _error_code_constants()["UNKNOWN_SERVER_ERROR"] == -1
     assert _BY_FFI_ID[-1] is UnknownServerError
     assert to_ffi_id(UnknownServerError("x")) == -1
 

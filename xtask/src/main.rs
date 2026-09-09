@@ -178,25 +178,25 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 //
 // `src/ffi/common.rs`'s `kafka_common_ErrorCode_t` is the one place the error
 // codes are declared. C sees them through the cbindgen-generated header, so it
-// needs nothing here; the two consumers that cannot include that header need a
+// needs nothing here; the one consumer that cannot include that header needs a
 // copy of the values, and copies are what drift:
 //
-//   - `bindings/python/_error_code.py` -- the gRPC test servers put the real
-//     code on their own synthetic errors ("unknown consumer_id"), and a unit
-//     test asserts a code instead of matching message text. Private (leading
-//     underscore): the Python public API is `code` / `message` /
-//     `is_retriable` on `KafkaError` and nothing re-exports this module.
 //   - `tests/common/error_code.rs` -- the multilanguage harness decodes a proto
 //     `KafkaError` back into a Rust `Error` by its code. It cannot use the enum
 //     itself: `src/ffi` is behind the `ffi` feature, which the multilanguage
 //     test targets do not enable.
+//
+// The flat `bindings/python/_error_code.py` copy was retired in P6: the
+// `confluent_kafka` package expresses error codes through the typed hierarchy
+// the same xtask generates (each `…Error` class carries its code as `_ffi_id`),
+// and the gRPC test servers now read those `_ffi_id`s instead of the flat
+// constants. The typed hierarchy is still generated below.
 //
 // `check-generated` re-runs the generation and fails on any difference, so a
 // stale copy breaks the build rather than a test (CLAUDE.md #6: xtask programs
 // rather than shell scripts).
 
 const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
-const ERROR_CODE_PY: &str = "bindings/python/_error_code.py";
 const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
 
 /// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_t`.
@@ -225,53 +225,6 @@ fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
         anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
     }
     Ok(codes)
-}
-
-fn error_codes_python(codes: &[(String, i32)]) -> String {
-    let mut out = String::new();
-    out.push_str(
-        r#"# Copyright 2025 Confluent Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Error-code constants -- GENERATED, DO NOT EDIT.
-
-Generated from kafka_common_ErrorCode_t in src/ffi/common.rs by
-`cargo xtask generate-error-codes`, and checked for staleness by
-`cargo xtask check-generated`.
-
-SUPERSEDED for the confluent_kafka package by the typed error hierarchy the same
-xtask now generates (confluent_kafka.common.errors and its siblings): each
-generated `...Error` class carries the same id as `_ffi_id`, and the id -> class
-table lives in confluent_kafka.common.errors. This flat-constants module is kept
-for its existing users only.
-
-Private plumbing, not public API: neither producer.py nor consumer.py re-exports
-this module. The users are the gRPC test servers, which stamp the real code on
-their own synthetic errors, and the unit tests, which compare a code instead of
-matching message text.
-
-Values are the FFI error codes: Java's wire codes at Java's own values, plus
-negatives for the classes only the client raises. They are injective over the
-error classes, so the code alone identifies the class.
-"""
-
-"#,
-    );
-    for (name, value) in codes {
-        out.push_str(&format!("{name} = {value}\n"));
-    }
-    out
 }
 
 fn error_codes_rust(codes: &[(String, i32)]) -> String {
@@ -318,10 +271,9 @@ fn generate_error_codes() -> anyhow::Result<()> {
     println!("🔧 Generating error-code constants from {ERROR_CODE_SOURCE}...");
 
     let codes = parse_error_codes()?;
-    fs::write(ERROR_CODE_PY, error_codes_python(&codes))?;
     fs::write(ERROR_CODE_RS, error_codes_rust(&codes))?;
 
-    println!("✅ Wrote {} constants to {ERROR_CODE_PY} and {ERROR_CODE_RS}", codes.len());
+    println!("✅ Wrote {} constants to {ERROR_CODE_RS}", codes.len());
 
     // Also regenerate the Python exception hierarchy from the Java sources,
     // cross-checked against the same FFI enum (spec §5.5 / Design Decisions D1).
@@ -336,10 +288,7 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
 
     let codes = parse_error_codes()?;
     let mut stale = Vec::new();
-    for (path, expected) in [
-        (ERROR_CODE_PY, error_codes_python(&codes)),
-        (ERROR_CODE_RS, error_codes_rust(&codes)),
-    ] {
+    for (path, expected) in [(ERROR_CODE_RS, error_codes_rust(&codes))] {
         match fs::read_to_string(path) {
             Ok(actual) if actual == expected => {},
             _ => stale.push(path),

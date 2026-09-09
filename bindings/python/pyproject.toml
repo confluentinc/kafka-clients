@@ -25,8 +25,11 @@ dev = [
 
 [tool.setuptools]
 # The new ``confluent_kafka`` package (spec §4 module layout). The legacy
-# top-level ``producer`` / ``consumer`` / ``admin`` modules are kept for now;
-# they are retired as their surfaces move into the package (P4/P5).
+# top-level ``producer.py`` / ``consumer.py`` / ``_error_code.py`` modules were
+# retired in P6 once the package covered their surface; the remaining top-level
+# modules are the PAUSED admin binding (``admin``) and the gRPC integration-test
+# servers (``grpc_server`` / ``grpc_server_async`` / ``grpc_translate``), which
+# now import the ``confluent_kafka`` package.
 packages = [
     "confluent_kafka",
     "confluent_kafka.common",
@@ -36,7 +39,7 @@ packages = [
     "confluent_kafka.consumer",
     "confluent_kafka.producer",
 ]
-py-modules = ["producer", "consumer", "admin"]
+py-modules = ["admin", "grpc_server", "grpc_server_async", "grpc_translate"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

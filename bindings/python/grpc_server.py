@@ -36,6 +36,7 @@ threads from the Rust send task, and concurrent.futures.Future.result()
 blocks the calling thread until the future fires.
 """
 
+import datetime as _dt
 import logging
 import os
 import sys
@@ -47,8 +48,15 @@ import grpc
 # Ensure the Python wrapper module is importable regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
-import consumer as kc  # noqa: E402  (KafkaConsumer / MockConsumer / TopicPartition / ...)
+# The gRPC integration servers speak the new ``confluent_kafka`` package
+# (spec §4), not the retired top-level ``producer.py`` / ``consumer.py``.
+from confluent_kafka.producer import KafkaProducer, MockProducer  # noqa: E402
+from confluent_kafka.consumer import (  # noqa: E402
+    KafkaConsumer,
+    MockConsumer,
+    OffsetAndMetadata,
+)
+from confluent_kafka.common.errors import KafkaError  # noqa: E402
 import admin as ka  # noqa: E402  (AdminClient / MockAdminClient / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
@@ -56,11 +64,6 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
-# Error codes generated from kafka_common_ErrorCode_t
-# (cargo xtask generate-error-codes). Private plumbing: the servicers stamp the
-# real code on errors of their own making, so the Rust client can tell those
-# apart from an error the client actually reported.
-import _error_code as ec  # noqa: E402
 
 LOG = logging.getLogger("grpc_server")
 
@@ -137,7 +140,6 @@ from grpc_translate import (  # noqa: E402
     _admin_void_response,
     _kafka_error_to_proto,
     _metric_to_proto,
-    _node_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
     _proto_offset_entries_to_dict,
@@ -177,9 +179,9 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             # Empty config selects MockProducer for client-side smoke
             # testing — useful when developing without a real broker.
             if not config or all(not v for v in config.values()):
-                producer = kp.MockProducer(auto_complete=True)
+                producer = MockProducer(auto_complete=True)
             else:
-                producer = kp.KafkaProducer(config)
+                producer = KafkaProducer(config=config)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateProducer failed")
             return pb.CreateProducerResponse(producer_id=0, error=_kafka_error_to_proto(e))
@@ -195,7 +197,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.SendResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             record = _proto_to_producer_record(request.record)
@@ -211,8 +213,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         if request.with_callback:
             on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
         try:
-            future = producer.send(record, on_delivery=on_delivery)
-        except kp.KafkaError as e:
+            future = producer.send(record=record, on_delivery=on_delivery)
+        except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("send raised")
@@ -223,11 +225,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # completed by Rust background tasks, so .result() is safe here.
         try:
             metadata = future.result(timeout=120)
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except futures.TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
-                code=ec.REQUEST_TIMED_OUT,
+                code=_REQUEST_TIMED_OUT,
                 message="python server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
             LOG.exception("future.result raised")
@@ -244,11 +246,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             producer.init_transactions()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -256,11 +258,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             producer.begin_transaction()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -268,11 +270,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             producer.commit_transaction()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -280,11 +282,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             producer.abort_transaction()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -292,7 +294,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         # Rebuild the consumer's group-metadata handle from the wire fields and
         # translate the flat OffsetEntry list; the producer stages the offsets in
@@ -300,8 +302,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         offsets = _proto_offset_entries_to_dict(request.offsets)
         group_metadata = _proto_to_group_metadata(request.group_metadata)
         try:
-            producer.send_offsets_to_transaction(offsets, group_metadata)
-        except kp.KafkaError as e:
+            producer.send_offsets_to_transaction(offsets=offsets, group_metadata=group_metadata)
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -309,11 +311,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             producer.flush()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -321,11 +323,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.PartitionsForResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
-            infos = producer.partitions_for(request.topic)
-        except kp.KafkaError as e:
+            infos = producer.partitions_for(topic=request.topic)
+        except KafkaError as e:
             return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
         # _partition_info_to_proto is defined in the consumer section below and
         # accepts the same PartitionInfo objects producer.partitions_for returns.
@@ -335,32 +337,40 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.MetricsResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             snapshot = producer.metrics()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.MetricsResponse(error=_kafka_error_to_proto(e))
         return pb.MetricsResponse(metrics=pb.MetricList(
-            metrics=[_metric_to_proto(m) for m in snapshot]))
+            metrics=[_metric_to_proto(m) for m in snapshot.values()]))
 
-    def Close(self, request, context):
+    def _close(self, producer_id, timeout):
         with self._lock:
-            producer = self._producers.pop(request.producer_id, None)
+            producer = self._producers.pop(producer_id, None)
         if producer is None:
             # Close is idempotent — silent success on unknown id mirrors
             # the Java client's behavior.
             return pb.StatusResponse()
         try:
-            producer.close()
-        except kp.KafkaError as e:
+            if timeout is None:
+                producer.close()
+            else:
+                producer.close(timeout=timeout)
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
+    def Close(self, request, context):
+        return self._close(request.producer_id, None)
+
     def CloseTimeout(self, request, context):
-        # producer.py's close() doesn't take a timeout. Best-effort
-        # mapping: ignore the timeout and call close() unconditionally.
-        return self.Close(pb.CloseRequest(producer_id=request.producer_id), context)
+        # The new KafkaProducer.close(*, timeout=...) has a timed FFI form, so
+        # the timeout is wired (D7). timeout_ms is milliseconds; Duration is
+        # seconds / timedelta.
+        timeout = _dt.timedelta(milliseconds=request.timeout_ms)
+        return self._close(request.producer_id, timeout)
 
     def GetCallbackLog(self, request, context):
         # Deliberately readable after Close (the log outlives the producer) —
@@ -399,9 +409,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         config = dict(request.config)
         try:
             if not config or all(not v for v in config.values()):
-                consumer = kc.MockConsumer("earliest")
+                consumer = MockConsumer(offset_reset_strategy="earliest")
             else:
-                consumer = kc.KafkaConsumer(config)
+                consumer = KafkaConsumer(config=config)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateConsumer failed")
             return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(e))
@@ -416,12 +426,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {consumer_id}"))
         try:
             fn(consumer)
             return pb.StatusResponse()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return self._status_err(e)
         except Exception as e:  # noqa: BLE001
             LOG.exception("consumer op raised")
@@ -436,24 +446,24 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
         return self._run_status(
             request.consumer_id,
-            lambda c: c.subscribe(list(request.topics), listener=listener))
+            lambda c: c.subscribe(topics=list(request.topics), listener=listener))
 
     def Unsubscribe(self, request, context):
         return self._run_status(request.consumer_id, lambda c: c.unsubscribe())
 
     def Assign(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return self._run_status(request.consumer_id, lambda c: c.assign(parts))
+        return self._run_status(request.consumer_id, lambda c: c.assign(partitions=parts))
 
     def Poll(self, request, context):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.PollResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            records = consumer.poll(request.timeout_ms / 1000.0)
-        except kc.KafkaError as e:
+            records = consumer.poll(timeout=request.timeout_ms / 1000.0)
+        except KafkaError as e:
             return cpb.PollResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("poll raised")
@@ -465,7 +475,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
             if offsets:
-                c.commit(offsets)
+                c.commit(offsets=offsets)
             else:
                 c.commit()
         return self._run_status(request.consumer_id, do)
@@ -479,18 +489,18 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             # commit_async is non-blocking in both clients (a local op on the
             # shared _ConsumerBase, not a coroutine) — the callback fires on a
             # later poll/commit/close, exactly as in Java.
-            c.commit_async(_proto_offsets_to_dict(request.offsets) or None, callback=callback)
+            c.commit_nowait(offsets=_proto_offsets_to_dict(request.offsets) or None, on_commit=callback)
         return self._run_status(request.consumer_id, do)
 
     def Committed(self, request, context):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.CommittedResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            result = consumer.committed([_tp(p) for p in request.partitions])
-        except kc.KafkaError as e:
+            result = consumer.committed(partitions=[_tp(p) for p in request.partitions])
+        except KafkaError as e:
             return cpb.CommittedResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp), offset=_oam_to_proto(oam))
                    for tp, oam in result.items()]
@@ -500,11 +510,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.PositionResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            offset = consumer.position(_tp(request.partition))
-        except kc.KafkaError as e:
+            offset = consumer.position(partition=_tp(request.partition))
+        except KafkaError as e:
             return cpb.PositionResponse(error=_kafka_error_to_proto(e))
         return cpb.PositionResponse(offset=offset)
 
@@ -512,41 +522,43 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         def do(c):
             tp = _tp(request.partition)
             if request.HasField("metadata") or request.HasField("leader_epoch"):
-                oam = kc.OffsetAndMetadata(
-                    request.offset,
-                    request.metadata if request.HasField("metadata") else "",
-                    request.leader_epoch if request.HasField("leader_epoch") else None)
-                c.seek(tp, oam)
+                oam = OffsetAndMetadata(
+                    offset=request.offset,
+                    metadata=request.metadata if request.HasField("metadata") else "",
+                    leader_epoch=(request.leader_epoch
+                                  if request.HasField("leader_epoch") else None))
+                c.seek(partition=tp, offset_and_metadata=oam)
             else:
-                c.seek(tp, request.offset)
+                c.seek(partition=tp, offset=request.offset)
         return self._run_status(request.consumer_id, do)
 
     def SeekToBeginning(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return self._run_status(request.consumer_id, lambda c: c.seek_to_beginning(parts))
+        return self._run_status(request.consumer_id, lambda c: c.seek_to_beginning(partitions=parts))
 
     def SeekToEnd(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return self._run_status(request.consumer_id, lambda c: c.seek_to_end(parts))
+        return self._run_status(request.consumer_id, lambda c: c.seek_to_end(partitions=parts))
 
     def Pause(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return self._run_status(request.consumer_id, lambda c: c.pause(parts))
+        return self._run_status(request.consumer_id, lambda c: c.pause(partitions=parts))
 
     def Resume(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return self._run_status(request.consumer_id, lambda c: c.resume(parts))
+        return self._run_status(request.consumer_id, lambda c: c.resume(partitions=parts))
 
     def _long_offsets(self, request, end):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.LongOffsetsResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         parts = [_tp(p) for p in request.partitions]
         try:
-            result = consumer.end_offsets(parts) if end else consumer.beginning_offsets(parts)
-        except kc.KafkaError as e:
+            result = (consumer.end_offsets(partitions=parts) if end
+                      else consumer.beginning_offsets(partitions=parts))
+        except KafkaError as e:
             return cpb.LongOffsetsResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.LongOffsetMapEntry(partition=_tp_to_proto(tp), offset=off) for tp, off in result.items()]
         return cpb.LongOffsetsResponse(offsets=cpb.LongOffsetMap(entries=entries))
@@ -561,20 +573,23 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.OffsetAndTimestampResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         spec = {_tp(e.partition): e.timestamp for e in request.timestamps}
         try:
-            result = consumer.offsets_for_times(spec)
-        except kc.KafkaError as e:
+            result = consumer.offsets_for_times(timestamps=spec)
+        except KafkaError as e:
             return cpb.OffsetAndTimestampResponse(error=_kafka_error_to_proto(e))
+        # New value type: accessors are methods; a partition with no offset at or
+        # after its timestamp maps to None (Java null) and is omitted.
         entries = [
             cpb.OffsetAndTimestampMapEntry(
                 partition=_tp_to_proto(tp),
                 offset=cpb.OffsetAndTimestamp(
-                    offset=oat.offset, timestamp=oat.timestamp,
-                    leader_epoch=oat.leader_epoch if oat.leader_epoch is not None else None))
-            for tp, oat in result.items()
+                    offset=oat.offset(), timestamp=oat.timestamp(),
+                    leader_epoch=(oat.leader_epoch()
+                                  if oat.leader_epoch() is not None else None)))
+            for tp, oat in result.items() if oat is not None
         ]
         return cpb.OffsetAndTimestampResponse(offsets=cpb.OffsetAndTimestampMap(entries=entries))
 
@@ -582,11 +597,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.PartitionsForResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            infos = consumer.partitions_for(request.topic)
-        except kc.KafkaError as e:
+            infos = consumer.partitions_for(topic=request.topic)
+        except KafkaError as e:
             return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
         return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
 
@@ -594,11 +609,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.ListTopicsResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             topics = consumer.list_topics()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return cpb.ListTopicsResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.TopicPartitionInfoEntry(topic=t, partitions=[_partition_info_to_proto(i) for i in infos])
                    for t, infos in topics.items()]
@@ -608,7 +623,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.TopicPartitionListResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             tps = consumer.assignment()
@@ -621,7 +636,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.SubscriptionResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             topics = consumer.subscription()
@@ -635,20 +650,20 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             # `MetricsResponse` is declared in producer_service.proto and shared
             # by both services, so it is reached through `pb`, not `cpb`.
             return pb.MetricsResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             snapshot = consumer.metrics()
         except Exception as e:  # noqa: BLE001
             return pb.MetricsResponse(error=_kafka_error_to_proto(e))
         return pb.MetricsResponse(metrics=pb.MetricList(
-            metrics=[_metric_to_proto(m) for m in snapshot]))
+            metrics=[_metric_to_proto(m) for m in snapshot.values()]))
 
     def Paused(self, request, context):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.TopicPartitionListResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             tps = consumer.paused()
@@ -669,8 +684,14 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.StatusResponse()
         try:
-            consumer.close()
-        except kc.KafkaError as e:
+            # KafkaConsumer.close(*, timeout=...) has a timed FFI form (D7); an
+            # absent timeout_ms is Java's no-argument close(). timeout_ms is
+            # milliseconds; Duration is seconds / timedelta.
+            if request.HasField("timeout_ms"):
+                consumer.close(timeout=_dt.timedelta(milliseconds=request.timeout_ms))
+            else:
+                consumer.close()
+        except KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()
 
@@ -735,7 +756,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
 
     def _unknown_admin(self, admin_id):
         return pb.KafkaError(
-            code=ec.LOCAL_ILLEGAL_STATE,
+            code=_LOCAL_ILLEGAL_STATE,
             message=f"unknown admin_id {admin_id}")
 
     def CreateTopics(self, request, context):
