@@ -304,6 +304,16 @@ producer-perf-test-python: build-python
 	@(. venv/bin/activate && \
 	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
 
+# Env-driven Python transactional producer performance benchmark (standalone).
+# Same env-var contract as `producer-perf-test` plus the transaction knobs
+# (RECORDS_PER_TRANSACTION, ABORT_RATE, NUM_TRANSACTIONAL_PRODUCERS,
+# TRANSACTIONAL_ID, TXN_MODE, SOURCE_TOPIC). Select the backend with
+# CLIENT_VERSION (3 = Python Rust binding, default; 2 = librdkafka baseline).
+# Keep in sync with the other transactional producer performance tests.
+transactional-producer-perf-test-python: build-python
+	@(. venv/bin/activate && \
+	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/transactional_producer_performance_test.py)
+
 # Delegates to bindings/c's own `test` (ctest + the C-backend multilanguage arm)
 # instead of reimplementing the ctest invocation here, mirroring how
 # `test-python` delegates to bindings/python. Passes the same
