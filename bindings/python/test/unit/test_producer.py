@@ -1467,21 +1467,25 @@ def test_on_drained_fast_path():
         assert called == []
 
 
-def test_on_drained_true_when_paused():
-    # While the send task is paused it will never take the tray, so a waiter
-    # would hang. on_drained short-circuits to True in that case (§2.4) rather
-    # than register a callback that could never fire.
+def test_on_drained_parks_waiter_when_paused():
+    # P2.3: while the send task is paused it will not take the tray, so on_drained
+    # does NOT short-circuit -- it registers the callback (returns False) and the
+    # waiter parks. Unpausing lets the send task drain and fire the parked
+    # callback. (Before P2.3 the `|| test_paused` clause short-circuited to True,
+    # which protected nothing -- no paused test waits on a drain -- and blocked
+    # any deterministic parked-waiter test.)
     p = MockProducer(auto_complete=True)
+    fired = threading.Event()
     try:
         _lib.Producer_test_set_paused(p.c_producer, True)
         p.send(ProducerRecord("test-topic", b"v"))  # accepted, not handed (paused)
-        called = []
-        assert _lib.Producer_on_drained(
-            p.c_producer, lambda: called.append(1)) is True
-        time.sleep(0.02)
-        assert called == []
-    finally:
+        # Registered, not satisfied: on_drained returns False and the cb parks.
+        assert _lib.Producer_on_drained(p.c_producer, fired.set) is False
+        assert not fired.wait(timeout=0.1), "cb must not fire while paused"
+        # Unpause: the send task drains the tray and fires the parked cb.
         _lib.Producer_test_set_paused(p.c_producer, False)
+        assert fired.wait(timeout=FUTURE_TIMEOUT), "cb must fire once unpaused"
+    finally:
         p.close()
 
 

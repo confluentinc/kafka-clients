@@ -1019,13 +1019,16 @@ static PyObject* py_Producer_on_drained(PyObject* self, PyObject* args) {
     mtx_lock(&producer->record_batches_mutex);
     uint64_t target = producer->accepted;  // snapshot once; later sends don't extend the wait
     if (producer->closed
-        || producer->test_paused
         || producer->handed >= target
         || thrd_equal(thrd_current(), producer->send_thread)) {
-        // Already drained; or closing; or paused (the send task will not take, so
-        // waiting would never complete); or called from the send task itself (a
+        // Already drained; or closing; or called from the send task itself (a
         // reentrant control op from an immediate-error delivery callback runs on
-        // the send thread — waiting on ourselves would deadlock).
+        // the send thread — waiting on ourselves would deadlock). While the
+        // test-only pause holds, the send task will not take the tray, so a drain
+        // waiter is NOT short-circuited: it parks and is fired once unpause lets
+        // the task drain (or close() releases it). Producer_send_thread clears
+        // drain_requested every iteration before the paused continue, so a parked
+        // request does not spin the task.
         done = 1;
     } else {
         if (producer->drain_cbs_count == producer->drain_cbs_capacity) {
