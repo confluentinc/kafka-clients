@@ -647,6 +647,8 @@ pub type kafka_consumer_Consumer_poll_callback_t =
 ///
 /// If the guard cannot be acquired, the callback fires inline with the error.
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
@@ -1674,6 +1676,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 /// embedder's thread stays free to drain caller-thread rebalance callbacks (a
 /// [`CallerThreadRebalanceListener`]) while the rebalance is parked on their
 /// ack. This is the mock analog of `poll` for the Python binding's §31 contract.
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -3594,6 +3598,8 @@ pub type kafka_consumer_Consumer_op_callback_t = unsafe extern "C" fn(*mut kafka
 
 /// Subscribes to a list of topics (async). See [`kafka_consumer_Consumer_subscribe`].
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics` `count` valid C strings.
@@ -3995,6 +4001,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
 /// Subscribes to a list of topics with a rebalance listener (async). See
 /// [`kafka_consumer_Consumer_subscribe_with_listener`] for the listener contract.
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher
+/// thread; the rebalance listener callbacks run on that same dispatcher
+/// thread (not the caller thread — this is not the caller-thread listener
+/// variant).
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics` must point to `count` valid C
@@ -4028,6 +4039,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
 /// deprecated client-side `Pattern` overloads, the pattern is evaluated by the
 /// broker (KIP-848), so no local topic metadata is needed.
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `pattern` a valid C string; `callback` a
@@ -4051,6 +4064,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_async(
 /// Subscribes to topics matching a broker-side RE2/J `pattern` with a rebalance
 /// listener (async). See [`kafka_consumer_Consumer_subscribe_pattern_async`] and
 /// [`kafka_consumer_Consumer_subscribe_with_listener`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher
+/// thread; the rebalance listener callbacks run on that same dispatcher
+/// thread (not the caller thread — this is not the caller-thread listener
+/// variant).
 ///
 /// # Safety
 ///
@@ -4091,6 +4109,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
 
 /// Unsubscribes from all topics / partitions (async).
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
@@ -4106,6 +4126,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_async(
 // ── assign (async; sync already defined above) ──
 
 /// Assigns the consumer to a set of `(topic, partition)` pairs (async).
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4144,6 +4166,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
 }
 
 /// Seeks a single partition to `offset` (async).
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4198,6 +4222,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
 /// (async). Pass `metadata == NULL` for no metadata and `leader_epoch < 0` for
 /// no leader epoch.
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
@@ -4250,6 +4276,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
 
 /// Seeks the given partitions to their beginning offsets (async).
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
@@ -4288,6 +4316,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
 
 /// Seeks the given partitions to their end offsets (async).
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
@@ -4324,6 +4354,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
 
 /// Pauses fetching for the given partitions (async).
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
@@ -4357,6 +4389,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
 }
 
 /// Resumes fetching for the given partitions (async).
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4392,6 +4426,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
 /// Commits the current positions asynchronously (async dispatch of
 /// [`kafka_consumer_Consumer_commit_sync`]; the callback fires when the commit
 /// has completed). One-operation-in-flight; reuses [`kafka_consumer_Consumer_op_callback_t`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4483,6 +4519,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
 /// commit has completed). One-operation-in-flight; reuses
 /// [`kafka_consumer_Consumer_op_callback_t`].
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
@@ -4513,6 +4551,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
 /// async commit is initiated). The callback-taking variants are
 /// [`kafka_consumer_Consumer_commit_async_with_callback`] and
 /// [`kafka_consumer_Consumer_commit_async_offsets_with_callback`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4796,6 +4836,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
 
 /// Closes the consumer asynchronously (default timeout).
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
@@ -4852,6 +4894,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_options(
 
 /// Closes the consumer with an explicit [`CloseOptions`] (async). See
 /// [`kafka_consumer_Consumer_close_options`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4914,6 +4958,8 @@ pub type kafka_consumer_Consumer_position_callback_t =
 
 /// Returns the current position of `(topic, partition)` asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_position`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -4987,6 +5033,8 @@ pub type kafka_consumer_Consumer_committed_callback_t =
 
 /// Returns the last committed offsets for the given partitions asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_committed`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -5094,6 +5142,8 @@ pub type kafka_consumer_Consumer_offsets_for_times_callback_t =
 /// Looks up offsets by timestamp asynchronously (one-operation-in-flight).
 /// See [`kafka_consumer_Consumer_offsets_for_times`].
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
@@ -5167,6 +5217,8 @@ pub type kafka_consumer_Consumer_long_offsets_callback_t =
 /// Returns the beginning offsets for the given partitions asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_beginning_offsets`].
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
@@ -5230,6 +5282,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
 
 /// Returns the end offsets for the given partitions asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_end_offsets`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
@@ -5299,6 +5353,8 @@ pub type kafka_consumer_Consumer_partitions_for_callback_t =
 /// Returns the partition metadata for a topic asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_partitions_for`].
 ///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
 /// # Safety
 ///
 /// `consumer` a valid handle; `topic` a valid C string.
@@ -5363,6 +5419,8 @@ pub type kafka_consumer_Consumer_list_topics_callback_t =
 
 /// Returns metadata for all topics the consumer is authorized to view
 /// asynchronously (one-operation-in-flight). See [`kafka_consumer_Consumer_list_topics`].
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
 /// # Safety
 ///
