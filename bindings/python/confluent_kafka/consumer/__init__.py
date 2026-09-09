@@ -15,16 +15,35 @@
 """``confluent_kafka.consumer`` — mirror of
 ``org.apache.kafka.clients.consumer`` (the ``clients`` segment dropped, spec §4).
 
-Skeleton for this phase (P1). ``Consumer`` / ``KafkaConsumer`` / ``MockConsumer``
-and their ``Async`` peers, the record and offset value types, ``CloseOptions``,
-``ConsumerRebalanceListener`` and the rest of §6.2 land here in P2/P5. It already
-carries the consumer-package exceptions, which Java places in this package
-(``CommitFailedException``, ``OffsetOutOfRangeException``, …).
+The record and offset value types, ``CloseOptions``, ``SubscriptionPattern`` and
+``OffsetResetStrategy`` live here (P2). ``Consumer`` / ``KafkaConsumer`` /
+``MockConsumer`` and their ``Async`` peers, ``ConsumerRebalanceListener`` and the
+rest of §6.2 land here in P5. It also carries the consumer-package exceptions,
+which Java places in this package (``CommitFailedException``,
+``OffsetOutOfRangeException``, …).
 """
 
 from __future__ import annotations
 
 from ._generated_errors import *  # noqa: F401,F403 -- re-export the consumer errors
 from ._generated_errors import __all__ as _errors_all
+from .close_options import CloseOptions
+from .consumer_group_metadata import ConsumerGroupMetadata
+from .consumer_record import ConsumerRecord
+from .consumer_records import ConsumerRecords
+from .offset_and_metadata import OffsetAndMetadata
+from .offset_and_timestamp import OffsetAndTimestamp
+from .offset_reset_strategy import OffsetResetStrategy
+from .subscription_pattern import SubscriptionPattern
 
-__all__ = [*_errors_all]
+__all__ = [
+    *_errors_all,
+    "CloseOptions",
+    "ConsumerGroupMetadata",
+    "ConsumerRecord",
+    "ConsumerRecords",
+    "OffsetAndMetadata",
+    "OffsetAndTimestamp",
+    "OffsetResetStrategy",
+    "SubscriptionPattern",
+]
