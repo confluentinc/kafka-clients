@@ -702,6 +702,143 @@ static void test_mock_consumer_close(void) {
     kafka_consumer_Consumer_destroy(c);
 }
 
+// ---------------------------------------------------------------------------
+// P5 additions: new mock driver methods + close(CloseOptions)
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_p5_mock_helpers(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+
+    // closed() is false until close.
+    TEST_ASSERT_FALSE(kafka_consumer_MockConsumer_closed(c));
+    // should_rebalance defaults false; reset is a no-op.
+    TEST_ASSERT_FALSE(kafka_consumer_MockConsumer_should_rebalance(c));
+    kafka_consumer_MockConsumer_reset_should_rebalance(c);
+    TEST_ASSERT_FALSE(kafka_consumer_MockConsumer_should_rebalance(c));
+    // last_poll_timeout is -1 before any poll.
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_MockConsumer_last_poll_timeout(c));
+
+    // set_max_poll_records: < 1 errors, >= 1 succeeds.
+    kafka_common_Error_t *e = kafka_consumer_MockConsumer_set_max_poll_records(c, 0);
+    TEST_ASSERT_NOT_NULL(e);
+    kafka_common_Error_destroy(e);
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_max_poll_records(c, 5));
+
+    // update_duration_offsets + schedule_nop_poll_task succeed.
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_duration_offsets(c, "test", 0, 10));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_schedule_nop_poll_task(c));
+
+    // Typed poll/offsets exception setters build the error from (code, message).
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_exception(c, -1, "boom poll"));
+    kafka_common_Error_t *poll_err = NULL;
+    kafka_consumer_ConsumerRecords_t *records =
+        kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    TEST_ASSERT_NULL(records);
+    TEST_ASSERT_NOT_NULL(poll_err);
+    kafka_common_Error_destroy(poll_err);
+
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_offsets_exception(c, -1, "boom offsets"));
+
+    // last_poll_timeout now reflects the 10ms poll above.
+    TEST_ASSERT_EQUAL_INT64(10, kafka_consumer_MockConsumer_last_poll_timeout(c));
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+static void test_mock_consumer_close_options(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    // close(CloseOptions): default timeout (-1), leave-group operation (1).
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_close_options(c, -1, 1));
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// P5: caller-thread rebalance-callback delivery (subscribe_caller_thread_listener
+// + rebalance_async + next/ack pending callback drain)
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    atomic_int pending_signaled;
+} caller_thread_ctx_t;
+
+static void pending_notify_cb(void *user_data) {
+    caller_thread_ctx_t *ctx = (caller_thread_ctx_t *)user_data;
+    atomic_fetch_add(&ctx->pending_signaled, 1);
+}
+
+typedef struct {
+    atomic_int fired;
+    int32_t error_code;
+} op_result_t;
+
+static void op_cb(kafka_common_Error_t *error, void *user_data) {
+    op_result_t *r = (op_result_t *)user_data;
+    r->error_code = error ? kafka_common_Error_code(error) : 0;
+    if (error) kafka_common_Error_destroy(error);
+    atomic_store(&r->fired, 1);
+}
+
+// Drain all pending caller-thread rebalance callbacks, acking each with success,
+// and count how many were seen.
+static int drain_pending(kafka_consumer_Consumer_t *c) {
+    int seen = 0;
+    for (;;) {
+        kafka_consumer_PendingCallback_t *p =
+            kafka_consumer_Consumer_next_pending_callback(c);
+        if (p == NULL) break;
+        (void)kafka_consumer_PendingCallback_method(p);
+        kafka_consumer_TopicPartitionList_t *parts =
+            kafka_consumer_PendingCallback_partitions(p);
+        kafka_consumer_TopicPartitionList_destroy(parts);
+        kafka_consumer_Consumer_ack_pending_callback(p, NULL);
+        seen++;
+    }
+    return seen;
+}
+
+static void test_mock_consumer_caller_thread_rebalance(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    caller_thread_ctx_t notify_ctx = {0};
+    kafka_consumer_Consumer_set_pending_callback_notify(
+        c, pending_notify_cb, &notify_ctx, NULL);
+
+    // Subscribe with a caller-thread listener.
+    op_result_t sub_res = {0};
+    const char *topics[1] = {"test"};
+    kafka_consumer_Consumer_subscribe_caller_thread_listener_async(
+        c, topics, 1, op_cb, &sub_res);
+    // Drain any callbacks + wait for the subscribe op to complete.
+    for (int i = 0; i < 1000 && !atomic_load(&sub_res.fired); i++) {
+        drain_pending(c);
+        struct timespec ts = {0, 1000000};  // 1ms
+        nanosleep(&ts, NULL);
+    }
+    TEST_ASSERT_TRUE(atomic_load(&sub_res.fired));
+
+    // Drive an async rebalance; the listener callbacks are delivered to us via
+    // the pending queue. Drain+ack them while awaiting completion.
+    op_result_t reb_res = {0};
+    const char *rtopics[1] = {"test"};
+    int32_t rparts[1] = {0};
+    kafka_consumer_MockConsumer_rebalance_async(
+        c, rtopics, rparts, 1, op_cb, &reb_res);
+
+    int total_callbacks = 0;
+    for (int i = 0; i < 2000 && !atomic_load(&reb_res.fired); i++) {
+        total_callbacks += drain_pending(c);
+        struct timespec ts = {0, 1000000};
+        nanosleep(&ts, NULL);
+    }
+    total_callbacks += drain_pending(c);
+    TEST_ASSERT_TRUE(atomic_load(&reb_res.fired));
+    TEST_ASSERT_EQUAL_INT32(0, reb_res.error_code);
+    // At least one assigned callback was delivered on this (caller) thread.
+    TEST_ASSERT_TRUE(total_callbacks >= 1);
+    TEST_ASSERT_TRUE(atomic_load(&notify_ctx.pending_signaled) >= 1);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_consumer_sync_poll_returns_record);
@@ -724,5 +861,8 @@ int main(void) {
     RUN_TEST(test_mock_consumer_subscribe_async);
     RUN_TEST(test_mock_consumer_client_id);
     RUN_TEST(test_mock_consumer_close);
+    RUN_TEST(test_mock_consumer_p5_mock_helpers);
+    RUN_TEST(test_mock_consumer_close_options);
+    RUN_TEST(test_mock_consumer_caller_thread_rebalance);
     return UNITY_END();
 }

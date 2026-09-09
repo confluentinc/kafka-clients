@@ -64,8 +64,8 @@ use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
 // is an unrelated concept.
 use crate::consumer::{
     AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
-    ConsumerRecord, ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp,
-    OffsetCommitCallback,
+    ConsumerRecord, ConsumerRecords, GroupMembershipOperation, GroupProtocol, MockConsumer, OffsetAndMetadata,
+    OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 
 use super::common::{
@@ -171,6 +171,24 @@ struct FfiConsumerHandle {
     /// Whether this handle wraps a [`MockConsumer`].
     #[allow(dead_code)]
     is_mock: bool,
+    /// Caller-thread rebalance-callback delivery (Python binding, §31).
+    ///
+    /// A [`CallerThreadRebalanceListener`] installed via
+    /// [`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`] pushes
+    /// each callback here (rather than running it on the dispatcher thread) and
+    /// parks on its ack. The embedder drains this queue on its *own* thread
+    /// inside the blocking API it is running (poll / commit / …), runs the user
+    /// listener, and acks — so the listener runs on the caller's thread, and a
+    /// reentrant op the listener submits is not gated behind a parked dispatcher
+    /// (closing the D25 gap-1/8 deadlock).
+    pending_rebalance_callbacks: Arc<Mutex<std::collections::VecDeque<PendingRebalanceCallback>>>,
+    /// C notification fired (on the dispatcher thread) when a callback is
+    /// enqueued above, so the embedder's blocking-API wait loop wakes and drains.
+    /// Set via [`kafka_consumer_Consumer_set_pending_callback_notify`]; shared
+    /// with every [`CallerThreadRebalanceListener`] so the listener reads the
+    /// **current** notify at callback time (the embedder re-registers it per
+    /// blocking op, e.g. the async client hops onto the running op's loop).
+    pending_callback_notify: Arc<Mutex<Option<PendingCallbackNotify>>>,
 }
 
 // SAFETY: `acquire()` guarantees at most one thread/future accesses
@@ -205,6 +223,8 @@ fn build_consumer_handle(
         dispatcher: Mutex::new(Some(dispatcher)),
         consumer_handle,
         is_mock,
+        pending_rebalance_callbacks: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        pending_callback_notify: Arc::new(Mutex::new(None)),
     });
     Box::into_raw(handle) as *mut kafka_consumer_Consumer_t
 }
@@ -1369,6 +1389,233 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     std::ptr::null_mut()
 }
 
+/// Builds an [`Error`] from a class-enum `code` + `message`, reusing the shared
+/// [`common::kafka_common_Error_new`] conversion (wire-code round-trip). Used by
+/// the mock exception setters so a Python-injected `KafkaError` re-raises with a
+/// matching type/message.
+///
+/// # Safety
+///
+/// `message` must be null or a valid C string.
+unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Error {
+    let handle = unsafe { common::kafka_common_Error_new(code, message) };
+    // `kafka_common_Error_new` always returns a non-null handle; `take_error`
+    // consumes it back into an `Error`.
+    unsafe { common::take_error(handle) }.unwrap_or_else(|| Error::local_illegal_state(String::new()))
+}
+
+/// Injects a typed exception (by class-enum `code` + `message`) to be raised by
+/// the next `poll` on a mock consumer. Mirrors Java's `setPollException`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid C string; `consumer` a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_exception(
+    consumer: *const kafka_consumer_Consumer_t,
+    code: i32,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let error = unsafe { error_from_code_and_message(code, message) };
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    mock.set_poll_error(error);
+    std::ptr::null_mut()
+}
+
+/// Injects a typed exception (by class-enum `code` + `message`) to be raised by
+/// the next `beginning_offsets` / `end_offsets` on a mock consumer. Mirrors
+/// Java's `setOffsetsException`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid C string; `consumer` a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_exception(
+    consumer: *const kafka_consumer_Consumer_t,
+    code: i32,
+    message: *const c_char,
+) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let error = unsafe { error_from_code_and_message(code, message) };
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    mock.set_offsets_error(error);
+    std::ptr::null_mut()
+}
+
+/// Seeds `by_duration:` reset offsets on a mock consumer (single entry). Mirrors
+/// Java's `updateDurationOffsets`.
+///
+/// # Safety
+///
+/// `topic` must be a valid C string; `consumer` a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
+    consumer: *const kafka_consumer_Consumer_t,
+    topic: *const c_char,
+    partition: i32,
+    offset: i64,
+) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    let mut map = HashMap::new();
+    map.insert(TopicPartition::new(topic_str, partition), offset);
+    mock.update_duration_offsets(map);
+    std::ptr::null_mut()
+}
+
+/// Caps the records returned per `poll` on a mock consumer. Mirrors Java's
+/// `setMaxPollRecords`; returns `IllegalArgumentError` when `max_poll_records < 1`.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
+    consumer: *const kafka_consumer_Consumer_t,
+    max_poll_records: i64,
+) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    match mock.set_max_poll_records(max_poll_records) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Schedules a no-op poll task on a mock consumer (Java's `scheduleNopPollTask`).
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(
+    consumer: *const kafka_consumer_Consumer_t,
+) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    mock.schedule_poll_task(Box::new(|_c| {}));
+    std::ptr::null_mut()
+}
+
+/// Whether an `enforceRebalance` request is pending on a mock consumer (Java's
+/// `shouldRebalance`). `false` for an async consumer.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
+    consumer: *const kafka_consumer_Consumer_t,
+) -> bool {
+    let h = unsafe { handle_ref(consumer) };
+    if acquire(h).is_err() {
+        return false;
+    }
+    let _g = ReleaseGuard(h);
+    match unsafe { mock_mut(h) } {
+        Ok(mock) => mock.should_rebalance(),
+        Err(_) => false,
+    }
+}
+
+/// Resets the rebalance-pending flag on a mock consumer (Java's
+/// `resetShouldRebalance`). No-op for an async consumer.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_reset_should_rebalance(
+    consumer: *const kafka_consumer_Consumer_t,
+) {
+    let h = unsafe { handle_ref(consumer) };
+    if acquire(h).is_err() {
+        return;
+    }
+    let _g = ReleaseGuard(h);
+    if let Ok(mock) = unsafe { mock_mut(h) } {
+        mock.reset_should_rebalance();
+    }
+}
+
+/// Whether a mock consumer has been closed (Java's `closed()`). `false` for an
+/// async consumer.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(consumer: *const kafka_consumer_Consumer_t) -> bool {
+    let h = unsafe { handle_ref(consumer) };
+    if acquire(h).is_err() {
+        return false;
+    }
+    let _g = ReleaseGuard(h);
+    match unsafe { mock_mut(h) } {
+        Ok(mock) => mock.closed(),
+        Err(_) => false,
+    }
+}
+
+/// The timeout (milliseconds) of the most recent `poll` on a mock consumer, or
+/// `-1` if `poll` has not been called (Java's `lastPollTimeout()`, mapped from
+/// `Optional<Duration>`).
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
+    consumer: *const kafka_consumer_Consumer_t,
+) -> i64 {
+    let h = unsafe { handle_ref(consumer) };
+    if acquire(h).is_err() {
+        return -1;
+    }
+    let _g = ReleaseGuard(h);
+    match unsafe { mock_mut(h) } {
+        Ok(mock) => mock.last_poll_timeout().map(|d| d.as_millis() as i64).unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
 /// Simulates a rebalance on a mock consumer (mock only), mirroring Java's
 /// `MockConsumer.rebalance(Collection<TopicPartition>)`.
 ///
@@ -1418,6 +1665,354 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
         Ok(()) => std::ptr::null_mut(),
         Err(e) => box_error(e),
     }
+}
+
+/// Drives a mock rebalance to `new_assignment` (async).
+///
+/// Unlike [`kafka_consumer_MockConsumer_rebalance`], the rebalance runs on the
+/// consumer runtime and its completion is delivered through `callback`, so the
+/// embedder's thread stays free to drain caller-thread rebalance callbacks (a
+/// [`CallerThreadRebalanceListener`]) while the rebalance is parked on their
+/// ack. This is the mock analog of `poll` for the Python binding's §31 contract.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `topics`/`partitions` `count` valid
+/// entries; `callback` a valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    let h = unsafe { handle_ref(consumer) };
+    let target = OperationCallbackTarget { callback, user_data };
+    if let Err(e) = acquire(h) {
+        unsafe { (target.callback)(box_error(e), target.user_data) };
+        return;
+    }
+    let tx = h.completion_tx.clone();
+    let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
+    h.runtime_handle.spawn(async move {
+        let target = target;
+        // SAFETY: the guard is held for the whole submit->callback window.
+        let result = match unsafe { mock_mut(hs) } {
+            Ok(mock) => mock.rebalance(&tps).await,
+            Err(e) => Err(e),
+        };
+        let error = match result {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => box_error(e),
+        };
+        let op = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
+        let release_handle = hs;
+        let job: CompletionJob = Box::new(move || {
+            release(release_handle);
+            unsafe { op.fire() };
+        });
+        enqueue_or_run_inline(&tx, job);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Caller-thread rebalance-callback delivery (Python binding, §31 / D25 gap 1/8)
+// ---------------------------------------------------------------------------
+//
+// The existing `FfiRebalanceListener` runs the C callback on the consumer's
+// *dispatcher* thread (via `dispatch_and_wait`). That satisfies Rust callers,
+// but for the Python binding it (a) runs the user listener on a thread other
+// than the one that called `poll()` (§31 wants the caller's thread), and (b)
+// deadlocks an async listener that `await`s another consumer method, because
+// listener invocation and every completion share one dispatcher FIFO.
+//
+// The mechanism below delivers each callback to the embedder's *own* thread:
+// the core invokes `CallerThreadRebalanceListener`, which enqueues a
+// `PendingRebalanceCallback` (method + partitions + an ack `oneshot`) on the
+// consumer handle and parks on the ack; a one-shot C notification wakes the
+// embedder's blocking-API wait loop, which drains the queue on its thread, runs
+// the user listener, and acks. The op that triggered the callback (poll,
+// rebalance, subscribe-driven reconcile, close) is meanwhile parked on the ack
+// on a runtime worker — the consumer's background task keeps spinning, so a
+// reentrant `ConsumerHandle` op the listener submits completes (§41).
+
+/// The rebalance-listener method a pending callback carries. Matches the C-side
+/// discriminant: `0` = revoked, `1` = assigned, `2` = lost.
+const PENDING_METHOD_REVOKED: i32 = 0;
+const PENDING_METHOD_ASSIGNED: i32 = 1;
+const PENDING_METHOD_LOST: i32 = 2;
+
+/// One rebalance callback awaiting delivery on the embedder's thread.
+struct PendingRebalanceCallback {
+    method: i32,
+    partitions: Vec<TopicPartition>,
+    ack: tokio::sync::oneshot::Sender<Result<(), Error>>,
+}
+
+/// The registered C notification fired when a callback is enqueued. Owns
+/// `user_data` and fires the destroy hook on drop.
+struct PendingCallbackNotify {
+    notify: kafka_consumer_Consumer_pending_callback_notify_t,
+    target: CallbackTarget,
+}
+// SAFETY: `notify`/`user_data` are supplied by the embedder, which is
+// responsible for their thread-safety; the notify only ever runs on the
+// dispatcher thread.
+unsafe impl Send for PendingCallbackNotify {}
+
+/// A registered pending-callback notify, snapshot for a
+/// [`CallerThreadRebalanceListener`]. `Send + Sync` so the listener's futures
+/// are `Send` under `#[async_trait]`; the embedder owns the thread-safety of
+/// `user_data` (as with [`CallbackTarget`]).
+#[derive(Clone, Copy)]
+struct NotifySnapshot {
+    notify: kafka_consumer_Consumer_pending_callback_notify_t,
+    user_data: *mut c_void,
+}
+// SAFETY: the raw `user_data` is the embedder's; the notify only ever runs on
+// the dispatcher thread, and the embedder is responsible for its thread-safety.
+unsafe impl Send for NotifySnapshot {}
+unsafe impl Sync for NotifySnapshot {}
+
+/// Adapts the core [`ConsumerRebalanceListener`] trait to the caller-thread
+/// delivery queue on an [`FfiConsumerHandle`].
+struct CallerThreadRebalanceListener {
+    queue: Arc<Mutex<std::collections::VecDeque<PendingRebalanceCallback>>>,
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+    /// The handle's live notify slot, read at callback time so re-registration
+    /// (the async client hops onto the running op's loop each blocking op) takes
+    /// effect. `None` inside means the embedder has not registered one.
+    notify: Arc<Mutex<Option<PendingCallbackNotify>>>,
+}
+
+impl CallerThreadRebalanceListener {
+    async fn enqueue_and_wait(&self, method: i32, partitions: &[TopicPartition]) -> Result<(), Error> {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Result<(), Error>>();
+        {
+            let mut queue = self.queue.lock().unwrap();
+            queue.push_back(PendingRebalanceCallback { method, partitions: partitions.to_vec(), ack: ack_tx });
+        }
+        // Wake the embedder's blocking-API wait loop from the dispatcher thread
+        // (GIL-safe for the Python binding), so it drains the queue. Read the
+        // CURRENT notify from the shared slot (not a subscribe-time snapshot).
+        let snapshot = self
+            .notify
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|n| NotifySnapshot { notify: n.notify, user_data: n.target.user_data });
+        if let Some(snapshot) = snapshot {
+            enqueue_or_run_inline(
+                &self.completion_tx,
+                Box::new(move || {
+                    // Move the whole `Send` snapshot in (not its raw-pointer field,
+                    // which Rust 2021 disjoint capture would grab instead).
+                    let snapshot = snapshot;
+                    // SAFETY: `notify` + `user_data` were supplied together by the
+                    // embedder and remain valid until the consumer is destroyed.
+                    unsafe { (snapshot.notify)(snapshot.user_data) };
+                }),
+            );
+        }
+        // Park on the ack. Dropping the sender (embedder never acked, e.g. the
+        // consumer is being torn down) resolves to an Err via `recv` error →
+        // treat as "no error" so teardown is not blocked.
+        match ack_rx.await {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for CallerThreadRebalanceListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.enqueue_and_wait(PENDING_METHOD_REVOKED, partitions).await
+    }
+
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.enqueue_and_wait(PENDING_METHOD_ASSIGNED, partitions).await
+    }
+
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.enqueue_and_wait(PENDING_METHOD_LOST, partitions).await
+    }
+}
+
+/// C notification typedef: fired (on the dispatcher thread) when a rebalance
+/// callback is enqueued for caller-thread delivery. `user_data` is whatever was
+/// registered with [`kafka_consumer_Consumer_set_pending_callback_notify`].
+pub type kafka_consumer_Consumer_pending_callback_notify_t = unsafe extern "C" fn(*mut c_void);
+
+/// Opaque handle to one pending rebalance callback, handed to the embedder by
+/// [`kafka_consumer_Consumer_next_pending_callback`] and consumed by
+/// [`kafka_consumer_Consumer_ack_pending_callback`].
+#[repr(C)]
+pub struct kafka_consumer_PendingCallback_t {
+    _private: [u8; 0],
+}
+
+/// Registers the notification fired when a caller-thread rebalance callback is
+/// enqueued. Call once, before subscribing with a caller-thread listener.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `notify` a valid function pointer;
+/// `user_data`/`user_data_destroy` follow the [`CallbackTarget`] contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_set_pending_callback_notify(
+    consumer: *const kafka_consumer_Consumer_t,
+    notify: kafka_consumer_Consumer_pending_callback_notify_t,
+    user_data: *mut c_void,
+    // Spelled out inline (not the `..._user_data_destroy_t` alias) so cbindgen
+    // emits a nullable C function pointer rather than a literal `Option<...>`.
+    user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+) {
+    let h = unsafe { handle_ref(consumer) };
+    let mut slot = h.pending_callback_notify.lock().unwrap();
+    *slot = Some(PendingCallbackNotify { notify, target: CallbackTarget { user_data, destroy: user_data_destroy } });
+}
+
+/// Subscribes to `topics` with a caller-thread rebalance listener (async): the
+/// listener callbacks are delivered to the embedder's thread via the pending
+/// queue, not run on the dispatcher thread. See the module section above.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `topics` `count` valid C strings;
+/// `callback` a valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_caller_thread_listener_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    count: i32,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let h = unsafe { handle_ref(consumer) };
+    let listener = unsafe { make_caller_thread_listener(h) };
+    let topic_vec = unsafe { read_topics(topics, count) };
+    unsafe {
+        async_void_op(consumer, callback, user_data, move |c| {
+            c.subscribe_topics_listener(topic_vec, listener)
+        })
+    };
+}
+
+/// Subscribes to a broker-side RE2/J `pattern` with a caller-thread rebalance
+/// listener (async). See
+/// [`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `pattern` a valid C string; `callback` a
+/// valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_caller_thread_listener_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    pattern: *const c_char,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let h = unsafe { handle_ref(consumer) };
+    let listener = unsafe { make_caller_thread_listener(h) };
+    let pattern_str = unsafe { CStr::from_ptr(pattern) }.to_string_lossy().to_string();
+    let subscription_pattern = SubscriptionPattern::new(pattern_str);
+    unsafe {
+        async_void_op(consumer, callback, user_data, move |c| {
+            c.subscribe_subscription_pattern_listener(subscription_pattern, listener)
+        })
+    };
+}
+
+/// Builds a [`CallerThreadRebalanceListener`] wired to the handle's pending
+/// queue and registered notify.
+///
+/// # Safety
+///
+/// `h` must be a valid, live consumer handle.
+unsafe fn make_caller_thread_listener(h: &FfiConsumerHandle) -> Arc<dyn ConsumerRebalanceListener> {
+    Arc::new(CallerThreadRebalanceListener {
+        queue: Arc::clone(&h.pending_rebalance_callbacks),
+        completion_tx: h.completion_tx.clone(),
+        notify: Arc::clone(&h.pending_callback_notify),
+    })
+}
+
+/// Pops the next pending caller-thread rebalance callback, or returns null when
+/// the queue is empty. The returned handle carries the method and partitions and
+/// MUST be completed with [`kafka_consumer_Consumer_ack_pending_callback`]
+/// (which frees it).
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_next_pending_callback(
+    consumer: *const kafka_consumer_Consumer_t,
+) -> *mut kafka_consumer_PendingCallback_t {
+    let h = unsafe { handle_ref(consumer) };
+    let popped = h.pending_rebalance_callbacks.lock().unwrap().pop_front();
+    match popped {
+        Some(pending) => Box::into_raw(Box::new(pending)) as *mut kafka_consumer_PendingCallback_t,
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The rebalance-listener method a pending callback carries (`0` = revoked,
+/// `1` = assigned, `2` = lost).
+///
+/// # Safety
+///
+/// `pending` must be a valid, not-yet-acked handle from
+/// [`kafka_consumer_Consumer_next_pending_callback`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_PendingCallback_method(
+    pending: *const kafka_consumer_PendingCallback_t,
+) -> i32 {
+    let pending = unsafe { &*(pending as *const PendingRebalanceCallback) };
+    pending.method
+}
+
+/// The partitions a pending callback carries, as a freshly allocated
+/// [`kafka_consumer_TopicPartitionList_t`] the caller must destroy.
+///
+/// # Safety
+///
+/// `pending` must be a valid, not-yet-acked handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_PendingCallback_partitions(
+    pending: *const kafka_consumer_PendingCallback_t,
+) -> *mut kafka_consumer_TopicPartitionList_t {
+    let pending = unsafe { &*(pending as *const PendingRebalanceCallback) };
+    box_topic_partition_list(pending.partitions.clone())
+}
+
+/// Completes a pending callback with the result of running the user listener
+/// (`error` null = success), freeing the handle and un-parking the op that
+/// triggered it. A non-null `error` fails the rebalance, exactly as a Java
+/// listener that throws.
+///
+/// # Safety
+///
+/// `pending` must be a valid handle from
+/// [`kafka_consumer_Consumer_next_pending_callback`]; `error` null or a handle
+/// owned by the caller (consumed here). After this call `pending` is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_ack_pending_callback(
+    pending: *mut kafka_consumer_PendingCallback_t,
+    error: *mut kafka_common_Error_t,
+) {
+    let pending = unsafe { Box::from_raw(pending as *mut PendingRebalanceCallback) };
+    let result = match unsafe { common::take_error(error) } {
+        Some(e) => Err(e),
+        None => Ok(()),
+    };
+    // The receiver is only dropped if the op was cancelled; ignore send failure.
+    let _ = pending.ack.send(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -3425,6 +4020,61 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
     };
 }
 
+// ── subscribe (SubscriptionPattern — KIP-848 broker-side RE2/J regex) ──
+
+/// Subscribes to topics matching a broker-side RE2/J `pattern` (async).
+///
+/// Translates Java's `void subscribe(SubscriptionPattern pattern)`. Unlike the
+/// deprecated client-side `Pattern` overloads, the pattern is evaluated by the
+/// broker (KIP-848), so no local topic metadata is needed.
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `pattern` a valid C string; `callback` a
+/// valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    pattern: *const c_char,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let pattern_str = unsafe { CStr::from_ptr(pattern) }.to_string_lossy().to_string();
+    let subscription_pattern = SubscriptionPattern::new(pattern_str);
+    unsafe {
+        async_void_op(consumer, callback, user_data, move |c| {
+            c.subscribe_subscription_pattern(subscription_pattern)
+        })
+    };
+}
+
+/// Subscribes to topics matching a broker-side RE2/J `pattern` with a rebalance
+/// listener (async). See [`kafka_consumer_Consumer_subscribe_pattern_async`] and
+/// [`kafka_consumer_Consumer_subscribe_with_listener`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `pattern` a valid C string; `listener` a
+/// non-null, not-yet-consumed handle; `callback` a valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_with_listener_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    pattern: *const c_char,
+    listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let h = unsafe { handle_ref(consumer) };
+    let listener = unsafe { take_rebalance_listener(listener, h.completion_tx.clone()) };
+    let pattern_str = unsafe { CStr::from_ptr(pattern) }.to_string_lossy().to_string();
+    let subscription_pattern = SubscriptionPattern::new(pattern_str);
+    unsafe {
+        async_void_op(consumer, callback, user_data, move |c| {
+            c.subscribe_subscription_pattern_listener(subscription_pattern, listener)
+        })
+    };
+}
+
 // ── unsubscribe ──
 
 /// Unsubscribes from all topics / partitions (sync).
@@ -4156,6 +4806,66 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_async(
     user_data: *mut c_void,
 ) {
     unsafe { async_void_op(consumer, callback, user_data, |c| c.close()) };
+}
+
+/// Maps the C group-membership-operation discriminant to the core enum:
+/// `0` = `Default`, `1` = `LeaveGroup`, `2` = `RemainInGroup`. Any other value
+/// falls back to `Default` (Java's default).
+fn group_membership_operation_from_code(code: i32) -> GroupMembershipOperation {
+    match code {
+        1 => GroupMembershipOperation::LeaveGroup,
+        2 => GroupMembershipOperation::RemainInGroup,
+        _ => GroupMembershipOperation::Default,
+    }
+}
+
+/// Builds a [`CloseOptions`] from a `timeout_ms` (`< 0` = the default close
+/// timeout) and a group-membership-operation discriminant (see
+/// [`group_membership_operation_from_code`]).
+fn close_options_from_args(timeout_ms: i64, operation_code: i32) -> CloseOptions {
+    let operation = group_membership_operation_from_code(operation_code);
+    let mut options = CloseOptions::new_group_membership_operation(operation);
+    if timeout_ms >= 0 {
+        options = options.with_timeout(Duration::from_millis(timeout_ms as u64));
+    }
+    options
+}
+
+/// Closes the consumer with an explicit [`CloseOptions`] (sync).
+///
+/// Translates Java's `void close(CloseOptions option)`. `timeout_ms < 0` uses the
+/// default close timeout; `operation_code` selects the group-membership operation
+/// (`0` = default, `1` = leave group, `2` = remain in group).
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_close_options(
+    consumer: *const kafka_consumer_Consumer_t,
+    timeout_ms: i64,
+    operation_code: i32,
+) -> *mut kafka_common_Error_t {
+    let options = close_options_from_args(timeout_ms, operation_code);
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_options(options))) }
+}
+
+/// Closes the consumer with an explicit [`CloseOptions`] (async). See
+/// [`kafka_consumer_Consumer_close_options`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle; `callback` a valid function pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_close_options_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    timeout_ms: i64,
+    operation_code: i32,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    let options = close_options_from_args(timeout_ms, operation_code);
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.close_options(options)) };
 }
 
 // ---------------------------------------------------------------------------
