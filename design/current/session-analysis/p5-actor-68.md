@@ -140,6 +140,11 @@ Actor 67 (producer) works in `../ecfk-p4`. Per the task I did NOT edit `src/ffi/
 to consumer natives + the shared module table. `cbindgen.toml` gained two consumer types.
 
 ## Commits
-(filled at hand-off)
+1. `6f6bf40c` — P5: consumer FFI — caller-thread rebalance callbacks, mock methods,
+   close(CloseOptions), subscribe(pattern) (+ C-ext natives, C tests, shortened pre-commit hook).
+2. `48b3ad86` — P5: confluent_kafka.consumer client family (+ tests, clarifications, this report).
+
+Branch `p5-consumer-wip` (from `dev_python-interface-implementation`). Not pushed, not merged —
+the Manager runs the full `make verify-sandbox` before merging.
 
 `COMMENTS.68.md` created empty in the repo root; empty at start and end.
