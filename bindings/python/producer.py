@@ -447,7 +447,9 @@ class Producer(_ProducerBase):
         :meth:`_run_sync`), bounded by ``_DRAIN_WAIT_TIMEOUT_S`` as a safety valve
         against a wedged send task; on expiry it raises a retriable timeout
         :class:`KafkaError` rather than letting the caller proceed with un-drained
-        records."""
+        records. The async :meth:`AsyncProducer._wait_drained` is bounded
+        identically (via ``asyncio.wait_for`` and the same
+        :func:`_drain_timeout_error`)."""
         done = threading.Event()
         if _lib.Producer_on_drained(self.c_producer, done.set):
             return
@@ -461,6 +463,10 @@ class Producer(_ProducerBase):
         producer first (via :meth:`_wait_drained`), so a returned (un-awaited)
         send is completed by the flush, matching Java."""
         self._wait_drained()
+        # A waiter released by close() (the send task fires all drain callbacks
+        # on exit) must not submit into a producer being torn down: re-check the
+        # closed flag after the wait, before any FFI call.
+        self._check_closed()
         self._run_sync(
             lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
             self._resolve_void,
@@ -512,6 +518,7 @@ class Producer(_ProducerBase):
         """
         self._check_closed()
         self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         self._run_sync(
             lambda cb: _lib.Producer_init_transactions_async(self.c_producer, cb),
             self._resolve_void,
@@ -533,6 +540,7 @@ class Producer(_ProducerBase):
         """
         self._check_closed()
         self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         self._run_sync(
             lambda cb: _lib.Producer_begin_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -565,6 +573,7 @@ class Producer(_ProducerBase):
         """
         self._check_closed()
         self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         spec = self._offsets_to_spec(offsets)
         self._run_sync(
             lambda cb: _lib.Producer_send_offsets_to_transaction_async(
@@ -590,6 +599,7 @@ class Producer(_ProducerBase):
         """
         self._check_closed()
         self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         self._run_sync(
             lambda cb: _lib.Producer_commit_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -611,6 +621,7 @@ class Producer(_ProducerBase):
         """
         self._check_closed()
         self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         self._run_sync(
             lambda cb: _lib.Producer_abort_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -823,9 +834,16 @@ class AsyncProducer(_ProducerBase):
 
         Resolves on the event loop -- the C callback hops on via
         ``call_soon_threadsafe`` with the same closed-loop / done-future guards as
-        the space-available path -- so it never freezes the loop and is
-        cancellable: if the awaiting task is cancelled here, the control op is
-        never submitted."""
+        the space-available path -- so it never freezes the loop. The wait is
+        bounded by ``_DRAIN_WAIT_TIMEOUT_S``, the identical safety valve the sync
+        :meth:`Producer._wait_drained` uses: a wedged send task raises the same
+        retriable timeout :class:`KafkaError` (via :func:`_drain_timeout_error`)
+        rather than hanging the op forever. It stays cancellable: cancelling the
+        awaiting task propagates ``CancelledError`` (never ``TimeoutError``) and
+        the control op is never submitted. ``asyncio.wait_for`` cancels ``fut`` on
+        both the timeout and the cancellation exit, so a late C callback lands on
+        the ``fut.done()`` guard in :meth:`_resolve_drained` and raises no
+        ``InvalidStateError``."""
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
 
@@ -835,8 +853,12 @@ class AsyncProducer(_ProducerBase):
             if not loop.is_closed():
                 loop.call_soon_threadsafe(self._resolve_drained, fut)
 
-        if not _lib.Producer_on_drained(self.c_producer, drained_cb):
-            await fut
+        if _lib.Producer_on_drained(self.c_producer, drained_cb):
+            return
+        try:
+            await asyncio.wait_for(fut, timeout=_DRAIN_WAIT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise _drain_timeout_error() from None
 
     async def flush(self):
         """Flush all pending records.
@@ -845,6 +867,10 @@ class AsyncProducer(_ProducerBase):
         producer first (via :meth:`_wait_drained`), so a returned (un-awaited)
         send is completed by the flush, matching Java."""
         await self._wait_drained()
+        # A waiter released by close() (the send task fires all drain callbacks
+        # on exit) must not submit into a producer being torn down: re-check the
+        # closed flag after the wait, before any FFI call.
+        self._check_closed()
         await self._run_async(
             lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
             self._resolve_void,
@@ -897,6 +923,7 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         await self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         await self._run_async(
             lambda cb: _lib.Producer_init_transactions_async(self.c_producer, cb),
             self._resolve_void,
@@ -919,6 +946,7 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         await self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         await self._run_async(
             lambda cb: _lib.Producer_begin_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -952,6 +980,7 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         await self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         spec = self._offsets_to_spec(offsets)
         await self._run_async(
             lambda cb: _lib.Producer_send_offsets_to_transaction_async(
@@ -978,6 +1007,7 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         await self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         await self._run_async(
             lambda cb: _lib.Producer_commit_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -999,6 +1029,7 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         await self._wait_drained()
+        self._check_closed()  # a waiter released by close() must not submit now
         await self._run_async(
             lambda cb: _lib.Producer_abort_transaction_async(self.c_producer, cb),
             self._resolve_void,
