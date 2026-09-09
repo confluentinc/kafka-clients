@@ -137,6 +137,13 @@ def to_ffi_id(error: BaseException) -> int:
     """The FFI id for a Python error, for mock injection into the core.
 
     ``type(error)._ffi_id`` — the inverse of :func:`from_ffi_error`.
+
+    The base :class:`KafkaError` carries no ``_ffi_id`` (it is only the no-mapping
+    fallback, never injected — Critic 64 F2), so passing a bare ``KafkaError``
+    raises ``TypeError`` rather than silently coercing to a code. To inject the
+    catch-all wire error, use its concrete class ``UnknownServerError``. Any error
+    class without an ``_ffi_id`` (a non-Kafka/non-JDK exception, or the base) is
+    likewise rejected.
     """
     ffi_id: int | None = getattr(type(error), "_ffi_id", None)
     if ffi_id is None:

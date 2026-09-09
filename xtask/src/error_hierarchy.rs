@@ -45,11 +45,16 @@ const FFI_ENUM_SOURCE: &str = "src/ffi/common.rs";
 /// Output roots (relative to the repo root).
 const PKG_ROOT: &str = "bindings/python/confluent_kafka";
 
-/// The five Java **abstract** exception classes on this surface. They are
-/// catch-only grouping bases (constructing one raises `TypeError`) and carry no
-/// FFI id (Design Decisions D1). Derived from the Java `abstract` modifier; listed
-/// here only so the generator knows to pull them into the graph even though no
-/// bridge entry (which maps *ids*) references them.
+/// The Java **abstract** exception classes on this surface. They are catch-only
+/// grouping bases (constructing one raises `TypeError`) and carry no FFI id
+/// (Design Decisions D1), so — unlike the concrete classes — the FFI-enum
+/// bijection cannot catch a missing one. Listed here so the generator can pull
+/// them into the graph even though no bridge entry (which maps *ids*) references
+/// them, and **validated against the Java `abstract` modifier**: the build fails
+/// if the exception-class scan (see [`scan_exception_classes`]) finds an
+/// in-scope `abstract` exception this list omits, or an entry here that Java does
+/// not actually mark `abstract` (rule 5 — "derived from the Java `abstract`
+/// modifier, never hand-listed"). In 4.3.1 the set is exactly these five.
 const ABSTRACT_CLASSES: &[&str] = &[
     "org.apache.kafka.common.errors.RetriableException",
     "org.apache.kafka.common.errors.RefreshRetriableException",
@@ -57,6 +62,40 @@ const ABSTRACT_CLASSES: &[&str] = &[
     "org.apache.kafka.common.errors.ApplicationRecoverableException",
     "org.apache.kafka.clients.consumer.InvalidOffsetException",
 ];
+
+/// `*Exception` (and the two suffix-less exception) classes under `common/` and
+/// `clients/` that are deliberately **out of scope** — the client error surface
+/// this binding raises is only the public broker/JDK errors, not internal helpers,
+/// share-consumer internals, or the security-mechanism plugins. The exception-class
+/// scan ([`scan_exception_classes`]) requires every scanned class to be in the
+/// bridge, an abstract base, an intermediate/base class, or listed here; a new Java
+/// exception that is none of those fails the build, so it can no longer be silently
+/// invisible (Critic 64 F1). Each entry cites why it is excluded.
+const EXCLUSIONS: &[&str] = &[
+    // Internal client-side signalling class, never surfaced to the user; no FFI id.
+    "org.apache.kafka.clients.StaleMetadataException",
+    // Consumer background-thread internals (package `...consumer.internals`).
+    "org.apache.kafka.clients.consumer.internals.NoAvailableBrokersException",
+    // Share-consumer internals (KIP-932) — out of scope (consumer-threading.md §20).
+    "org.apache.kafka.clients.consumer.internals.ShareFetchException",
+    "org.apache.kafka.clients.consumer.internals.ShareInFlightBatchException",
+    // Internal network-layer signalling, not a public client error.
+    "org.apache.kafka.common.network.DelayedResponseAuthenticationException",
+    // OAuth Bearer security-mechanism plugin errors — not the public client surface.
+    "org.apache.kafka.common.security.oauthbearer.JwtRetrieverException",
+    "org.apache.kafka.common.security.oauthbearer.JwtValidatorException",
+    "org.apache.kafka.common.security.oauthbearer.internals.secured.UnretryableException",
+    "org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerConfigException",
+    "org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerIllegalTokenException",
+];
+
+/// Java's `KafkaException` base is scanned (it is `…Exception`) but is neither a
+/// concrete leaf with an id (so not in the bridge) nor an abstract catch-only base
+/// (so not in [`ABSTRACT_CLASSES`]); it is covered as the hand-written Python base
+/// (`common/errors/_base.py`), so the scan must not treat it as a failure. Every
+/// other concrete intermediate other exceptions extend (`ApiException`,
+/// `AuthorizationException`, …) has its own FFI id and is already in the bridge.
+const COVERED_INTERMEDIATES: &[&str] = &["org.apache.kafka.common.KafkaException"];
 
 /// Java's `KafkaException` — the base of the Kafka side. Not generated: the Python
 /// base `KafkaError` is hand-written in `common/errors/_base.py` so the runtime
@@ -824,7 +863,152 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<Vec<ClassInfo>> {
         };
     }
 
+    // 4. Fail-closed universe check (Critic 64 F1): every in-scope Java exception
+    //    class must be accounted for, and the abstract set must be derived from the
+    //    Java `abstract` modifier rather than trusted as a hand-list.
+    validate_exception_scan(repo_root, &classes)?;
+
     Ok(classes.into_values().collect())
+}
+
+/// Every `…Exception` (plus the two suffix-less exception) class declared under
+/// `common/` and `clients/`, with its Java `abstract` flag. This is the "all Java
+/// exceptions" universe the fail-closed check runs against.
+fn scan_exception_classes(repo_root: &Path) -> anyhow::Result<Vec<(String, bool)>> {
+    // The two Kafka exception classes whose name does not end in `Exception`.
+    const SUFFIXLESS: &[&str] = &["InvalidRegularExpression", "OffsetMetadataTooLarge"];
+    let mut out = Vec::new();
+    for top in ["common", "clients"] {
+        let root = repo_root.join(JAVA_ROOT).join("org/apache/kafka").join(top);
+        scan_dir(&root, &mut out, SUFFIXLESS)?;
+    }
+    Ok(out)
+}
+
+/// Recursively collect exception classes from `.java` files under `dir`.
+fn scan_dir(dir: &Path, out: &mut Vec<(String, bool)>, suffixless: &[&str]) -> anyhow::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            scan_dir(&path, out, suffixless)?;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let txt = fs::read_to_string(&path)?;
+        // `public [abstract] class <Name> extends <Parent>` — a top-level class
+        // declaration. (`\n    public` inner classes are not matched: an exception
+        // class is always top-level here.)
+        let Some(caps) = find_class_decl(&txt) else {
+            continue;
+        };
+        let (is_abstract, name) = caps;
+        let is_exception = name.ends_with("Exception") || suffixless.contains(&name.as_str());
+        if !is_exception {
+            continue;
+        }
+        let package = txt
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("package ").map(|p| p.trim_end_matches(';').trim()))
+            .ok_or_else(|| anyhow::anyhow!("{}: no package declaration", path.display()))?;
+        out.push((format!("{package}.{name}"), is_abstract));
+    }
+    Ok(())
+}
+
+/// Return `(is_abstract, class_name)` for a `public [abstract] class X extends …`
+/// declaration, or `None`. Anchored on `public class` / `public abstract class`
+/// / `public final class` so a stray ` class ` in a javadoc comment (e.g.
+/// `KafkaException`'s "The base class of all other Kafka exceptions") is not
+/// mistaken for the declaration.
+fn find_class_decl(txt: &str) -> Option<(bool, String)> {
+    // Try the abstract form first so `is_abstract` is set correctly.
+    for (needle, is_abstract) in [
+        ("public abstract class ", true),
+        ("public final class ", false),
+        ("public class ", false),
+    ] {
+        if let Some(idx) = txt.find(needle) {
+            let after = &txt[idx + needle.len()..];
+            // Every Kafka exception extends something; ignore declarations without it.
+            if !after.contains(" extends ") {
+                continue;
+            }
+            let name: String = after.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if !name.is_empty() {
+                return Some((is_abstract, name));
+            }
+        }
+    }
+    None
+}
+
+/// The fail-closed universe check (Critic 64 F1): every scanned exception class is
+/// accounted for, and the abstract set is derived from Java, not trusted.
+fn validate_exception_scan(repo_root: &Path, classes: &BTreeMap<String, ClassInfo>) -> anyhow::Result<()> {
+    let scanned = scan_exception_classes(repo_root)?;
+    let scanned_fqns: BTreeSet<&str> = scanned.iter().map(|(f, _)| f.as_str()).collect();
+    let exclusions: BTreeSet<&str> = EXCLUSIONS.iter().copied().collect();
+    let abstract_list: BTreeSet<&str> = ABSTRACT_CLASSES.iter().copied().collect();
+    let covered_intermediates: BTreeSet<&str> = COVERED_INTERMEDIATES.iter().copied().collect();
+
+    // (a) No stale exclusion: every EXCLUSIONS entry must be a real scanned class.
+    for ex in &exclusions {
+        if !scanned_fqns.contains(ex) {
+            anyhow::bail!(
+                "error hierarchy: EXCLUSIONS lists `{ex}`, which the exception-class scan does not \
+                 find — remove the stale exclusion"
+            );
+        }
+    }
+
+    // (b) Abstract set derived from Java: every scanned `abstract` in-scope class is
+    //     in ABSTRACT_CLASSES, and every ABSTRACT_CLASSES entry is really `abstract`.
+    let scanned_abstract: BTreeSet<&str> = scanned
+        .iter()
+        .filter(|(f, ab)| *ab && !exclusions.contains(f.as_str()))
+        .map(|(f, _)| f.as_str())
+        .collect();
+    for a in &scanned_abstract {
+        if !abstract_list.contains(a) {
+            anyhow::bail!(
+                "error hierarchy: `{a}` is a Java `abstract` exception in scope but is not in \
+                 ABSTRACT_CLASSES — add it (it is a catch-only base with no FFI id)"
+            );
+        }
+    }
+    for a in &abstract_list {
+        if !scanned_abstract.contains(a) {
+            anyhow::bail!(
+                "error hierarchy: ABSTRACT_CLASSES lists `{a}`, which the scan does not find as an \
+                 in-scope Java `abstract` exception — it is not abstract, out of scope, or renamed"
+            );
+        }
+    }
+
+    // (c) Every scanned class is covered: in the built graph, an intermediate/base,
+    //     or an explicit exclusion. This is what makes a new Java exception (or a
+    //     concrete one the core forgot to give an FFI id) fail the build instead of
+    //     being silently invisible.
+    for (fqn, _is_abstract) in &scanned {
+        let covered = classes.contains_key(fqn)
+            || covered_intermediates.contains(fqn.as_str())
+            || exclusions.contains(fqn.as_str());
+        if !covered {
+            anyhow::bail!(
+                "error hierarchy: Java exception `{fqn}` is neither in the BRIDGE, an abstract \
+                 base, a covered intermediate, nor an explicit EXCLUSION. If it is a public client \
+                 error it needs an FFI id + BRIDGE row; otherwise add it to EXCLUSIONS with a \
+                 reason."
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// The Python builtin base for a JDK analog (spec §5.5 API-misuse table).
@@ -1251,5 +1435,69 @@ mod tests {
         // (which is itself a generated class, so the base is the plain name and a
         // cross-module import brings it in).
         assert_eq!(by_name["CorrelationIdMismatchError"].py_base, "IllegalStateError");
+    }
+
+    #[test]
+    fn scan_finds_the_expected_exception_classes() {
+        let scanned = scan_exception_classes(&repo_root()).unwrap();
+        let fqns: BTreeSet<&str> = scanned.iter().map(|(f, _)| f.as_str()).collect();
+        // Public bridge classes are found.
+        assert!(fqns.contains("org.apache.kafka.common.errors.TopicAuthorizationException"));
+        // The suffix-less exception classes are found.
+        assert!(fqns.contains("org.apache.kafka.common.errors.InvalidRegularExpression"));
+        assert!(fqns.contains("org.apache.kafka.common.errors.OffsetMetadataTooLarge"));
+        // The abstract bases are found.
+        assert!(fqns.contains("org.apache.kafka.common.errors.RetriableException"));
+        // The base KafkaException is found (it is `…Exception`).
+        assert!(fqns.contains("org.apache.kafka.common.KafkaException"));
+        // Out-of-scope classes are found by the scan (so the exclusion check has
+        // something to exclude) — they are excluded, not invisible.
+        assert!(fqns.contains("org.apache.kafka.clients.consumer.internals.ShareFetchException"));
+        assert!(fqns.contains("org.apache.kafka.common.security.oauthbearer.JwtRetrieverException"));
+    }
+
+    #[test]
+    fn scan_marks_abstract_classes_abstract() {
+        let scanned = scan_exception_classes(&repo_root()).unwrap();
+        let by_fqn: BTreeMap<&str, bool> = scanned.iter().map(|(f, a)| (f.as_str(), *a)).collect();
+        for a in ABSTRACT_CLASSES {
+            assert_eq!(by_fqn.get(a), Some(&true), "{a} should scan as abstract");
+        }
+        // A concrete one is not abstract.
+        assert_eq!(
+            by_fqn.get("org.apache.kafka.common.errors.TopicAuthorizationException"),
+            Some(&false)
+        );
+    }
+
+    #[test]
+    fn universe_check_passes_on_the_real_tree() {
+        // build_graph runs validate_exception_scan; it must not bail.
+        build_graph(&repo_root()).expect("the fail-closed universe check must pass");
+    }
+
+    #[test]
+    fn abstract_set_is_derived_from_java_not_hand_listed() {
+        // Every scanned in-scope `abstract` exception is in ABSTRACT_CLASSES, and
+        // every ABSTRACT_CLASSES entry is really abstract in Java (validated inside
+        // validate_exception_scan). Restate the derivation here as a direct check.
+        let scanned = scan_exception_classes(&repo_root()).unwrap();
+        let exclusions: BTreeSet<&str> = EXCLUSIONS.iter().copied().collect();
+        let scanned_abstract: BTreeSet<&str> = scanned
+            .iter()
+            .filter(|(f, ab)| *ab && !exclusions.contains(f.as_str()))
+            .map(|(f, _)| f.as_str())
+            .collect();
+        let listed: BTreeSet<&str> = ABSTRACT_CLASSES.iter().copied().collect();
+        assert_eq!(scanned_abstract, listed, "ABSTRACT_CLASSES must equal Java's abstract set");
+    }
+
+    #[test]
+    fn every_exclusion_is_a_real_scanned_class() {
+        let scanned = scan_exception_classes(&repo_root()).unwrap();
+        let fqns: BTreeSet<&str> = scanned.iter().map(|(f, _)| f.as_str()).collect();
+        for ex in EXCLUSIONS {
+            assert!(fqns.contains(ex), "stale exclusion: {ex} is not a scanned class");
+        }
     }
 }

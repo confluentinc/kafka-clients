@@ -137,3 +137,18 @@ on commit.
    test_args.py, Makefile `typecheck` target, `_error_code.py` superseded-docstring).
 
 `COMMENTS.64.md` was empty at start and end.
+
+## Critic-64 fixes (post-review, one commit)
+
+- **F1** — the generator is now fail-closed over *all* Java exceptions, not just its
+  own lists. `scan_exception_classes` walks every `…Exception` (+ the two suffix-less)
+  class under `common/`+`clients/`; `validate_exception_scan` (run in `build_graph`)
+  fails the build unless each is a BRIDGE class, an abstract base, the `KafkaException`
+  base, or an explicit `EXCLUSIONS` entry (10 out-of-scope classes, each with a reason;
+  a stale exclusion also fails). `ABSTRACT_CLASSES` is derived-and-checked against the
+  Java `abstract` modifier. 5 new xtask tests; `cargo test -p xtask` → 38.
+- **F2** — the base `KafkaError` carries no `_ffi_id` (Java's `KafkaException` has no
+  wire code), so `to_ffi_id(KafkaError(...))` raises rather than coercing to -1; the -1
+  wire code (`UNKNOWN_SERVER_ERROR`) is owned by the concrete `UnknownServerError`. 2 new
+  pytest tests pin both; `pytest test/unit` → 398 passed / 2 skipped, `mypy --strict`
+  clean.

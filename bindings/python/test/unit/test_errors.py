@@ -360,7 +360,7 @@ def test_from_ffi_error_chains_cause(monkeypatch) -> None:
     class _FakeLib:
         @staticmethod
         def KafkaError_code(handle: int) -> int:
-            return KafkaError._ffi_id
+            return 999_999  # unknown id -> base KafkaError fallback
 
         @staticmethod
         def KafkaError_message(handle: int) -> str:
@@ -373,6 +373,7 @@ def test_from_ffi_error_chains_cause(monkeypatch) -> None:
     monkeypatch.setattr(errmod, "_lib", _FakeLib)
     cause = ValueError("root cause")
     err = errmod.from_ffi_error(0, cause=cause)
+    assert type(err) is KafkaError
     assert err.__cause__ is cause
 
 
@@ -401,6 +402,43 @@ def test_to_ffi_id_round_trips() -> None:
 def test_to_ffi_id_rejects_a_non_kafka_error() -> None:
     with pytest.raises(TypeError):
         to_ffi_id(RuntimeError("not ours"))
+
+
+def test_to_ffi_id_rejects_the_bare_base_kafka_error() -> None:
+    # The base is the no-mapping fallback, never injected: it carries no _ffi_id,
+    # so to_ffi_id raises rather than silently coercing to a code (Critic 64 F2).
+    assert "_ffi_id" not in KafkaError.__dict__
+    with pytest.raises(TypeError):
+        to_ffi_id(KafkaError("x"))
+
+
+def test_unknown_server_error_owns_wire_code_minus_one(monkeypatch) -> None:
+    # The catch-all wire code -1 (UNKNOWN_SERVER_ERROR) maps to the concrete
+    # UnknownServerError, NOT the base KafkaError — that is the class a mock
+    # injects for it, and the class from_ffi_error builds for id -1.
+    import _error_code
+    from confluent_kafka.common import errors as errmod
+    from confluent_kafka.common.errors import UnknownServerError
+
+    assert UnknownServerError._ffi_id == _error_code.UNKNOWN_SERVER_ERROR == -1
+    assert _BY_FFI_ID[-1] is UnknownServerError
+    assert to_ffi_id(UnknownServerError("x")) == -1
+
+    class _FakeLib:
+        @staticmethod
+        def KafkaError_code(handle: int) -> int:
+            return -1
+
+        @staticmethod
+        def KafkaError_message(handle: int) -> str:
+            return "boom"
+
+        @staticmethod
+        def KafkaError_destroy(handle: int) -> None:
+            pass
+
+    monkeypatch.setattr(errmod, "_lib", _FakeLib)
+    assert type(errmod.from_ffi_error(0)) is UnknownServerError
 
 
 # ----------------------------------------------------------------------------

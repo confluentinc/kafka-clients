@@ -27,8 +27,6 @@ each generated subclass, used only internally to pick which class to raise.
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 
 class KafkaError(Exception):
     """Base of the Kafka error hierarchy — Java's ``KafkaException``.
@@ -38,11 +36,15 @@ class KafkaError(Exception):
     Python's native chaining (``raise ... from cause``), a cause — exactly Java's
     ``getMessage()`` / ``getCause()``. It has no error code or predicate methods on
     the public surface (Design Decisions D1).
-    """
 
-    # The base itself is raised only as the no-mapping fallback (an FFI id with no
-    # dedicated class); it inherits ``UNKNOWN_SERVER_ERROR`` for round-tripping.
-    _ffi_id: ClassVar[int] = -1  # kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+    The base carries **no** ``_ffi_id``: Java's ``KafkaException`` has no wire code,
+    and the base is only ever *raised* as the no-mapping fallback for a core error id
+    that has no dedicated class (Design Decisions D1) — it is never *injected* into
+    the core. So ``to_ffi_id(KafkaError(...))`` deliberately raises rather than
+    silently coercing to a code (Critic 64 F2). The catch-all wire code
+    ``UNKNOWN_SERVER_ERROR`` (-1) belongs to its own concrete class,
+    ``UnknownServerError``, which is what a mock injects for that error.
+    """
 
     def __str__(self) -> str:
         # ``KafkaError(message)`` -> ``message``; matches Java's ``getMessage()``.
