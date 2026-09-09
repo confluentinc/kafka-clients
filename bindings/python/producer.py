@@ -7,6 +7,16 @@ from concurrent.futures import (Future)
 
 _log = logging.getLogger(__name__)
 
+# Safety valve for the sync _wait_drained: the C send task normally hands
+# accepted records to the Rust producer within one batch interval (10ms), so this
+# bound only trips if that task is wedged. It is not derived from any config --
+# max.block.ms is held by the Rust producer and is not reachable here -- so a
+# generous constant is used, and a trip raises a retriable timeout rather than
+# letting a control op proceed with un-drained records.
+_DRAIN_WAIT_TIMEOUT_S = 60.0
+# Errors::RequestTimedOut -- retriable; used for a _wait_drained timeout.
+_DRAIN_TIMEOUT_CODE = 7
+
 
 # ProducerRecord is a C extension type imported from _confluentkafka module
 # It stores kafka_producer_ProducerRecord_t internally for optimized performance
@@ -76,6 +86,24 @@ class KafkaError(Exception):
         abortable transaction failure: it reports ``False`` here, the
         transaction is untouched, and it must not trigger an abort or retry."""
         return self._txn_requires_abort
+
+
+def _drain_timeout_error():
+    """A retriable timeout :class:`KafkaError` for a ``_wait_drained`` expiry.
+
+    Built directly (not via :meth:`KafkaError._from_c`) because there is no C
+    error handle -- the wait is entirely Python-side. Every field
+    :class:`KafkaError` exposes is set, including ``_txn_requires_abort=False``:
+    a drain-wait timeout means the records were not handed to the producer, not
+    that the transaction is corrupt, so a retry is safe."""
+    err = KafkaError.__new__(KafkaError)
+    err._code = _DRAIN_TIMEOUT_CODE
+    err._message = (
+        "Timed out waiting for accepted records to be handed to the producer")
+    err._is_retriable = True
+    err._is_fatal = False
+    err._txn_requires_abort = False
+    return err
 
 
 class RecordMetadata:
@@ -403,8 +431,36 @@ class Producer(_ProducerBase):
         done.wait()
         return resolve(box["payload"])
 
+    def _wait_drained(self):
+        """Block until every record :meth:`send` has accepted is handed to the
+        Rust producer.
+
+        Called first by :meth:`flush` and every transaction-control op so a
+        record whose :meth:`send` has *returned* -- but which the C batching task
+        has not yet flushed to the Rust producer -- is part of the operation:
+        included in a commit, discarded by an abort, completed by flush. This
+        matches Java's synchronous ``doSend`` registration. Sends racing
+        concurrently on another thread are not ordered against this call (same as
+        Java).
+
+        Waits on an interruptible ``threading.Event`` with the GIL released (like
+        :meth:`_run_sync`), bounded by ``_DRAIN_WAIT_TIMEOUT_S`` as a safety valve
+        against a wedged send task; on expiry it raises a retriable timeout
+        :class:`KafkaError` rather than letting the caller proceed with un-drained
+        records."""
+        done = threading.Event()
+        if _lib.Producer_on_drained(self.c_producer, done.set):
+            return
+        if not done.wait(timeout=_DRAIN_WAIT_TIMEOUT_S):
+            raise _drain_timeout_error()
+
     def flush(self):
-        """Flush all pending records."""
+        """Flush all pending records.
+
+        Records accepted by :meth:`send` before this call are handed to the
+        producer first (via :meth:`_wait_drained`), so a returned (un-awaited)
+        send is completed by the flush, matching Java."""
+        self._wait_drained()
         self._run_sync(
             lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
             self._resolve_void,
@@ -429,11 +485,15 @@ class Producer(_ProducerBase):
     # KeyboardInterrupt on the main thread. _resolve_void raises KafkaError on a
     # non-null completion error (0 = success).
     #
-    # Records produced inside a transaction use send(): Python's send() calls
-    # the synchronous send FFI, which registers the record before it returns, so
-    # every record produced between begin_transaction() and commit/abort is part
-    # of the transaction (committed on commit, discarded on abort). Python does
-    # not expose an async/outbox send path.
+    # Records produced inside a transaction use send(). Python's send() does NOT
+    # hand the record to the Rust producer synchronously: it appends it to a
+    # C-side batch (the tray) that the background send task later flushes. So each
+    # control op (and flush()) first calls _wait_drained(), which blocks until
+    # every record whose send() has *returned* is handed to the producer -- making
+    # it part of the transaction (committed on commit, discarded on abort),
+    # reconstructing Java's synchronous doSend registration above the tray. Sends
+    # racing concurrently on another thread are not ordered against the control op
+    # (same as Java).
 
     def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
@@ -443,13 +503,15 @@ class Producer(_ProducerBase):
         coordinator is ready; a timeout error is safe to retry. Driven through
         the async FFI so the wait stays interruptible on the main thread.
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        this call runs (via :meth:`_wait_drained`), so they fall on the intended
+        side of the transaction boundary (see the class comment above).
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
+        self._wait_drained()
         self._run_sync(
             lambda cb: _lib.Producer_init_transactions_async(self.c_producer, cb),
             self._resolve_void,
@@ -462,13 +524,15 @@ class Producer(_ProducerBase):
         have completed successfully first. Routed through the async FFI (like
         the other four control ops) for a uniform, interruptible path.
 
-        Produce records into this transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        A record whose :meth:`send` returned before this call is handed to the
+        producer first (via :meth:`_wait_drained`), so a pre-transaction send is
+        not pulled into the transaction that begins here (see the class comment).
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
+        self._wait_drained()
         self._run_sync(
             lambda cb: _lib.Producer_begin_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -490,9 +554,9 @@ class Producer(_ProducerBase):
                 ``consumer.group_metadata()`` (it owns the live handle the FFI
                 needs).
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        this call runs (via :meth:`_wait_drained`), so they are part of the
+        transaction (see the class comment above).
 
         Raises:
             KafkaError: if the call fails. If ``err.txn_requires_abort`` is
@@ -500,6 +564,7 @@ class Producer(_ProducerBase):
                 :meth:`abort_transaction`.
         """
         self._check_closed()
+        self._wait_drained()
         spec = self._offsets_to_spec(offsets)
         self._run_sync(
             lambda cb: _lib.Producer_send_offsets_to_transaction_async(
@@ -510,13 +575,13 @@ class Producer(_ProducerBase):
     def commit_transaction(self):
         """Commit the ongoing transaction (Java ``commitTransaction()``).
 
-        Flushes any pending records, then waits until the transaction is
-        committed. Driven through the async FFI so the wait stays interruptible
-        on the main thread.
+        Hands any accepted-but-not-yet-flushed records to the producer, then
+        waits until the transaction is committed. Driven through the async FFI so
+        the wait stays interruptible on the main thread.
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        the commit runs (via :meth:`_wait_drained`), so they are committed with
+        the transaction (see the class comment above).
 
         Raises:
             KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
@@ -524,6 +589,7 @@ class Producer(_ProducerBase):
                 :meth:`abort_transaction`; a timeout error is safe to retry.
         """
         self._check_closed()
+        self._wait_drained()
         self._run_sync(
             lambda cb: _lib.Producer_commit_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -536,13 +602,15 @@ class Producer(_ProducerBase):
         the abort completes. Driven through the async FFI so the wait stays
         interruptible on the main thread.
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        the abort runs (via :meth:`_wait_drained`), so they are discarded with the
+        transaction rather than leaking into the next one (see the class comment).
 
         Raises:
             KafkaError: if the abort fails.
         """
         self._check_closed()
+        self._wait_drained()
         self._run_sync(
             lambda cb: _lib.Producer_abort_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -626,6 +694,15 @@ class AsyncProducer(_ProducerBase):
         (scheduled via call_soon_threadsafe from the C send task)."""
         if not space.done():
             space.set_result(None)
+
+    @staticmethod
+    def _resolve_drained(fut):
+        """Resolve a drain-wait future. Runs on the event loop thread (scheduled
+        via call_soon_threadsafe from the C send task). Guards ``fut.done()`` so
+        a callback that lands after the awaiting coroutine was cancelled raises no
+        ``InvalidStateError``."""
+        if not fut.done():
+            fut.set_result(None)
 
     def _drain(self):
         """Resolve all buffered completions. Runs on the event loop thread."""
@@ -733,8 +810,41 @@ class AsyncProducer(_ProducerBase):
         payload = await fut
         return resolve(payload)
 
+    async def _wait_drained(self):
+        """Await until every record :meth:`send` has accepted is handed to the
+        Rust producer.
+
+        The async counterpart of :meth:`Producer._wait_drained`: called first by
+        :meth:`flush` and every transaction-control op so a returned (un-awaited)
+        send is part of the operation (committed on commit, discarded on abort,
+        completed by flush), matching Java's synchronous ``doSend`` registration.
+        Sends racing concurrently on another task are not ordered against this
+        call (same as Java).
+
+        Resolves on the event loop -- the C callback hops on via
+        ``call_soon_threadsafe`` with the same closed-loop / done-future guards as
+        the space-available path -- so it never freezes the loop and is
+        cancellable: if the awaiting task is cancelled here, the control op is
+        never submitted."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def drained_cb():
+            # Runs on the C send task; asyncio.Future is not thread-safe, so hop
+            # onto the loop. Guard a closed loop, exactly as space_cb does.
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(self._resolve_drained, fut)
+
+        if not _lib.Producer_on_drained(self.c_producer, drained_cb):
+            await fut
+
     async def flush(self):
-        """Flush all pending records."""
+        """Flush all pending records.
+
+        Records accepted by :meth:`send` before this call are handed to the
+        producer first (via :meth:`_wait_drained`), so a returned (un-awaited)
+        send is completed by the flush, matching Java."""
+        await self._wait_drained()
         await self._run_async(
             lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
             self._resolve_void,
@@ -762,11 +872,14 @@ class AsyncProducer(_ProducerBase):
     # handle if the loop is gone before delivery.
     #
     # Records produced inside a transaction use send() (``await
-    # producer.send(rec)``): Python's send() calls the synchronous send FFI,
-    # which registers the record before it returns, so every record produced
-    # between begin_transaction() and commit/abort is part of the transaction
-    # (committed on commit, discarded on abort). Python does not expose an
-    # async/outbox send path.
+    # producer.send(rec)``). Python's send() does NOT hand the record to the Rust
+    # producer synchronously: it appends it to a C-side batch (the tray) that the
+    # background send task later flushes. So each control op (and flush()) first
+    # ``await``s _wait_drained(), which suspends until every record whose send()
+    # has *returned* is handed to the producer -- making it part of the
+    # transaction (committed on commit, discarded on abort), reconstructing Java's
+    # synchronous doSend registration above the tray. Sends racing concurrently on
+    # another task are not ordered against the control op (same as Java).
 
     async def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
@@ -775,13 +888,15 @@ class AsyncProducer(_ProducerBase):
         ``transactional.id`` is configured. Awaits the coordinator handshake on
         the event loop (no executor thread); a timeout error is safe to retry.
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        this call runs (via :meth:`_wait_drained`), so they fall on the intended
+        side of the transaction boundary (see the class comment above).
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
+        await self._wait_drained()
         await self._run_async(
             lambda cb: _lib.Producer_init_transactions_async(self.c_producer, cb),
             self._resolve_void,
@@ -795,13 +910,15 @@ class AsyncProducer(_ProducerBase):
         have completed first. Awaited through the async FFI (like the other four
         control ops) for a uniform, cancellable path.
 
-        Produce records into this transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        A record whose :meth:`send` returned before this call is handed to the
+        producer first (via :meth:`_wait_drained`), so a pre-transaction send is
+        not pulled into the transaction that begins here (see the class comment).
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
+        await self._wait_drained()
         await self._run_async(
             lambda cb: _lib.Producer_begin_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -824,9 +941,9 @@ class AsyncProducer(_ProducerBase):
                 ``consumer.group_metadata()`` (it owns the live handle the FFI
                 needs).
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        this call runs (via :meth:`_wait_drained`), so they are part of the
+        transaction (see the class comment above).
 
         Raises:
             KafkaError: if the call fails. If ``err.txn_requires_abort`` is
@@ -834,6 +951,7 @@ class AsyncProducer(_ProducerBase):
                 :meth:`abort_transaction`.
         """
         self._check_closed()
+        await self._wait_drained()
         spec = self._offsets_to_spec(offsets)
         await self._run_async(
             lambda cb: _lib.Producer_send_offsets_to_transaction_async(
@@ -845,13 +963,13 @@ class AsyncProducer(_ProducerBase):
     async def commit_transaction(self):
         """Commit the ongoing transaction (Java ``commitTransaction()``).
 
-        Flushes any pending records, then awaits the commit on the event loop
-        (no executor thread), so the coroutine is cancellable and the loop is
-        never frozen.
+        Hands any accepted-but-not-yet-flushed records to the producer, then
+        awaits the commit on the event loop (no executor thread), so the
+        coroutine is cancellable and the loop is never frozen.
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        the commit runs (via :meth:`_wait_drained`), so they are committed with
+        the transaction (see the class comment above).
 
         Raises:
             KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
@@ -859,6 +977,7 @@ class AsyncProducer(_ProducerBase):
                 :meth:`abort_transaction`; a timeout error is safe to retry.
         """
         self._check_closed()
+        await self._wait_drained()
         await self._run_async(
             lambda cb: _lib.Producer_commit_transaction_async(self.c_producer, cb),
             self._resolve_void,
@@ -871,13 +990,15 @@ class AsyncProducer(_ProducerBase):
         Discards the transaction's records and staged offsets, then awaits the
         abort on the event loop (no executor thread).
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Records whose :meth:`send` has returned are handed to the producer before
+        the abort runs (via :meth:`_wait_drained`), so they are discarded with the
+        transaction rather than leaking into the next one (see the class comment).
 
         Raises:
             KafkaError: if the abort fails.
         """
         self._check_closed()
+        await self._wait_drained()
         await self._run_async(
             lambda cb: _lib.Producer_abort_transaction_async(self.c_producer, cb),
             self._resolve_void,
