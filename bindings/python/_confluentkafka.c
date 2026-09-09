@@ -1483,6 +1483,16 @@ static PyObject* py_KafkaError_message(PyObject* self, PyObject* args) {
     return PyUnicode_FromString(msg);
 }
 
+// KafkaError_source(err) -> a NEW owned error handle int for the cause, or 0
+// (None) when there is none. The caller destroys the returned handle.
+static PyObject* py_KafkaError_source(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_common_Error_t *src =
+        kafka_common_Error_source((kafka_common_Error_t*)(uintptr_t)ptr);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)src);
+}
+
 static PyObject* py_KafkaError_is_retriable(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
@@ -7552,6 +7562,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Destroy KafkaError handle"},
     {"KafkaError_new", py_KafkaError_new, METH_VARARGS,
      "Build a KafkaError handle from (code, message); returns error_int"},
+    {"KafkaError_source", py_KafkaError_source, METH_VARARGS,
+     "The cause of an error as a new owned handle int, or 0 (None)"},
     // ---- Consumer ----
     {"Consumer_MockConsumer_new", py_Consumer_MockConsumer_new, METH_VARARGS, "Create a MockConsumer"},
     {"Consumer_KafkaConsumer_new", py_Consumer_KafkaConsumer_new, METH_VARARGS, "Create a KafkaConsumer"},

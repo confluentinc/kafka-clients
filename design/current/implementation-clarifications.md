@@ -559,9 +559,13 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   `Consumer_KafkaConsumer_new_typed` FFI hands the construction error back as a handle (rather
   than the legacy `RuntimeError`) so at least the outer typed error surfaces.
 - **Alternatives:** add a `kafka_common_Error_source`/`_cause` FFI accessor so the binding can
-  chain the cause into `__cause__` (would let the tests assert the `InvalidGroupIdError` cause,
-  matching Java exactly) — a shared FFI addition (`src/ffi/common.rs`, producer-actor territory).
-- **Status:** open — owner to decide whether to add an error-cause FFI accessor.
+  chain the cause into `__cause__` (matching Java exactly).
+- **Resolution (Critic 68 F2):** DONE. Added `kafka_common_Error_source(err) -> Error*` (a new
+  owned handle for the cause, or null) to `src/ffi/common.rs` + a `KafkaError_source` C-ext native;
+  `from_ffi_error` now reads the source chain recursively and sets `__cause__`. The empty-group.id
+  test asserts `e.__cause__` is `InvalidGroupIdError` (rule 5 / spec §5.5). C test covers the
+  accessor.
+- **Status:** resolved.
 
 ### C35 — Rust core does not trim `group.id` before the empty-check (P5)
 - **Where:** `src/consumer/consumer_config.rs` / `async_kafka_consumer.rs` (group.id validation);
@@ -576,6 +580,62 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   SKIPPED with this reason (a core behaviour gap, not a binding issue — the binding must not add
   a Python-side trim/reject that the core lacks, per the parity rule).
 - **Status:** open — core fix (trim `group.id` before the empty check) would close it.
+### C36 — D7: eight consumer methods silently ignore `timeout=` (no timed FFI form) (P5)
+- **Where:** `bindings/python/confluent_kafka/consumer/{consumer,async_consumer}.py`.
+- **Rule:** python-binding rule 10 (D7): a `timeout=` on an otherwise-implemented method whose FFI
+  entry point has no timed form is silently ignored, **but every remaining unwired `timeout=` is
+  listed in the clarifications file**.
+- **The full set (8 methods)** whose `timeout=` is currently accepted-but-ignored, because the C
+  header exposes no timed form for them (only `close_with_timeout` / `close_options` are timed):
+  1. `commit(*, offsets=None, timeout=None)` — FFI `Consumer_commit_sync[_offsets]_async` has no
+     `_timeout` form.
+  2. `committed(*, partitions, timeout=None)` — `Consumer_committed_async` untimed.
+  3. `position(*, partition, timeout=None)` — `Consumer_position_async` untimed (though
+     `ConsumerHandle_position_timeout` exists on the handle, the plain consumer path does not).
+  4. `beginning_offsets(*, partitions, timeout=None)` — `Consumer_beginning_offsets_async` untimed.
+  5. `end_offsets(*, partitions, timeout=None)` — `Consumer_end_offsets_async` untimed.
+  6. `offsets_for_times(*, timestamps, timeout=None)` — `Consumer_offsets_for_times_async` untimed.
+  7. `partitions_for(*, topic, timeout=None)` — `Consumer_partitions_for_async` untimed.
+  8. `list_topics(*, timeout=None)` — `Consumer_list_topics_async` untimed.
+- **FFI additions that would wire them:** a `_timeout` async variant per method taking `timeout_ms`
+  (mirroring `Consumer_close_options` / `ConsumerHandle_position_timeout`), routing to the core's
+  `commit_sync_timeout` / `committed_timeout` / `position_timeout` / `beginning_offsets_timeout` /
+  `end_offsets_timeout` / `offsets_for_times_timeout` / `partitions_for_timeout` /
+  `list_topics_timeout` (all of which exist on `AsyncKafkaConsumer`). Until then the parameter is
+  accepted for API-shape compatibility and ignored (D7 carve-out).
+- **Status:** open — the `_timeout` FFI variants are follow-up work; the core methods already exist.
+
+### C37 — Reentrant consumer ops from a listener: handle path; mock blocking ops unsupported (P5, Critic 68 B1)
+- **Where:** `bindings/python/confluent_kafka/consumer/{_engine,_client_base,consumer,async_consumer}.py`.
+- **Rule:** consumer-threading.md §31/§41 — a listener may call back into the consumer (commit,
+  committed, seek, assign, …) from inside the rebalance callback; the reentrant call must succeed,
+  not raise `ConcurrentModificationError`.
+- **Root cause the fix addresses:** the FFI single-owner guard is held by the outer op (poll /
+  rebalance) from submission to completion, and the consumer's blocking methods take `&mut self`.
+  Admitting a reentrant op that re-borrows `&mut` (via `consumer_mut`) while the outer op holds it
+  is a Rust aliasing violation (UB), even on a mock. So the sound reentrant path is the core's
+  `ConsumerHandle` (`&self`, `Arc`-shared state, guard-free).
+- **Resolution:** when a consumer op is issued from inside a callback (tracked by a
+  `_callback_depth` set around the listener invocation in the drain), the engine routes it through
+  a lazily-created `ConsumerHandle` (`Consumer_handle` → `ConsumerHandle_*`): commit / committed /
+  position / seek / assign / pause / resume / seek_to_beginning / seek_to_end / beginning_offsets /
+  end_offsets / offsets_for_times, and the sync reads assignment / subscription / paused. This is
+  sound and §41-faithful on the REAL consumer (`KafkaConsumer` / `AsyncKafkaConsumer`), whose handle
+  supports the blocking ops over its `Arc<Mutex<..>>` state; the reentrant `await consumer.commit()`
+  in a coroutine listener works because the handle op is a synchronous `block_on` off the (non-tokio)
+  event-loop thread while the consumer's bg task keeps spinning.
+- **MockConsumer limitation:** the core deliberately rejects `ConsumerHandle` BLOCKING ops for a
+  mock ("ConsumerHandle async operations are not supported on a MockConsumer handle; drive the
+  MockConsumer directly" — `async_kafka_consumer.rs:401`), because the mock has no async pipeline
+  and driving it directly during a rebalance would alias its `&mut` borrow. So a reentrant
+  **blocking** op on a `MockConsumer` surfaces that clear `UnsupportedVersionError` (tested); a
+  reentrant **read** (assignment/subscription/paused) works (handle getters are supported on the
+  mock). The §31 regression tests therefore prove: callback on the caller thread, rebalance blocked
+  until the listener returns, reentrant reads succeed, a different thread is still rejected, and the
+  mock blocking-op limitation surfaces cleanly. On the real consumer the blocking reentrant op
+  succeeds through the handle (untestable without a broker on this surface).
+- **Status:** resolved; the mock blocking-op limitation is a faithful mirror of the core's mock
+  ConsumerHandle contract (owner may extend the mock handle later).
 ### C38 — `MockProducer` is pure Python; the Rust core's `MockProducer` + FFI mock surface back only the legacy module (Critic 67 note on C22)
 - **Where:** `confluent_kafka/producer/mock_producer.py` vs `src/producer/mock_producer.rs` + `kafka_producer_MockProducer_*`.
 - **Question:** the spec's motivation is "one Rust core serves every binding". Critic 67 verified the Rust
@@ -603,4 +663,5 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
 - **Status:** open — the package-level typing gap should be closed by adding an `__init__.pyi` (or
   explicit re-exports) to `common/errors` / `common/config`, after which these imports can move back to
   the parent re-export per CLAUDE.md.
+
 

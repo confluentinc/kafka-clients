@@ -37,6 +37,7 @@ from confluent_kafka._args import at_most_one, exactly_one
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka.common.metric import KafkaMetric
 from confluent_kafka.common.partition_info import PartitionInfo
+from confluent_kafka.common.uuid import Uuid
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from ._client_base import _ConsumerClientBase
@@ -109,16 +110,25 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
     def assign(self, *, partitions: Iterable[TopicPartition]) -> None:
         """Java ``assign(Collection<TopicPartition>)`` — manual assignment."""
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_assign", partitions)
+            return
         self._run_sync(*self._tp_op_spec(_lib.Consumer_assign_async, partitions))
 
     def pause(self, *, partitions: Iterable[TopicPartition]) -> None:
         """Java ``pause(Collection<TopicPartition>)``."""
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_pause", partitions)
+            return
         self._run_sync(*self._tp_op_spec(_lib.Consumer_pause_async, partitions))
 
     def resume(self, *, partitions: Iterable[TopicPartition]) -> None:
         """Java ``resume(Collection<TopicPartition>)``."""
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_resume", partitions)
+            return
         self._run_sync(*self._tp_op_spec(_lib.Consumer_resume_async, partitions))
 
     # ---- consume -------------------------------------------------------
@@ -137,7 +147,10 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
         """Java ``commitSync`` — commit and wait for the ack. ``commit_nowait``
         is Java ``commitAsync`` (returns immediately)."""
         self._check_closed()
-        # timeout has no timed FFI form on commit_sync yet; unwired (D7).
+        # timeout has no timed FFI form on commit_sync yet; unwired (D7, C36).
+        if self._in_callback:
+            self._reentrant_commit(offsets)
+            return
         self._run_sync(*self._commit_spec(offsets))
 
     def commit_nowait(self, *,
@@ -145,6 +158,9 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
                       on_commit: CommitCallback | None = None) -> None:
         """Java ``commitAsync`` — commit without waiting, optional callback."""
         self._check_closed()
+        if self._in_callback and on_commit is None:
+            self._reentrant_commit_nowait(offsets)
+            return
         adapter = self._wrap_commit_callback(on_commit)
         if offsets is None:
             if adapter is None:
@@ -168,12 +184,16 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
         """Java ``committed(Set)`` — the last committed offsets; a partition with
         no committed offset maps to ``None`` (D25 ruling C)."""
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_committed(list(partitions))
         return self._run_sync(*self._committed_spec(partitions))
 
     def position(self, *, partition: TopicPartition,
                  timeout: Duration | None = None) -> int:
         """Java ``position(TopicPartition)`` — the next offset to be fetched."""
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_position(partition)
         return self._run_sync(*self._position_spec(partition))
 
     @overload
@@ -188,16 +208,25 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
         OffsetAndMetadata)``. Also the poison-pill recovery device (§5.4)."""
         self._check_closed()
         exactly_one("seek", offset=offset, offset_and_metadata=offset_and_metadata)
+        if self._in_callback:
+            self._reentrant_seek(partition, offset, offset_and_metadata)
+            return
         self._run_sync(*self._seek_spec(partition, offset, offset_and_metadata))
 
     def seek_to_beginning(self, *, partitions: Iterable[TopicPartition]) -> None:
         """Java ``seekToBeginning(Collection)``."""
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_seek_to_beginning", partitions)
+            return
         self._run_sync(*self._tp_op_spec(_lib.Consumer_seek_to_beginning_async, partitions))
 
     def seek_to_end(self, *, partitions: Iterable[TopicPartition]) -> None:
         """Java ``seekToEnd(Collection)``."""
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_seek_to_end", partitions)
+            return
         self._run_sync(*self._tp_op_spec(_lib.Consumer_seek_to_end_async, partitions))
 
     def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
@@ -205,6 +234,9 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
                           ) -> dict[TopicPartition, int]:
         """Java ``beginningOffsets(Collection)``."""
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_long_offsets(
+                "ConsumerHandle_beginning_offsets", partitions)
         return self._run_sync(*self._long_offsets_spec(
             _lib.Consumer_beginning_offsets_async, partitions))
 
@@ -213,6 +245,9 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
                     ) -> dict[TopicPartition, int]:
         """Java ``endOffsets(Collection)``."""
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_long_offsets(
+                "ConsumerHandle_end_offsets", partitions)
         return self._run_sync(*self._long_offsets_spec(
             _lib.Consumer_end_offsets_async, partitions))
 
@@ -222,6 +257,8 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
         """Java ``offsetsForTimes(Map)`` — the earliest offset whose timestamp is
         ≥ the requested one, or ``None`` if none (Java null)."""
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_offsets_for_times(timestamps)
         return self._run_sync(*self._offsets_for_times_spec(timestamps))
 
     # ---- metadata & observability --------------------------------------
@@ -245,7 +282,7 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
         """Java ``unregisterMetricFromSubscription(KafkaMetric)`` (KIP-1076)."""
         raise_unsupported("unregister_metric_from_subscription")
 
-    def client_instance_id(self, *, timeout: Duration | None = None) -> Any:
+    def client_instance_id(self, *, timeout: Duration | None = None) -> Uuid:
         """Java ``clientInstanceId(Duration)`` (KIP-714 telemetry)."""
         # Java validates a negative timeout first (IllegalArgumentException).
         if timeout is not None:

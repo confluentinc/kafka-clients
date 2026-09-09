@@ -37,6 +37,7 @@ from confluent_kafka._args import at_most_one, exactly_one
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka.common.metric import KafkaMetric
 from confluent_kafka.common.partition_info import PartitionInfo
+from confluent_kafka.common.uuid import Uuid
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from ._client_base import _ConsumerClientBase
@@ -97,14 +98,23 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
 
     async def assign(self, *, partitions: Iterable[TopicPartition]) -> None:
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_assign", partitions)
+            return
         await self._run_async(*self._tp_op_spec(_lib.Consumer_assign_async, partitions))
 
     async def pause(self, *, partitions: Iterable[TopicPartition]) -> None:
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_pause", partitions)
+            return
         await self._run_async(*self._tp_op_spec(_lib.Consumer_pause_async, partitions))
 
     async def resume(self, *, partitions: Iterable[TopicPartition]) -> None:
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_resume", partitions)
+            return
         await self._run_async(*self._tp_op_spec(_lib.Consumer_resume_async, partitions))
 
     # ---- consume -------------------------------------------------------
@@ -124,12 +134,18 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
                    offset_and_metadata: OffsetAndMetadata | None = None) -> None:
         self._check_closed()
         exactly_one("seek", offset=offset, offset_and_metadata=offset_and_metadata)
+        if self._in_callback:
+            self._reentrant_seek(partition, offset, offset_and_metadata)
+            return
         await self._run_async(*self._seek_spec(partition, offset, offset_and_metadata))
 
     async def commit(self, *,
                      offsets: Mapping[TopicPartition, OffsetAndMetadata] | None = None,
                      timeout: Duration | None = None) -> None:
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_commit(offsets)
+            return
         await self._run_async(*self._commit_spec(offsets))
 
     def commit_nowait(self, *,
@@ -138,6 +154,9 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
         """Java ``commitAsync`` — returns immediately, so a plain ``def`` on both
         classes (spec §3 principle 12)."""
         self._check_closed()
+        if self._in_callback and on_commit is None:
+            self._reentrant_commit_nowait(offsets)
+            return
         adapter = self._wrap_commit_callback(on_commit)
         if offsets is None:
             error = (_lib.Consumer_commit_async(self._h)
@@ -157,27 +176,40 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
                         timeout: Duration | None = None
                         ) -> dict[TopicPartition, OffsetAndMetadata | None]:
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_committed(list(partitions))
         return await self._run_async(*self._committed_spec(partitions))
 
     async def position(self, *, partition: TopicPartition,
                        timeout: Duration | None = None) -> int:
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_position(partition)
         return await self._run_async(*self._position_spec(partition))
 
     async def seek_to_beginning(self, *,
                                 partitions: Iterable[TopicPartition]) -> None:
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_seek_to_beginning", partitions)
+            return
         await self._run_async(*self._tp_op_spec(_lib.Consumer_seek_to_beginning_async, partitions))
 
     async def seek_to_end(self, *,
                           partitions: Iterable[TopicPartition]) -> None:
         self._check_closed()
+        if self._in_callback:
+            self._reentrant_tp_op("ConsumerHandle_seek_to_end", partitions)
+            return
         await self._run_async(*self._tp_op_spec(_lib.Consumer_seek_to_end_async, partitions))
 
     async def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
                                 timeout: Duration | None = None
                                 ) -> dict[TopicPartition, int]:
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_long_offsets(
+                "ConsumerHandle_beginning_offsets", partitions)
         return await self._run_async(*self._long_offsets_spec(
             _lib.Consumer_beginning_offsets_async, partitions))
 
@@ -185,6 +217,9 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
                           timeout: Duration | None = None
                           ) -> dict[TopicPartition, int]:
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_long_offsets(
+                "ConsumerHandle_end_offsets", partitions)
         return await self._run_async(*self._long_offsets_spec(
             _lib.Consumer_end_offsets_async, partitions))
 
@@ -192,6 +227,8 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
                                 timeout: Duration | None = None
                                 ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         self._check_closed()
+        if self._in_callback:
+            return self._reentrant_offsets_for_times(timestamps)
         return await self._run_async(*self._offsets_for_times_spec(timestamps))
 
     # ---- metadata & observability --------------------------------------
@@ -212,7 +249,7 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
     def unregister_metric_from_subscription(self, *, metric: KafkaMetric) -> None:
         raise_unsupported("unregister_metric_from_subscription")
 
-    async def client_instance_id(self, *, timeout: Duration | None = None) -> Any:
+    async def client_instance_id(self, *, timeout: Duration | None = None) -> Uuid:
         if timeout is not None:
             duration_to_ms(timeout, default_ms=_DEFAULT_API_TIMEOUT_MS)
         raise_unsupported("client_instance_id")

@@ -117,6 +117,13 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
 
     The handle is consumed (destroyed) here, mirroring the existing
     ``KafkaError._from_c`` contract.
+
+    Java's cause chain (``Throwable.getCause()``) is reconstructed as Python's
+    ``__cause__``: the core error's source (``kafka_common_Error_source``) is read
+    recursively and chained, so e.g. a ``KafkaException("Failed to construct kafka
+    consumer", InvalidGroupIdException)`` surfaces the ``InvalidGroupIdError`` as
+    ``e.__cause__`` (rule 5 / spec §5.5). An explicit ``cause`` argument, when
+    given, takes precedence over the FFI source chain.
     """
     if _lib is None:
         raise RuntimeError(
@@ -125,11 +132,25 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
         )
     ffi_id: int = _lib.KafkaError_code(handle)
     message: str = _lib.KafkaError_message(handle)
+    # Read the core error's cause chain BEFORE destroying the handle, but only
+    # when the caller did not pass an explicit `cause` (which wins). Defensive
+    # via getattr so a caller/test that mocks `_lib` without the accessor still
+    # works (the source chain is simply not read).
+    source_cause: BaseException | None = None
+    if cause is None:
+        error_source = getattr(_lib, "KafkaError_source", None)
+        if error_source is not None:
+            source_handle: int = error_source(handle)
+            if source_handle:
+                # Recurses through the whole chain (each level reads its source).
+                source_cause = from_ffi_error(source_handle)
     _lib.KafkaError_destroy(handle)
     cls = _class_for_ffi_id(ffi_id)
     error = cls(message)
     if cause is not None:
         error.__cause__ = cause
+    elif source_cause is not None:
+        error.__cause__ = source_cause
     return error
 
 

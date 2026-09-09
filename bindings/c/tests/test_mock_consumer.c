@@ -780,6 +780,14 @@ static void op_cb(kafka_common_Error_t *error, void *user_data) {
 
 // Drain all pending caller-thread rebalance callbacks, acking each with success,
 // and count how many were seen.
+// A reentrancy handle used to reach back into the consumer from inside a
+// callback (§41: the listener uses the captured ConsumerHandle, not the
+// consumer's &mut methods). Set to make drain_pending exercise one handle op
+// from inside the callback window and assert it does not fail.
+static kafka_consumer_ConsumerHandle_t *g_reentrant_handle;
+static atomic_int g_reentrant_ok;
+static atomic_int g_reentrant_tried;
+
 static int drain_pending(kafka_consumer_Consumer_t *c) {
     int seen = 0;
     for (;;) {
@@ -790,6 +798,16 @@ static int drain_pending(kafka_consumer_Consumer_t *c) {
         kafka_consumer_TopicPartitionList_t *parts =
             kafka_consumer_PendingCallback_partitions(p);
         kafka_consumer_TopicPartitionList_destroy(parts);
+        if (g_reentrant_handle != NULL && atomic_load(&g_reentrant_tried) == 0) {
+            atomic_store(&g_reentrant_tried, 1);
+            // Reentrant read through the ConsumerHandle (§41) while the rebalance
+            // is in flight — the guard-free &self path, which must not deadlock
+            // or be rejected as concurrent access.
+            kafka_consumer_TopicPartitionList_t *a =
+                kafka_consumer_ConsumerHandle_assignment(g_reentrant_handle);
+            atomic_store(&g_reentrant_ok, a != NULL ? 1 : 0);
+            if (a) kafka_consumer_TopicPartitionList_destroy(a);
+        }
         kafka_consumer_Consumer_ack_pending_callback(p, NULL);
         seen++;
     }
@@ -801,6 +819,10 @@ static void test_mock_consumer_caller_thread_rebalance(void) {
     caller_thread_ctx_t notify_ctx = {0};
     kafka_consumer_Consumer_set_pending_callback_notify(
         c, pending_notify_cb, &notify_ctx, NULL);
+    // A ConsumerHandle for the reentrant read the listener performs (§41).
+    g_reentrant_handle = kafka_consumer_Consumer_handle(c);
+    atomic_store(&g_reentrant_ok, 0);
+    atomic_store(&g_reentrant_tried, 0);
 
     // Subscribe with a caller-thread listener.
     op_result_t sub_res = {0};
@@ -835,8 +857,25 @@ static void test_mock_consumer_caller_thread_rebalance(void) {
     // At least one assigned callback was delivered on this (caller) thread.
     TEST_ASSERT_TRUE(total_callbacks >= 1);
     TEST_ASSERT_TRUE(atomic_load(&notify_ctx.pending_signaled) >= 1);
+    // The reentrant read through the ConsumerHandle from inside the callback
+    // succeeded (§41) — it was not deadlocked or rejected.
+    TEST_ASSERT_TRUE(atomic_load(&g_reentrant_tried) == 1);
+    TEST_ASSERT_TRUE(atomic_load(&g_reentrant_ok) == 1);
 
+    kafka_consumer_ConsumerHandle_destroy(g_reentrant_handle);
+    g_reentrant_handle = NULL;
     kafka_consumer_Consumer_destroy(c);
+}
+
+// KafkaError source/cause accessor.
+static void test_error_source_accessor(void) {
+    // An error with no cause returns null for source.
+    kafka_common_Error_t *e = kafka_common_Error_new(-1, "no cause");
+    kafka_common_Error_t *src = kafka_common_Error_source(e);
+    TEST_ASSERT_NULL(src);
+    kafka_common_Error_destroy(e);
+    // A null handle yields null (no crash).
+    TEST_ASSERT_NULL(kafka_common_Error_source(NULL));
 }
 
 int main(void) {
@@ -864,5 +903,6 @@ int main(void) {
     RUN_TEST(test_mock_consumer_p5_mock_helpers);
     RUN_TEST(test_mock_consumer_close_options);
     RUN_TEST(test_mock_consumer_caller_thread_rebalance);
+    RUN_TEST(test_error_source_accessor);
     return UNITY_END();
 }

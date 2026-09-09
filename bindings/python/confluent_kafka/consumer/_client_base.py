@@ -294,6 +294,11 @@ class _ConsumerClientBase(_ConsumerEngine):
     def assignment(self) -> set[TopicPartition]:
         """Java ``assignment()`` — the currently assigned partitions."""
         self._check_closed()
+        # From inside a rebalance callback (§41) the consumer's own guard is held
+        # by the outer op, so read through the guard-free ConsumerHandle.
+        if self._in_callback:
+            raw = _lib.ConsumerHandle_assignment(self._handle())
+            return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
         raw = _lib.Consumer_assignment(self._h)
         if raw is None:
             raise _concurrent_error()
@@ -302,6 +307,8 @@ class _ConsumerClientBase(_ConsumerEngine):
     def subscription(self) -> set[str]:
         """Java ``subscription()`` — the currently subscribed topics."""
         self._check_closed()
+        if self._in_callback:
+            return set(_lib.ConsumerHandle_subscription(self._handle()))
         raw = _lib.Consumer_subscription(self._h)
         if raw is None:
             raise _concurrent_error()
@@ -310,6 +317,9 @@ class _ConsumerClientBase(_ConsumerEngine):
     def paused(self) -> set[TopicPartition]:
         """Java ``paused()`` — the currently paused partitions."""
         self._check_closed()
+        if self._in_callback:
+            raw = _lib.ConsumerHandle_paused(self._handle())
+            return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
         raw = _lib.Consumer_paused(self._h)
         if raw is None:
             raise _concurrent_error()

@@ -49,6 +49,7 @@ from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_rebalance_listener import ConsumerRebalanceListener
 from .offset_and_metadata import OffsetAndMetadata
+from .offset_and_timestamp import OffsetAndTimestamp
 from ._conversions import to_offset_map
 
 _T = TypeVar("_T")
@@ -87,6 +88,7 @@ class _ConsumerEngine:
     __slots__ = (
         "_h", "_closed", "_listener", "_key_deserializer", "_value_deserializer",
         "_loop", "_pending_notify_ref", "_pending_event",
+        "_reentrant_handle", "_callback_depth",
     )
 
     def _engine_init(
@@ -100,6 +102,18 @@ class _ConsumerEngine:
         self._listener: ConsumerRebalanceListener | None = None
         self._key_deserializer = key_deserializer
         self._value_deserializer = value_deserializer
+        # A guard-free reentrancy handle (§41), created lazily; used to route a
+        # consumer op the listener issues from inside a callback through the
+        # core's `&self` ConsumerHandle instead of the `&mut` consumer path
+        # (whose single-owner guard the outer op holds, and whose `&mut` access
+        # would alias the in-flight op).
+        self._reentrant_handle: int | None = None
+        # Depth of caller-thread callback delivery, THREAD-LOCAL: only the thread
+        # currently running a listener sees `_in_callback` (a different thread
+        # touching the consumer meanwhile must still hit the single-owner guard
+        # and get ConcurrentModificationError). > 0 means this thread's consumer
+        # op must go through `_reentrant_handle`.
+        self._callback_depth = threading.local()
         # Event loop remembered for async coroutine listener/callback delivery.
         self._loop: asyncio.AbstractEventLoop | None = None
         # A threading.Event set (from the dispatcher thread) when a caller-thread
@@ -118,11 +132,121 @@ class _ConsumerEngine:
             raise IllegalStateError("This consumer has already been closed.")
 
     def _destroy(self) -> None:
+        if self._reentrant_handle is not None:
+            _lib.ConsumerHandle_destroy(self._reentrant_handle)
+            self._reentrant_handle = None
         if self._h is not None:
             _lib.Consumer_destroy(self._h)
             self._h = None
         self._listener = None
         self._pending_notify_ref = None
+
+    # ---- reentrancy (a consumer op issued from inside a callback) --------
+    @property
+    def _in_callback(self) -> bool:
+        """Whether THIS thread is currently delivering a rebalance callback, so a
+        consumer op it issues must be routed through the ConsumerHandle (§41).
+        Thread-local: a different thread is unaffected."""
+        return getattr(self._callback_depth, "value", 0) > 0
+
+    def _enter_callback(self) -> None:
+        self._callback_depth.value = getattr(self._callback_depth, "value", 0) + 1
+
+    def _exit_callback(self) -> None:
+        self._callback_depth.value = getattr(self._callback_depth, "value", 0) - 1
+
+    def _handle(self) -> int:
+        """The lazily-created guard-free ConsumerHandle (§41)."""
+        if self._reentrant_handle is None:
+            self._reentrant_handle = _lib.Consumer_handle(self._h)
+        return self._reentrant_handle
+
+    # A consumer op the listener issues from inside a callback runs here, through
+    # the ConsumerHandle's `&self` FFI (guard-free, no `&mut` aliasing). Each
+    # returns/raises exactly as the consumer method would.
+    def _reentrant_commit(self, offsets: Any) -> None:
+        from ._conversions import offsets_to_spec
+        h = self._handle()
+        if offsets is None:
+            error = _lib.ConsumerHandle_commit_sync(h)
+        else:
+            error = _lib.ConsumerHandle_commit_sync_offsets(
+                h, offsets_to_spec(offsets))
+        self._raise_handle_error(error)
+
+    def _reentrant_commit_nowait(self, offsets: Any) -> None:
+        from ._conversions import offsets_to_spec
+        h = self._handle()
+        if offsets is None:
+            error = _lib.ConsumerHandle_commit_async(h)
+        else:
+            error = _lib.ConsumerHandle_commit_async_offsets(
+                h, offsets_to_spec(offsets))
+        self._raise_handle_error(error)
+
+    def _reentrant_committed(
+        self, partitions: Any
+    ) -> dict[TopicPartition, OffsetAndMetadata | None]:
+        from ._conversions import tp_to_spec, to_offset_map
+        handle, error = _lib.ConsumerHandle_committed(
+            self._handle(), tp_to_spec(partitions))
+        self._raise_handle_error(error)
+        result = to_offset_map(_lib.OffsetMap_drain(handle)) if handle else {}
+        for tp in partitions:
+            result.setdefault(tp, None)
+        return result
+
+    def _reentrant_position(self, partition: Any) -> int:
+        pos, error = _lib.ConsumerHandle_position(
+            self._handle(), partition.topic(), partition.partition())
+        self._raise_handle_error(error)
+        return int(pos)
+
+    def _reentrant_seek(self, partition: Any, offset: Any,
+                        offset_and_metadata: Any) -> None:
+        h = self._handle()
+        if offset_and_metadata is not None:
+            oam = offset_and_metadata
+            epoch = oam.leader_epoch()
+            error = _lib.ConsumerHandle_seek_with_metadata(
+                h, partition.topic(), partition.partition(), oam.offset(),
+                epoch if epoch is not None else -1, oam.metadata())
+        else:
+            error = _lib.ConsumerHandle_seek(
+                h, partition.topic(), partition.partition(), offset)
+        self._raise_handle_error(error)
+
+    def _reentrant_tp_op(self, fn_name: str, partitions: Any) -> None:
+        from ._conversions import tp_to_spec
+        fn = getattr(_lib, fn_name)
+        self._raise_handle_error(fn(self._handle(), tp_to_spec(partitions)))
+
+    def _reentrant_long_offsets(self, fn_name: str, partitions: Any) -> "dict[TopicPartition, int]":
+        from ._conversions import tp_to_spec, to_long_map
+        fn = getattr(_lib, fn_name)
+        handle, error = fn(self._handle(), tp_to_spec(partitions))
+        self._raise_handle_error(error)
+        return to_long_map(_lib.LongOffsetMap_drain(handle)) if handle else {}
+
+    def _reentrant_offsets_for_times(
+        self, timestamps: Any
+    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
+        from ._conversions import (
+            timestamps_to_spec, to_offset_and_timestamp_map,
+        )
+        handle, error = _lib.ConsumerHandle_offsets_for_times(
+            self._handle(), timestamps_to_spec(timestamps))
+        self._raise_handle_error(error)
+        result = (to_offset_and_timestamp_map(
+            _lib.OffsetAndTimestampMap_drain(handle)) if handle else {})
+        for tp in timestamps:
+            result.setdefault(tp, None)
+        return result
+
+    @staticmethod
+    def _raise_handle_error(error_handle: int) -> None:
+        if error_handle:
+            raise from_ffi_error(error_handle)
 
     # ---- caller-thread rebalance-callback drain -------------------------
     def _drain_pending_callbacks(self) -> None:
@@ -138,12 +262,17 @@ class _ConsumerEngine:
             raw = _lib.PendingCallback_partitions(pending)
             partitions = {self._to_tp(t, p) for (t, p) in raw}
             error_handle = 0
+            # Mark the callback window so a reentrant consumer op the listener
+            # issues routes through the ConsumerHandle (§41).
+            self._enter_callback()
             try:
                 result = self._invoke_listener(method, partitions)
                 if inspect.isawaitable(result):
                     error_handle = self._run_awaitable_sync(result)
             except BaseException as exc:  # noqa: BLE001 - reported to the core
                 error_handle = _error_from_exception(exc)
+            finally:
+                self._exit_callback()
             _lib.Consumer_ack_pending_callback(pending, error_handle)
 
     async def _drain_pending_callbacks_async(self) -> None:
@@ -158,12 +287,15 @@ class _ConsumerEngine:
             raw = _lib.PendingCallback_partitions(pending)
             partitions = {self._to_tp(t, p) for (t, p) in raw}
             error_handle = 0
+            self._enter_callback()
             try:
                 result = self._invoke_listener(method, partitions)
                 if inspect.isawaitable(result):
                     await result
             except BaseException as exc:  # noqa: BLE001 - reported to the core
                 error_handle = _error_from_exception(exc)
+            finally:
+                self._exit_callback()
             _lib.Consumer_ack_pending_callback(pending, error_handle)
 
     def _invoke_listener(

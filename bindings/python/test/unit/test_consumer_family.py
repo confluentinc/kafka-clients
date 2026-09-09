@@ -363,13 +363,17 @@ def _kafka_config(**overrides) -> dict:
 
 
 def test_empty_group_id_rejected():
-    """KafkaConsumerTest.testEmptyGroupId. Java wraps the construction failure in
+    """KafkaConsumerTest.testEmptyGroupId — Java wraps the construction failure in
     ``KafkaException("Failed to construct kafka consumer")`` whose cause is the
-    ``InvalidGroupIdException``. The FFI exposes only the outer error's code and
-    message (no cause chain), so the binding raises the outer ``KafkaError`` with
-    the wrapper message — recorded in the clarifications file."""
-    with pytest.raises(KafkaError, match="Failed to construct kafka consumer"):
+    ``InvalidGroupIdException`` (``e.getCause() instanceof InvalidGroupIdException``).
+    The binding now surfaces the wrapper as the outer ``KafkaError`` and chains the
+    core error's source into ``__cause__`` (via ``kafka_common_Error_source``), so
+    ``e.__cause__`` is the ``InvalidGroupIdError`` — rule 5 / spec §5.5."""
+    from confluent_kafka.common.errors._generated import InvalidGroupIdError
+    with pytest.raises(KafkaError, match="Failed to construct kafka consumer") as ei:
         KafkaConsumer(config=_kafka_config(**{"group.id": ""}))
+    assert isinstance(ei.value.__cause__, InvalidGroupIdError)
+    assert "should not be an empty string or whitespace" in str(ei.value.__cause__)
 
 
 @pytest.mark.skip(
@@ -424,29 +428,110 @@ def test_deprecated_offset_reset_strategy_enum_constructor():
 # ==========================================================================
 # consumer-threading.md §31 regression tests (REQUIRED)
 # ==========================================================================
-def test_commit_from_inside_on_partitions_revoked():
-    """§31 regression #1: a listener that calls back into the consumer from
-    inside ``on_partitions_revoked`` succeeds without deadlock — proving the
-    callback runs on the caller's thread (the deadlock the old dispatcher-thread
-    binding had). ``committed()`` is a reentrant read that goes through the
-    engine's blocking-op driver, so if the callback ran on a parked dispatcher
-    it would hang."""
-    ran_on = {}
+def test_reentrant_reads_from_inside_the_listener_succeed():
+    """§31 regression #1 (mock surface): a listener makes REAL reentrant reads
+    into the consumer from inside the rebalance callback and they SUCCEED —
+    ``assignment()`` / ``subscription()`` / ``paused()`` return, not raise
+    ``ConcurrentModificationError`` (which the old dispatcher-thread binding gave,
+    because the outer op holds the single-owner guard). The caller-thread
+    mechanism routes the reentrant read through the guard-free ConsumerHandle
+    (§41). Blocking reentrant ops (``commit``) are covered by
+    ``test_reentrant_commit_on_mock_is_unsupported`` (mock limitation) and, on the
+    real consumer, go through the handle's blocking ops."""
+    result = {}
     main_thread = threading.get_ident()
 
-    class RanHere(ConsumerRebalanceListener):
-        def on_partitions_revoked(self, partitions):
-            ran_on["revoked"] = threading.get_ident()
+    class ReadsOnAssign(ConsumerRebalanceListener):
+        def __init__(self, consumer):
+            self._c = consumer
 
         def on_partitions_assigned(self, partitions):
-            ran_on["assigned"] = threading.get_ident()
+            # Reentrant READS from inside the callback — must RETURN (not raise
+            # ConcurrentModificationError, not deadlock). On a MockConsumer the
+            # handle getters return empty; what matters is they return at all.
+            result["assignment"] = self._c.assignment()
+            result["subscription"] = self._c.subscription()
+            result["paused"] = self._c.paused()
+            result["thread"] = threading.get_ident()
 
     with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["t"], listener=RanHere())
+        c.subscribe(topics=["t"], listener=ReadsOnAssign(c))
         c.rebalance(partitions=[_tp("t", 0)])
-        c.rebalance(partitions=[_tp("t", 1)])
-        assert ran_on["assigned"] == main_thread
-        assert ran_on["revoked"] == main_thread
+        # The reentrant reads returned (the old binding raised
+        # ConcurrentModificationError / deadlocked); they ran on the caller thread.
+        assert "assignment" in result
+        assert isinstance(result["subscription"], set)
+        assert isinstance(result["paused"], set)
+        assert result["thread"] == main_thread
+
+
+def test_reentrant_commit_on_mock_is_unsupported():
+    """On a MockConsumer, a reentrant BLOCKING op inside a listener routes through
+    the ConsumerHandle, whose blocking ops the core deliberately rejects for the
+    mock ("drive the MockConsumer directly"). It surfaces a clear error, not a
+    deadlock or a crash. On the REAL consumer the same call succeeds through the
+    handle (§41) — recorded in the clarifications file."""
+    from confluent_kafka.common.errors import KafkaError
+    seen = {}
+
+    class CommitOnAssign(ConsumerRebalanceListener):
+        def __init__(self, consumer):
+            self._c = consumer
+
+        def on_partitions_assigned(self, partitions):
+            try:
+                self._c.commit(offsets={_tp("t", 0): OffsetAndMetadata(offset=7)})
+                seen["error"] = None
+            except KafkaError as exc:
+                seen["error"] = str(exc)
+
+    with MockConsumer(offset_reset_strategy="earliest") as c:
+        c.subscribe(topics=["t"], listener=CommitOnAssign(c))
+        # The listener catches the commit error, so the rebalance completes.
+        c.rebalance(partitions=[_tp("t", 0)])
+        # The reentrant commit surfaced the clear mock-handle limitation (a
+        # KafkaError), NOT a ConcurrentModificationError or a deadlock.
+        assert seen["error"] is not None
+        assert "MockConsumer" in seen["error"]
+
+
+def test_reentrant_op_from_a_different_thread_still_rejected():
+    """The reentrancy admission is scoped to the callback-delivering thread: a
+    DIFFERENT thread using the consumer while a rebalance callback is in flight
+    must still get ``ConcurrentModificationError`` (Java parity)."""
+    from confluent_kafka import ConcurrentModificationError
+
+    entered = threading.Event()
+    release = threading.Event()
+    other = {}
+
+    class Blocking(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions):
+            entered.set()
+            release.wait(WAIT * 5)
+
+    c = MockConsumer(offset_reset_strategy="earliest")
+    c.subscribe(topics=["t"], listener=Blocking())
+
+    def drive():
+        c.rebalance(partitions=[_tp("t", 0)])
+
+    worker = threading.Thread(target=drive)
+    worker.start()
+    try:
+        assert entered.wait(WAIT), "listener should have been entered"
+        # A different thread (this one) touches the consumer while the callback
+        # is delivering on the worker thread → must be rejected.
+        try:
+            c.assignment()
+            other["error"] = None
+        except ConcurrentModificationError:
+            other["error"] = "concurrent"
+    finally:
+        release.set()
+        worker.join(timeout=WAIT)
+        c.close()
+    assert other["error"] == "concurrent"
 
 
 def test_rebalance_blocks_until_listener_returns():
@@ -681,6 +766,34 @@ def test_async_rebalance_awaits_coroutine_listener():
             order.append("rebalance-returned")
         # The rebalance must not return before the coroutine listener completed.
         assert order == ["listener", "rebalance-returned"]
+
+    asyncio.run(run())
+
+
+def test_async_reentrant_reads_from_coroutine_listener():
+    """§31 regression #1 (async peer): an ``async def`` listener that reads the
+    consumer reentrantly from inside the callback succeeds — the canonical
+    decision-F shape (reentrancy admitted on the delivering task, routed through
+    the guard-free ConsumerHandle). Blocking reentrant ops on the mock are the
+    subject of ``test_reentrant_commit_on_mock_is_unsupported``."""
+    async def run():
+        result = {}
+
+        class ReadsListener(ConsumerRebalanceListener):
+            def __init__(self, consumer):
+                self._c = consumer
+
+            async def on_partitions_assigned(self, partitions):
+                # A reentrant read from inside an async listener must RETURN
+                # (not raise ConcurrentModificationError, not deadlock).
+                result["subscription"] = self._c.subscription()
+                result["assignment"] = self._c.assignment()
+
+        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
+            await c.subscribe(topics=["t"], listener=ReadsListener(c))
+            await c.rebalance(partitions=[_tp("t", 0)])
+        assert isinstance(result["subscription"], set)
+        assert "assignment" in result
 
     asyncio.run(run())
 
