@@ -162,6 +162,6 @@ root `venv/` editable install is repointed by `pip install -e .` from the worktr
 
 ## Commits
 
-- `<pending>` — P4: producer family (branch `p4-producer-wip`). Hash added on land.
+- `21b7a328` — P4: producer family (branch `p4-producer-wip`).
 
 `COMMENTS.67.md` created empty; empty at start and end.
