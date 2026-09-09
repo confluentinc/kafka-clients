@@ -27,10 +27,17 @@ from __future__ import annotations
 
 from ._generated_errors import *  # noqa: F401,F403 -- re-export the consumer errors
 from ._generated_errors import __all__ as _errors_all
+from .async_consumer import AsyncConsumer
+from .async_kafka_consumer import AsyncKafkaConsumer
+from .async_mock_consumer import AsyncMockConsumer
 from .close_options import CloseOptions
+from .consumer import Consumer
 from .consumer_group_metadata import ConsumerGroupMetadata
+from .consumer_rebalance_listener import CommitCallback, ConsumerRebalanceListener
 from .consumer_record import ConsumerRecord
 from .consumer_records import ConsumerRecords
+from .kafka_consumer import KafkaConsumer
+from .mock_consumer import MockConsumer
 from .offset_and_metadata import OffsetAndMetadata
 from .offset_and_timestamp import OffsetAndTimestamp
 from .offset_reset_strategy import OffsetResetStrategy
@@ -38,10 +45,18 @@ from .subscription_pattern import SubscriptionPattern
 
 __all__ = [
     *_errors_all,
+    "AsyncConsumer",
+    "AsyncKafkaConsumer",
+    "AsyncMockConsumer",
     "CloseOptions",
+    "CommitCallback",
+    "Consumer",
     "ConsumerGroupMetadata",
+    "ConsumerRebalanceListener",
     "ConsumerRecord",
     "ConsumerRecords",
+    "KafkaConsumer",
+    "MockConsumer",
     "OffsetAndMetadata",
     "OffsetAndTimestamp",
     "OffsetResetStrategy",

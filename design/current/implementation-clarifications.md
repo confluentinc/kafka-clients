@@ -428,6 +428,154 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   at the package root (no FFI id, mirroring the other root JDK analogs). The `disable_telemetry` path
   is already faithful (Java throws bare `IllegalStateException()`; Python raises `IllegalStateError()`).
 
+### C26 — Legacy `bindings/python/consumer.py` NOT retired (P5)
+- **Where:** `bindings/python/consumer.py` (the flat legacy module) vs the new
+  `bindings/python/confluent_kafka/consumer/` package.
+- **Question:** P5 deliverable 6 says to retire the legacy `consumer.py` "ONLY if nothing else
+  imports it".
+- **Finding:** `producer.py`, `admin.py`, `grpc_server.py`, `grpc_server_async.py`,
+  `grpc_translate.py`, and `test/performance/consumer_performance_test.py` all still
+  `import consumer` (verified 2026-09-09). Retiring it would break those.
+- **Assumption taken:** left the legacy `consumer.py` untouched; the new package is added
+  alongside it (this extends the P1 C5 duplication note). The legacy `test_consumer.py` /
+  `test_consumer_callbacks.py` stay while the legacy module lives; the new API's tests are in
+  `test/unit/test_consumer_family.py`.
+- **Status:** open — retire the legacy module once the gRPC servers / admin / producer / perf
+  tests move onto the new package.
+
+### C27 — Caller-thread rebalance-callback delivery: new FFI mechanism (P5, D25 gaps 1/8)
+- **Where:** `src/ffi/consumer.rs` (`CallerThreadRebalanceListener`, the pending-callback queue,
+  `kafka_consumer_Consumer_{set_pending_callback_notify,subscribe_caller_thread_listener_async,
+  next_pending_callback,ack_pending_callback}`, `kafka_consumer_PendingCallback_*`,
+  `kafka_consumer_MockConsumer_rebalance_async`);
+  `bindings/python/confluent_kafka/consumer/_engine.py`.
+- **Question:** §31 requires the listener / `on_commit` to run on the poll/commit/rebalance
+  CALLER's thread, and D25 gaps 1/8 require the async-listener reentrancy deadlock to be fixed
+  (not documented). The existing FFI `subscribe_with_listener` runs the C callback on the
+  consumer's *dispatcher* thread (via `dispatch_and_wait`), which violates §31 and deadlocks a
+  reentrant `await consumer.commit()`.
+- **Assumption taken:** added a new FFI path. `subscribe_caller_thread_listener_async` installs a
+  core listener that, when invoked, enqueues a `(method, partitions, ack)` record on the consumer
+  handle and parks on the ack; a one-shot C notify (`set_pending_callback_notify`) wakes the
+  Python blocking-op wait loop, which drains the queue on its OWN thread
+  (`Consumer_next_pending_callback` / `PendingCallback_method` / `_partitions` /
+  `ack_pending_callback`), runs the user listener, and acks. The op that triggered the callback
+  (poll / rebalance / subscribe-driven reconcile) is parked on the ack on a runtime worker, so
+  the bg task keeps spinning and a reentrant `ConsumerHandle` op completes (§41). `MockConsumer`
+  needed a `rebalance_async` variant (its sync `rebalance` `block_on`s on the caller thread, which
+  cannot also drain). The notify slot is shared (`Arc<Mutex<Option<..>>>`) and read at callback
+  time so the async client's per-op loop-hop notify takes effect.
+- **Alternatives:** a dedicated per-subscription dispatcher thread (breaks the single-FIFO
+  deadlock but still runs the listener off the caller's thread — a §31 violation); restructure
+  poll to run on a background thread (larger change).
+- **Status:** open — owner to confirm the caller-thread drain/ack FFI shape.
+
+### C28 — `MockConsumer.add_record` carries serialized (bytes) key/value (P5)
+- **Where:** `bindings/python/confluent_kafka/consumer/_mock_driver.py` (`add_record`).
+- **Question:** Java's `MockConsumer<K,V>.addRecord(ConsumerRecord<K,V>)` takes the already-typed
+  key/value; the spec (§6.2) says the mock applies the deserializers on `poll()`.
+- **Assumption taken:** the record passed to `add_record` carries the **serialized** (`bytes`)
+  key/value; `poll()` runs the configured deserializers on them (with the byte defaults this is a
+  pass-through). This is the only way to honour "the mock applies serdes on poll" over the FFI's
+  byte-oriented `MockConsumer_add_record`, and it makes a `MockConsumer(value_deserializer=
+  json_deserializer())` yield decoded values (spec §6.2).
+- **Alternatives:** store the typed value and skip deserialization on the mock (diverges from the
+  spec's "applies serdes on poll").
+- **Status:** open — owner to confirm the serialized-bytes `add_record` contract.
+
+### C29 — `schedule_poll_task` (general form) raises unsupported; `schedule_nop_poll_task` wired (P5)
+- **Where:** `bindings/python/confluent_kafka/consumer/_mock_driver.py` (`schedule_poll_task`).
+- **Question:** Java's `MockConsumer.schedulePollTask(Runnable)` runs a task on the next poll; the
+  Rust core's `schedule_poll_task` takes `Box<dyn FnOnce(&mut MockConsumer<K,V>)>`, which cannot
+  bridge a bare Python callable across the FFI safely (the task would need `&mut MockConsumer`).
+- **Assumption taken:** `schedule_nop_poll_task()` is fully wired (the only form `MockConsumerTest`
+  exercises); the general `schedule_poll_task(task=...)` raises `UnsupportedVersionError` (rule 10)
+  rather than a wrong bridge. No in-scope Java test uses the general form.
+- **Status:** open — owner to confirm; a future FFI could expose a bare-callable task form.
+
+### C30 — KIP-714 client telemetry gaps raise `UnsupportedVersionError` (P5, extends P4 gap)
+- **Where:** `bindings/python/confluent_kafka/consumer/{consumer,async_consumer,_mock_driver,
+  _unsupported}.py`.
+- **Question:** `Consumer.clientInstanceId`, `registerMetricForSubscription`,
+  `unregisterMetricFromSubscription`, and `MockConsumer.{setClientInstanceId,
+  injectTimeoutException,disableTelemetry,addedMetrics}` are all KIP-714 telemetry, which the Rust
+  core explicitly defers (`src/consumer/mod.rs:142`).
+- **Assumption taken:** each Python method exists with the spec's signature and raises
+  `UnsupportedVersionError` (rule 10 — an explicit `Error`, never a silent no-op), with the
+  negative-timeout check on `client_instance_id` done first so
+  `KafkaConsumerTest.testClientInstanceIdInvalidTimeout` is translatable. Same pattern as the P4
+  producer (its C4 note).
+- **Status:** open — implemented when the core lands KIP-714.
+
+### C31 — `set_poll_exception` / `set_offsets_exception` inject via wire-code round-trip (P5)
+- **Where:** `src/ffi/consumer.rs` (`error_from_code_and_message`), `_mock_driver.py`.
+- **Question:** the mock exception setters take a Python `KafkaError`; its `_ffi_id` is the CLASS
+  enum (`kafka_common_ErrorCode_t`), which diverges from the wire code for 4 inheritance classes
+  (BufferExhausted, Authentication, Authorization, SslAuthentication) — the same P4 producer trap.
+- **Assumption taken:** the FFI reuses `kafka_common_Error_new(code, message)` (= `Errors::for_code`),
+  which round-trips the wire code and collapses those 4 classes to `UnknownServerError`. Acceptable
+  for the mock test surface (no in-scope test injects one of the 4); a faithful class-enum inverse
+  (`error_from_ffi_code`) is P4/shared work in `src/ffi/common.rs` (owned by the producer actor).
+- **Status:** open — tracked with the P4 error-injection-inverse item.
+
+### C32 — `RecordDeserializationError` payload accessors attached at raise time (P5, closes C4)
+- **Where:** `bindings/python/confluent_kafka/consumer/_poll.py`
+  (`_attach_deserialization_payload`).
+- **Question:** the generated `RecordDeserializationError` is a plain leaf (P1 deferred the typed
+  payload accessors, C4). The spec (§5.5 / rule 5) requires `topic_partition()`, `offset()`,
+  `key_buffer()`, `value_buffer()`, `origin()` + `__cause__` so the poison-pill recovery
+  `seek(partition=e.topic_partition(), offset=e.offset()+1)` works.
+- **Assumption taken:** the deserialize path builds the error and attaches the payload accessors +
+  `__cause__` at raise time (the raw key/value are the batch memoryviews, which pin the batch so
+  the buffers stay valid). This is per-instance, over the record being decoded — it does not need
+  the FFI `kafka_common_Error_record_deserialization` sub-handle (which is for a core-produced
+  error, not a Python-side serde throw). The position is not advanced (§5.4).
+- **Status:** open — owner to confirm attaching accessors at raise time (vs. baking them into the
+  generated class), which closes C4 for the deserialize path.
+
+### C33 — `metrics()` values are a small `MetricValue` (P5)
+- **Where:** `bindings/python/confluent_kafka/consumer/_conversions.py` (`MetricValue`).
+- **Question:** `metrics()` returns `dict[MetricName, Metric]`, but `Metric`/`KafkaMetric` are
+  `Protocol`s (P2 C12) with no concrete class.
+- **Assumption taken:** the binding materialises each FFI metric snapshot as a small `MetricValue`
+  satisfying the `Metric` protocol (`metric_name()` / `metric_value()`). Not a Java class (Java's
+  `metrics()` returns `KafkaMetric` instances); a binding-internal value type, like the producer's
+  metric handling.
+- **Status:** open — folds into the metrics design pass (C12).
+
+### C34 — Consumer construction error surfaces the outer wrapper, not the cause (P5)
+- **Where:** `bindings/python/confluent_kafka/consumer/_config_resolve.py`;
+  `src/ffi/consumer.rs` (`kafka_consumer_KafkaConsumer_new`).
+- **Question:** Java's `KafkaConsumer` constructor wraps every failure in
+  `KafkaException("Failed to construct kafka consumer", cause)` (the Rust core does this
+  unconditionally too, `async_kafka_consumer.rs:1687`). `KafkaConsumerTest.testEmptyGroupId`
+  asserts `e.getCause() instanceof InvalidGroupIdException`.
+- **Finding:** the FFI's error handle exposes only `code` + `message` (no cause/source chain);
+  `from_ffi_error` reads those two. So the binding raises the OUTER error —
+  `KafkaError("Failed to construct kafka consumer")` (code `UnknownServerError`) — and cannot see
+  the `InvalidGroupIdException` cause.
+- **Assumption taken:** raise the outer `KafkaError` with the wrapper message (Java-faithful for
+  the outer exception); the translated tests assert that, not the buried cause. A new
+  `Consumer_KafkaConsumer_new_typed` FFI hands the construction error back as a handle (rather
+  than the legacy `RuntimeError`) so at least the outer typed error surfaces.
+- **Alternatives:** add a `kafka_common_Error_source`/`_cause` FFI accessor so the binding can
+  chain the cause into `__cause__` (would let the tests assert the `InvalidGroupIdError` cause,
+  matching Java exactly) — a shared FFI addition (`src/ffi/common.rs`, producer-actor territory).
+- **Status:** open — owner to decide whether to add an error-cause FFI accessor.
+
+### C35 — Rust core does not trim `group.id` before the empty-check (P5)
+- **Where:** `src/consumer/consumer_config.rs` / `async_kafka_consumer.rs` (group.id validation);
+  test `test_group_id_with_whitespace_rejected` (skipped).
+- **Question:** Java's `ConsumerConfig` trims `group.id`, so both `""` and `" "` reach
+  `groupId.isEmpty()` and are rejected with `InvalidGroupIdException`
+  (`KafkaConsumerTest.testGroupIdWithWhitespace`).
+- **Finding:** the Rust core rejects an EMPTY `group.id` but accepts a whitespace-only one
+  (`" "`) — it does not trim before the empty check. So the whitespace case is not rejected at
+  construction.
+- **Assumption taken:** the empty-string test is translated and passes; the whitespace test is
+  SKIPPED with this reason (a core behaviour gap, not a binding issue — the binding must not add
+  a Python-side trim/reject that the core lacks, per the parity rule).
+- **Status:** open — core fix (trim `group.id` before the empty check) would close it.
 ### C38 — `MockProducer` is pure Python; the Rust core's `MockProducer` + FFI mock surface back only the legacy module (Critic 67 note on C22)
 - **Where:** `confluent_kafka/producer/mock_producer.py` vs `src/producer/mock_producer.rs` + `kafka_producer_MockProducer_*`.
 - **Question:** the spec's motivation is "one Rust core serves every binding". Critic 67 verified the Rust
@@ -451,4 +599,8 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
 - **Alternatives:** emit the dashed `java.util.UUID` form (interoperable, but `Uuid` ↔ `java.util.UUID`
   bit mapping must be defined), or offer both.
 - **Status:** open — owner to decide interop vs type-faithfulness.
+
+- **Status:** open — the package-level typing gap should be closed by adding an `__init__.pyi` (or
+  explicit re-exports) to `common/errors` / `common/config`, after which these imports can move back to
+  the parent re-export per CLAUDE.md.
 

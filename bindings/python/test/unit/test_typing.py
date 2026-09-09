@@ -142,6 +142,55 @@ def test_error_reexport_derives_from_kafka_error() -> None:
     ``mypy --strict``)."""
     assert issubclass(TopicAuthorizationError, KafkaError)
     assert isinstance(TopicAuthorizationError("x"), KafkaError)
+def _consumer_family_types(c: object = None) -> None:
+    """P5: the consumer clients' method return types and overloads.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime (an early return guards the actual FFI calls), so no real
+    consumer is constructed."""
+    if c is None:
+        return
+    from confluent_kafka.consumer import (
+        Consumer, ConsumerRecords, KafkaConsumer, MockConsumer,
+        OffsetAndMetadata, OffsetAndTimestamp, SubscriptionPattern,
+    )
+    from confluent_kafka.common import PartitionInfo, TopicPartition
+    from confluent_kafka.common.serialization import (
+        bytes_deserializer, string_deserializer,
+    )
+
+    # K/V are inferred from the typed deserializers (spec §3 principle 7).
+    c = MockConsumer(
+        offset_reset_strategy="earliest",
+        key_deserializer=bytes_deserializer(),
+        value_deserializer=string_deserializer(),
+    )
+    assert_type(c.poll(timeout=1.0), ConsumerRecords[bytes, str])
+    assert_type(
+        c.committed(partitions=[TopicPartition(topic="t", partition=0)]),
+        "dict[TopicPartition, OffsetAndMetadata | None]",
+    )
+    assert_type(c.position(partition=TopicPartition(topic="t", partition=0)),
+                int)
+    assert_type(c.assignment(), "set[TopicPartition]")
+    assert_type(c.subscription(), "set[str]")
+    assert_type(c.current_lag(partition=TopicPartition(topic="t", partition=0)),
+                "int | None")
+    assert_type(c.list_topics(), "dict[str, list[PartitionInfo]]")
+    assert_type(c.partitions_for(topic="t"), "list[PartitionInfo]")
+    assert_type(
+        c.offsets_for_times(timestamps={}),
+        "dict[TopicPartition, OffsetAndTimestamp | None]",
+    )
+    # The subscribe/seek @overload stubs must accept each disjoint form.
+    c.subscribe(topics=["t"])
+    c.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
+    c.seek(partition=TopicPartition(topic="t", partition=0), offset=5)
+    c.seek(partition=TopicPartition(topic="t", partition=0),
+           offset_and_metadata=OffsetAndMetadata(offset=5))
+    _kc: type[KafkaConsumer[bytes, bytes]] = KafkaConsumer
+    _base: type[Consumer[bytes, bytes]] = MockConsumer
+    del _kc, _base
 
 
 def test_typing_module_imports() -> None:
@@ -153,3 +202,4 @@ def test_typing_module_imports() -> None:
     _sentinel_return_types()
     _serde_factory_types()
     _error_reexport_is_typed()
+    _consumer_family_types()
