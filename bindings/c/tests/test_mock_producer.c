@@ -312,6 +312,37 @@ void test_send_batch(void) {
     kafka_producer_Producer_destroy(producer);
 }
 
+// A record carrying headers (B1) and a null value / tombstone (B2) is accepted
+// by the send path. (The C mock exposes no per-record header accessor, so this
+// verifies the struct+entry point compile and accept the data; the header/value
+// preservation is asserted in the Rust FFI test test_send_batch_carries_headers_and_tombstone.)
+void test_send_batch_headers_and_tombstone(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t key[] = "k";
+    const uint8_t hval[] = "abc";
+    kafka_producer_ProducerRecordHeader_t headers[2] = {
+        { "trace-id", hval, (int32_t)sizeof(hval) - 1 },
+        { "null-header", NULL, -1 },  // null header value
+    };
+    kafka_producer_ProducerRecord_t records[1] = {
+        { "t", -1, -1, key, (int32_t)sizeof(key) - 1,
+          NULL, -1,          // tombstone (null value)
+          headers, 2 },
+    };
+    kafka_producer_FutureRecordMetadata_t *futures[1] = { NULL };
+    kafka_common_Error_t *errors[1] = { NULL };
+
+    int32_t sent = kafka_producer_Producer_send_batch(
+        producer, records, 1, futures, errors);
+    TEST_ASSERT_EQUAL_INT32(1, sent);
+    TEST_ASSERT_NULL(errors[0]);
+    TEST_ASSERT_NOT_NULL(futures[0]);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    kafka_producer_FutureRecordMetadata_destroy(futures[0]);
+    kafka_producer_Producer_destroy(producer);
+}
+
 void test_send_batch_partial_failure(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
@@ -2133,6 +2164,7 @@ int main(void) {
 
     /* Batch */
     RUN_TEST(test_send_batch);
+    RUN_TEST(test_send_batch_headers_and_tombstone);
     RUN_TEST(test_send_batch_partial_failure);
 
     /* Close */

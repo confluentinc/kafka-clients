@@ -546,8 +546,13 @@ class MockProducer(_MockSurfaceMixin[K, V], Producer[K, V]):
                  partitioner: object | None = None,
                  key_serializer: Serializer[Any] = bytes_serializer(),
                  value_serializer: Serializer[Any] = bytes_serializer()) -> None:
-        # The mock is a pure-Python synchronous double (C22) — no native
-        # producer handle; the base guard is not invoked (its state is unused).
+        # Initialise the base state (Producer.__init__ → _ProducerState) so any
+        # inherited Producer method the mock does not override still finds its
+        # fields (N4 hardening); the mock is otherwise a pure-Python synchronous
+        # double (C22) whose _c_producer stays None and whose state lives in
+        # _core. Producer.__init__'s abstract-base guard does not fire (this is
+        # MockProducer, not the bare Producer).
+        Producer.__init__(self)
         _reject_partitioner(partitioner)
         _reject_cluster(cluster)
         ks, vs = _resolve_mock_serdes(key_serializer, value_serializer)
@@ -610,6 +615,8 @@ class AsyncMockProducer(_MockSurfaceMixin[K, V], AsyncProducer[K, V]):
                  partitioner: object | None = None,
                  key_serializer: Serializer[Any] = bytes_serializer(),
                  value_serializer: Serializer[Any] = bytes_serializer()) -> None:
+        # See MockProducer.__init__ (N4 hardening): initialise base state.
+        AsyncProducer.__init__(self)
         _reject_partitioner(partitioner)
         _reject_cluster(cluster)
         ks, vs = _resolve_mock_serdes(key_serializer, value_serializer)

@@ -210,8 +210,14 @@ def _proto_to_producer_record(proto_record):
     tombstone, which the new ``ProducerRecord`` accepts as ``None`` (unlike the
     retired wrapper, which forced an empty bytestring). ``partition`` /
     ``timestamp`` are ``None`` when unset (Java's null), not the old ``-1``
-    sentinel. Headers are not carried by the proto record, so they default to
-    empty."""
+    sentinel.
+
+    The producer send path DOES carry ProducerRecord headers end-to-end now (the
+    native record + FFI struct + Rust send preserve them — B1), but the gRPC
+    *producer* proto ``ProducerRecord`` has no ``headers`` field, so this
+    translation cannot forward them; they default to empty on this arm. Adding a
+    headers field to the producer proto is a separate gRPC-contract change. (The
+    consumer arm's proto DOES carry headers — see ``_consumer_record_to_proto``.)"""
     value = proto_record.value if proto_record.HasField("value") else None
     key = proto_record.key if proto_record.HasField("key") else None
     partition = proto_record.partition if proto_record.HasField("partition") else None

@@ -742,3 +742,38 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   suspend + close-unblocks + below-bound contracts, which are the broker-free half. This is a
   faithful split, not a silent drop: the full/space-available path is now covered.
 - **Status:** resolved (unit coverage restored; the delivery-resume leg is an integration item).
+
+### C45 — Producer send-path headers (B1) + tombstone (B2): header VALUES are copied once at the C→Rust boundary (P7)
+- **Where:** `src/ffi/producer.rs` (`kafka_producer_ProducerRecord_t.headers`,
+  `build_record_headers`, `send_batch`/`send_batch_async`); `_confluentkafka.c`
+  (`ProducerRecord_init` / `producer_record_build_headers`);
+  `producer/_base.py` (`_native_record`).
+- **Question:** Critic 70 B1 — the real `KafkaProducer` send path silently dropped `ProducerRecord`
+  headers; B2 — a null value (`value=None`) was sent as empty bytes (`b""`) instead of a Java
+  tombstone. Both are now fixed end-to-end (Python record → native `_confluentkafka.ProducerRecord`
+  struct → Rust `send_batch` → the produced record). The FFI struct gained a `headers` pointer +
+  `header_count`, and the native ctor accepts a `None` value (`value_len == -1`, exactly as it
+  already did for a null key).
+- **Zero-copy nuance (CLAUDE.md §12):** the record's **key/value** bytes are NOT copied by the
+  binding (serialized once, then borrowed straight into the batch buffer — unchanged). Header
+  **values**, however, ARE copied once at the C→Rust boundary in `build_record_headers`, because the
+  core's header type (`RecordHeaders` / `RecordHeader`) owns its value as `Option<Vec<u8>>` — headers
+  are always owned in the core, even on the borrowed-slice Kafka send path (`ProducerRecord.headers`
+  is a non-generic `RecordHeaders`, not parameterized over the value type). Making header values
+  zero-copy would require refactoring `RecordHeaders` to be borrow-generic through the whole
+  accumulator/wire path — a large core change out of P7 scope. The header **keys** are encoded once
+  (UTF-8 already, copied as owned C strings). This is the same ownership the batch / owned-record
+  paths already used (`.to_vec()`), so it is not a new copy the binding introduces; it is the core's
+  pre-existing header ownership.
+- **Assumption taken:** carry headers through by copying values into the owned `RecordHeaders` at the
+  boundary; do not refactor the core header type in P7. Verified: Rust FFI test
+  `test_send_batch_carries_headers_and_tombstone` (headers + tombstone reach the produced record via
+  the mock's history), C test `test_send_batch_headers_and_tombstone`, Python tests in
+  `TestSendPathHeadersAndTombstone` (headers + null value reach the native FFI struct, sync + async;
+  the pure-Python `MockProducer` preserves both directly).
+- **gRPC integration gap:** the producer proto `ProducerRecord` has no `headers` field, so the gRPC
+  producer arm (`grpc_translate.py::_proto_to_producer_record`) cannot forward headers — a separate
+  gRPC-contract change (the comment there was corrected to say so; the consumer arm's proto DOES
+  carry headers). So the header round-trip is unit/C/Rust-tested here, not gRPC-integration-tested.
+- **Status:** open — owner to confirm the one-copy-of-header-values boundary (vs a core
+  `RecordHeaders` borrow-generic refactor) and whether the producer proto should gain a headers field.

@@ -160,7 +160,8 @@ class _ProducerState:
     def _native_record(self, record: object) -> object:
         """Serialize the record's key/value on the caller's thread (spec §5.4)
         and build the native ``_confluentkafka.ProducerRecord`` that carries the
-        serialized ``bytes`` into the send path with no copy (C10)."""
+        serialized ``bytes`` (and the record's headers) into the send path with no
+        further copy of the key/value bytes (C10)."""
         topic = record.topic()               # type: ignore[attr-defined]
         key = self._serialize(topic, record.key(),   # type: ignore[attr-defined]
                               self._key_serializer)
@@ -168,14 +169,17 @@ class _ProducerState:
                                 self._value_serializer)
         partition = record.partition()       # type: ignore[attr-defined]
         timestamp = record.timestamp()       # type: ignore[attr-defined]
-        # The native ctor requires a non-None bytes value; Java allows a null
-        # value (tombstone). Pass empty bytes for None on the value slot.
+        headers = record.headers()           # type: ignore[attr-defined]
+        # A None value is a Java tombstone (the native ctor / FFI carry it as a
+        # null value, value_len == -1); headers are passed through as the
+        # already-owned (str, bytes|None) pairs the record holds.
         return _lib.ProducerRecord(
             topic,
-            value if value is not None else b"",
+            value,
             key,
             partition if partition is not None else -1,
             timestamp if timestamp is not None else -1,
+            tuple(headers),
         )
 
 

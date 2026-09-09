@@ -267,6 +267,22 @@ pub struct kafka_producer_ProducerProperties_t {
     _private: [u8; 0],
 }
 
+/// A single record header (`org.apache.kafka.common.header.Header`) on the send
+/// path: a UTF-8 key and a bytes-like value.
+///
+/// The value buffer is **not** copied by the caller — the producer reads it while
+/// building the record; a `-1` `value_len` is a null header value (Java allows a
+/// null `Header` value).
+#[repr(C)]
+pub struct kafka_producer_ProducerRecordHeader_t {
+    /// Null-terminated UTF-8 header key.
+    pub key: *const c_char,
+    /// Pointer to value bytes, or null if `value_len` is `-1`.
+    pub value: *const u8,
+    /// Value length in bytes, or `-1` for a null value.
+    pub value_len: i32,
+}
+
 /// A single record in a batch send call.
 ///
 /// All fields use fixed-width types for cross-platform FFI portability.
@@ -280,6 +296,9 @@ pub struct kafka_producer_ProducerProperties_t {
 ///   a valid buffer of that length.
 /// - `value_len`: Use `-1` to indicate no value. When `>= 0`, `value` must
 ///   point to a valid buffer of that length.
+/// - `headers` / `header_count`: `headers` points to `header_count` header
+///   entries, or is null when `header_count` is `0`. Headers preserve insertion
+///   order and are read (not copied) while the record is built.
 #[repr(C)]
 pub struct kafka_producer_ProducerRecord_t {
     /// Null-terminated UTF-8 topic name.
@@ -296,6 +315,10 @@ pub struct kafka_producer_ProducerRecord_t {
     pub value: *const u8,
     /// Value length in bytes, or -1 for no value.
     pub value_len: i32,
+    /// Pointer to `header_count` header entries, or null when `header_count == 0`.
+    pub headers: *const kafka_producer_ProducerRecordHeader_t,
+    /// Number of header entries pointed to by `headers`.
+    pub header_count: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +366,39 @@ unsafe fn metadata_ref(metadata: *const kafka_producer_RecordMetadata_t) -> &'st
     unsafe { &*(metadata as *const RecordMetadataInner) }
 }
 
+/// Build [`RecordHeaders`] from a C `kafka_producer_ProducerRecordHeader_t`
+/// array. Preserves insertion order; a `-1` `value_len` is a null header value.
+///
+/// The core's `RecordHeaders` owns its header values (`Option<Vec<u8>>`), so the
+/// value bytes are copied here at the C→Rust boundary — the same ownership the
+/// batch / owned-record paths already use. Header keys are decoded once. There
+/// is no per-record copy of the record's key/value bytes (those stay borrowed).
+///
+/// # Safety
+///
+/// When `count > 0`, `headers` must point to `count` valid entries, each with a
+/// valid NUL-terminated `key` and a `value` valid for `value_len` bytes when
+/// `value_len >= 0`.
+unsafe fn build_record_headers(
+    headers: *const kafka_producer_ProducerRecordHeader_t,
+    count: i32,
+) -> crate::common::header::RecordHeaders {
+    use crate::common::header::{RecordHeader, RecordHeaders};
+    if headers.is_null() || count <= 0 {
+        return RecordHeaders::new();
+    }
+    let entries = unsafe { std::slice::from_raw_parts(headers, count as usize) };
+    RecordHeaders::new_header_iter(entries.iter().map(|h| {
+        let key = unsafe { CStr::from_ptr(h.key) }.to_string_lossy().into_owned();
+        let value = if h.value_len >= 0 && !h.value.is_null() {
+            Some(unsafe { std::slice::from_raw_parts(h.value, h.value_len as usize) }.to_vec())
+        } else {
+            None
+        };
+        RecordHeader::new(key, value)
+    }))
+}
+
 /// Send a record through the producer.
 ///
 /// For [`ProducerKind::Kafka`] this builds a `ProducerRecord<&[u8], &[u8]>`
@@ -357,7 +413,7 @@ fn producer_send(
     let rt = kind.runtime();
     match kind {
         ProducerKind::Mock(mock, _) => {
-            let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
+            let (topic, partition, timestamp, headers, key, value) = record.into_parts();
             let owned_record = ProducerRecord::new_options(
                 ProducerRecordOptionsBuilder::new()
                     .set_topic(topic)
@@ -365,6 +421,7 @@ fn producer_send(
                     .set_partition(partition)
                     .set_timestamp(timestamp)
                     .set_key(key.map(|k| k.to_vec()))
+                    .set_headers(Some(headers))
                     .build(),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
@@ -387,7 +444,7 @@ fn producer_send_with_callback(
     let rt = kind.runtime();
     match kind {
         ProducerKind::Mock(mock, _) => {
-            let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
+            let (topic, partition, timestamp, headers, key, value) = record.into_parts();
             let owned_record = ProducerRecord::new_options(
                 ProducerRecordOptionsBuilder::new()
                     .set_topic(topic)
@@ -395,6 +452,7 @@ fn producer_send_with_callback(
                     .set_partition(partition)
                     .set_timestamp(timestamp)
                     .set_key(key.map(|k| k.to_vec()))
+                    .set_headers(Some(headers))
                     .build(),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
@@ -1565,6 +1623,7 @@ unsafe fn send_batch_inner(
 
         let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
         let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
+        let headers = unsafe { build_record_headers(rec.headers, rec.header_count) };
 
         let record = match ProducerRecord::new_options(
             ProducerRecordOptionsBuilder::new()
@@ -1573,6 +1632,7 @@ unsafe fn send_batch_inner(
                 .set_partition(partition)
                 .set_timestamp(timestamp)
                 .set_key(key)
+                .set_headers(Some(headers))
                 .build(),
         ) {
             Ok(r) => r,
@@ -1851,6 +1911,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
 
         let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
         let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
+        // Headers are copied into owned RecordHeaders here (not borrowed like
+        // key/value), so they need not outlive this call.
+        let headers = unsafe { build_record_headers(rec.headers, rec.header_count) };
 
         let record = match ProducerRecord::new_options(
             ProducerRecordOptionsBuilder::new()
@@ -1859,6 +1922,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
                 .set_partition(partition)
                 .set_timestamp(timestamp)
                 .set_key(key)
+                .set_headers(Some(headers))
                 .build(),
         ) {
             Ok(r) => r,
@@ -4633,6 +4697,8 @@ mod tests {
                 key_len: key.len() as i32,
                 value: value.as_ptr(),
                 value_len: value.len() as i32,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
             kafka_producer_ProducerRecord_t {
                 topic: topic2.as_ptr(),
@@ -4642,6 +4708,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
         ];
 
@@ -4670,6 +4738,77 @@ mod tests {
             for f in &futures {
                 kafka_producer_FutureRecordMetadata_destroy(*f);
             }
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
+    /// `send_batch` carries the record's headers (B1) and a null value / tombstone
+    /// (B2) through to the produced record — verified via the mock's history.
+    #[test]
+    fn test_send_batch_carries_headers_and_tombstone() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let topic = CString::new("t").unwrap();
+        let key = b"k";
+        let h0_key = CString::new("trace-id").unwrap();
+        let h0_val = b"abc";
+        let h1_key = CString::new("null-header").unwrap();
+        let headers = [
+            kafka_producer_ProducerRecordHeader_t {
+                key: h0_key.as_ptr(),
+                value: h0_val.as_ptr(),
+                value_len: h0_val.len() as i32,
+            },
+            kafka_producer_ProducerRecordHeader_t {
+                key: h1_key.as_ptr(),
+                value: std::ptr::null(),
+                value_len: -1, // null header value
+            },
+        ];
+        let records = [kafka_producer_ProducerRecord_t {
+            topic: topic.as_ptr(),
+            partition: -1,
+            timestamp: -1,
+            key: key.as_ptr(),
+            key_len: key.len() as i32,
+            value: std::ptr::null(),
+            value_len: -1, // tombstone (null value)
+            headers: headers.as_ptr(),
+            header_count: 2,
+        }];
+        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
+        let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
+
+        unsafe {
+            let sent = kafka_producer_Producer_send_batch(
+                producer,
+                records.as_ptr(),
+                1,
+                futures.as_mut_ptr(),
+                errors.as_mut_ptr(),
+            );
+            assert_eq!(sent, 1);
+
+            // Inspect the mock's stored record: headers preserved (order + null),
+            // value is None (tombstone).
+            use crate::common::header::{Header, Headers, RecordHeader};
+            let guard = producer_ref(producer).lock().unwrap();
+            if let ProducerKind::Mock(mock, _) = &*guard {
+                let history = mock.history();
+                assert_eq!(history.len(), 1);
+                let rec = &history[0];
+                assert!(rec.value().is_none(), "tombstone value must be None");
+                let hs: Vec<&RecordHeader> = rec.headers().iter().collect();
+                assert_eq!(hs.len(), 2);
+                assert_eq!(hs[0].key(), "trace-id");
+                assert_eq!(hs[0].value(), Some(&b"abc"[..]));
+                assert_eq!(hs[1].key(), "null-header");
+                assert_eq!(hs[1].value(), None);
+            } else {
+                panic!("expected a mock producer");
+            }
+            drop(guard);
+
+            kafka_producer_FutureRecordMetadata_destroy(futures[0]);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5185,6 +5324,8 @@ mod tests {
             key_len: -1,
             value: std::ptr::null(),
             value_len: -1,
+            headers: std::ptr::null(),
+            header_count: 0,
         }];
         let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
@@ -5232,6 +5373,8 @@ mod tests {
             key_len: -1,
             value: std::ptr::null(),
             value_len: -1,
+            headers: std::ptr::null(),
+            header_count: 0,
         }];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
@@ -5260,6 +5403,8 @@ mod tests {
             key_len: -1,
             value: std::ptr::null(),
             value_len: -1,
+            headers: std::ptr::null(),
+            header_count: 0,
         }];
         let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
 
@@ -5288,6 +5433,8 @@ mod tests {
             key_len: -1,
             value: std::ptr::null(),
             value_len: -1,
+            headers: std::ptr::null(),
+            header_count: 0,
         }];
         let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
@@ -5322,6 +5469,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             };
             let sent = kafka_producer_Producer_send_batch(producer, &dummy_record, 0, &mut futures, &mut errors);
             assert_eq!(sent, 0);
@@ -5347,6 +5496,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
             kafka_producer_ProducerRecord_t {
                 topic: std::ptr::null(), // Error at index 1
@@ -5356,6 +5507,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
             kafka_producer_ProducerRecord_t {
                 topic: topic3.as_ptr(),
@@ -5365,6 +5518,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
         ];
 
@@ -5417,6 +5572,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
             kafka_producer_ProducerRecord_t {
                 topic: std::ptr::null(),
@@ -5426,6 +5583,8 @@ mod tests {
                 key_len: -1,
                 value: std::ptr::null(),
                 value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
             },
         ];
 

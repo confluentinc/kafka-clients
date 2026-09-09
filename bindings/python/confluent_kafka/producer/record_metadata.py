@@ -39,6 +39,9 @@ class RecordMetadata:
     int serializedValueSize)``).
     """
 
+    # Java: public static final int UNKNOWN_PARTITION = -1 (RecordMetadata.java:31).
+    UNKNOWN_PARTITION: int = -1
+
     __slots__ = ("_topic_partition", "_offset", "_timestamp",
                  "_serialized_key_size", "_serialized_value_size")
 

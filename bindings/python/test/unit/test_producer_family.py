@@ -1018,3 +1018,80 @@ class TestProducerBackpressure:
             await asyncio.wait_for(fut, timeout=2.0)
         # Teardown while paused (records never delivered to the unreachable broker).
         await asyncio.wait_for(p.close(timeout=2.0), timeout=10.0)
+
+
+# ===========================================================================
+# Send-path headers (B1) + tombstone / null value (B2)
+# ===========================================================================
+
+class TestSendPathHeadersAndTombstone:
+    """The real KafkaProducer send path must carry ProducerRecord headers (B1)
+    and a null value as a tombstone (B2) through to the native FFI struct. These
+    assert at the native boundary (the struct the Rust send path reads), built by
+    Producer._native_record; the end-to-end broker delivery is P7 integration.
+    """
+
+    def _native_for(self, record):
+        # Build the native record exactly as the real producer's send path does,
+        # without a broker: a KafkaProducer with the default bytes serializers.
+        p = KafkaProducer(config={"bootstrap.servers": "localhost:9"})
+        try:
+            return p._native_record(record)
+        finally:
+            p.close()
+
+    def test_headers_reach_the_ffi_struct(self):
+        rec = ProducerRecord(
+            topic=TOPIC, key=b"k", value=b"v",
+            headers=[("trace-id", b"abc"), ("null-header", None)])
+        native = self._native_for(rec)
+        # native.headers reconstructs the FFI struct's header array.
+        assert native.headers == [("trace-id", b"abc"), ("null-header", None)]
+
+    def test_no_headers_is_empty(self):
+        rec = ProducerRecord(topic=TOPIC, key=b"k", value=b"v")
+        native = self._native_for(rec)
+        assert native.headers == []
+
+    def test_null_value_reaches_ffi_as_tombstone(self):
+        # value=None must cross as a null value (value_len == -1), NOT b"".
+        rec = ProducerRecord(topic=TOPIC, key=b"k", value=None)
+        native = self._native_for(rec)
+        assert native.value is None
+        assert native.value_len == -1
+
+    def test_empty_value_is_not_a_tombstone(self):
+        # An explicit empty-bytes value is NOT a tombstone (value_len == 0).
+        rec = ProducerRecord(topic=TOPIC, key=b"k", value=b"")
+        native = self._native_for(rec)
+        assert native.value == b""
+        assert native.value_len == 0
+
+    async def test_async_headers_and_tombstone_reach_ffi(self):
+        # Same at the AsyncKafkaProducer boundary (its _native_record is shared).
+        from confluent_kafka.producer import AsyncKafkaProducer
+        p = AsyncKafkaProducer(config={"bootstrap.servers": "localhost:9"})
+        try:
+            rec = ProducerRecord(
+                topic=TOPIC, key=b"k", value=None,
+                headers=[("h", b"1")])
+            native = p._native_record(rec)
+            assert native.headers == [("h", b"1")]
+            assert native.value is None
+            assert native.value_len == -1
+        finally:
+            await p.close()
+
+    def test_mock_producer_preserves_headers_and_tombstone(self):
+        # The pure-Python MockProducer keeps the original record, so history
+        # reflects headers + a None value directly (Java-faithful).
+        p = MockProducer(auto_complete=True)
+        rec = ProducerRecord(
+            topic=TOPIC, key=b"k", value=None,
+            headers=[("h", b"1"), ("n", None)])
+        p.send(record=rec)
+        hist = p.history()
+        assert len(hist) == 1
+        assert hist[0].value() is None
+        assert hist[0].headers() == (("h", b"1"), ("n", None))
+        p.close()
