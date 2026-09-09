@@ -450,21 +450,74 @@ def test_consumer_records_empty() -> None:
     assert empty.next_offsets() == {}
 
 
-def test_next_offsets_tainted_returns_empty() -> None:
-    # Java: the deprecated records-only constructor makes next_offsets() return
-    # an empty map (and log), NOT raise.
+_LOGGER_NAME = "confluent_kafka.consumer.consumer_records"
+
+
+def test_next_offsets_logs_error_periodically_when_tainted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Java testNextOffsetsLogsErrorPeriodicallyWhenConstructedWithDeprecated
+    # Constructor: the tainted (records-only) instance returns an empty map and
+    # logs a rate-limited ERROR — exactly once per interval, not once per call.
+    import confluent_kafka.consumer.consumer_records as cr_mod
+
     tp = TopicPartition(topic="topic", partition=0)
     rec = ConsumerRecord(topic="topic", partition=0, offset=0, key=0,
                          value="value")
-    cr: ConsumerRecords[int, str] = ConsumerRecords(records={tp: [rec]})
-    assert cr.next_offsets() == {}
+    records = {tp: [rec]}
+
+    previous = cr_mod._tainted_next_offsets_last_log_s
+    try:
+        # Force the rate-limit window to have elapsed so the next tainted call
+        # logs (Java sets the AtomicLong one interval into the past).
+        cr_mod._tainted_next_offsets_last_log_s = (
+            cr_mod._TAINT_LOG_INTERVAL_S * -2)
+
+        with caplog.at_level("ERROR", logger=_LOGGER_NAME):
+            cr: ConsumerRecords[int, str] = ConsumerRecords(records=records)
+            # Deprecated constructor supplies no next offsets -> empty map.
+            assert cr.next_offsets() == {}
+
+            errors = [r for r in caplog.records if r.levelname == "ERROR"]
+            assert len(errors) == 1
+            assert "deprecated records-only" in errors[0].getMessage()
+
+            # Within the window, neither repeated calls nor new tainted
+            # instances log again.
+            assert cr.next_offsets() == {}
+            assert ConsumerRecords(records=records).next_offsets() == {}
+            assert len([r for r in caplog.records
+                        if r.levelname == "ERROR"]) == 1
+
+            # Once the window has elapsed, the error is logged again.
+            cr_mod._tainted_next_offsets_last_log_s = (
+                cr_mod._TAINT_LOG_INTERVAL_S * -2)
+            assert cr.next_offsets() == {}
+            assert len([r for r in caplog.records
+                        if r.levelname == "ERROR"]) == 2
+    finally:
+        cr_mod._tainted_next_offsets_last_log_s = previous
 
 
-def test_next_offsets_supplied_returns_map() -> None:
+def test_next_offsets_does_not_log_when_supplied(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Java testNextOffsetsDoesNotLogErrorWhenConstructedWithNextOffsets.
     tp = TopicPartition(topic="topic", partition=0)
     rec = ConsumerRecord(topic="topic", partition=0, offset=0, key=0,
                          value="value")
     next_offsets = {tp: OffsetAndMetadata(offset=1)}
-    cr: ConsumerRecords[int, str] = ConsumerRecords(
-        records={tp: [rec]}, next_offsets=next_offsets)
-    assert cr.next_offsets() == next_offsets
+    with caplog.at_level("ERROR", logger=_LOGGER_NAME):
+        cr: ConsumerRecords[int, str] = ConsumerRecords(
+            records={tp: [rec]}, next_offsets=next_offsets)
+        assert cr.next_offsets() == next_offsets
+        assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+
+
+def test_next_offsets_does_not_log_for_empty_records(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Java testNextOffsetsDoesNotLogErrorForEmptyRecords.
+    with caplog.at_level("ERROR", logger=_LOGGER_NAME):
+        assert ConsumerRecords.empty().next_offsets() == {}
+        assert [r for r in caplog.records if r.levelname == "ERROR"] == []

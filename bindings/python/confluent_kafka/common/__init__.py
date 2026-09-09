@@ -23,7 +23,7 @@ error hierarchy and the serialization surface.
 
 from __future__ import annotations
 
-from .headers import Headers, validate_written_headers
+from .headers import Headers
 from .metric import KafkaMetric, Metric
 from .metric_name import MetricName
 from .node import Node
@@ -44,5 +44,4 @@ __all__ = [
     "TopicIdPartition",
     "TopicPartition",
     "Uuid",
-    "validate_written_headers",
 ]

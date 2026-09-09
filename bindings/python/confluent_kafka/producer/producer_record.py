@@ -35,7 +35,7 @@ from __future__ import annotations
 from typing import Generic, TypeVar
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common.headers import Headers, validate_written_headers
+from confluent_kafka.common.headers import Headers, _validate_written_headers
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -71,7 +71,7 @@ class ProducerRecord(Generic[K, V]):
         self._key = key
         self._value = value
         # Headers normalized to the owned tuple form (Java new RecordHeaders(..)).
-        self._headers: Headers = validate_written_headers(headers)  # type: ignore[assignment]
+        self._headers: Headers = _validate_written_headers(headers)  # type: ignore[assignment]
 
     def topic(self) -> str:
         return self._topic

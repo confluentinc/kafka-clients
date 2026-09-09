@@ -45,8 +45,9 @@ from confluent_kafka.common import (
     TopicIdPartition,
     TopicPartition,
     Uuid,
-    validate_written_headers,
 )
+# Binding-internal helper (not part of the public common surface, F3).
+from confluent_kafka.common.headers import _validate_written_headers
 
 # --------------------------------------------------------------------------- #
 # Uuid — translated from UuidTest
@@ -368,13 +369,34 @@ def test_metric_name_hashable_as_dict_key() -> None:
     assert {a: 1}[MetricName(name="n", group="g", description="x", tags={})] == 1
 
 
+def test_metric_name_equality_excludes_description() -> None:
+    # F2 / Java MetricName.equals: two instances differing ONLY in description
+    # are equal (Java compares group, name, tags — not description).
+    a = MetricName(name="n", group="g", description="first", tags={"k": "v"})
+    b = MetricName(name="n", group="g", description="second", tags={"k": "v"})
+    assert a.description() != b.description()
+    assert a == b
+    assert hash(a) == hash(b)
+
+
+def test_metric_name_hash_is_tag_insertion_order_independent() -> None:
+    # F2 / Java MetricName.hashCode over tags: the tag map is compared by
+    # content, so tag insertion order must not change equality or the hash.
+    a = MetricName(name="n", group="g", description="d",
+                   tags={"a": "1", "b": "2"})
+    b = MetricName(name="n", group="g", description="d",
+                   tags={"b": "2", "a": "1"})
+    assert a == b
+    assert hash(a) == hash(b)
+
+
 # --------------------------------------------------------------------------- #
 # Headers write-side validator
 # --------------------------------------------------------------------------- #
 
 
 def test_validate_written_headers_normalizes() -> None:
-    out = validate_written_headers(
+    out = _validate_written_headers(
         [("k1", b"v1"), ("k2", bytearray(b"v2")), ("k3", None)]
     )
     assert out == (("k1", b"v1"), ("k2", b"v2"), ("k3", None))
@@ -382,9 +404,18 @@ def test_validate_written_headers_normalizes() -> None:
 
 def test_validate_written_headers_rejects_bad_value() -> None:
     with pytest.raises(IllegalArgumentError):
-        validate_written_headers([("k", "not-bytes")])  # type: ignore[list-item]
+        _validate_written_headers([("k", "not-bytes")])  # type: ignore[list-item]
 
 
 def test_validate_written_headers_rejects_bad_shape() -> None:
     with pytest.raises(IllegalArgumentError):
-        validate_written_headers([("k",)])  # type: ignore[list-item]
+        _validate_written_headers([("k",)])  # type: ignore[list-item]
+
+
+def test_validate_written_headers_is_not_public() -> None:
+    # F3: the write-path header validator is binding-internal (no Java analog),
+    # so it must NOT be on the public confluent_kafka.common surface.
+    import confluent_kafka.common as common
+
+    assert "validate_written_headers" not in common.__all__
+    assert not hasattr(common, "validate_written_headers")

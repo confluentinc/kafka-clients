@@ -39,10 +39,16 @@ Headers = Sequence["tuple[str, memoryview]"]
 _ByteLike = (bytes, bytearray, memoryview)
 
 
-def validate_written_headers(
+def _validate_written_headers(
     headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]],
 ) -> tuple[tuple[str, bytes | None], ...]:
     """Validate and normalize a written header iterable.
+
+    Binding-internal (leading underscore): Java has no free header-validation
+    function — ``RecordHeaders(Iterable<Header>)`` normalizes internally — so this
+    helper is deliberately kept off the public ``confluent_kafka.common`` surface
+    (rule 2 / DoD #7). It is imported only by the record modules within the
+    package.
 
     Each element must be a ``(str, byte-like | None)`` 2-tuple. Byte-like values
     are copied into owned ``bytes``; ``None`` passes through. A malformed

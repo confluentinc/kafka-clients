@@ -31,7 +31,7 @@ from typing import Generic, TypeVar
 
 from confluent_kafka import IllegalArgumentError
 
-from confluent_kafka.common.headers import Headers, validate_written_headers
+from confluent_kafka.common.headers import Headers, _validate_written_headers
 from confluent_kafka.common.timestamp_type import TimestampType
 
 K = TypeVar("K")
@@ -78,7 +78,7 @@ class ConsumerRecord(Generic[K, V]):
         self._value = value
         # Headers are validated/normalized to the owned tuple form; on the read
         # path the fetch layer supplies memoryview values (§5.2).
-        self._headers: Headers = validate_written_headers(headers)  # type: ignore[assignment]
+        self._headers: Headers = _validate_written_headers(headers)  # type: ignore[assignment]
         self._leader_epoch = leader_epoch
         self._delivery_count = delivery_count
 
