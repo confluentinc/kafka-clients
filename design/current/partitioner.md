@@ -122,15 +122,155 @@ There is no runtime detection of a mismatch — the broker accepts whatever
 partition the producer chose. The only signal is records for the same key
 appearing in more than one partition.
 
-## Phase 2 note (future work)
+## Phase 2 — pluggable `Partitioner`
 
-Phase 1 delivers only the two hashers behind `partitioner.class`
-(`ConsistentRandomPartitioner` / `Murmur2RandomPartitioner`) and the CRC-32
-default. It does **not** translate Java's pluggable `Partitioner` interface, the
-`RoundRobinPartitioner`, or any custom-partitioner SPI. If a genuine need for a
-user-supplied partitioner surfaces, a Phase 2 would introduce a `Partitioner`
-trait and route `partition_for_key` through it — additive, and without changing
-the Phase 1 default or the two built-in names.
+Phase 2 translates Java's pluggable partitioner (`Partitioner`,
+`RoundRobinPartitioner`) and routes the producer send path through a configured
+partitioner, keeping the Phase 1 CRC-32 default and the two built-in hash names
+unchanged. It is purely **additive**: a producer with no partitioner configured
+behaves exactly as it did after Phase 1.
+
+### The `Partitioner<K, V>` trait
+
+`src/producer/partitioner.rs` translates
+`org.apache.kafka.clients.producer.Partitioner`
+(`interface Partitioner extends Configurable, Closeable`):
+
+```rust
+pub trait Partitioner<K, V>: Send + Sync {
+    fn configure(&mut self, _configs: &HashMap<String, String>) {}
+    fn partition(
+        &self,
+        topic: &str,
+        key: Option<&K>,
+        key_bytes: Option<&[u8]>,
+        value: Option<&V>,
+        value_bytes: Option<&[u8]>,
+        cluster: &Cluster,
+    ) -> i32;
+    fn close(&self) {}
+}
+```
+
+Deliberate deviations from the Java interface (recorded in full in the trait's
+own rustdoc under "Translation notes", `src/producer/partitioner.rs`):
+
+- **`K, V` generics** replace Java's erased `Object key` / `Object value`. The
+  Rust producer is generic, so the partitioner receives typed borrows and never
+  downcasts.
+- **`partition(&self)` / `close(&self)`, not `&mut self`.** Java's
+  `KafkaProducer` is thread-safe and calls the *one* shared partitioner instance
+  concurrently, so Java implementations are already internally synchronized —
+  `RoundRobinPartitioner` uses a `ConcurrentMap` + `AtomicInteger`. `&self` is
+  the faithful translation and keeps the send path lock-free: any per-record
+  state is the implementer's job via interior mutability (atomics / a concurrent
+  map), exactly as in Java. `close(&self)` also matches `Producer::close(&self)`,
+  so the partitioner is closable through the shared reference without wrapping it
+  in a `Mutex`.
+- **`configure(&mut self)`** with a default no-op mirrors the
+  `ConsumerInterceptor::configure` precedent; it is called exactly once, before
+  the instance is boxed and shared, so `&mut self` is available then.
+- Java's `Plugin<Partitioner>` / `Monitorable` metrics wrapper has **no Rust
+  counterpart** and is not translated (KIP-877 metrics plumbing, out of scope).
+
+`RoundRobinPartitioner` (`src/producer/round_robin_partitioner.rs`) is the one
+built-in translated: it round-robins across the available partitions of a topic,
+keeping a per-topic `AtomicI32` counter, and — like Java — skips to the next
+partition when the chosen one has no leader.
+
+### Configuring a partitioner: instance vs. `partitioner.class`
+
+Rust has **no reflection**, so a class *name* can only select a built-in the
+crate already knows. Two resolution paths exist, mirroring how Java resolves
+`partitioner.class` reflectively:
+
+- **By name (`partitioner.class`)** — `ProducerConfig::resolve_partitioner`
+  maps the configured name to a built-in instance. Only `RoundRobinPartitioner`
+  resolves to a distinct `Partitioner` object; the two hash names
+  (`ConsistentRandomPartitioner`, `Murmur2RandomPartitioner`) and the unset
+  default resolve to `None`, meaning "use the built-in key-hash / sticky path"
+  (Phase 1). Accepted `RoundRobinPartitioner` spellings are the simple name
+  `RoundRobinPartitioner` **and** the Java fully-qualified name
+  `org.apache.kafka.clients.producer.RoundRobinPartitioner`. Any *other*
+  non-built-in value is already rejected at config-construction time with Java's
+  exact `ConfigException` text (Phase 1), so no unknown class name reaches
+  `resolve_partitioner`.
+- **By instance (`KafkaProducer::from_config_with_partitioner`)** — because a
+  user-written partitioner cannot be named reflectively, the caller supplies it
+  as a constructed `Box<dyn Partitioner<K, V>>`. An explicit instance **takes
+  precedence** over any built-in that `partitioner.class` would otherwise name,
+  mirroring Java, where an explicitly passed `Partitioner` wins over the config.
+
+There is intentionally **no custom-partitioner SPI** (registering a
+user-written partitioner by class name across the FFI / Python boundary) in
+Phase 2 — that is out of scope. A Rust user supplies an instance; a built-in is
+reachable by name from any binding (see the FFI/Python note below).
+
+### Send-path behavior
+
+- **`configure` sees the producer originals plus `client.id`.** When a
+  partitioner is present (resolved from `partitioner.class` or passed as an
+  instance), the constructor configures it exactly once with the producer's
+  original configuration map plus the resolved (possibly auto-generated)
+  `client.id`, matching Java's `partitioner.configure(...)`.
+- **Adaptive partitioning is disabled while a custom partitioner is in use**
+  (`enable_adaptive_partitioning = partitioner.is_none() &&
+  config.partitioner_adaptive_partitioning_enable`), matching Java's
+  `PartitionerConfig` gating: a caller-supplied partition decision must not be
+  second-guessed by the built-in adaptive logic.
+- **The partitioner is consulted exactly once per record.** On the borrowed
+  zero-copy send path the typed `key` / `value` arguments are `None` even when
+  `key_bytes` / `value_bytes` are present, because on that path Java's
+  `record.key()` *is* the same `byte[]` as `keyBytes`; materializing a typed
+  `&Vec<u8>` from the borrowed bytes would allocate and violate the zero-copy
+  contract (CLAUDE.md §12). Partitioners that need the key/value read the
+  `*_bytes` parameters, which are always supplied when a key/value exists. This
+  deviation is recorded on the `partition` method's rustdoc in
+  `src/producer/partitioner.rs`.
+- **A negative partition is rejected** with Java's exact
+  `IllegalArgumentException` text ("The partitioner generated an invalid
+  partition number: N. Partition number should always be non-negative."),
+  returned as `Err` and propagated out of `do_send` — Java rethrows the same out
+  of `doSend`'s `catch (Exception e)`.
+- **Close order.** `close()` closes the partitioner after `producer_metrics` and
+  `metrics`, mirroring Java's `Utils.closeQuietly(...)` chain
+  (`KafkaProducer.java:1441-1446`, which closes the partitioner at `:1446` after
+  metrics). Behaviourally irrelevant for the built-ins, whose `close` is a no-op,
+  and no producer construction path closes a partitioner mid-build (KAFKA-2121
+  holds trivially — every fallible step precedes the infallible `configure`).
+
+### `MockProducer` — and the empty-cluster deviation
+
+`MockProducer` gains the same optional partitioner plus key/value serializers.
+Its inherent `partition()` faithfully translates
+`MockProducer.partition(ProducerRecord, Cluster)`
+(`MockProducer.java:598-616`): an explicit record partition is range-validated
+against the topic's partition count and returned as-is (rejecting an
+out-of-range value with Java's exact `IllegalArgumentException`); otherwise the
+key/value are serialized (so a serializer mismatch surfaces as Java's
+`ClassCastException` would) and the partition is chosen by the partitioner, or
+by the topic's first partition when none is configured.
+
+**Deviation (empty cluster).** In `MockProducer::send`, when the cluster has
+metadata for the record's topic, the send routes through `partition()` above
+(Java 309-316). In the empty-cluster `else` branch Java serializes purely for
+the `ClassCastException` side effect (Java's own comment at `:313`) and uses
+partition `0`. The Rust translation still consults the serializers when present,
+but honours an explicit `record.partition()` before falling back to `0`, so the
+C FFI empty-cluster mock (`bindings/c/tests/test_mock_producer.c`) keeps
+working. This is a DoD §7 justified deviation, recorded in the
+`src/producer/mock_producer.rs` file header and inline at the branch.
+
+### Bindings: built-in partitioners reach FFI / Python for free
+
+Because `resolve_partitioner` runs *inside* config construction
+(`ProducerConfig::from_properties` → `from_config`), any client built from a
+property map — including the C FFI and the Python binding, which both construct
+producers from properties — automatically gets a `RoundRobinPartitioner` when
+`partitioner.class=RoundRobinPartitioner` is set, and the CRC-32 / murmur2 hash
+selection for the two hash names. **No new FFI SPI is required** for the
+built-in partitioners; only a user-*written* custom partitioner would need a
+cross-language registration mechanism, which remains out of scope.
 
 ## Proposed CLAUDE.md addition
 
