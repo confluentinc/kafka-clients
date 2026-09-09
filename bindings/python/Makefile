@@ -4,7 +4,7 @@ CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test test-performance grpc-image grpc-image-async \
+.PHONY: build test typecheck test-performance grpc-image grpc-image-async \
 	grpc-image-macos grpc-image-async-macos clean
 
 build:
@@ -12,7 +12,12 @@ build:
 	CFLAGS="$(CFLAGS_EXTRA)" \
 	pip install -e .
 
-test: build
+# Static type check of the new `confluent_kafka` package (spec §11 / rule 11):
+# `mypy --strict` catches stub/implementation drift so it fails `make verify`.
+typecheck:
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka
+
+test: build typecheck
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python

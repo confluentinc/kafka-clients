@@ -250,11 +250,16 @@ Generated from kafka_common_ErrorCode_t in src/ffi/common.rs by
 `cargo xtask generate-error-codes`, and checked for staleness by
 `cargo xtask check-generated`.
 
-Private plumbing, not public API: KafkaError exposes `code`, `message` and
-`is_retriable`, and neither producer.py nor consumer.py re-exports this module.
-The users are the gRPC test servers, which stamp the real code on their own
-synthetic errors, and the unit tests, which compare a code instead of matching
-message text.
+SUPERSEDED for the confluent_kafka package by the typed error hierarchy the same
+xtask now generates (confluent_kafka.common.errors and its siblings): each
+generated `...Error` class carries the same id as `_ffi_id`, and the id -> class
+table lives in confluent_kafka.common.errors. This flat-constants module is kept
+for its existing users only.
+
+Private plumbing, not public API: neither producer.py nor consumer.py re-exports
+this module. The users are the gRPC test servers, which stamp the real code on
+their own synthetic errors, and the unit tests, which compare a code instead of
+matching message text.
 
 Values are the FFI error codes: Java's wire codes at Java's own values, plus
 negatives for the classes only the client raises. They are injective over the
