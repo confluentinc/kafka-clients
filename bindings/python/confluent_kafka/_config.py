@@ -22,7 +22,7 @@ the binding needs, so the client families (P4/P5) share one implementation:
   ``True`` equivalent, ``"1000"``/``1000`` equivalent), with Java's ``ConfigException``
   messages surfaced as ``ConfigError``.
 * ``log_unused`` — Java's ``AbstractConfig.logUnused()`` — unknown keys are
-  accepted, not rejected, with one WARN log.
+  accepted, not rejected, with one INFO log.
 * ``duration_to_ms`` — a ``Duration`` (float seconds or ``timedelta``) to
   milliseconds; a negative value raises ``IllegalArgumentError("Timeout must not
   be negative")``.
@@ -252,7 +252,9 @@ def duration_to_ms(timeout: Duration | None, *, default_ms: int) -> int:
         # float | int seconds
         millis = float(timeout) * 1000.0
     if millis < 0:
-        raise IllegalArgumentError("Timeout must not be negative")
+        # Java's exact text for every client's negative-timeout guard
+        # (KafkaProducer.java:1393, AsyncKafkaConsumer.java:1552, ...).
+        raise IllegalArgumentError("The timeout cannot be negative.")
     return int(millis)
 
 

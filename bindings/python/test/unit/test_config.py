@@ -155,7 +155,8 @@ class TestDurationToMs:
     def test_negative_float_raises(self) -> None:
         with pytest.raises(IllegalArgumentError) as exc:
             _config.duration_to_ms(-1.0, default_ms=0)
-        assert str(exc.value) == "Timeout must not be negative"
+        # Java's exact text (KafkaProducer.java:1393, AsyncKafkaConsumer.java:1552).
+        assert str(exc.value) == "The timeout cannot be negative."
 
     def test_negative_timedelta_raises(self) -> None:
         with pytest.raises(IllegalArgumentError):

@@ -340,6 +340,24 @@ class TestFloatNaN:
         # The bit pattern our serializer emitted round-trips exactly.
         assert float_serializer(size=4)(TOPIC, got) == out
 
+    def test_double_nan_canonicalized_like_java(self) -> None:
+        # Java's DoubleSerializer uses doubleToLongBits, which canonicalizes
+        # every NaN to 0x7ff8000000000000 (unlike the raw doubleToRawLongBits) —
+        # F2 / C20. A non-canonical double NaN is representable in a Python float
+        # (it IS a C double), so we build one from raw bits and assert the
+        # serializer emits Java's canonical bytes, NOT the raw pack.
+        non_canonical = struct.unpack(">d", b"\x7f\xf0\x00\x00\x00\x00\x00\x01")[0]
+        assert non_canonical != non_canonical  # it is a NaN
+        # struct.pack(">d") (raw) would leak the non-canonical payload:
+        assert struct.pack(">d", non_canonical) == b"\x7f\xf0\x00\x00\x00\x00\x00\x01"
+        # Our serializer canonicalizes it to match Java doubleToLongBits:
+        out = float_serializer(size=8)(TOPIC, non_canonical)
+        assert out == b"\x7f\xf8\x00\x00\x00\x00\x00\x00"
+        # A plain (already-canonical) NaN also emits the canonical bytes.
+        assert float_serializer(size=8)(TOPIC, float("nan")) == (
+            b"\x7f\xf8\x00\x00\x00\x00\x00\x00"
+        )
+
 
 # ---------------------------------------------------------------------------
 # memoryview input path (stringDeserializerSupportByteBuffer)
