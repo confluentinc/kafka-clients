@@ -1393,6 +1393,98 @@ def test_txn_send_offsets_after_close_raises():
     consumer.close()
 
 
+# -- Un-awaited send drained before control ops (send/commit race) ------------
+#
+# Python's send() only appends the record to a C-side batch (the tray) that the
+# background send task later hands to the Rust producer. Without draining, a
+# returned-but-not-awaited send could reach Rust *after* a commit/abort/flush,
+# landing in the wrong transaction (or surviving an abort). The control ops and
+# flush() now wait via Producer_on_drained first, so a returned send is part of
+# the operation -- Java's synchronous doSend guarantee. These tests send WITHOUT
+# .result() and assert via the deterministic Rust-side observables
+# (history_count / on_drained), which is exactly what the fix restores.
+
+
+def test_txn_unawaited_send_is_committed():
+    # The record is NOT awaited before commit. commit_transaction() drains it to
+    # the producer first, so it is committed (history_count == 1). Before the fix
+    # the record was still in the tray at commit time -> history_count == 0.
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"v"))  # no .result()
+        p.commit_transaction()
+        assert p.history_count() == 1
+
+
+def test_txn_unawaited_send_is_discarded_by_abort():
+    # The un-awaited record is drained to the producer inside the aborting
+    # transaction, then discarded by the abort -- it must not leak into history
+    # later (before the fix it was handed to Rust ~10ms after the abort, landing
+    # outside the transaction and leaking in).
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"discarded"))  # no .result()
+        p.abort_transaction()
+        assert p.history_count() == 0
+        time.sleep(0.05)  # a stale tray hand-off would land in this window
+        assert p.history_count() == 0
+        # A fresh transaction with another un-awaited send still commits it.
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"kept"))  # no .result()
+        p.commit_transaction()
+        assert p.history_count() == 1
+
+
+def test_flush_completes_unawaited_send():
+    # Java flush() completes every returned send. send() only appends to the
+    # tray, so without the fix flush() returns before the record is even handed
+    # to the producer (history_count == 0). With the fix flush() drains the tray
+    # first, so the record is handed AND completed by the flush.
+    with MockProducer(auto_complete=True) as p:
+        fut = p.send(ProducerRecord("test-topic", b"v"))  # no .result()
+        p.flush()
+        # Deterministic Rust-side observable: 0 without the fix (still in tray),
+        # 1 with it (handed + completed by the flush).
+        assert p.history_count() == 1
+        # The record's Python future is resolved by the poll-futures task once
+        # the flush completes it; result() blocks (bounded) until then.
+        meta = fut.result(timeout=FUTURE_TIMEOUT)
+        assert isinstance(meta, RecordMetadata)
+        assert fut.done()
+
+
+def test_on_drained_fast_path():
+    # After a record has completed (its send task hand-off is done), on_drained
+    # reports already-drained (True) and never registers/fires the callback.
+    with MockProducer(auto_complete=True) as p:
+        p.send(ProducerRecord("test-topic", b"v")).result(timeout=FUTURE_TIMEOUT)
+        called = []
+        assert _lib.Producer_on_drained(
+            p.c_producer, lambda: called.append(1)) is True
+        time.sleep(0.02)  # a spuriously-registered cb would fire here
+        assert called == []
+
+
+def test_on_drained_true_when_paused():
+    # While the send task is paused it will never take the tray, so a waiter
+    # would hang. on_drained short-circuits to True in that case (§2.4) rather
+    # than register a callback that could never fire.
+    p = MockProducer(auto_complete=True)
+    try:
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        p.send(ProducerRecord("test-topic", b"v"))  # accepted, not handed (paused)
+        called = []
+        assert _lib.Producer_on_drained(
+            p.c_producer, lambda: called.append(1)) is True
+        time.sleep(0.02)
+        assert called == []
+    finally:
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        p.close()
+
+
 # -- ConsumerGroupMetadata handle lifecycle -----------------------------------
 
 def test_group_metadata_handle_lifecycle():
@@ -1633,3 +1725,47 @@ async def test_async_txn_cancelled_await_frees_late_error_handle():
         _lib.Producer_commit_transaction_async = real_async
         _lib.KafkaError_destroy = real_destroy
         await p.close()
+
+
+# =============================================================================
+# AsyncProducer un-awaited send drained before control ops (async twins)
+#
+# Async counterparts of the sync send/commit-race tests: the record's send() is
+# awaited (send is a coroutine) but the returned Future is NOT, so the record is
+# still in the C tray when the control op / flush runs. _wait_drained() (awaited
+# first by each) hands it to the producer before the op, matching Java.
+# =============================================================================
+
+
+async def test_async_txn_unawaited_send_is_committed():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+        await p.commit_transaction()
+        assert p.history_count() == 1
+
+
+async def test_async_txn_unawaited_send_is_discarded_by_abort():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        await p.send(ProducerRecord("test-topic", b"discarded"))  # not awaited
+        await p.abort_transaction()
+        assert p.history_count() == 0
+        await asyncio.sleep(0.05)  # a stale tray hand-off would land here
+        assert p.history_count() == 0
+        await p.begin_transaction()
+        await p.send(ProducerRecord("test-topic", b"kept"))  # not awaited
+        await p.commit_transaction()
+        assert p.history_count() == 1
+
+
+async def test_async_flush_completes_unawaited_send():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        fut = await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+        await p.flush()
+        # Deterministic: 0 without the fix (still in the tray), 1 with it.
+        assert p.history_count() == 1
+        meta = await asyncio.wait_for(fut, timeout=FUTURE_TIMEOUT)
+        assert isinstance(meta, RecordMetadata)
