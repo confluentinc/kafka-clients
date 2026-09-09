@@ -181,10 +181,20 @@ public sealed class AdminKeyedResultMarshalTests
     /// <b>Result shape 2</b> — the per-key <c>KafkaFuture&lt;Void&gt;</c> form, where the
     /// ABI exposes no <c>_get_value</c> at all and a null error <em>is</em> the success
     /// value. P1 ships no shape-2 RPC (<c>deleteTopics</c> is M15/P2), so the shape is
-    /// exercised the only way it can be without inventing one: the production walker is
-    /// handed a value-less accessor set over a real result table, driving exactly the
-    /// branch a shape-2 RPC will take — including the borrowed per-key error.
+    /// exercised the only way it can be without inventing one: the production walker's
+    /// <b>value-less</b> <c>Complete</c> overload is driven over a real result table,
+    /// taking exactly the branch a shape-2 RPC will take — including the borrowed per-key
+    /// error.
     /// </summary>
+    /// <remarks>
+    /// ⚠ M15/P2b re-pointed this at the value-less overload. Before P2b, shape 2 was
+    /// expressed by nulling out <c>getValue</c> <em>and</em> <c>marshalValue</c> — which
+    /// is exactly the misuse the phase removed, because an RPC whose value is an inline
+    /// scalar could be described the same way and have its value silently discarded.
+    /// There is now no null to pass: the shape is selected by which overload is called,
+    /// and that overload accepts only a <see cref="VoidKeyedAdminOperation{TKey}"/>.
+    /// Every assertion below is unchanged.
+    /// </remarks>
     [Fact]
     public async Task Shape2_TreatsANullPerKeyErrorAsTheSuccessValue()
     {
@@ -199,14 +209,13 @@ public sealed class AdminKeyedResultMarshalTests
         {
             KeyedResultMarshal.Accessors voidShape = new KeyedResultMarshal.Accessors(
                 NativeMethods.CreateTopicsResultCount,
-                NativeMethods.CreateTopicsResultGetError,
-                getValue: null);
+                NativeMethods.CreateTopicsResultGetError);
 
             VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
                 "createTopics", new[] { GoodTopic, BadTopic }, StringComparer.Ordinal);
 
-            KeyedResultMarshal.Complete<string, bool>(
-                result, voidShape, operation, AdminCallbacks.CreateTopicsKey, marshalValue: null);
+            KeyedResultMarshal.Complete(
+                result, voidShape, operation, AdminCallbacks.CreateTopicsKey);
 
             // Success carries no value: the Task simply completes.
             Assert.Equal(TaskStatus.RanToCompletion, operation.Tasks[GoodTopic].Status);

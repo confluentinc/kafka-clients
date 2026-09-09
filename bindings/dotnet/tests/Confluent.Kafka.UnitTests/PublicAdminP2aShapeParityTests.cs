@@ -270,36 +270,23 @@ public sealed class PublicAdminP2aShapeParityTests
 
     /// <summary>
     /// 1 = not-annotated-nullable, 2 = nullable, in the C# compiler's
-    /// <c>NullableAttribute</c> encoding. A member with no attribute inherits the
-    /// enclosing <c>NullableContextAttribute</c>, which this project sets to 1
-    /// (<c>#nullable enable</c>), so an absent attribute means non-nullable.
+    /// <c>NullableAttribute</c> encoding — decoded by
+    /// <see cref="NullableAnnotation"/>, which resolves a member carrying no
+    /// attribute of its own against the nearest enclosing
+    /// <c>NullableContextAttribute</c>.
     /// </summary>
-    private static byte NullableFlag(MemberInfo member) => ReadFlag(member.GetCustomAttributesData());
+    /// <remarks>
+    /// ⚠ <b>The enclosing-context walk is what keeps
+    /// <see cref="AssertNonNullableProperty"/> reading metadata rather than a default.</b>
+    /// This file originally decoded only a member's own attribute and defaulted to 1, on
+    /// the stated premise that the project sets the context to 1 everywhere — false, since
+    /// the compiler picks the context <em>per declaration</em>. All 3 of the
+    /// <see cref="AssertNonNullableProperty"/> call sites resolved through that default
+    /// without reading any metadata; each is now verified to fail when its property is
+    /// widened. See <see cref="NullableAnnotation"/> for the measurement and for the
+    /// sibling assertion that could not fail at all.
+    /// </remarks>
+    private static byte NullableFlag(MemberInfo member) => NullableAnnotation.Flag(member);
 
-    private static byte NullableFlag(ParameterInfo parameter) => ReadFlag(parameter.GetCustomAttributesData());
-
-    private static byte ReadFlag(IList<CustomAttributeData> attributes)
-    {
-        foreach (CustomAttributeData attribute in attributes)
-        {
-            if (attribute.AttributeType.FullName != "System.Runtime.CompilerServices.NullableAttribute")
-            {
-                continue;
-            }
-
-            CustomAttributeTypedArgument argument = attribute.ConstructorArguments[0];
-            if (argument.Value is byte flag)
-            {
-                return flag;
-            }
-
-            // For a generic type the attribute carries one flag per type argument; the
-            // first is the outermost, which is the one being asserted.
-            IReadOnlyCollection<CustomAttributeTypedArgument> flags =
-                (IReadOnlyCollection<CustomAttributeTypedArgument>)argument.Value!;
-            return (byte)flags.First().Value!;
-        }
-
-        return 1;
-    }
+    private static byte NullableFlag(ParameterInfo parameter) => NullableAnnotation.Flag(parameter);
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 using Confluent.Kafka.Internal;
 
@@ -21,51 +22,64 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <summary>
 /// The shared walker over an admin <c>*Result_t</c> — the flattened, index-addressed,
 /// fully-settled table the ABI substitutes for Java's
-/// <c>Map&lt;K, KafkaFuture&lt;V&gt;&gt;</c>. It reads
-/// <c>count</c> / <c>get_error(i)</c> / <c>get_value(i)</c> plus the RPC's own key
-/// reader, copies every borrowed value out, and resolves the matching per-key
-/// <see cref="System.Threading.Tasks.Task"/> on a
-/// <see cref="KeyedAdminOperation{TKey, TValue}"/> — once per RPC family rather than once
-/// per RPC.
+/// <c>Map&lt;K, KafkaFuture&lt;V&gt;&gt;</c>. It reads <c>count</c> plus the RPC's own
+/// key, value and error readers, copies every borrowed value out, and resolves the
+/// awaiters on an <see cref="AdminOperation"/> — once per RPC family rather than once per
+/// RPC.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Two result shapes today.</b> Shape 1 (per-key value) supplies a
-/// <see cref="Accessors.GetValue"/> and a value marshaller; shape 2 (per-key
-/// <c>KafkaFuture&lt;Void&gt;</c>) supplies <b>neither</b>, because for those RPCs the
-/// ABI exposes no <c>_get_value</c> function at all — the header states it outright:
-/// "Java's per-key future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <b>is</b>
-/// the success value." The remaining shapes are later phases; nothing here forecloses
-/// them, and nothing here builds them speculatively.
+/// <b>Three result shapes, and each one is named by the method it goes through.</b>
+/// </para>
+/// <list type="bullet">
+/// <item>
+/// <b>Shape 1</b> — a per-key value: <c>count</c> / <c>get_key</c> / <c>get_value</c> /
+/// <c>get_error</c>. <c>createTopics</c>, <c>describeTopics</c>. Goes through
+/// <see cref="Complete{TKey, TValue}(IntPtr, Accessors, KeyedAdminOperation{TKey, TValue}, Func{IntPtr, int, TKey}, Func{IntPtr, int, TValue})"/>.
+/// </item>
+/// <item>
+/// <b>Shape 2</b> — a per-key <c>KafkaFuture&lt;Void&gt;</c>: the ABI exposes <b>no</b>
+/// <c>_get_value</c> at all, and the header states it outright — "Java's per-key future
+/// is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <b>is</b> the success value".
+/// <c>deleteTopics</c>, <c>createPartitions</c>. Goes through
+/// <see cref="Complete{TKey}(IntPtr, Accessors, VoidKeyedAdminOperation{TKey}, Func{IntPtr, int, TKey})"/>,
+/// which has <b>no value parameter at all</b>.
+/// </item>
+/// <item>
+/// <b>Shape 3</b> — one aggregate future over the whole map, and structurally <b>no</b>
+/// per-key error: <c>kafka_admin_ListTopicsResult_t</c> declares no <c>get_error</c>
+/// whatsoever, so either the call fails (through the callback's own <c>error</c>) or the
+/// whole map succeeds. Goes through
+/// <see cref="CompleteAggregate{TKey, TValue}"/>, which has <b>no error parameter at
+/// all</b>.
+/// </item>
+/// </list>
+/// <para>
+/// ⚠ <b>Neither the key nor the value is part of <see cref="Accessors"/>, and that is
+/// deliberate — neither is universal.</b> The obvious key seam (parse a <c>string</c>
+/// read from <c>get_key(i)</c>) fits every RPC keyed by a name or a base64 id and
+/// <em>cannot</em> fit <c>deleteRecords</c>: <c>kafka_admin_DeleteRecordsResult_t</c>
+/// declares no <c>get_key</c> whatsoever, and its key is composed from two accessors
+/// (<c>get_topic(i)</c> and <c>get_partition(i)</c>). The obvious value seam (a pointer
+/// to a borrowed child) has the identical problem on the other axis: the same result's
+/// value is an <b>inline scalar</b>, <c>int64_t …_get_low_watermark(result, i)</c>, not a
+/// child handle. So both are read by a <c>Func&lt;IntPtr, int, T&gt;</c> over the result
+/// handle and the index, and <see cref="Accessors"/> carries only what every keyed shape
+/// really has in common: <c>count</c> and <c>get_error</c>. Each reader is expected to be
+/// a <c>static readonly</c> field beside its accessor set, so walking a result allocates
+/// no delegates.
 /// </para>
 /// <para>
-/// ⚠ <b>The key is read by a delegate over <c>(result, index)</c>, and that is
-/// deliberate.</b> The obvious seam — parse a <c>string</c> the walker read from
-/// <c>get_key(i)</c> — fits every RPC bound so far and <em>cannot</em> fit
-/// <c>deleteRecords</c>: <c>kafka_admin_DeleteRecordsResult_t</c> declares no
-/// <c>get_key</c> whatsoever, and its key is composed from two accessors
-/// (<c>get_topic(i)</c> and <c>get_partition(i)</c>). Because <c>get_key</c> is therefore
-/// not universal, it is <b>not</b> part of <see cref="Accessors"/> at all; the key reader
-/// is the single place a key comes from. A reader is expected to be a
-/// <c>static readonly</c> field beside its accessor set, so walking a result allocates no
-/// delegates.
-/// </para>
-/// <para>
-/// ⚠ <b>Known limitation — the generalization above was applied to the KEY axis only.
-/// The VALUE axis is still pointer-shaped.</b> <see cref="Accessors.GetValue"/> is an
-/// <see cref="IndexedAccessor"/> (it returns an <see cref="IntPtr"/>) and
-/// <c>Complete</c>'s <c>marshalValue</c> is <c>Func&lt;IntPtr, TValue&gt;</c>, so both can
-/// only point at an accessor that returns a <em>pointer</em> to a borrowed child. A result
-/// whose per-key value is an <b>inline scalar</b> cannot be described:
-/// <c>kafka_admin_DeleteRecordsResult_t</c>'s value is
-/// <c>int64_t …_get_low_watermark(result, i)</c>, not a child handle. Passing
-/// <c>getValue: null</c> is <b>not</b> an escape — the walker reads a null
-/// <see cref="Accessors.GetValue"/> as shape 2 and calls
-/// <c>CompleteWithSuccessNoValue</c>, which would discard that watermark silently rather
-/// than fail. The fix is a value reader over <c>(result, index)</c> symmetric with the key
-/// reader; unlike the key change it is purely <b>additive</b> (a new overload, no existing
-/// call site touched), which is why it is left to the phase that binds such an RPC instead
-/// of being built here speculatively.
+/// ⚠ <b>There is no nullable value channel, and that is the point (M15/P2b).</b> P2a left
+/// the value axis pointer-shaped, with <c>getValue: null</c> meaning "shape 2" — so an RPC
+/// whose value is an inline scalar could be described by nulling it out, and the walker
+/// would have taken the shape-2 branch and <em>silently discarded the number</em>: no
+/// exception, no failing test, a wrong answer handed to the caller. That misuse is now
+/// <b>unrepresentable</b> rather than merely warned about. There is no <c>null</c> to
+/// pass: the value reader is required on the value-carrying overload, and shape 2 is
+/// selected by calling an overload that has no value parameter and accepts only a
+/// <see cref="VoidKeyedAdminOperation{TKey}"/>. A value-carrying operation cannot be
+/// passed to it, and a value-less one cannot reach the other overload without a reader.
 /// </para>
 /// <para>
 /// ⚠ <b>The per-key error is BORROWED (ffi §B2 Category 4).</b> It is read with
@@ -79,12 +93,11 @@ namespace Confluent.Kafka.Internal.Interop;
 /// header is the only signal.
 /// </para>
 /// <para>
-/// <b>Values are copied out before the root dies.</b> Every <c>get_value(i)</c> is a
-/// borrowed child of the same root, so the caller's marshaller must produce a fully
-/// owned managed object; nothing native-backed may survive
-/// <c>*Result_destroy</c> (ffi §B4 / CLAUDE.md §6.4). All strings here are the
-/// NUL-terminated, callee-owned form (ffi §B3 row 2) — admin has no length-delimited
-/// slices.
+/// <b>Values are copied out before the root dies.</b> Every value a reader produces is
+/// derived from the same root, so the reader must produce a fully owned managed object;
+/// nothing native-backed may survive <c>*Result_destroy</c> (ffi §B4 / CLAUDE.md §6.4).
+/// All strings here are the NUL-terminated, callee-owned form (ffi §B3 row 2) — admin has
+/// no length-delimited slices.
 /// </para>
 /// </remarks>
 internal static class KeyedResultMarshal
@@ -93,33 +106,38 @@ internal static class KeyedResultMarshal
     internal delegate int CountAccessor(IntPtr result);
 
     /// <summary>
-    /// <c>const T *(*)(const *Result_t *, int32_t index)</c> — the shape shared by
-    /// <c>get_key</c>, <c>get_error</c> and <c>get_value</c>.
+    /// <c>const T *(*)(const *Result_t *, int32_t index)</c> — the shape of
+    /// <c>get_error</c>, and of the pointer-returning <c>get_key</c> / <c>get_value</c>
+    /// an individual RPC's reader may call.
     /// </summary>
     internal delegate IntPtr IndexedAccessor(IntPtr result, int index);
 
     /// <summary>
-    /// One RPC's <c>*Result_t</c> accessor set. Built once per RPC as a
+    /// The success token for a shape-2 walk. Hoisted to a single instance so the
+    /// value-less overload allocates no delegate, and expressed as a reader like every
+    /// other value so that "success carries no value" is a value the walker
+    /// <em>produces</em> rather than a branch it <em>infers from a null</em>.
+    /// </summary>
+    private static readonly Func<IntPtr, int, bool> s_voidSuccess = static (result, index) => true;
+
+    /// <summary>
+    /// One RPC's <b>universal</b> <c>*Result_t</c> accessors. Built once per RPC as a
     /// <c>static readonly</c> field (method groups bind directly to the delegate
     /// types), so walking a result allocates no delegates.
     /// </summary>
     /// <remarks>
-    /// The <b>key</b> accessor is deliberately absent — see the key-reader note in the
-    /// class remarks. Only <c>count</c>, <c>get_error</c> and the optional
-    /// <c>get_value</c> are universal across the keyed shapes.
+    /// The <b>key</b> and <b>value</b> accessors are deliberately absent — see the
+    /// reader note in the class remarks. Only <c>count</c> and <c>get_error</c> are
+    /// common to every <em>keyed</em> shape, and shape 3 does not use this type at all
+    /// because it has no <c>get_error</c> either.
     /// </remarks>
     internal sealed class Accessors
     {
-        /// <summary>
-        /// Creates an accessor set. Pass <see langword="null"/> for
-        /// <paramref name="getValue"/> to describe a <b>shape 2</b> (per-key void)
-        /// result — those RPCs have no <c>_get_value</c> function to point at.
-        /// </summary>
-        internal Accessors(CountAccessor count, IndexedAccessor getError, IndexedAccessor? getValue)
+        /// <summary>Creates an accessor set for a keyed result.</summary>
+        internal Accessors(CountAccessor count, IndexedAccessor getError)
         {
             Count = count;
             GetError = getError;
-            GetValue = getValue;
         }
 
         /// <summary><c>*Result_count</c>.</summary>
@@ -127,22 +145,11 @@ internal static class KeyedResultMarshal
 
         /// <summary>
         /// <c>*Result_get_error</c> — that key's error, <b>borrowed</b>, or null when
-        /// the key succeeded.
+        /// the key succeeded. Required: every keyed shape has one, and a shape that does
+        /// not (shape 3) goes through <see cref="CompleteAggregate{TKey, TValue}"/>,
+        /// whose signature has no error channel to leave null.
         /// </summary>
         internal IndexedAccessor GetError { get; }
-
-        /// <summary>
-        /// <c>*Result_get_value</c> — that key's value, borrowed, or null when the key
-        /// failed. <see langword="null"/> for a shape-2 result, which has no such
-        /// function.
-        /// </summary>
-        /// <remarks>
-        /// Being an <see cref="IndexedAccessor"/> this can only name a <em>pointer</em>-
-        /// returning accessor, and <see langword="null"/> here means shape 2 — so an
-        /// inline-scalar value is not expressible on this axis and must not be described
-        /// by leaving this null. See the value-axis note in the class remarks.
-        /// </remarks>
-        internal IndexedAccessor? GetValue { get; }
     }
 
     /// <summary>
@@ -163,25 +170,28 @@ internal static class KeyedResultMarshal
         ?? throw new KafkaException("The admin result produced no key for an index within its own count.");
 
     /// <summary>
-    /// Walks <paramref name="result"/> and resolves every per-key awaiter on
-    /// <paramref name="operation"/>. Runs on whichever thread the completion callback
-    /// fired on, and must complete <b>before</b> the caller destroys the result root.
+    /// <b>Shape 1 and the inline-scalar sub-shape.</b> Walks <paramref name="result"/> and
+    /// resolves every per-key awaiter on <paramref name="operation"/>, reading each key's
+    /// own value. Runs on whichever thread the completion callback fired on, and must
+    /// complete <b>before</b> the caller destroys the result root.
     /// </summary>
     /// <param name="result">
     /// The owned result root. Never null on the path that reaches here (a non-null
     /// callback <c>error</c> means there is no result and the caller faults every key
     /// instead).
     /// </param>
-    /// <param name="accessors">That RPC's accessor set.</param>
+    /// <param name="accessors">That RPC's universal accessors.</param>
     /// <param name="operation">The per-key bridge holding one source per requested key.</param>
     /// <param name="readKey">
-    /// Reads the key at one index straight out of the result root — see the key-reader
-    /// note in the class remarks.
+    /// Reads the key at one index straight out of the result root — see the reader note in
+    /// the class remarks.
     /// </param>
-    /// <param name="marshalValue">
-    /// Copies one borrowed <c>get_value(i)</c> into an owned managed
-    /// <typeparamref name="TValue"/>. <see langword="null"/> for a shape-2 result,
-    /// where success carries no value.
+    /// <param name="readValue">
+    /// Reads the value at one index straight out of the result root and copies it into an
+    /// owned managed <typeparamref name="TValue"/>. <b>Required</b>: whether the value is
+    /// a borrowed child handle (<c>get_value(i)</c> then a copy-out) or an inline scalar
+    /// (<c>get_low_watermark(i)</c>) is the reader's business, not the walker's. See the
+    /// no-nullable-value-channel note in the class remarks.
     /// </param>
     /// <typeparam name="TKey">The managed per-key key type.</typeparam>
     /// <typeparam name="TValue">The managed per-key result type.</typeparam>
@@ -190,7 +200,7 @@ internal static class KeyedResultMarshal
         Accessors accessors,
         KeyedAdminOperation<TKey, TValue> operation,
         Func<IntPtr, int, TKey> readKey,
-        Func<IntPtr, TValue>? marshalValue)
+        Func<IntPtr, int, TValue> readValue)
         where TKey : notnull
     {
         int count = accessors.Count(result);
@@ -216,18 +226,18 @@ internal static class KeyedResultMarshal
                 if (error != IntPtr.Zero)
                 {
                     // ⚠ BORROWED — read, never destroy. See the class remarks.
+                    //
+                    // ⚠ This — not any in-band sentinel — is the authoritative
+                    // success/failure signal. `deleteRecords` documents "-1 if that
+                    // partition failed", but the very same sentence gives -1 a second
+                    // meaning ("or `index` is out of range"), and -1 is also a legitimate
+                    // low watermark. So the sentinel is read as a value, never as a
+                    // verdict: a -1 with a NULL error is a SUCCESS carrying -1.
                     operation.SetException(key, KafkaException.FromBorrowedHandle(error)!);
                     continue;
                 }
 
-                if (accessors.GetValue is null || marshalValue is null)
-                {
-                    // Shape 2: a null error IS the success value.
-                    operation.CompleteWithSuccessNoValue(key);
-                    continue;
-                }
-
-                operation.SetResult(key, marshalValue(accessors.GetValue(result, index)));
+                operation.SetResult(key, readValue(result, index));
             }
             catch (Exception exception)
             {
@@ -238,5 +248,88 @@ internal static class KeyedResultMarshal
                 operation.SetException(key, exception);
             }
         }
+    }
+
+    /// <summary>
+    /// <b>Shape 2 — the per-key <c>KafkaFuture&lt;Void&gt;</c> form.</b> Identical walk,
+    /// except that a null per-key error <em>is</em> the success value: these RPCs have no
+    /// <c>_get_value</c> function to point at.
+    /// </summary>
+    /// <remarks>
+    /// This overload exists so that "this result has no per-key value" is stated by
+    /// <em>which method you call</em>, not by nulling a parameter out. It takes a
+    /// <see cref="VoidKeyedAdminOperation{TKey}"/> rather than the base type, so a
+    /// value-carrying operation cannot be routed here and have its value dropped — the
+    /// exact silent failure P2a's nullable value channel allowed.
+    /// </remarks>
+    /// <param name="result">The owned result root.</param>
+    /// <param name="accessors">That RPC's universal accessors.</param>
+    /// <param name="operation">The per-key void bridge.</param>
+    /// <param name="readKey">That RPC's key reader.</param>
+    /// <typeparam name="TKey">The managed per-key key type.</typeparam>
+    internal static void Complete<TKey>(
+        IntPtr result,
+        Accessors accessors,
+        VoidKeyedAdminOperation<TKey> operation,
+        Func<IntPtr, int, TKey> readKey)
+        where TKey : notnull =>
+        Complete(result, accessors, operation, readKey, s_voidSuccess);
+
+    /// <summary>
+    /// <b>Shape 3 — one aggregate future over the whole map.</b> Builds the entire
+    /// <c>Map&lt;K, V&gt;</c> out of the result table and resolves the operation's single
+    /// awaiter with it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>There is no per-key error parameter, because the ABI has no per-key error
+    /// function.</b> <c>kafka_admin_ListTopicsResult_t</c> exposes <c>count</c> /
+    /// <c>get_key</c> / <c>get_value</c> / <c>destroy</c> and nothing else — that absence
+    /// is the ABI stating shape 3's semantics: either the call fails, through the
+    /// callback's own <c>error</c> parameter, or the whole map succeeds. Expressing that
+    /// by leaving a nullable <c>getError</c> null would re-create, on the error axis, the
+    /// null-as-shape-discriminator hazard this phase removed from the value axis; giving
+    /// the shape its own signature states it structurally instead.
+    /// </para>
+    /// <para>
+    /// <b>Any failure faults the whole task.</b> There is no per-key channel to fault
+    /// into, so a throw from either reader propagates to the trampoline's no-throw
+    /// boundary, which faults the one awaiter. That is Java's shape: a single
+    /// <c>KafkaFuture&lt;Map&lt;…&gt;&gt;</c>.
+    /// </para>
+    /// </remarks>
+    /// <param name="result">The owned result root.</param>
+    /// <param name="count">That RPC's <c>*Result_count</c>.</param>
+    /// <param name="operation">The single-awaiter bridge.</param>
+    /// <param name="readKey">That RPC's key reader.</param>
+    /// <param name="readValue">That RPC's value reader.</param>
+    /// <param name="keyComparer">
+    /// The comparer the assembled map is keyed by — required for the same reason
+    /// <see cref="KeyedAdminOperation{TKey, TValue}"/>'s is: so the map and any view
+    /// derived from it cannot disagree about key identity.
+    /// </param>
+    /// <typeparam name="TKey">The managed key type.</typeparam>
+    /// <typeparam name="TValue">The managed value type.</typeparam>
+    internal static void CompleteAggregate<TKey, TValue>(
+        IntPtr result,
+        CountAccessor count,
+        SingleAdminOperation<IReadOnlyDictionary<TKey, TValue>> operation,
+        Func<IntPtr, int, TKey> readKey,
+        Func<IntPtr, int, TValue> readValue,
+        IEqualityComparer<TKey> keyComparer)
+        where TKey : notnull
+    {
+        int total = count(result);
+        Dictionary<TKey, TValue> entries =
+            new Dictionary<TKey, TValue>(Math.Max(total, 0), keyComparer);
+        for (int index = 0; index < total; index++)
+        {
+            // Add, not the indexer: the ABI's keys come from a Map and are documented
+            // sorted, so a duplicate is a core contract violation. Faulting the one
+            // awaiter loudly beats silently collapsing two entries into one.
+            entries.Add(readKey(result, index), readValue(result, index));
+        }
+
+        operation.SetResult(entries);
     }
 }

@@ -124,6 +124,48 @@ internal sealed class NativeAdminClient : IDisposable
         AdminCallbacks.DescribeTopicsCallback callback,
         IntPtr userData);
 
+    /// <summary>
+    /// The <c>list_topics_async</c> submit shape, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>. ⚠ Note the absence of a key array — the
+    /// keys are discovered from the response, which is why this RPC uses
+    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge.
+    /// </summary>
+    internal delegate void NativeListTopicsSubmit(
+        IntPtr admin,
+        int timeoutMs,
+        bool listInternal,
+        AdminCallbacks.ListTopicsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>create_partitions_async</c> submit shape — <b>two</b> parallel arrays,
+    /// injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeCreatePartitionsSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        IntPtr[] newPartitions,
+        int count,
+        int timeoutMs,
+        bool validateOnly,
+        bool retryOnQuotaViolation,
+        AdminCallbacks.CreatePartitionsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>delete_records_async</c> submit shape — <b>three</b> parallel arrays,
+    /// injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeDeleteRecordsSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] beforeOffsets,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteRecordsCallback callback,
+        IntPtr userData);
+
     internal SafeAdminHandle Handle => _handle;
 
     /// <summary>
@@ -551,6 +593,332 @@ internal sealed class NativeAdminClient : IDisposable
             default:
                 throw UnreachableCollection(nameof(topics));
         }
+    }
+
+    internal ListTopicsResult ListTopics(ListTopicsOptions? options) =>
+        ListTopics(options, NativeMethods.AdminClientListTopicsAsync);
+
+    /// <summary>
+    /// Submits <c>listTopics</c> and returns immediately with the <b>single</b> awaitable
+    /// Java's <c>ListTopicsResult</c> wraps (result shape 3).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>No keys are pre-registered, because there are none to register.</b> The ABI
+    /// entry point takes no key array — the topics are discovered from the response — so
+    /// the per-key bridge, which builds one source per requested key before the submit,
+    /// cannot express this RPC. <see cref="SingleAdminOperation{TValue}"/> reuses every
+    /// rooting invariant and differs only in the completion payload.
+    /// </remarks>
+    internal ListTopicsResult ListTopics(ListTopicsOptions? options, NativeListTopicsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool listInternal = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListTopicsOptions));
+            listInternal = options.ListInternal;
+        }
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+        try
+        {
+            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
+            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                timeoutMs,
+                listInternal,
+                AdminCallbacks.ListTopics,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return new ListTopicsResult(operation.Task);
+    }
+
+    internal CreatePartitionsResult CreatePartitions(
+        IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options) =>
+        CreatePartitions(newPartitions, options, NativeMethods.AdminClientCreatePartitionsAsync);
+
+    /// <summary>
+    /// Submits <c>createPartitions</c> and returns immediately with one awaitable per
+    /// topic. Java's <c>Map&lt;String, NewPartitions&gt;</c> becomes the ABI's two
+    /// parallel arrays.
+    /// </summary>
+    /// <remarks>
+    /// No de-duplication step: the input <em>is</em> a map, so its keys are already
+    /// distinct — under the caller's own comparer, and therefore under the finer
+    /// <see cref="StringComparer.Ordinal"/> the bridge keys by.
+    /// </remarks>
+    internal CreatePartitionsResult CreatePartitions(
+        IReadOnlyDictionary<string, NewPartitions> newPartitions,
+        CreatePartitionsOptions? options,
+        NativeCreatePartitionsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (newPartitions is null)
+        {
+            throw new ArgumentNullException(nameof(newPartitions));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool validateOnly = false;
+        bool retryOnQuotaViolation = true;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreatePartitionsOptions));
+            validateOnly = options.ValidateOnly;
+            retryOnQuotaViolation = options.RetryOnQuotaViolation;
+        }
+
+        List<string> keys = new List<string>(newPartitions.Count);
+        List<NewPartitions> requested = new List<NewPartitions>(newPartitions.Count);
+        foreach (KeyValuePair<string, NewPartitions> entry in newPartitions)
+        {
+            // The header requires `count` valid C strings and `count` valid entries, and
+            // the ABI does not validate its own preconditions (ffi §B5). A null on either
+            // side makes the ABI *skip that pair*, which would silently drop a topic the
+            // caller asked for and leave its awaiter to FailUncompleted.
+            if (entry.Key is null)
+            {
+                throw new ArgumentException(
+                    "The new-partitions map must not contain a null topic name.", nameof(newPartitions));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    $"The new-partitions entry for topic '{entry.Key}' must not be null.", nameof(newPartitions));
+            }
+
+            keys.Add(entry.Key);
+            requested.Add(entry.Value);
+        }
+
+        VoidKeyedAdminOperation<string> operation =
+            new VoidKeyedAdminOperation<string>("createPartitions", keys, StringComparer.Ordinal);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        // Both deliberately EMPTY/null here and allocated inside the try, as CreateTopics
+        // does: everything between the GCHandle allocation above and the try is a window
+        // in which a throw would root the operation for the process lifetime, because
+        // neither the catch nor the finally covers it.
+        IntPtr[] handles = Array.Empty<IntPtr>();
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            handles = new IntPtr[requested.Count];
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(keys[i]);
+                pinned.Add(key);
+                topics[i] = key.Pointer;
+            }
+
+            for (int i = 0; i < requested.Count; i++)
+            {
+                handles[i] = NewPartitionsMarshal.Build(requested[i]);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                handles,
+                handles.Length,
+                timeoutMs,
+                validateOnly,
+                retryOnQuotaViolation,
+                AdminCallbacks.CreatePartitions,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // The ABI copies out during the submit and "the caller retains ownership" of
+            // the input entries, so they are destroyed here — after the call, on every
+            // path, including a partially built array. Null-safe.
+            foreach (IntPtr handle in handles)
+            {
+                NativeMethods.NewPartitionsDestroy(handle);
+            }
+
+            // The key strings are pinned only for the call (ffi §A4's call-scoped rule):
+            // the ABI copies them out during the submit.
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String key in pinned)
+                {
+                    key.Dispose();
+                }
+            }
+        }
+
+        return new CreatePartitionsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal DeleteRecordsResult DeleteRecords(
+        IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
+        DeleteRecordsOptions? options) =>
+        DeleteRecords(recordsToDelete, options, NativeMethods.AdminClientDeleteRecordsAsync);
+
+    /// <summary>
+    /// Submits <c>deleteRecords</c> and returns immediately with one awaitable per topic
+    /// partition. Java's <c>Map&lt;TopicPartition, RecordsToDelete&gt;</c> becomes the
+    /// ABI's three parallel arrays — <c>topics</c>, <c>partitions</c>,
+    /// <c>before_offsets</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>RecordsToDelete</c> carries only an offset, so — unlike <c>NewPartitions</c> —
+    /// it needs no input handle and nothing here has to be destroyed afterwards.
+    /// </para>
+    /// <para>
+    /// An offset of <c>-1</c> is passed through unchanged: it is Java's documented
+    /// "truncate to the high watermark", a <em>value</em> rather than an unset sentinel,
+    /// so the negative-value guard that applies to timeouts deliberately does not apply
+    /// here.
+    /// </para>
+    /// </remarks>
+    internal DeleteRecordsResult DeleteRecords(
+        IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
+        DeleteRecordsOptions? options,
+        NativeDeleteRecordsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (recordsToDelete is null)
+        {
+            throw new ArgumentNullException(nameof(recordsToDelete));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteRecordsOptions));
+        }
+
+        List<TopicPartition> keys = new List<TopicPartition>(recordsToDelete.Count);
+        int[] partitions = new int[recordsToDelete.Count];
+        long[] beforeOffsets = new long[recordsToDelete.Count];
+        int next = 0;
+        foreach (KeyValuePair<TopicPartition, RecordsToDelete> entry in recordsToDelete)
+        {
+            // A `default(TopicPartition)` has a null Topic, and the header's "an entry
+            // with a NULL topic is skipped" would silently drop it (ffi §B5).
+            if (entry.Key.Topic is null)
+            {
+                throw new ArgumentException(
+                    "The records-to-delete map must not contain a topic partition with a null topic.",
+                    nameof(recordsToDelete));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    $"The records-to-delete entry for '{entry.Key}' must not be null.",
+                    nameof(recordsToDelete));
+            }
+
+            keys.Add(entry.Key);
+            partitions[next] = entry.Key.Partition;
+            beforeOffsets[next] = entry.Value.BeforeOffset();
+            next++;
+        }
+
+        // EqualityComparer<TopicPartition>.Default dispatches to the struct's own
+        // IEquatable implementation (ordinal on the topic), so it neither boxes nor
+        // disagrees with the public DeleteRecordsResult view — the same reasoning as the
+        // Uuid-keyed deleteTopics path.
+        KeyedAdminOperation<TopicPartition, DeletedRecords> operation =
+            new KeyedAdminOperation<TopicPartition, DeletedRecords>(
+                "deleteRecords", keys, EqualityComparer<TopicPartition>.Default);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+            }
+
+            // The blittable int[] / long[] are pinned by the interop marshaller for the
+            // duration of the call; the ABI copies out during it (ffi §A4 call-scoped).
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                partitions,
+                beforeOffsets,
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.DeleteRecords,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+                {
+                    topic.Dispose();
+                }
+            }
+        }
+
+        return new DeleteRecordsResult(operation.Tasks);
     }
 
     /// <summary>

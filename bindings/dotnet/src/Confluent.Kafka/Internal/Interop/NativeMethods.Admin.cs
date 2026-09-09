@@ -534,4 +534,248 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_TopicPartitionInfo_last_known_elr", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr TopicPartitionInfoLastKnownElr(IntPtr info, int index);
+
+    // ---- listTopics (M15/P2b) — result shape 3: ONE aggregate future, no per-key error ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_topics_async</c> — Java's
+    /// <c>listTopics(ListTopicsOptions)</c>.
+    /// <para>
+    /// ⚠ <b>No key array.</b> Unlike every other admin RPC bound so far, the keys are
+    /// discovered from the response rather than supplied by the caller — which is why
+    /// this one cannot use the per-key bridge (it has no keys to pre-register) and uses
+    /// <c>SingleAdminOperation</c> instead.
+    /// </para>
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> means <b>unset</b> (the client default
+    /// applies), <em>not</em> a zero timeout.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_topics_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListTopicsAsync(
+        IntPtr admin,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool listInternal,
+        AdminCallbacks.ListTopicsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_ListTopicsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTopicsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListTopicsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListTopicsResult_get_key</c> — the topic name at
+    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated, ffi §B3 row 2).
+    /// Entries are sorted by topic name.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTopicsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListTopicsResultGetKey(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListTopicsResult_get_value</c> — the listing at
+    /// <paramref name="index"/>, <b>borrowed</b> from the result root.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ There is deliberately no <c>ListTopicsResult_get_error</c> to declare beside
+    /// this: the ABI does not have one. That absence <em>is</em> the shape — either the
+    /// whole call fails (through the callback's own <c>error</c>) or the whole map
+    /// succeeds.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTopicsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListTopicsResultGetValue(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTopicsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListTopicsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_TopicListing_t — a Category-4 borrowed view (no destroy) ----
+
+    /// <summary><c>kafka_admin_TopicListing_name</c> — borrowed, NUL-terminated.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicListing_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicListingName(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_TopicListing_topic_id</c> — the topic id as a <b>base64</b> string
+    /// (Java's <c>Uuid.toString()</c>), borrowed. Parsed back to a <see cref="Uuid"/> so
+    /// the public shape matches Java's <c>TopicListing.topicId()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicListing_topic_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TopicListingTopicId(IntPtr listing);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicListing_is_internal", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool TopicListingIsInternal(IntPtr listing);
+
+    // ---- kafka_admin_NewPartitions_t — the second (and last) admin INPUT handle ----
+
+    /// <summary>
+    /// <c>kafka_admin_NewPartitions_new</c> — Java's two <c>NewPartitions</c> factories,
+    /// selected by <paramref name="hasAssignments"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b><paramref name="hasAssignments"/> is an explicit discriminant, never inferred
+    /// from how many assignments were appended.</b> <c>increaseTo(n, emptyList())</c> is
+    /// legal Java and is a <em>different request</em> from <c>increaseTo(n)</c>:
+    /// <c>CreatePartitionsRequest.json:36</c> marks <c>Assignments</c>
+    /// <c>"nullableVersions": "0+"</c>, and the broker rejects a present-but-empty list
+    /// with <c>INVALID_REPLICA_ASSIGNMENT</c> where a null one succeeds. So a
+    /// <c>?? Array.Empty&lt;…&gt;()</c> anywhere on this path silently converts a
+    /// broker-rejected request into an accepted one, or vice versa.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_NewPartitions_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr NewPartitionsNew(
+        int totalCount,
+        [MarshalAs(UnmanagedType.I1)] bool hasAssignments);
+
+    /// <summary>
+    /// <c>kafka_admin_NewPartitions_add_assignment</c> — appends one new partition's
+    /// replica broker ids. The blittable <c>int[]</c> is pinned by the marshaller for the
+    /// duration of the call; the ABI copies out during it (ffi §A4 call-scoped).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_NewPartitions_add_assignment", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void NewPartitionsAddAssignment(IntPtr partitions, int[] brokerIds, int count);
+
+    /// <summary>
+    /// <c>kafka_admin_NewPartitions_destroy</c> — null-safe. The submit copies out and
+    /// "the caller retains ownership", so every handle built must be destroyed after the
+    /// submit returns.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_NewPartitions_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void NewPartitionsDestroy(IntPtr partitions);
+
+    // ---- createPartitions (M15/P2b) — result shape 2 (per-key void) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_create_partitions_async</c> — Java's
+    /// <c>createPartitions(Map&lt;String, NewPartitions&gt;, options)</c>. Java's map
+    /// becomes <b>two parallel arrays</b>: entry <c>i</c> pairs <paramref name="topics"/>
+    /// with <paramref name="newPartitions"/>.
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> means <b>unset</b> (the client default
+    /// applies), <em>not</em> a zero timeout.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_create_partitions_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientCreatePartitionsAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        IntPtr[] newPartitions,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool validateOnly,
+        [MarshalAs(UnmanagedType.I1)] bool retryOnQuotaViolation,
+        AdminCallbacks.CreatePartitionsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_CreatePartitionsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CreatePartitionsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_CreatePartitionsResult_get_key</c> — the topic name at
+    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_get_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr CreatePartitionsResultGetKey(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_CreatePartitionsResult_get_error</c> — that topic's error, or null
+    /// if its partitions were created.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>): it dies with the result root and must
+    /// <b>never</b> be destroyed — <see cref="KafkaException.FromBorrowedHandle"/>, not
+    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no
+    /// <c>_get_value</c> to declare beside it: Java's per-key future is
+    /// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr CreatePartitionsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void CreatePartitionsResultDestroy(IntPtr result);
+
+    // ---- deleteRecords (M15/P2b) — composite key + INLINE-SCALAR value ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_delete_records_async</c> — Java's
+    /// <c>deleteRecords(Map&lt;TopicPartition, RecordsToDelete&gt;, options)</c>. Java's
+    /// map becomes <b>three parallel arrays</b>: entry <c>i</c> is
+    /// <c>(topics[i], partitions[i]) → RecordsToDelete.beforeOffset(beforeOffsets[i])</c>.
+    /// <para>
+    /// <c>RecordsToDelete</c> carries only that offset, so it needs no input handle. A
+    /// <c>beforeOffsets</c> entry of <c>-1</c> truncates that partition to its high
+    /// watermark (Java's documented <c>beforeOffset(-1)</c> behavior) — it is a
+    /// <em>value</em>, not a sentinel this binding interprets.
+    /// </para>
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> means <b>unset</b>;
+    /// <c>DeleteRecordsOptions</c> has no other field in Java.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_records_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDeleteRecordsAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] beforeOffsets,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteRecordsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DeleteRecordsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteRecordsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteRecordsResult_get_topic</c> — <b>half</b> of the composite
+    /// key at <paramref name="index"/>, borrowed (NUL-terminated). Entries are sorted by
+    /// topic name then partition id.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ This result declares <b>no <c>get_key</c> at all</b>: its key is composed from
+    /// this and <see cref="DeleteRecordsResultGetPartition"/>. That is why the walker's
+    /// key reader takes <c>(result, index)</c> rather than a string (M15/P2a's G1).
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteRecordsResultGetTopic(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteRecordsResult_get_partition</c> — the other half of the
+    /// composite key, or <c>-1</c> if <paramref name="index"/> is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteRecordsResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteRecordsResult_get_low_watermark</c> — Java's
+    /// <c>DeletedRecords.lowWatermark()</c> for the entry at <paramref name="index"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>This is an INLINE SCALAR, not a pointer to a borrowed child.</b> It is the
+    /// reason the walker's value axis had to be generalized in M15/P2b: there is no
+    /// handle to copy out of, so a pointer-shaped value accessor cannot describe it.
+    /// <para>
+    /// ⚠ <b><c>-1</c> is NOT the failure signal.</b> The header gives it three meanings
+    /// at once — "or -1 if that partition failed … or <c>index</c> is out of range" — and
+    /// <c>-1</c> is also a legitimate low watermark. The authoritative signal is
+    /// <see cref="DeleteRecordsResultGetError"/><c> != IntPtr.Zero</c>; a <c>-1</c>
+    /// watermark with a <b>null</b> error is a <b>success</b> carrying <c>-1</c>.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_low_watermark", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long DeleteRecordsResultGetLowWatermark(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteRecordsResult_get_error</c> — that partition's error, or null
+    /// if it succeeded. <b>BORROWED</b> (<c>const</c>) — read, never destroy.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteRecordsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeleteRecordsResultDestroy(IntPtr result);
 }

@@ -256,18 +256,6 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
     }
 
     /// <summary>
-    /// Resolves one key successfully when the result carries <b>no value</b> — result
-    /// shape 2, where Java's per-key future is <c>KafkaFuture&lt;Void&gt;</c> and the
-    /// ABI exposes no <c>_get_value</c> at all, so a null error <em>is</em> the success
-    /// value. The value-carrying base cannot fabricate a <typeparamref name="TValue"/>,
-    /// so it defers to <see cref="VoidKeyedAdminOperation{TKey}"/>; a shape-1 operation
-    /// never reaches here.
-    /// </summary>
-    internal virtual void CompleteWithSuccessNoValue(TKey key)
-    {
-    }
-
-    /// <summary>
     /// Faults <b>every</b> key with the same exception — the top-level submit-failure
     /// path, where the callback's <c>error</c> parameter is non-null and no result
     /// table exists, and the callback's no-throw boundary.
@@ -311,6 +299,14 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
 /// <c>KafkaFuture&lt;Void&gt;</c> — for those the ABI exposes no <c>_get_value</c>, so
 /// a null per-key error <em>is</em> the success value.
 /// </summary>
+/// <remarks>
+/// ⚠ <b>This type is load-bearing, not a convenience alias (M15/P2b).</b> It is what
+/// <see cref="Interop.KeyedResultMarshal"/>'s value-less <c>Complete</c> overload accepts,
+/// so "this result has no per-key value" is a fact the <em>type system</em> carries. A
+/// value-carrying <see cref="KeyedAdminOperation{TKey, TValue}"/> cannot be routed down
+/// that path and have its value silently dropped — which is exactly what a nullable value
+/// channel allowed before P2b removed it.
+/// </remarks>
 /// <typeparam name="TKey">The managed per-key key type.</typeparam>
 internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, bool>
     where TKey : notnull
@@ -323,7 +319,85 @@ internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, 
         : base(operationName, keys, keyComparer)
     {
     }
+}
 
-    /// <inheritdoc/>
-    internal override void CompleteWithSuccessNoValue(TKey key) => SetResult(key, true);
+/// <summary>
+/// The completion bridge for a <b>non-keyed</b> admin RPC (result shape 3): <b>one</b>
+/// <see cref="TaskCompletionSource{TResult}"/> for the whole call, mirroring Java's single
+/// <c>KafkaFuture&lt;Map&lt;K, V&gt;&gt;</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why the per-key bridge cannot express this.</b>
+/// <see cref="KeyedAdminOperation{TKey, TValue}"/> creates one source per key
+/// <em>before</em> the submit, so the C# method can hand back its Java-shaped
+/// <c>*Result</c> synchronously — which requires knowing the keys up front.
+/// <c>kafka_admin_AdminClient_list_topics</c> takes <b>no key array</b>: the keys are
+/// discovered from the response. And <c>kafka_admin_ListTopicsResult_t</c> exposes no
+/// <c>get_error</c> at all, the ABI's way of saying there is no per-key failure to
+/// attribute. One future is therefore the faithful shape, not a simplification of N.
+/// </para>
+/// <para>
+/// <b>Everything about rooting is inherited unchanged.</b> The <see cref="GCHandle"/>,
+/// the span-the-op <see cref="SafeHandle"/> reference,
+/// <see cref="AdminOperation.AbandonBeforeSubmit"/>
+/// and the free-exactly-once discipline all come from <see cref="AdminOperation"/>; only
+/// the completion payload differs. The source uses
+/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> for the same reason
+/// the per-key sources do — an admin callback can fire synchronously on the submitting
+/// thread, so without it a continuation would run inside the caller's own P/Invoke.
+/// </para>
+/// </remarks>
+/// <typeparam name="TValue">The already-marshalled managed result type.</typeparam>
+internal sealed class SingleAdminOperation<TValue> : AdminOperation
+{
+    private readonly TaskCompletionSource<TValue> _source =
+        new TaskCompletionSource<TValue>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private readonly string _operationName;
+
+    /// <summary>Creates the single source, before anything is submitted.</summary>
+    /// <param name="operationName">
+    /// The Java method name (e.g. <c>listTopics</c>), used only to make the
+    /// "result was never delivered" message name the operation it came from.
+    /// </param>
+    internal SingleAdminOperation(string operationName)
+    {
+        _operationName = operationName;
+    }
+
+    /// <summary>
+    /// The awaitable, in the Java <c>KafkaFuture&lt;T&gt;</c> shape the public
+    /// <c>*Result</c> exposes. Available before the submit, so the synchronous C# method
+    /// can hand it back immediately.
+    /// </summary>
+    internal Task<TValue> Task => _source.Task;
+
+    /// <summary>Resolves the call successfully with its marshalled value.</summary>
+    internal void SetResult(TValue value) => _source.TrySetResult(value);
+
+    /// <summary>
+    /// Faults the call. Used both for the callback's own top-level <c>error</c> and for
+    /// any failure during the walk — shape 3 has no per-key channel, so every failure is
+    /// a call failure.
+    /// </summary>
+    internal void SetException(Exception exception) => _source.TrySetException(exception);
+
+    /// <summary>
+    /// Faults the awaiter if nothing completed it, so the <see cref="Task"/> <b>cannot
+    /// hang</b>. A no-op on every normal path; it exists because a caller holding a
+    /// never-completing <see cref="Task"/> is a worse failure than an explicit error.
+    /// The keyed bridge's <c>FailUncompleted</c>, for one source instead of N.
+    /// </summary>
+    internal void FailUncompleted()
+    {
+        if (!_source.Task.IsCompleted)
+        {
+            _source.TrySetException(new KafkaException(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "The {0} call completed without delivering a result.",
+                    _operationName)));
+        }
+    }
 }

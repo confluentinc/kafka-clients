@@ -61,6 +61,21 @@ public sealed class KafkaAdminClient : IAdmin
         _native.DescribeTopics(topics, options);
 
     /// <inheritdoc/>
+    public ListTopicsResult ListTopics(ListTopicsOptions? options = null) =>
+        _native.ListTopics(options);
+
+    /// <inheritdoc/>
+    public CreatePartitionsResult CreatePartitions(
+        IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null) =>
+        _native.CreatePartitions(newPartitions, options);
+
+    /// <inheritdoc/>
+    public DeleteRecordsResult DeleteRecords(
+        IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
+        DeleteRecordsOptions? options = null) =>
+        _native.DeleteRecords(recordsToDelete, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>
