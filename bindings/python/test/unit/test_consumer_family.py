@@ -406,7 +406,7 @@ def test_client_instance_id_negative_timeout_rejected():
     c = KafkaConsumer(config=_kafka_config(**{"group.id": "g"}))
     try:
         with pytest.raises(IllegalArgumentError,
-                           match="Timeout must not be negative"):
+                           match="The timeout cannot be negative\."):
             c.client_instance_id(timeout=-1.0)
     finally:
         c.close()
