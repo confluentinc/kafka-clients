@@ -174,3 +174,107 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   from `metrics()`), and `config()`/`measurable()` are typed `-> object` for now, per the spec's
   deferral. `metric_value()` is `Any` (Java `Object`).
 - **Status:** open — the two return types land in the metrics design pass.
+
+### C13 — Spec text lags Java in two P2 details (Critic 65 notes N2/N3)
+- **Where:** spec §5.3 `OffsetResetStrategy` member order; §5.1 `TopicIdPartition.topic()` return type.
+- **Question:** the spec's enum member order and the `topic()` type differ from Java 4.3.1
+  (`OffsetResetStrategy.java`, `TopicIdPartition.java:…` — `topic()` may return `null` in Java).
+- **Assumption taken:** the code follows Java (rule 2 outranks the spec's code blocks); the spec is to
+  be corrected in its next revision, not the code.
+- **Status:** open — spec edit for the owner's next spec pass.
+
+### C14 — `TimestampType.for_name` raises `KeyError` where Java throws `NoSuchElementException`
+- **Where:** `confluent_kafka/common/timestamp_type.py`.
+- **Question:** Java's `TimestampType.forName` throws `java.util.NoSuchElementException`; the spec
+  defines no JDK analog for it (only `IllegalState`, `IllegalArgument`, `ConcurrentModification`,
+  `Timeout`).
+- **Assumption taken:** Python's `KeyError` (the closest builtin; a lookup failure). Alternative: add a
+  `NoSuchElementError` JDK analog at the root (would need an FFI id — none exists).
+- **Status:** open — owner to confirm `KeyError` or request a new JDK analog.
+
+### C15 — `uuid_serializer`/`uuid_deserializer` use this binding's `Uuid` (base64), not `java.util.UUID` (dashed) (P3)
+- **Where:** `bindings/python/confluent_kafka/common/serialization/uuid_serializer.py`,
+  `uuid_deserializer.py`.
+- **Question:** Java's `UUIDSerializer`/`UUIDDeserializer` operate on `java.util.UUID`, serializing
+  `UUID.toString()` (the canonical dashed form, e.g. `123e4567-e89b-...`) and parsing via
+  `UUID.fromString`. The spec (§5.4) types the factory as `Serializer[Uuid]` / `Deserializer[Uuid]`
+  where `Uuid` is `confluent_kafka.common.Uuid` (`org.apache.kafka.common.Uuid`), whose string form is
+  a **URL-safe base64** encoding — not the dashed form. These produce different wire bytes.
+- **Assumption taken:** faithful to the Java *mechanism* (serialize the type's string form, parse it
+  back on the deserializer) using our `Uuid`'s `str()` / `Uuid.from_string`. The wire bytes are
+  therefore the base64 string, not `java.util.UUID`'s dashed string. An unparseable string wraps the
+  `IllegalArgumentError` from `from_string` as `SerializationError("Error parsing data into UUID")`,
+  matching Java. Encoding config keys (`key.serializer.encoding` etc.) are honoured exactly as Java's
+  UUID serdes honour them (stored, not validated at configure time — unlike `StringSerializer`).
+- **Alternatives:** (a) introduce a separate `java.util.UUID`-compatible path (would require a second
+  UUID type on the surface — none exists); (b) serialize our `Uuid`'s dashed-equivalent form (our
+  `Uuid` has no dashed form).
+- **Status:** open — owner to confirm base64 wire form for our `Uuid` is acceptable, since it diverges
+  from Java's `java.util.UUID` bytes for cross-language interop.
+
+### C16 — Java serdes with no spec factory: Short / Long / Void / ByteBuffer / Bytes / List (P3)
+- **Where:** `bindings/python/confluent_kafka/common/serialization/` (factory roster in `_factories.py`).
+- **Question:** the P3 deliverable lists all Java built-in serdes; the spec §5.4 collapses the sized
+  integer serdes into `int_serializer(*, size=4)` (allowed sizes **4|8**) and the float serdes into
+  `float_serializer(*, size=8)` (**8|4**), and names an exact factory set that omits several Java
+  serdes. Which Java serdes have no factory, and what happens to them?
+- **Assumption taken (per D6 built-ins table + rule 2 = implement exactly the spec's roster):**
+  - **`ShortSerializer`/`ShortDeserializer` (size 2)** — NOT offered. `int_serializer`/`int_deserializer`
+    accept only size 4|8 (spec), so `size=2` is rejected with `IllegalArgumentError`. Java's Short
+    testData row has no home; a `test_short_range_via_int_size2_is_not_offered` documents the rejection.
+    (Long IS offered as `int_serializer(size=8)`.)
+  - **`VoidSerializer`/`VoidDeserializer`** — NOT offered (D6: "not in v1 — no demand; `bytes_*` +
+    None-passthrough covers it").
+  - **`ByteBufferSerializer`** — NOT offered as a distinct factory; the producer default
+    `bytes_serializer()` (passthrough) covers the `bytes`-like producer path. `ByteBufferDeserializer`
+    IS offered as `memoryview_deserializer()` (the zero-copy opt-in).
+  - **`BytesSerializer`/`BytesDeserializer`** (Java's `org.apache.kafka.common.utils.Bytes` wrapper) —
+    NOT offered; `bytes_*` covers the same role (there is no `Bytes` wrapper type on this surface).
+  - **`ListSerializer`/`ListDeserializer`** — NOT offered (D6: "not in v1 — needs an inner-serde story
+    first"). All `listSerde…` Java tests are skipped with this reason in `test_serialization.py`.
+- **Status:** resolved by D6's built-ins table; recorded here so the omissions are explicit and the
+  skipped Java tests are accounted for.
+
+### C17 — float serde does not preserve raw signaling-NaN payloads (Python-float limitation) (P3)
+- **Where:** `bindings/python/confluent_kafka/common/serialization/float_serializer.py`.
+- **Question:** Java's `FloatSerializer` uses `Float.floatToRawIntBits`, which preserves the exact NaN
+  bit pattern; `floatSerdeShouldPreserveNaNValues` constructs a signaling NaN from `0x7f800001` and
+  asserts the raw int bits round-trip. Python's `struct.pack(">f", x)` canonicalizes a signaling NaN to
+  a quiet NaN (`0x7f800001` -> `0x7fc00001`), and a Python `float` cannot carry the raw payload through
+  the C double it materializes as.
+- **Assumption taken:** implement standard big-endian IEEE-754 packing (`struct`), which matches Java
+  for all non-NaN values and for canonical (quiet) NaN. The `floatSerdeShouldPreserveNaNValues` test is
+  translated as a **canonical-NaN round-trip** (still a NaN; the bits our own encoder emits round-trip
+  exactly), NOT the raw-payload assertion — which is unrepresentable in pure Python. If native C-ext
+  execution of the built-ins lands (see C18), the raw-payload path could be recovered there.
+- **Status:** open — a genuine language limitation; owner to acknowledge the canonical-NaN adaptation.
+
+### C18 — built-ins run in Python for P3; native C-ext execution is a P4/P5 item (P3)
+- **Where:** `bindings/python/confluent_kafka/common/serialization/` (all built-in serde classes).
+- **Question:** spec §5.4 / D10 say "built-ins run natively — no per-record Python call". The FFI /
+  C extension (`bindings/python/_confluentkafka.c`, `src/ffi/*.rs`) currently exposes NO serde hooks
+  (only the `RecordDeserializationError` accessors); there is no native serialize/deserialize entry
+  point to wire the built-ins to.
+- **Assumption taken:** implement the built-ins in Python for P3 (correct behavior, byte-faithful with
+  Java). Native execution (recognizing a built-in by identity at construction and running it in the C
+  layer, zero per-record Python call) is deferred to the client-integration phases (P4/P5) where the
+  poll/send FFI path exists — no FFI is added in P3 (per the phase instruction).
+- **Status:** open — native-execution wiring tracked for P4/P5; the Python built-ins are the fallback
+  D6 placement option 1 ("Hybrid — built-ins native, customs Python") permits.
+
+### C19 — serde/config error classes imported from their concrete generated modules, not the package re-export (P3)
+- **Where:** `bindings/python/confluent_kafka/common/serialization/*` and
+  `bindings/python/confluent_kafka/_config.py` (imports of `SerializationError`, `ConfigError`).
+- **Question:** CLAUDE.md's naming rule prefers importing a type via its parent-module re-export
+  (`from confluent_kafka.common.errors import SerializationError`). Under `mypy --strict` (rule 12),
+  that re-export resolves `SerializationError` as `object` (a variable, not a type): the errors package
+  `__init__` re-exports via `from ._generated import *` with a runtime-computed `__all__` and ships no
+  `__init__.pyi`, so mypy cannot statically see the class through the package.
+- **Assumption taken:** import these error classes from their **concrete generated modules**
+  (`confluent_kafka.common.errors._generated`, `confluent_kafka.common.config._generated_errors`),
+  which carry proper `.pyi` types, so `mypy --strict` stays clean. Runtime behavior is identical (the
+  package re-export works at runtime). The parent-re-export typing gap belongs to the errors-package
+  owner (Actor/Critic 64); this is a workaround on the consumer side, not a fix to that package.
+- **Status:** open — the package-level typing gap should be closed by adding an `__init__.pyi` (or
+  explicit re-exports) to `common/errors` / `common/config`, after which these imports can move back to
+  the parent re-export per CLAUDE.md.

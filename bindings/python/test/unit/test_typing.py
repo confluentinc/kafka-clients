@@ -27,6 +27,25 @@ from __future__ import annotations
 from typing import assert_type
 
 from confluent_kafka.common import TopicIdPartition, TopicPartition, Uuid
+from confluent_kafka.common.serialization import (
+    Deserializer,
+    Serializer,
+    bool_deserializer,
+    bool_serializer,
+    bytes_deserializer,
+    bytes_serializer,
+    float_deserializer,
+    float_serializer,
+    int_deserializer,
+    int_serializer,
+    json_deserializer,
+    json_serializer,
+    memoryview_deserializer,
+    string_deserializer,
+    string_serializer,
+    uuid_deserializer,
+    uuid_serializer,
+)
 from confluent_kafka.consumer import (
     ConsumerRecord,
     ConsumerRecords,
@@ -78,6 +97,31 @@ def _sentinel_return_types() -> None:
     assert_type(om.leader_epoch(), "int | None")
 
 
+def _serde_factory_types() -> None:
+    # Each factory returns a typed callable, so K/V infer from it (D11).
+    assert_type(bytes_serializer(), "Serializer[bytes]")
+    assert_type(bytes_deserializer(), "Deserializer[bytes]")
+    assert_type(memoryview_deserializer(), "Deserializer[memoryview]")
+    assert_type(string_serializer(), "Serializer[str]")
+    assert_type(string_deserializer(), "Deserializer[str]")
+    assert_type(int_serializer(), "Serializer[int]")
+    assert_type(int_deserializer(), "Deserializer[int]")
+    assert_type(float_serializer(), "Serializer[float]")
+    assert_type(float_deserializer(), "Deserializer[float]")
+    assert_type(bool_serializer(), "Serializer[bool]")
+    assert_type(bool_deserializer(), "Deserializer[bool]")
+    assert_type(uuid_serializer(), "Serializer[Uuid]")
+    assert_type(uuid_deserializer(), "Deserializer[Uuid]")
+
+    # A serde is just a callable of the right shape — a bare function type-checks.
+    def value_deser(topic: str, data: memoryview | None,
+                    headers: object = None) -> str | None:
+        return None if data is None else bytes(data).decode()
+
+    d: Deserializer[str] = value_deser
+    assert_type(d, "Deserializer[str]")
+
+
 def test_typing_module_imports() -> None:
     """Runtime smoke check that the typing module imports cleanly. The real
     assertions above are enforced statically by mypy --strict."""
@@ -85,3 +129,4 @@ def test_typing_module_imports() -> None:
     _consumer_records_overloads()
     _record_generics_inference()
     _sentinel_return_types()
+    _serde_factory_types()
