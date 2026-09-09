@@ -665,3 +665,57 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   the parent re-export per CLAUDE.md.
 
 
+
+### C40 — Legacy `producer.py` / `consumer.py` / `_error_code.py` retired; admin keeps a private compat shim (P6)
+- **Where:** deleted `bindings/python/{producer,consumer,_error_code}.py`; new
+  `bindings/python/confluent_kafka/_legacy_compat.py`; `admin.py` / `grpc_translate.py` imports.
+- **Decision:** the `confluent_kafka` package now covers the producer/consumer surface (P4/P5), so the
+  three top-level legacy modules are deleted. The **paused** admin binding still returns the flat
+  `KafkaError` (with `code()` / `is_retriable()`) and takes the positional `Node` /
+  `OffsetAndMetadata` value types as its frozen public contract; those three types moved to the
+  private `confluent_kafka/_legacy_compat.py` shim so the legacy modules could be deleted without
+  changing admin's surface. `admin.py`, `grpc_translate.py` and `test_admin.py` import the shim.
+- **Assumption taken:** the task's option — move admin's needed helpers into a private module rather
+  than keep `producer.py`. The flat `KafkaError` is no longer importable from the top level.
+- **Status:** resolved (admin is paused; the shim is deleted when admin is ported).
+
+### C41 — `xtask generate-error-codes` stops emitting `_error_code.py`; the Rust mirror stays (P6)
+- **Where:** `xtask/src/main.rs` (`ERROR_CODE_PY` removed; `ERROR_CODE_RS` kept); `check-generated`.
+- **Decision:** the flat `_error_code.py` copy is retired with `producer.py`/`consumer.py`. The Rust
+  mirror `tests/common/error_code.rs` (needed by the multilanguage harness, which cannot see the FFI
+  enum) and the generated `confluent_kafka` error hierarchy are still generated and still checked by
+  `check-generated`. `test_errors.py` cross-checks each `_ffi_id` against the Rust mirror instead of
+  the deleted Python module.
+- **Status:** resolved.
+
+### C42 — gRPC integration servers ported to the new package; metric `kind` fidelity relaxed (P6)
+- **Where:** `grpc_server.py` / `grpc_server_async.py` / `grpc_translate.py`.
+- **Decision:** the multilanguage gRPC servers now speak the new package (keyword-only calls, typed
+  errors via `to_ffi_id` / `_ffi_id` constants, method value-type accessors, wired close timeouts).
+  The new public `metrics()` returns `dict[MetricName, Metric]` whose `metric_value()` no longer
+  carries the Rust `Long`-vs-`Int` distinction the retired FFI dict did, so `_metric_to_proto` picks
+  the proto value oneof from the Python value type (`int` → `long_value`). The integration metric
+  assertions are structural (name/group/tags), so this is not observable; `make test-integration-python`
+  passes 232/0. Node/PartitionInfo/OffsetAndMetadata proto helpers read through a `_member` shim
+  because they are shared between the new (method-accessor) consumer/producer path and the paused
+  admin (attribute-accessor) path.
+- **Status:** resolved (integration arm green).
+
+### C43 — Performance tests (`test/performance/*`) left un-ported: package-name collision, owner item (P6)
+- **Where:** `bindings/python/test/performance/{producer,consumer}_performance_test.py`.
+- **Question:** the perf tests benchmark OUR client against the reference `confluent-kafka` PyPI
+  library, importing the latter as `from confluent_kafka import Producer as CKProducer`. Our package
+  is now ALSO named `confluent_kafka` and shadows the pip-installed reference lib (`import
+  confluent_kafka` resolves to our in-tree package, which has no top-level `Producer`), so the
+  comparison-against-reference is unreachable by name. They also use `producer.poll()` (no equivalent
+  on the new client — spec §11 says delete it) and `KafkaError._QUEUE_FULL` / `err.code()` (flat error,
+  removed). They are **not** in the `make verify` gate (only `test-integration-perf-python`, a separate
+  target).
+- **Assumption taken:** left un-ported and logged. Porting is blocked by the name-collision design
+  question (how the reference lib is reached once our package owns the `confluent_kafka` name), which
+  is an owner decision (spec §11 mentions a separate compatibility module). The macOS/Linux gRPC image
+  Dockerfiles and the `make verify` chain do not depend on them.
+- **Alternatives:** (a) rename the perf-test reference import via an env-installed alias; (b) drop the
+  reference-lib comparison and benchmark only our client; (c) port after the compat-module decision.
+- **Status:** open — owner to decide how the perf suite reaches the reference library under the
+  `confluent_kafka` name.

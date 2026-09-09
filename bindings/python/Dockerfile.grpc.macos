@@ -46,8 +46,7 @@ COPY --from=rust-builder /workspace/target/include/confluent_kafka.h /workspace/
 COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
 COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
-COPY bindings/python/producer.py /workspace/bindings/python/producer.py
-COPY bindings/python/consumer.py /workspace/bindings/python/consumer.py
+COPY bindings/python/confluent_kafka /workspace/bindings/python/confluent_kafka
 COPY bindings/python/admin.py /workspace/bindings/python/admin.py
 
 COPY multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
@@ -76,8 +75,7 @@ WORKDIR /app
 
 COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
-COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
-COPY --from=builder /workspace/bindings/python/consumer.py /app/consumer.py
+COPY --from=builder /workspace/bindings/python/confluent_kafka /app/confluent_kafka
 COPY --from=builder /workspace/bindings/python/admin.py /app/admin.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/producer_service_pb2.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
