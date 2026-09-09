@@ -233,8 +233,8 @@ class Producer(Generic[K, V], _ProducerState):
         _lib.Producer_shutdown(self._c_producer)
         timeout_ms = _timeout_to_ms(timeout)
         self._run_sync(
-            lambda cb: _lib.Producer_close_timeout_async(
-                self._c_producer, timeout_ms, cb))
+            lambda cb: _lib.Producer_close_async(
+                self._c_producer, cb, timeout_ms))
         _lib.Producer_destroy(self._c_producer)
 
     def _cancel(self) -> None:

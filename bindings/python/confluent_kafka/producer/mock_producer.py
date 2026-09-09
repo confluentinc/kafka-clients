@@ -353,7 +353,11 @@ class _MockCore(Generic[K, V]):
         if self._telemetry_disabled:
             raise IllegalStateError()
         if self._client_instance_id is None:
-            raise KafkaError("clientInstanceId not set")
+            # Java throws UnsupportedOperationException("clientInstanceId not set")
+            # (MockProducer.java:406). There is no UnsupportedOperationError JDK
+            # analog on this surface (and no FFI id), so Python's semantic
+            # counterpart NotImplementedError carries Java's exact message (C25).
+            raise NotImplementedError("clientInstanceId not set")
         if self._inject_timeout_counter != 0:
             if self._inject_timeout_counter > 0:
                 self._inject_timeout_counter -= 1

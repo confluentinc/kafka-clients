@@ -2796,9 +2796,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 ///
 /// After closing, further send calls will fail.
 ///
+/// `timeout_ms` bounds the wait, mirroring Java's `close(Duration)`; `-1` selects
+/// the default untimed (flushing) close, mirroring the no-argument `close()`.
+/// Java's `close()` / `close(Duration)` differ only by the *presence* of the
+/// duration, so per CLAUDE.md §2 this **one** entry point serves both — the
+/// caller passes `-1` for the no-argument form.
+///
 /// # Parameters
 ///
 /// - `producer`: Producer handle, or null (no-op).
+/// - `timeout_ms`: Close timeout in milliseconds, or `-1` for the default
+///   untimed flushing close.
 /// - `out_error`: Pointer where an error handle will be written on failure,
 ///   or null if the caller does not need error details.
 ///
@@ -2808,6 +2816,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     producer: *mut kafka_producer_Producer_t,
+    timeout_ms: i64,
     out_error: *mut *mut kafka_common_Error_t,
 ) {
     if producer.is_null() {
@@ -2818,11 +2827,11 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
     }
 
     // Hand over records still queued by `send_async` before closing. Java's
-    // `close()` flushes by default (only `close(Duration.ZERO)` discards, and this
-    // FFI exposes only the flushing form), so queued records must be produced, not
-    // dropped. Without this, close would race the queued `send`s: the producer
-    // shuts down, each queued `send` then fails `ensure_not_closed`, and the
-    // record is lost. As in `flush`, drain without holding the `kind` lock.
+    // `close()` flushes by default (only `close(Duration.ZERO)` discards), so
+    // queued records must be produced, not dropped. Without this, close would
+    // race the queued `send`s: the producer shuts down, each queued `send` then
+    // fails `ensure_not_closed`, and the record is lost. As in `flush`, drain
+    // without holding the `kind` lock.
     let handle = unsafe { producer_handle(producer) };
     let producer_mtx = unsafe { producer_ref(producer) };
     let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
@@ -2835,9 +2844,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
 
     let guard = producer_mtx.lock().unwrap();
     let rt = guard.runtime();
+    let timeout = (timeout_ms >= 0).then(|| std::time::Duration::from_millis(timeout_ms as u64));
     let result = match &*guard {
-        ProducerKind::Mock(mock, _) => rt.block_on(mock.close()),
-        ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.close()),
+        ProducerKind::Mock(mock, _) => match timeout {
+            Some(t) => rt.block_on(mock.close_timeout(t)),
+            None => rt.block_on(mock.close()),
+        },
+        ProducerKind::Kafka(kafka, _) => match timeout {
+            Some(t) => rt.block_on(kafka.close_timeout(t)),
+            None => rt.block_on(kafka.close()),
+        },
     };
     if !out_error.is_null() {
         unsafe {
@@ -2964,6 +2980,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
 /// Asynchronously closes the producer, invoking `callback` on completion (the
 /// async counterpart of [`kafka_producer_Producer_close`]).
 ///
+/// `timeout_ms` bounds the wait, mirroring Java's `close(Duration)`; `-1` selects
+/// the default untimed (flushing) close, mirroring the no-argument `close()`.
+/// Java's `close()` / `close(Duration)` differ only by the *presence* of the
+/// duration, so per CLAUDE.md §2 this **one** entry point serves both — the
+/// binding passes `-1` for the no-argument form. (There is deliberately no
+/// separate `close_timeout_async` sibling; the presence-only overload keeps the
+/// bare name with an optional parameter.)
+///
 /// Returns immediately; `callback` fires on the producer's dispatcher thread
 /// with a null error on success or a non-null [`kafka_common_Error_t`] the
 /// caller must free on failure.
@@ -2973,31 +2997,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
 /// `producer` must be a valid handle, or null (null is a no-op success).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_async(
-    producer: *mut kafka_producer_Producer_t,
-    callback: kafka_producer_Producer_close_callback_t,
-    user_data: *mut std::ffi::c_void,
-) {
-    flush_or_close_async(producer, callback, user_data, true);
-}
-
-/// Asynchronously closes the producer with a bounded timeout (the async
-/// counterpart of Java's `close(Duration)`).
-///
-/// `timeout_ms` of `-1` selects the default untimed (flushing) close, exactly
-/// like [`kafka_producer_Producer_close_async`]; a non-negative value bounds the
-/// wait. Java's `close()` / `close(Duration)` differ only by the presence of the
-/// duration, so this one entry point serves both (CLAUDE.md §2), with the
-/// binding passing `-1` for the no-argument form.
-///
-/// Returns immediately; `callback` fires on the producer's dispatcher thread
-/// with a null error on success or a non-null [`kafka_common_Error_t`] the
-/// caller must free on failure.
-///
-/// # Safety
-///
-/// `producer` must be a valid handle, or null (null is a no-op success).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_Producer_close_timeout_async(
     producer: *mut kafka_producer_Producer_t,
     timeout_ms: i64,
     callback: kafka_producer_Producer_close_callback_t,
@@ -5102,14 +5101,14 @@ mod tests {
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
-    /// `close_timeout_async` with a non-negative timeout closes a mock producer
+    /// `close_async` with a non-negative timeout closes a mock producer
     /// and fires its callback exactly once with no error (Java `close(Duration)`).
     #[test]
-    fn test_close_timeout_async_succeeds() {
+    fn test_close_async_with_timeout() {
         let producer = kafka_producer_MockProducer_new(true);
         let captured = CapturedOpResult::new();
         unsafe {
-            kafka_producer_Producer_close_timeout_async(
+            kafka_producer_Producer_close_async(
                 producer,
                 1000, // 1s timeout
                 capture_op_result,
@@ -5117,7 +5116,7 @@ mod tests {
             );
         }
         wait_for_fired(&captured);
-        assert_eq!(captured.fired(), 1, "close_timeout_async must fire its callback exactly once");
+        assert_eq!(captured.fired(), 1, "close_async must fire its callback exactly once");
         assert!(
             captured.message().is_none(),
             "a clean close must deliver a null error, got: {:?}",
@@ -5129,11 +5128,11 @@ mod tests {
     /// A `-1` timeout selects the default untimed flushing close (the no-arg
     /// Java `close()` form), and still fires the callback with no error.
     #[test]
-    fn test_close_timeout_async_default_sentinel() {
+    fn test_close_async_default_sentinel() {
         let producer = kafka_producer_MockProducer_new(true);
         let captured = CapturedOpResult::new();
         unsafe {
-            kafka_producer_Producer_close_timeout_async(
+            kafka_producer_Producer_close_async(
                 producer,
                 -1,
                 capture_op_result,
@@ -5712,7 +5711,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
@@ -5738,7 +5737,7 @@ mod tests {
     fn test_close_null() {
         unsafe {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(std::ptr::null_mut(), &mut err);
+            kafka_producer_Producer_close(std::ptr::null_mut(), -1, &mut err);
             assert_success(err);
         }
     }
@@ -5907,7 +5906,7 @@ mod tests {
         let producer = kafka_producer_MockProducer_new(true);
         unsafe {
             // Close and then try to send -- should produce an error handle
-            kafka_producer_Producer_close(producer, std::ptr::null_mut());
+            kafka_producer_Producer_close(producer, -1, std::ptr::null_mut());
 
             let topic = CString::new("topic").unwrap();
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
@@ -5947,7 +5946,7 @@ mod tests {
         // Create an error by sending to a closed producer
         let producer = kafka_producer_MockProducer_new(true);
         unsafe {
-            kafka_producer_Producer_close(producer, std::ptr::null_mut());
+            kafka_producer_Producer_close(producer, -1, std::ptr::null_mut());
 
             let topic = CString::new("topic").unwrap();
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
@@ -6070,7 +6069,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
@@ -6098,7 +6097,7 @@ mod tests {
 
         unsafe {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
@@ -6156,7 +6155,7 @@ mod tests {
 
             kafka_producer_ProducerProperties_destroy(props);
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
             kafka_producer_Producer_destroy(producer);
         }
@@ -6181,7 +6180,7 @@ mod tests {
 
             kafka_producer_ProducerProperties_destroy(props);
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
             kafka_producer_Producer_destroy(producer);
         }
@@ -6262,7 +6261,7 @@ mod tests {
 
             // Close before destroy
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
 
             kafka_producer_Producer_destroy(producer);
@@ -6290,7 +6289,7 @@ mod tests {
             let producer = kafka_producer_KafkaProducer_new(props, std::ptr::null_mut());
             assert!(!producer.is_null());
             kafka_producer_ProducerProperties_destroy(props);
-            kafka_producer_Producer_close(producer, std::ptr::null_mut());
+            kafka_producer_Producer_close(producer, -1, std::ptr::null_mut());
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -6324,7 +6323,7 @@ mod tests {
             kafka_producer_MockProducer_clear(producer); // no-op
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close(producer, &mut err);
+            kafka_producer_Producer_close(producer, -1, &mut err);
             assert_success(err);
             kafka_producer_Producer_destroy(producer);
         }

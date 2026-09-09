@@ -747,7 +747,7 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 
     Producer* producer = (Producer*)PyMem_Malloc(sizeof(Producer));
     if (!producer) {
-        kafka_producer_Producer_close(kafka_producer, NULL);
+        kafka_producer_Producer_close(kafka_producer, -1, NULL);
         kafka_producer_Producer_destroy(kafka_producer);
         return PyErr_NoMemory();
     }
@@ -985,30 +985,20 @@ static PyObject* py_Producer_shutdown(PyObject* self, PyObject* args) {
 // dispatcher thread. The Python wrapper waits via _run_sync / _run_async so a
 // stuck close stays interruptible on the main thread (like flush). Must be
 // called after Producer_shutdown (the C batching threads are already joined).
+// Async close. The optional timeout_ms (default -1) mirrors Java close(Duration)
+// / close(): Java's forms differ only by the presence of the duration, so this is
+// ONE entry point taking an optional timeout (CLAUDE.md §2). -1 selects the
+// default untimed flushing close.
 static PyObject* py_Producer_close_async(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) {
+    long long timeout_ms = -1;  // default: no-argument close()
+    if (!PyArg_ParseTuple(args, "KO|L", &producer_ptr, &cb, &timeout_ms)) {
         return NULL;
     }
     Producer* producer = (Producer*)producer_ptr;
     Py_INCREF(cb);
-    kafka_producer_Producer_close_async(producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
-
-// Close with a bounded timeout (Java close(Duration)). timeout_ms of -1 selects
-// the default untimed flushing close, like Producer_close_async.
-static PyObject* py_Producer_close_timeout_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    long long timeout_ms;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KLO", &producer_ptr, &timeout_ms, &cb)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_close_timeout_async(
+    kafka_producer_Producer_close_async(
         producer->producer, (int64_t)timeout_ms, producer_op_trampoline, cb);
     Py_RETURN_NONE;
 }
@@ -7209,9 +7199,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_shutdown", py_Producer_shutdown, METH_VARARGS,
      "Stop/join the C batching threads (step 1 of close)"},
     {"Producer_close_async", py_Producer_close_async, METH_VARARGS,
-     "Async Rust-side close; cb(error_int) (step 2 of close)"},
-    {"Producer_close_timeout_async", py_Producer_close_timeout_async, METH_VARARGS,
-     "Async Rust-side close with timeout_ms (-1=default); cb(error_int)"},
+     "Async Rust-side close; (producer, cb[, timeout_ms=-1]) (step 2 of close)"},
     {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
      "Free the Rust handle + C struct (step 3 of close)"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},

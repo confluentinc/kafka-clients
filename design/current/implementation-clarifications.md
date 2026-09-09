@@ -408,6 +408,14 @@ Format: `### C<n> — <title>` · **Where** · **Question** · **Assumption take
   client implement these too).
 - **Status:** open — real-client telemetry/metric-subscription tracked for a future core phase; the
   mock implements the full Java surface now.
+- **Addendum (Critic 67 F1):** `MockProducer.client_instance_id` when the id is unset — Java throws
+  `UnsupportedOperationException("clientInstanceId not set")` (`MockProducer.java:406`). There is no
+  `UnsupportedOperationError` JDK analog on this surface (the defined analogs are `IllegalStateError`
+  / `IllegalArgumentError` / `ConcurrentModificationError` / `TimeoutError`) and no FFI id for one,
+  so Python's **semantic counterpart `NotImplementedError`** carries Java's exact message. **Owner
+  choice:** confirm `NotImplementedError`, or add a hand-written `UnsupportedOperationError` JDK analog
+  at the package root (no FFI id, mirroring the other root JDK analogs). The `disable_telemetry` path
+  is already faithful (Java throws bare `IllegalStateException()`; Python raises `IllegalStateError()`).
 
 ### C21 — The pre-commit hook scans the whole working tree, so parallel actors block each other
 - **Where:** `.githooks/pre-commit` → `make verify-sandbox` (release build, C build, `format-check`,
