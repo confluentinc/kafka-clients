@@ -57,7 +57,7 @@ void test_properties_new_and_put(void) {
     TEST_ASSERT_NOT_NULL(producer);
 
     kafka_producer_ProducerProperties_destroy(props);
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
     kafka_producer_Producer_destroy(producer);
 }
@@ -79,7 +79,7 @@ void test_properties_from_configs(void) {
     TEST_ASSERT_NOT_NULL(producer);
 
     kafka_producer_ProducerProperties_destroy(props);
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
     kafka_producer_Producer_destroy(producer);
 }
@@ -112,7 +112,7 @@ void test_create_close_destroy(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
 
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
 
     kafka_producer_Producer_destroy(producer);
@@ -149,7 +149,7 @@ void test_create_null_out_error(void) {
         kafka_producer_KafkaProducer_new(props, NULL);
     TEST_ASSERT_NOT_NULL(producer);
     kafka_producer_ProducerProperties_destroy(props);
-    kafka_producer_Producer_close(producer, NULL);
+    kafka_producer_Producer_close(producer, -1, NULL);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -183,7 +183,7 @@ void test_mock_ops_noop(void) {
     TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
     kafka_producer_MockProducer_clear(producer); /* no-op */
 
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
     kafka_producer_Producer_destroy(producer);
 }
@@ -208,7 +208,7 @@ void test_create_multiple_config(void) {
     TEST_ASSERT_NOT_NULL(producer);
 
     kafka_producer_ProducerProperties_destroy(props);
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
     kafka_producer_Producer_destroy(producer);
 }

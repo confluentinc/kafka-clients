@@ -359,7 +359,7 @@ void test_close_then_send(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
 
     err = NULL;
@@ -393,7 +393,7 @@ void test_send_async_on_closed_producer_fires_callback(void) {
      * would leak user_data and hang an app blocking on the callback. */
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     kafka_common_Error_t *err = NULL;
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
 
     static const uint8_t value[] = "v";
@@ -459,7 +459,7 @@ void test_close_drains_async_queued_send(void) {
     TEST_ASSERT_NULL(err);
 
     err = NULL;
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
@@ -522,7 +522,7 @@ void test_error_inspection(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_Producer_close(producer, &err);
+    kafka_producer_Producer_close(producer, -1, &err);
     TEST_ASSERT_NULL(err);
 
     err = NULL;
@@ -986,11 +986,96 @@ void test_close_async(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
     async_op_result_t result = {0};
-    kafka_producer_Producer_close_async(producer, on_operation, &result);
+    kafka_producer_Producer_close_async(producer, -1, on_operation, &result);
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
     TEST_ASSERT_FALSE(result.had_error);
 
+    kafka_producer_Producer_destroy(producer);
+}
+
+/* close_async with a non-negative timeout (Java close(Duration)) closes
+ * a mock producer and fires the callback exactly once with no error. */
+void test_close_async_with_timeout(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    async_op_result_t result = {0};
+    kafka_producer_Producer_close_async(producer, 1000, on_operation, &result);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+/* A -1 timeout selects the default untimed flushing close (Java close()). */
+void test_close_async_default_sentinel(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    async_op_result_t result = {0};
+    kafka_producer_Producer_close_async(producer, -1, on_operation, &result);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+/* Captures the six fields RecordMetadata_copy_full delivers. */
+typedef struct {
+    int64_t offset;
+    int32_t partition;
+    char topic[256];
+    int64_t timestamp;
+    int32_t serialized_key_size;
+    int32_t serialized_value_size;
+} copy_full_capture_t;
+
+static void on_copy_full(int64_t offset, int32_t partition, const char *topic,
+                         int64_t timestamp, int32_t serialized_key_size,
+                         int32_t serialized_value_size, void *user_data) {
+    copy_full_capture_t *c = (copy_full_capture_t *)user_data;
+    c->offset = offset;
+    c->partition = partition;
+    if (topic != NULL) {
+        strncpy(c->topic, topic, sizeof(c->topic) - 1);
+    }
+    c->timestamp = timestamp;
+    c->serialized_key_size = serialized_key_size;
+    c->serialized_value_size = serialized_value_size;
+}
+
+/* RecordMetadata_copy_full extracts every field (incl. serialized sizes) in one
+ * call and destroys the handle. */
+void test_record_metadata_copy_full(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+        producer, "my-topic", 3, -1, NULL, -1, NULL, -1, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+
+    err = NULL;
+    kafka_producer_RecordMetadata_t *metadata =
+        kafka_producer_FutureRecordMetadata_get(future, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(metadata);
+
+    copy_full_capture_t capture = {0};
+    capture.offset = -99;
+    capture.partition = -99;
+    /* copy_full destroys the handle after the callback returns. */
+    kafka_producer_RecordMetadata_copy_full(metadata, on_copy_full, &capture);
+
+    TEST_ASSERT_EQUAL_INT64(0, capture.offset);
+    TEST_ASSERT_EQUAL_INT32(3, capture.partition);
+    TEST_ASSERT_EQUAL_STRING("my-topic", capture.topic);
+    TEST_ASSERT_EQUAL_INT64(-1, capture.timestamp);
+    TEST_ASSERT_EQUAL_INT32(0, capture.serialized_key_size);
+    TEST_ASSERT_EQUAL_INT32(0, capture.serialized_value_size);
+
+    kafka_producer_FutureRecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -2087,6 +2172,9 @@ int main(void) {
     RUN_TEST(test_future_get_async);
     RUN_TEST(test_flush_async);
     RUN_TEST(test_close_async);
+    RUN_TEST(test_close_async_with_timeout);
+    RUN_TEST(test_close_async_default_sentinel);
+    RUN_TEST(test_record_metadata_copy_full);
     RUN_TEST(test_async_callbacks_single_thread);
 
     /* Transactions */
