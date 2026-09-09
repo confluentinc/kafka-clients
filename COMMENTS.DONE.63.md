@@ -1,46 +1,4 @@
-# Critic 63 — Milestone 13 Phase 3 (resolved)
+# COMMENTS.DONE.63 — rules-file review (Critic 63), fixed by the Manager 2026-09-09
 
-## Finding 1 — `committed()` path drops the last-seen-epoch update; recorded-skip line 81 overstates equivalence — RESOLVED
-
-- **File**: `src/consumer/internals/commit_request_manager.rs` (driver +
-  `events/application_event_processor.rs` FetchCommittedOffsets handler);
-  `src/consumer/internals/offsets_request_manager.rs::refresh_offsets`;
-  `design/history/Milestone-13/PLAN.md:81`.
-- **Severity**: Behavior Mismatch (pre-existing — NOT introduced by this
-  phase; reported for accuracy of the Phase-3 skip record, low priority).
-- **Java Reference**: `CommitRequestManager.java` `handleSuccessfulOffsetFetch`
-  / `handleRetriablePartitionErrors` both call
-  `maybeUpdateLastSeenEpochIfNewer(res.offsets())` **inside the driver**, on
-  **all** fetched offsets, regardless of caller.
-- **Description**: Java updates the `Metadata` last-seen leader-epoch cache
-  for every fetched offset on **both** the `updateFetchPositions` path (via
-  `OffsetsRequestManager`) **and** the public `committed()` path (via
-  `FetchCommittedOffsetsEvent`). The Rust translation relocated the update to
-  `OffsetsRequestManager::refresh_offsets`, where it is (a) reached **only**
-  by the position-init path — the AEP `FetchCommittedOffsetsEvent` handler
-  just strips + completes and never touches metadata — and (b) gated on
-  `currently_initializing.contains(tp)`, so it is narrower than Java's
-  "all `res.offsets()`". Net: `consumer.committed(..)` in Rust does not
-  refresh the leader-epoch cache that Java refreshes.
-- **Related, same root cause — public-API contract**: Java's `committed()`
-  returns `toOffsetMapWithNulls()`, i.e. a map with the requested partition
-  **present with a `null` value** for uncommitted **and** (now, KAFKA-20165)
-  retriable-errored partitions. The Rust AEP handler's target type is
-  `HashMap<TopicPartition, OffsetAndMetadata>` (no `Option`), so it strips
-  those entries — the partition is **absent**.
-
-**Resolution (Manager decision):** the underlying behavior mismatch is
-**pre-existing** — it predates this milestone and is not part of the
-4.2→4.3.1 delta, so it is NOT fixed in this phase; it is recorded
-accurately instead.
-
-1. Tightened the overstated recorded-skip wording at
-   `design/history/Milestone-13/PLAN.md` (~line 81): removed the "for both
-   full-success and partial-result paths, idempotent" equivalence claim and
-   replaced it with a NOTE stating the two limitations (position-init-only
-   path + `currently_initializing` gate; `committed()` never refreshes
-   epochs), cross-referencing §5.
-2. Added `## 5. Known pre-existing divergences (not part of the 4.2→4.3.1
-   delta — follow-up candidates)` at the bottom of the PLAN recording both
-   the leader-epoch-cache gap and the present-with-null vs absent contract
-   divergence, with the Rust and Java locations cited.
+All 14 items addressed in .claude/rules/python-binding-interface.md:
+1/12 rule 10 rewritten to quote CLAUDE.md §2: presence-only → one FFI method with Option params; type/name-colliding → <base>_<param> entry points; >3 params → _options struct + builder. 2 rule 1 mocks path corrected (main tree; tests under src/test). 3 rule 7: ConsumerHandle §41 reentrancy bullet (D25 gaps 1/8 must be fixed). 4 rule 3.2 examples lead with CloseOptions, admin marked paused. 5 acknowledged (owner-gated, C2). 6 rule 3.5 names one mechanism (confluent_kafka/_args.py helpers, exact message forms). 7 rule 7: wakeup()/WakeupError/rotating token + internal-wake anti-pattern. 8 rule 3.8 names RecordMetadata + Node.has_rack sites. 9 new rule 10a (ConsumerRecords deprecated ctor, TopicIdPartition scoping, memoryview retention, poison-pill seek, close semantics) + MockConsumer no-default fact in 3.4. 10 rule 5 states current generator scope + required extension; rule 10 names src/ffi/consumer.rs + common.rs dispatcher as precedent; rule 11/14 state make verify composition and that mypy must be added. 11 rule 5: abstract set derived from Java 'abstract' modifier, exactly five named incl. InvalidOffsetException. 13 proposal 1 absorbed via rule 10 precedent bullet; 2 absorbed (rule 7); 3 out of scope (core). 14 rule 10 carries the D7 timeout carve-out with the wiring requirement.
