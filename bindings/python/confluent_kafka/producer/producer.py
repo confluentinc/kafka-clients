@@ -305,7 +305,7 @@ def _validate_timeout(timeout: Duration | None) -> None:
     """Java: a negative ``Duration`` raises ``IllegalArgumentException``
     (D7 addendum / D25 A). ``None`` is allowed (default api timeout)."""
     if timeout is not None and _timeout_seconds(timeout) < 0:
-        raise IllegalArgumentError("Timeout must not be negative")
+        raise IllegalArgumentError("The timeout cannot be negative.")
 
 
 def _timeout_to_ms(timeout: Duration | None) -> int:

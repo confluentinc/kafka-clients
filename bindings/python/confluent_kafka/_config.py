@@ -241,7 +241,7 @@ def duration_to_ms(timeout: Duration | None, *, default_ms: int) -> int:
 
     ``None`` -> ``default_ms`` (Java's ``default.api.timeout.ms`` fallback for the
     ``Duration``-less overloads). A negative value raises
-    ``IllegalArgumentError("Timeout must not be negative")`` (Java rejects a
+    ``IllegalArgumentError("The timeout cannot be negative.")`` (Java rejects a
     negative ``Duration``). There is no infinite sentinel (spec §11.1).
     """
     if timeout is None:
