@@ -51,6 +51,8 @@ from confluent_kafka.common.errors import KafkaError
 from confluent_kafka.common.errors._generated import (
     ProducerFencedError,
     RecordTooLargeError,
+    TimeoutError as WireTimeoutError,
+    TransactionAbortableError,
 )
 from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 from confluent_kafka.producer import (
@@ -802,4 +804,122 @@ class TestAsyncProducerFamily:
     async def test_async_context_manager(self):
         async with AsyncMockProducer(auto_complete=True) as p:
             await p.send(record=RECORD1)
+        assert p.closed()
+
+
+# ===========================================================================
+# Migrated from the retired test_producer.py (legacy flat-API MockProducer).
+#
+# Only cases whose subject survives on the new pure-Python MockProducer surface
+# (C22/C38) are migrated. The legacy backpressure suite and the async-FFI-routing
+# / GIL / handle-lifecycle regressions targeted the retired FFI-backed mock's
+# `_c_producer` / `_lib.Producer_*_async` plumbing, which the pure-Python mock
+# does not have — their subject is gone, so they are dropped (not skipped). The
+# flat-error assertions (`err.code` / `err.is_retriable` / `err.txn_requires_abort`)
+# are re-expressed here as the typed error class the new hierarchy uses.
+# ===========================================================================
+
+class TestMockProducerCallbacks:
+    def test_on_delivery_fires_when_future_cancelled(self):
+        # Callback obligation (CLAUDE.md §9.5): on_delivery must fire even when the
+        # caller cancelled the returned future before completion.
+        p = build_mock(False)
+        seen = []
+        md = p.send(record=RECORD1, on_delivery=lambda meta, exc: seen.append((meta, exc)))
+        assert md.cancel()
+        assert p.complete_next()
+        assert len(seen) == 1
+        meta, exc = seen[0]
+        assert exc is None
+        assert meta.offset() == 0
+        p.close()
+
+    def test_on_delivery_exception_does_not_break_future_or_producer(self):
+        # A raising on_delivery is logged, not propagated (rule 7): the producer
+        # keeps working and the next send still completes.
+        p = build_mock(False)
+
+        def boom(meta, exc):
+            raise RuntimeError("callback blew up")
+
+        md1 = p.send(record=RECORD1, on_delivery=boom)
+        assert p.complete_next()
+        assert not is_error(md1)  # the future itself still resolved
+        md2 = p.send(record=RECORD2)
+        assert p.complete_next()
+        assert md2.result().offset() == 1
+        p.close()
+
+    def test_on_delivery_none_is_the_default(self):
+        # on_delivery=None is a valid no-op.
+        p = build_mock(True)
+        md = p.send(record=RECORD1, on_delivery=None)
+        assert md.result().offset() == 0
+        p.close()
+
+
+class TestMockProducerLifecycle:
+    def test_partitions_for_on_mock_is_empty(self):
+        # MockProducer.partitions_for(*, topic=) returns [] (no cluster metadata).
+        p = build_mock(True)
+        assert p.partitions_for(topic=TOPIC) == []
+        p.close()
+
+    def test_close_with_send_in_flight(self):
+        # Regression: close() must not deadlock with an un-completed in-flight
+        # send on a manual-completion mock.
+        p = build_mock(False)
+        p.send(record=RECORD1)
+        p.close()
+        assert p.closed()
+
+
+class TestMockProducerTransactionFailure:
+    def test_commit_failure_abortable_surfaces_abortable_error(self):
+        # Legacy asserted err.txn_requires_abort is True (flat API, removed); the
+        # new hierarchy expresses "abortable" as the typed TransactionAbortableError.
+        p = build_mock(True)
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(record=RECORD1)
+        p.set_commit_transaction_exception(error=TransactionAbortableError("abort me"))
+        with pytest.raises(TransactionAbortableError):
+            p.commit_transaction()
+        p.close()
+
+    def test_commit_failure_non_abortable_surfaces_its_own_error(self):
+        # A non-abortable commit failure (e.g. a wire timeout) surfaces as its own
+        # typed class, distinct from TransactionAbortableError.
+        p = build_mock(True)
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(record=RECORD1)
+        p.set_commit_transaction_exception(error=WireTimeoutError("timed out"))
+        with pytest.raises(WireTimeoutError):
+            p.commit_transaction()
+        p.close()
+
+
+class TestAsyncMockProducerCallbacks:
+    async def test_async_on_delivery_fires_on_loop_thread(self):
+        # On AsyncKafkaProducer the on_delivery runs on the event-loop thread, not
+        # a background completion thread (rule 7).
+        import asyncio
+        p = AsyncMockProducer(auto_complete=True)
+        loop_ident = threading.get_ident()
+        seen = []
+
+        def cb(meta, exc):
+            seen.append(threading.get_ident())
+
+        await (await p.send(record=RECORD1, on_delivery=cb))
+        # Let any scheduled callback run on the loop.
+        await asyncio.sleep(0)
+        assert seen == [loop_ident]
+        await p.close()
+
+    async def test_async_close_with_send_in_flight(self):
+        p = AsyncMockProducer(auto_complete=False)
+        await p.send(record=RECORD1)
+        await p.close()
         assert p.closed()

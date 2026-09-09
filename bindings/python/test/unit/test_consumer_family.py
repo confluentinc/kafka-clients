@@ -29,7 +29,7 @@ import threading
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common.errors import KafkaError
+from confluent_kafka.common.errors import KafkaError, WakeupError
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.consumer import (
     AsyncMockConsumer, CloseOptions, Consumer, ConsumerRebalanceListener,
@@ -826,3 +826,39 @@ def test_async_plain_def_listener():
 #   plugin-metric, log-recommendation): need a metrics-reporter/JMX/SASL/log
 #   double not present on this surface.
 # ==========================================================================
+
+
+# ==========================================================================
+# Migrated from the retired test_consumer.py (legacy flat-API MockConsumer).
+# Only cases whose subject survives on the new surface are migrated; the two
+# @skip-ped broker-only cases (SIGINT-interrupts-poll, async-poll-cancel) are
+# dropped — MockConsumer.poll does not block, so they need a real broker and
+# are covered by the integration/multilanguage suites.
+# ==========================================================================
+
+def test_wakeup_is_consumed_by_the_next_poll():
+    # wakeup() marks the next blocking call: the next poll() raises WakeupError
+    # (Java WakeupException) and clears the flag, then poll() works again and the
+    # assignment is intact (spec §6.6 / consumer-threading §11 rotating token).
+    with MockConsumer(offset_reset_strategy="earliest") as c:
+        tp = _tp("test", 0)
+        c.assign(partitions=[tp])
+        c.update_beginning_offsets(offsets={tp: 0})
+        c.add_record(record=_record("test", 0, 0, value=b"v0"))
+
+        c.wakeup()
+        with pytest.raises(WakeupError):
+            c.poll(timeout=1.0)
+
+        # The next poll no longer raises and sees the buffered record.
+        records = c.poll(timeout=1.0)
+        assert len(records) == 1
+        assert c.assignment() == {tp}
+
+
+def test_seek_after_close_raises():
+    # A seek() after close() raises IllegalStateError (use-after-close guard).
+    c = MockConsumer(offset_reset_strategy="earliest")
+    c.close()
+    with pytest.raises(IllegalStateError):
+        c.seek(partition=_tp("t", 0), offset=1)
