@@ -88,6 +88,7 @@ Two ways to run:
     or via the ``make transactional-producer-perf-test-python`` target.
 """
 
+import asyncio
 import datetime
 import gc
 import json
@@ -118,6 +119,10 @@ value_size = int(os.getenv("VALUE_SIZE", "2048"))
 message_size = key_size + value_size
 
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
+# ASYNC=True drives the async transaction API (v3 AsyncKafkaProducer /
+# v2 confluent_kafka.aio.AIOProducer) with awaited control ops + async sends,
+# exercising the async drain-before-control-ops path. Default False = sync.
+run_async = os.getenv("ASYNC", "False") == "True"
 do_verify = os.getenv("DO_VERIFY", "True") == "True"
 use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
 create_topic = os.getenv("CREATE_TOPIC", "True") == "True"
@@ -995,6 +1000,206 @@ def spawn_seed_producer(bootstrap_servers, total_records):
     return True
 
 
+# --------------------------------------------------------------------------
+# Async twins (ASYNC=True): drive the async transaction API — v3
+# AsyncKafkaProducer / v2 confluent_kafka.aio.AIOProducer — with awaited control
+# ops and async sends. This exercises the async drain-before-control-ops path
+# (each control op awaits the send tray drain before running). One asyncio task
+# per NUM_TRANSACTIONAL_PRODUCERS; the EOS source poll uses the sync consumer
+# (a blocking poll is fine for the single-producer scenarios and keeps the
+# produce + control-op path fully async).
+# --------------------------------------------------------------------------
+def create_async_producer(bootstrap_servers, txn_id):
+    conf = producer_config(bootstrap_servers, txn_id)
+    if v2:
+        from confluent_kafka.aio.producer import AIOProducer
+        return AIOProducer({k: str(val) for k, val in conf.items()})
+    from producer import AsyncKafkaProducer
+    return AsyncKafkaProducer({k: str(val) for k, val in conf.items()})
+
+
+async def _async_send(producer, key, value):
+    """Async produce; returns an awaitable delivery future (v2 AIOProducer.produce
+    / v3 AsyncKafkaProducer.send)."""
+    if v2:
+        return await producer.produce(topic=topic_name, key=key, value=value)
+    from producer import ProducerRecord
+    return await producer.send(ProducerRecord(topic=topic_name, key=key, value=value))
+
+
+async def _send_offsets_async(producer, consumer, offsets):
+    if v2:
+        from confluent_kafka import TopicPartition as CKTopicPartition
+        offsets_list = [CKTopicPartition(t, p, off) for (t, p), off in offsets.items()]
+        await producer.send_offsets_to_transaction(
+            offsets_list, consumer.consumer_group_metadata())
+    else:
+        from consumer import TopicPartition, OffsetAndMetadata
+        offset_map = {TopicPartition(t, p): OffsetAndMetadata(off)
+                      for (t, p), off in offsets.items()}
+        await producer.send_offsets_to_transaction(offset_map, consumer.group_metadata())
+
+
+def _verify_async_result(res):
+    """Verify one gathered produce result (RecordMetadata v3 / Message v2 /
+    Exception from return_exceptions gather)."""
+    try:
+        if isinstance(res, BaseException):
+            print(f"Produce call resulted in exception: {res}")
+            return False
+        return verify_v2(res) if v2 else verify_v3(res)
+    except Exception as e:  # noqa: BLE001
+        print(f"verify error: {e}")
+        return False
+
+
+async def _close_producer_async(producer):
+    try:
+        if v2:
+            await producer.flush()
+        await producer.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def run_producer_async(index, bootstrap_servers, measured_start_ns,
+                             per_producer_num_messages, per_producer_rps):
+    txn_id = f"{transactional_id}-{index}"
+    producer = create_async_producer(bootstrap_servers, txn_id)
+    n = records_per_transaction
+    rate = RateLimiter(per_producer_rps, measured_start_ns)
+    txn_index = 0
+    records_sent = 0
+    msg_count = len(generated_messages)
+    try:
+        await producer.init_transactions()
+        cont = records_sent < per_producer_num_messages \
+            if per_producer_num_messages > 0 else not terminating
+        while cont:
+            begin_ms = now_ms()
+            await producer.begin_transaction()
+            produce_ms = []
+            futures = []
+            for _ in range(n):
+                key, value = generated_messages[records_sent % msg_count]
+                produce_ms.append(now_ms())
+                futures.append(await _async_send(producer, key, value))
+                records_sent += 1
+                rate.maybe_wait(records_sent)
+            if should_abort(txn_index, abort_rate):
+                await producer.abort_transaction()
+                abort_ms = now_ms()
+                record_abort(abort_ms - begin_ms, n)
+            else:
+                await producer.commit_transaction()
+                commit_ms = now_ms()
+                record_commit(commit_ms - begin_ms)
+                results = await asyncio.gather(*futures, return_exceptions=True)
+                for r in range(n):
+                    ok = _verify_async_result(results[r]) if r < len(results) else False
+                    record_committed_record(commit_ms - produce_ms[r], ok)
+            txn_index += 1
+            if per_producer_num_messages <= 0 and _time_bound_reached(measured_start_ns):
+                break
+            cont = not terminating
+            if per_producer_num_messages > 0:
+                cont = cont and records_sent < per_producer_num_messages
+    except Exception as e:  # noqa: BLE001
+        print(f"Async producer {index} failed: {e}")
+    finally:
+        await _close_producer_async(producer)
+
+
+async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
+                                 per_producer_num_messages, per_producer_rps):
+    txn_id = f"{transactional_id}-{index}"
+    producer = create_async_producer(bootstrap_servers, txn_id)
+    consumer = create_consumer(bootstrap_servers)
+    rate = RateLimiter(per_producer_rps, measured_start_ns)
+    txn_index = 0
+    records_sent = 0
+    consecutive_empty_polls = 0
+    starvation_warned = False
+    try:
+        await producer.init_transactions()
+        cont = records_sent < per_producer_num_messages \
+            if per_producer_num_messages > 0 else not terminating
+        while cont:
+            batch = _eos_poll(consumer)
+            if not batch:
+                consecutive_empty_polls += 1
+                if consecutive_empty_polls >= 10 and not starvation_warned:
+                    print("[WARN] EOS source starved (async): consecutive empty "
+                          "polls from the source topic — seed SOURCE_TOPIC.",
+                          file=sys.stderr)
+                    starvation_warned = True
+                if per_producer_num_messages <= 0 and _time_bound_reached(measured_start_ns):
+                    break
+                cont = not terminating
+                if per_producer_num_messages > 0:
+                    cont = cont and records_sent < per_producer_num_messages
+                await asyncio.sleep(0)
+                continue
+            consecutive_empty_polls = 0
+            begin_ms = now_ms()
+            await producer.begin_transaction()
+            produce_ms = []
+            futures = []
+            offsets = {}
+            for rec in batch:
+                key, value, rtopic, rpart, roff = rec
+                produce_ms.append(now_ms())
+                futures.append(await _async_send(producer, key, value))
+                nxt = roff + 1
+                cur = offsets.get((rtopic, rpart))
+                if cur is None or nxt > cur:
+                    offsets[(rtopic, rpart)] = nxt
+                records_sent += 1
+                rate.maybe_wait(records_sent)
+            batch_records = len(batch)
+            try:
+                await _send_offsets_async(producer, consumer, offsets)
+            except Exception as e:  # noqa: BLE001
+                print(f"send_offsets_to_transaction error (async): {e}")
+                await producer.abort_transaction()
+                record_error_abort(batch_records)
+                txn_index += 1
+                continue
+            if should_abort(txn_index, abort_rate):
+                await producer.abort_transaction()
+                abort_ms = now_ms()
+                record_abort(abort_ms - begin_ms, batch_records)
+            else:
+                await producer.commit_transaction()
+                commit_ms = now_ms()
+                record_commit(commit_ms - begin_ms)
+                results = await asyncio.gather(*futures, return_exceptions=True)
+                for r in range(batch_records):
+                    ok = _verify_async_result(results[r]) if r < len(results) else False
+                    record_committed_record(commit_ms - produce_ms[r], ok)
+            txn_index += 1
+            if per_producer_num_messages <= 0 and _time_bound_reached(measured_start_ns):
+                break
+            cont = not terminating
+            if per_producer_num_messages > 0:
+                cont = cont and records_sent < per_producer_num_messages
+    except Exception as e:  # noqa: BLE001
+        print(f"Async EOS producer {index} failed: {e}")
+    finally:
+        await _close_producer_async(producer)
+        _close_consumer(consumer)
+
+
+async def _amain(bootstrap_servers, measured_start_ns,
+                 per_producer_num_messages, per_producer_rps):
+    worker = run_eos_producer_async if eos_mode else run_producer_async
+    await asyncio.gather(*[
+        worker(k, bootstrap_servers, measured_start_ns,
+               per_producer_num_messages, per_producer_rps)
+        for k in range(num_transactional_producers)
+    ])
+
+
 def main():
     bootstrap_servers = os.environ.get("BOOTSTRAP_SERVERS", "localhost:9092")
 
@@ -1052,17 +1257,23 @@ def main():
     per_producer_rps = max(limit_rps // num_transactional_producers, 1) \
         if limit_rps else 0
 
-    worker = run_eos_producer if eos_mode else run_producer
-    threads = []
-    for k in range(num_transactional_producers):
-        t = Thread(target=worker,
-                   args=(k, bootstrap_servers, measured_start_ns,
-                         per_producer_num_messages, per_producer_rps),
-                   name=f"txn-producer-{k}")
-        threads.append(t)
-        t.start()
-    for t in threads:
-        t.join()
+    if run_async:
+        # Async transaction API: one asyncio task per producer (awaited control
+        # ops + async sends). Exercises the async drain-before-control-ops path.
+        asyncio.run(_amain(bootstrap_servers, measured_start_ns,
+                           per_producer_num_messages, per_producer_rps))
+    else:
+        worker = run_eos_producer if eos_mode else run_producer
+        threads = []
+        for k in range(num_transactional_producers):
+            t = Thread(target=worker,
+                       args=(k, bootstrap_servers, measured_start_ns,
+                             per_producer_num_messages, per_producer_rps),
+                       name=f"txn-producer-{k}")
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
 
     metrics.measurement_end_ms = now_ms()
     measured_secs = (time.time_ns() - measured_start_ns) / 1e9
