@@ -33,9 +33,9 @@ name: build-test-release
 #   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   5. "Verify language bindings unit tests (macOS arm64)" -- verify-c (ctest)
-#      and verify-python (pytest test/unit). No container is used, so the block
-#      sets MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
+#   5. "Run bindings unit test (macOS)" -- verify-c (ctest) and verify-python
+#      (pytest test/unit). No container is used, so the block sets
+#      MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -104,7 +104,7 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-rust"
+        - name: "verify-rust (Linux amd64)"
           commands:
             - make verify-rust
 
@@ -123,10 +123,10 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-c"
+        - name: "verify-c (Linux amd64)"
           commands:
             - make verify-c
-        - name: "verify-python"
+        - name: "verify-python (Linux amd64)"
           commands:
             - make verify-python
 
@@ -147,11 +147,11 @@ blocks:
           commands:
             - colima stop || true
       jobs:
-        - name: "verify-rust"
+        - name: "verify-rust (macOS arm64)"
           commands:
             - make verify-rust-macos-docker
 
-  - name: "Verify language bindings unit tests (macOS arm64)"
+  - name: "Run bindings unit test (macOS)"
     # verify-c runs the C ctest suite; verify-python runs pytest test/unit. No
     # container is used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh
     # to skip Colima. The gRPC multilanguage arm runs on Linux only.
@@ -169,10 +169,10 @@ blocks:
         commands:
           - source ./.semaphore/dependencies-macos.sh
       jobs:
-        - name: "verify-c"
+        - name: "verify-c (macOS arm64)"
           commands:
             - make verify-c-macos-docker
-        - name: "verify-python"
+        - name: "verify-python (macOS arm64)"
           commands:
             - make verify-python-macos-docker
 
