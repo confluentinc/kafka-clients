@@ -146,7 +146,9 @@ internal sealed class SendAccumulator
     private int _queued;
 
     // 0/1 token: at most ONE submitter loop exists at a time, which is what makes the appends
-    // ordered without depending on how many permits ReleaseSpace hands out at once.
+    // ordered without depending on how many permits ReleaseSpace hands out at once. BOTH sides of
+    // the start/stop handshake use Interlocked, so both are full fences: that symmetry is what
+    // makes the loop's exit re-check sound against store→load reordering (see RunSubmitterAsync).
     private int _submitterRunning;
 
     private Node? _head;      // oldest node, the one the wait loop measures (anchor: next_batches_to_send)
@@ -412,12 +414,23 @@ internal sealed class SendAccumulator
     /// and appends — so queued submissions reach <see cref="Append"/> in enqueue order.
     /// </summary>
     /// <remarks>
-    /// <b>The whole loop is one state machine, on purpose.</b> Keeping the per-submission body
-    /// inline (rather than in its own <c>async</c> helper) means a burst of N queued sends allocates
-    /// one state machine between them, replacing the one-per-send box the previous per-send
-    /// continuation allocated (DoD §10). It never throws: every failure is routed to that
-    /// submission's own awaiter, because this is a fire-and-forget task and an escaping exception
-    /// would both go unobserved and kill the loop, stranding every submission behind it.
+    /// <b>What the queued route actually saves, and what it does not (DoD §10).</b> Only
+    /// <em>this loop's own</em> state machine is amortised across a burst — the per-submission body
+    /// is its own <c>async</c> helper (<see cref="AppendQueuedAsync"/>, awaited once per
+    /// submission), and in the regime the queued route exists for — the bound saturated — that
+    /// helper and the <see cref="WaitForSpaceAsync"/> inside it both suspend, so both box. Per
+    /// saturated submission the cost is therefore those two state machines plus one value-type
+    /// queue entry amortised over a <see cref="ConcurrentQueue{T}"/> segment. The saving is on the
+    /// <em>caller-facing</em> side, where the pre-fix slow path had a per-send
+    /// <c>async Task&lt;RecordMetadata&gt;</c> carrier of its own whose <see cref="Task"/> was what
+    /// the caller awaited, and which ended in <c>return await completion.Task</c> — a second
+    /// <see cref="Task"/> and a continuation chained onto the awaiter. Both are gone: the caller
+    /// gets <c>completion.Task</c> itself on both routes.
+    /// <para>
+    /// It never throws: every failure is routed to that submission's own awaiter, because this is a
+    /// fire-and-forget task and an escaping exception would both go unobserved and kill the loop,
+    /// stranding every submission behind it.
+    /// </para>
     /// </remarks>
     private async Task RunSubmitterAsync()
     {
@@ -438,11 +451,25 @@ internal sealed class SendAccumulator
                 }
             }
 
-            Volatile.Write(ref _submitterRunning, 0);
+            // Interlocked.Exchange, NOT Volatile.Write — the release needs a store→load fence.
+            // This release plus the IsEmpty read below are one side of Dekker's pattern against
+            // SubmitQueued's enqueue-then-CAS; a Volatile.Write is a RELEASE store, which orders
+            // earlier writes against the store and says NOTHING about a later load. On a target
+            // that buffers stores (x86-64 does) "the submitter read the queue empty" and "the
+            // producer read the token still taken" could then both hold, and the submission would
+            // sit queued with no submitter — a strand that keeps _queued >= 1, so the idle
+            // predicate never holds, DrainPending waits out its whole bound, and the inline fast
+            // path stays refused until some later queued send restarts the loop. The `||` below
+            // short-circuits past the CAS on exactly the path where it matters, so the CAS cannot
+            // supply the missing barrier: it has to be on the store.
+            Interlocked.Exchange(ref _submitterRunning, 0);
 
             // A submission enqueued between the failed dequeue and that release would have found
             // the token taken and started no loop, so it would sit there with nothing to append it.
-            // Re-check, and take the token back if it is still free.
+            // Re-check, and take the token back if it is still free. With the fence above this is
+            // sound by contract rather than by timing: SubmitQueued's CompareExchange is itself a
+            // full barrier placed after its Enqueue, so if it read a stale 1 then its enqueue is
+            // ordered before this read and the queue is observed non-empty here.
             if (_submissions.IsEmpty
                 || Interlocked.CompareExchange(ref _submitterRunning, 1, 0) != 0)
             {
@@ -532,10 +559,22 @@ internal sealed class SendAccumulator
     /// <see cref="WaitForSpaceAsync"/> throw the identical exception). The count is decremented by
     /// the taker, so <see cref="ReleaseQueuedSlot"/> runs here too.
     /// <para>
-    /// <b>Anything enqueued after this ran still settles</b>, without a second sweep: the gate is
-    /// already cancelled, so its submitter's wait faults immediately; and if it somehow reached a
-    /// permit, <c>_closed</c> makes <see cref="Append"/> refuse it. This sweep is what makes the
-    /// queue <em>empty when <see cref="Stop"/> returns</em> rather than eventually.
+    /// <b>Anything enqueued after this ran still settles</b>, without a second sweep — but the
+    /// reason differs by caller, so it is stated per caller rather than once.
+    /// <list type="bullet">
+    /// <item>From <see cref="Stop"/>: the gate is already cancelled (<c>Stop</c> cancels it before
+    /// anything else), so a late submission's wait faults immediately; and if it somehow reached a
+    /// permit, <c>_closed</c> makes <see cref="Append"/> refuse it.</item>
+    /// <item>From <see cref="AbandonOnThreadFailure"/>: that path deliberately does <em>not</em>
+    /// cancel the gate, so the first clause does not hold there and the <c>_closed</c> refusal is
+    /// the whole guarantee — a late submission settles once a permit becomes free, which on that
+    /// path it does (the abandoned chain's permits are released immediately after this sweep).
+    /// Making the settlement independent of permit availability is exactly what M11/P3.2 §F5's
+    /// unconditional <c>_spaceGate.Cancel()</c> would do, and it is deliberately its own
+    /// slice.</item>
+    /// </list>
+    /// This sweep is what makes the queue <em>empty when <see cref="Stop"/> returns</em> rather
+    /// than eventually.
     /// </para>
     /// <para>
     /// <b>Faulting is this slice's semantics, deliberately.</b> The anchor still <em>sends</em> a

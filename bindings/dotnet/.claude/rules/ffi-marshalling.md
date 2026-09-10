@@ -340,6 +340,16 @@ pump deadlock-free (the Sender runs on other worker threads).
   - A **dedicated thread** for the submission queue's appender (the cap is two);
     conversely, more than one appender draining that queue, which reintroduces the
     race the queue exists to remove.
+  - ⚠ **The dual of that, and the one this rule shipped a defect on:** *zero*
+    appenders. "At most one appender" is a start/stop handshake between the enqueuing
+    caller and the exiting appender, i.e. Dekker's pattern, so **both** sides need a
+    store→load fence — an `Interlocked` operation, not a `Volatile.Write`, which is a
+    release store and orders no *later* load. A one-sided fence lets "the appender saw
+    the queue empty" and "the caller saw the token already taken" both hold, stranding
+    a submission with nothing to append it (and, where a drain predicate counts queued
+    submissions, hanging that drain out to its bound). This is the same standard as the
+    `SemaphoreSlim`-fairness warning above: an ordering claim must rest on a documented
+    guarantee, not on how a primitive happens to behave on one target.
 
 **Tests required:**
 
