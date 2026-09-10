@@ -1181,11 +1181,13 @@ public sealed class SendAccumulatorTests
         // joined :969, waiters fired :972; py_Producer_on_space_available reports "available" the
         // moment closed is set, :857-861, so a waiter never parks through a close).
         //
-        // ⚠ Python's version of this guarantee is almost unconditional, not unconditional:
-        // Producer_send_thread re-tests !closed at :529 OUTSIDE record_batches_mutex, so a record
-        // appended in the narrow gap between its mtx_unlock (:577/:638) and that re-test is never
-        // sent and never completed. So .NET now completes it "as Python does on every path except
-        // one narrow race Python leaves open" — Python-aligned AND strictly better.
+        // ⚠ Python's version of this guarantee is almost unconditional, not unconditional; .NET's
+        // IS unconditional, which is what the three assertions below pin. How Python's window
+        // arises — which mutex, which unlock sites, and how wide it actually is — is derived ONCE,
+        // in SendAccumulator.AppendQueuedAsync's remarks (M11/P3.2 PLAN §1.3), and is deliberately
+        // NOT restated here: this comment was a third copy of that argument and outlived two
+        // corrections of the canonical one (Critic 71 findings 71.10 / 71.11, and 71.12 for this
+        // copy). One statement is the only statement.
         //
         // Three assertions, because any one alone passes on a wrong implementation: the record
         // reaches the core (a fault would not), its Task completes successfully (an appended record
