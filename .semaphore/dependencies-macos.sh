@@ -47,39 +47,45 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-mod
 source "$HOME/.cargo/env"
 git submodule update --init --depth=1 kafka
 
-echo "=== Setting up Docker via Colima ==="
-# The agent (s1-macos-15-arm64-8) has 8 physical cores, but Colima's VM was
-# only getting 2 -- too tight once RUST_TEST_THREADS=4 parallel test threads
-# each try to bring up a KRaft broker container at once. Under that
-# contention a broker can fail its controller-quorum registration handshake
-# before the (non-retried, by design -- see kafka_cluster.rs's
-# is_port_allocation_error comment) startup timeout, aborting the whole
-# suite. Bump to 6, leaving 2 cores of headroom for the host OS and the
-# Semaphore agent process itself.
-if colima status &>/dev/null; then
-  echo "Colima is already running"
+# MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
+# setup above always runs). Set by blocks whose tests need no container.
+if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
+  echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else
-  command -v colima >/dev/null 2>&1 || brew install colima
-  colima start --cpu 6 --memory 12 --disk 50
-fi
-
-echo "Waiting for Docker daemon..."
-docker_wait_timeout=90
-while ! docker info >/dev/null 2>&1; do
-  if [ "$docker_wait_timeout" -le 0 ]; then
-    echo "ERROR: Docker failed to start within 90 seconds"
-    colima status || true
-    exit 1
+  echo "=== Setting up Docker via Colima ==="
+  # The agent (s1-macos-15-arm64-8) has 8 physical cores, but Colima's VM was
+  # only getting 2 -- too tight once RUST_TEST_THREADS=4 parallel test threads
+  # each try to bring up a KRaft broker container at once. Under that
+  # contention a broker can fail its controller-quorum registration handshake
+  # before the (non-retried, by design -- see kafka_cluster.rs's
+  # is_port_allocation_error comment) startup timeout, aborting the whole
+  # suite. Bump to 6, leaving 2 cores of headroom for the host OS and the
+  # Semaphore agent process itself.
+  if colima status &>/dev/null; then
+    echo "Colima is already running"
+  else
+    command -v colima >/dev/null 2>&1 || brew install colima
+    colima start --cpu 6 --memory 12 --disk 50
   fi
-  sleep 3
-  docker_wait_timeout=$((docker_wait_timeout - 3))
-done
-echo "Docker is ready:"
-docker info
 
-export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
-export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
-export TESTCONTAINERS_RYUK_DISABLED=false
+  echo "Waiting for Docker daemon..."
+  docker_wait_timeout=90
+  while ! docker info >/dev/null 2>&1; do
+    if [ "$docker_wait_timeout" -le 0 ]; then
+      echo "ERROR: Docker failed to start within 90 seconds"
+      colima status || true
+      exit 1
+    fi
+    sleep 3
+    docker_wait_timeout=$((docker_wait_timeout - 3))
+  done
+  echo "Docker is ready:"
+  docker info
+
+  export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
+  export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+  export TESTCONTAINERS_RYUK_DISABLED=false
+fi
 
 export RUST_TEST_THREADS=4
 
@@ -90,7 +96,9 @@ brew --version
 cmake --version
 rustc --version
 cargo --version
-docker --version
-colima status
+if [ "${MACOS_SKIP_COLIMA:-}" != "true" ]; then
+  docker --version
+  colima status
+fi
 
 set +x
