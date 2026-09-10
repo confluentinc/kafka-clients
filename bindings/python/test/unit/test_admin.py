@@ -54,7 +54,10 @@ from admin import (
     _to_partition_info,
     _close_ms, _ms,
 )
-from producer import KafkaError
+# The admin binding is paused and keeps its flat ``KafkaError`` (code /
+# is_retriable / is_fatal). It now lives in the private package shim that
+# replaced the retired top-level ``producer.py``.
+from confluent_kafka._legacy_compat import KafkaError
 
 # Numeric `Errors` codes (src/common/protocol/errors.rs).
 UNKNOWN_TOPIC_OR_PARTITION = 3

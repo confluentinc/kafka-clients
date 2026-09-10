@@ -384,3 +384,40 @@ verified N/A-holds.
 
 **Amendment draft:** the §28/§31 amendment text is in this file (section "PROPOSED
 AMENDMENT (human applies)" above).
+
+---
+
+## P1 Critic-64 findings — RESOLVED (Actor 64)
+
+### F1 — BRIDGE + abstract set are hand-lists; fail-closed universe was not "all Java exceptions" — RESOLVED
+Fixed in `xtask/src/error_hierarchy.rs`. The generator now scans **every** `…Exception`
+(plus the two suffix-less exception) class declared under `common/` and `clients/`
+(`scan_exception_classes` / `find_class_decl`) and, in `validate_exception_scan` (called
+from `build_graph`), fails the build unless each scanned class is one of: a BRIDGE class,
+an abstract base, the covered `KafkaException` base, or an explicit `EXCLUSIONS` entry —
+so a new Java exception, or a concrete class the core forgot to give an FFI id, can no
+longer be silently invisible. `ABSTRACT_CLASSES` is now **derived-and-checked**: the build
+fails if the scan finds an in-scope Java `abstract` exception the list omits, or lists one
+Java does not mark `abstract`. `EXCLUSIONS` holds the 10 out-of-scope classes (client
+internals, consumer-`internals`, share-consumer, internal network signalling, OAuth Bearer
+plugins), each citing why; a stale exclusion also fails the build. Added 5 xtask tests
+(`scan_finds_the_expected_exception_classes`, `scan_marks_abstract_classes_abstract`,
+`universe_check_passes_on_the_real_tree`, `abstract_set_is_derived_from_java_not_hand_listed`,
+`every_exclusion_is_a_real_scanned_class`). `cargo test -p xtask` → 38 pass.
+
+### F2 — `to_ffi_id(KafkaError(...))` silently coerced the base fallback to -1 — RESOLVED
+Fixed the Java-faithful way (Java's `KafkaException` has no wire code): the base
+`KafkaError` now carries **no** `_ffi_id` (`common/errors/_base.py`), so
+`to_ffi_id(KafkaError(...))` raises `TypeError` instead of silently returning -1. The
+catch-all wire code -1 (`UNKNOWN_SERVER_ERROR`) belongs to its own concrete class
+`UnknownServerError`, which is what `from_ffi_error` builds for id -1 and what a mock injects
+— documented on `to_ffi_id` and `_base.py`. Added tests
+`test_to_ffi_id_rejects_the_bare_base_kafka_error` and
+`test_unknown_server_error_owns_wire_code_minus_one` (pins id -1 -> UnknownServerError both
+directions); updated `test_from_ffi_error_chains_cause` to exercise the base fallback via an
+unknown id.
+
+### N1 / N2 — owner notes (no Actor action)
+N1 (fold six sibling-package classes into `common.errors`) is logged as clarification C3;
+N2 (PLAN says the legacy modules are "retired"; kept per C5) is logged as C5. Both are
+owner-judgment items for the P1 sign-off, not defects.

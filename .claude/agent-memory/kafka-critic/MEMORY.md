@@ -50,6 +50,8 @@
 - [Data path copy analysis](review_data_path_copies.md) — only 2 real memcpy in zero-copy path: record write_all, writev to kernel
 - [Logging infrastructure patterns](review_logging_patterns.md) — LogContext wiring gaps: NetworkClient, CCS, SaslChannelBuilder get empty context
 
+- [P5 Python consumer family](review_p5_python_consumer.md) — §31 reentrancy defeated by FFI guard held across callback; test-asserts-thread-not-reentrancy trap
+
 <!-- added during milestone-13 session -->
 - [M13 Phase 4 consumer rebalance/poll](review_m13_phase4.md) — three-leg handshake; "new arm≠new behavior" (check 4.2.0 default); COMMENTS clobber
 - [M13 Phase 0 ref-bump](review_m13_phase0.md) — CLEAN; corpus/version-bump verification recipe (gitlink, diff -rq, OUT_DIR types)
@@ -129,3 +131,4 @@
 - [FFI send_offsets multilang wiring](review_ffi_send_offsets_multilang.md) — CLEAN; parallel-array/proto sentinel at READER's per-element contract; no __grpc_rust
 - [Python _run_async cancellation leak](review_python_run_async_cancellation.md) — producer deliver drops payload w/o free on cancelled fut; consumer _deliver frees
 - [C-ext tp_new owned-handle audit](review_cext_tp_new_owned_handle.md) — CLEAN; 4-path leak/double-free table, ordering trap, two-paths-one-dealloc; tinycthread now vendored
+- [Python P2 value types review](review_python_p2_value_types.md) — Java-file name collisions (OffsetAndMetadata/CloseOptions dup packages); requireNonNull→TypeError vs IAE→IllegalArgumentError; spec≠Java Java-wins; mypy cross-actor attribution

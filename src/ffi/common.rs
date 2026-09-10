@@ -691,6 +691,30 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
     unsafe { error_ref(error) }.message_cstring.as_ptr()
 }
 
+/// Returns the underlying cause of `error` as a NEW owned error handle (Java's
+/// `Throwable.getCause()`), or null when there is none. The returned handle is
+/// owned by the caller and must be freed with [`kafka_common_Error_destroy`].
+///
+/// This lets the binding reconstruct Java's cause chain as Python's `__cause__`:
+/// e.g. `KafkaConsumer` wraps a construction failure in
+/// `KafkaException("Failed to construct kafka consumer", cause)`, and the cause
+/// (`InvalidGroupIdException`) is only reachable through this accessor.
+///
+/// # Safety
+///
+/// `error` must be null or a valid handle from a function that returned an
+/// error. The returned handle (if non-null) is a fresh allocation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    if error.is_null() {
+        return std::ptr::null_mut();
+    }
+    match unsafe { error_ref(error) }.error.source() {
+        Some(source) => box_error(source.clone()),
+        None => std::ptr::null_mut(),
+    }
+}
+
 /// Returns whether the error is retriable.
 ///
 /// # Parameters

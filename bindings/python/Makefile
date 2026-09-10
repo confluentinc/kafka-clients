@@ -4,7 +4,7 @@ CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test test-performance grpc-image grpc-image-async \
+.PHONY: build test typecheck test-performance grpc-image grpc-image-async \
 	grpc-image-macos grpc-image-async-macos clean
 
 build:
@@ -12,7 +12,21 @@ build:
 	CFLAGS="$(CFLAGS_EXTRA)" \
 	pip install -e .
 
-test: build
+# Static type check of the new `confluent_kafka` package (spec §11 / rule 11):
+# `mypy --strict` catches stub/implementation drift so it fails `make verify`.
+# `test/unit/test_typing.py` carries `typing.assert_type` assertions that
+# machine-verify the `@overload` stubs and the generics inference, so it is type
+# checked here too — a broken stub fails `make verify`.
+#
+# REQUIRES `python` to be the repo venv interpreter (root `venv/`), where mypy
+# and the built `_confluentkafka` extension live. The pre-commit hook and
+# `make verify` activate that venv first; to run this target standalone, activate
+# it (`. venv/bin/activate`) or invoke mypy with the venv python directly
+# (`../../venv/bin/python -m mypy --strict confluent_kafka test/unit/test_typing.py`).
+typecheck:
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka test/unit/test_typing.py
+
+test: build typecheck
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python

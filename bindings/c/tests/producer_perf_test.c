@@ -1396,7 +1396,7 @@ static void run_test() {
 end:
     if (CLIENT_VERSION == 3) {
         kafka_common_Error_t *error = NULL;
-        kafka_producer_Producer_close(producer, &error);
+        kafka_producer_Producer_close(producer, -1, &error);
         if (error) {
             kafka_common_Error_destroy(error);
         }
