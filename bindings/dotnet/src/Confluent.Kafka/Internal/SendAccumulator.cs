@@ -1585,6 +1585,12 @@ internal sealed class SendAccumulator
         // How many indices CompleteNode has fully handled. Read by FaultNode so a partial throw
         // faults only the tail — an index already handed to the pump must not be touched again.
         int settled = 0;
+
+        // Read ONCE and shared by the send loop and the completion loop below, so the two provably
+        // walk the same chunk boundaries: a completion group IS one send_batch call's records
+        // (M11/P3.2 §3B.1), and recomputing the bound twice from the settings would let a future
+        // edit silently move one of them.
+        int chunk = _settings.BatchChunk;
         try
         {
             try
@@ -1598,7 +1604,6 @@ internal sealed class SendAccumulator
                 Array.Clear(node.Futures, 0, count);
                 Array.Clear(node.Errors, 0, count);
 
-                int chunk = _settings.BatchChunk;
                 for (int offset = 0; offset < count; offset += chunk)
                 {
                     int length = Math.Min(chunk, count - offset);
@@ -1623,7 +1628,21 @@ internal sealed class SendAccumulator
                 ReleasePins(node, count);
             }
 
-            CompleteNode(node, count, ref settled);
+            // ONE COMPLETION GROUP PER send_batch CALL (M11/P3.2 §3B.1) — the same boundaries the
+            // send loop above used, walked in the same order. `settled` is a whole-node cursor, so
+            // each call resumes where the previous one stopped and FaultNode's "the tail from
+            // `settled`" contract is unchanged.
+            //
+            // Why the unit is the CALL and not the node, even though they coincide at the defaults
+            // (chunk == SlotCapacity == node capacity, so this loop runs once and is identical to
+            // the anchor's one get_all per BatchNode): a LOWERED CONFLUENT_KAFKA_PRODUCER_BATCH_CHUNK
+            // splits a node into ceil(count / chunk) calls, and grouping per node would then re-mix
+            // several send_batch calls into one get_all — reintroducing under an override exactly the
+            // shape grouping exists to remove. Do not "simplify" this back to one call per node.
+            for (int offset = 0; offset < count; offset += chunk)
+            {
+                CompleteNode(node, offset + Math.Min(chunk, count - offset), ref settled);
+            }
         }
         catch (Exception exception)
         {
@@ -1632,21 +1651,54 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
-    /// Walks the per-record results: faults the immediate-error indices here and hands the rest to
-    /// the completion pump — the anchor's compaction (<c>:600-621</c>), expressed as "settle in
-    /// place" rather than "shift the survivors down", because .NET has no reason to compact arrays
-    /// it is about to drop.
+    /// Walks the per-record results of <b>one <c>send_batch</c> call</b> — the node's indices from
+    /// <paramref name="settled"/> up to <paramref name="end"/>: faults the immediate-error indices
+    /// here and hands the rest to the completion pump as a <b>single group</b> — the anchor's
+    /// compaction (<c>:600-621</c>), expressed as "settle in place, collect the survivors" rather
+    /// than "shift the survivors down", because .NET has no reason to compact arrays it is about to
+    /// drop.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>This is the phase's new delivery-callback firing site (§6.1).</b> An immediate error is a
     /// core completion — the core reported that it would not take this record — so the callback is
     /// owed exactly once here, and that index deliberately does not also reach the pump.
+    /// </para>
+    /// <para>
+    /// <b>The group is built as the walk goes, so compaction costs nothing extra</b> (M11/P3.2
+    /// §3B.2): only the accepted indices are written into it, and its <c>count</c> is what the pump
+    /// bounds every loop by. The three arrays are sized for the whole call because the accepted
+    /// count is not known until the walk ends; they are allocated lazily, so a call the core
+    /// rejected outright allocates nothing.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>THE HAND-OVER ORDER IS THE MOST DELICATE THING HERE.</b> See the note at the
+    /// <c>Enqueue</c> call below — it is the one that must not be reordered.
+    /// </para>
     /// </remarks>
-    private void CompleteNode(Node node, int count, ref int settled)
+    /// <param name="node">The node being sent.</param>
+    /// <param name="end">
+    /// One past the last index of this <c>send_batch</c> call — the walk runs from
+    /// <paramref name="settled"/> to here.
+    /// </param>
+    /// <param name="settled">
+    /// The whole-node cursor: how many indices have been fully handled. Advanced to
+    /// <paramref name="end"/> only once this call's group has been handed over, so
+    /// <see cref="FaultNode"/> can still finish everything this call did not.
+    /// </param>
+    private void CompleteNode(Node node, int end, ref int settled)
     {
-        for (; settled < count; settled++)
+        int start = settled;
+
+        // This call's completion group, allocated on the first accepted index. Sized for the whole
+        // call; `accepted` is the count that travels with it.
+        IntPtr[]? futures = null;
+        TaskCompletionSource<RecordMetadata>[]? completions = null;
+        DeliveryRegistration?[]? deliveries = null;
+        int accepted = 0;
+
+        for (int i = start; i < end; i++)
         {
-            int i = settled;
             IntPtr error = node.Errors[i];
             IntPtr future = node.Futures[i];
             TaskCompletionSource<RecordMetadata> completion = node.Completions[i]!;
@@ -1686,24 +1738,64 @@ internal sealed class SendAccumulator
             }
             else
             {
-                // Accepted: ownership of the future transfers to the pump, which reads its
-                // completion, fires the delivery callback and completes the awaiter.
-                //
-                // The slot is nulled ONLY AFTER Enqueue returns. If it threw (its queue growing
-                // under out-of-memory — its own _stopped branch frees the future and returns
-                // normally), ownership never transferred, so FaultNode must still see a live future
-                // at this index and free it. Nulling first would make that index look like "the
-                // core never saw this record", and FaultNode would then fire a delivery callback the
-                // pump is also about to fire — a DUPLICATE, which the exactly-once obligation makes
-                // strictly worse than the drop (root CLAUDE.md §9.5).
-                _pump.Enqueue(future, completion, delivery);
-                node.Futures[i] = IntPtr.Zero;
+                // Accepted: this index joins the group whose ownership transfers to the pump below.
+                // Its Futures / Completions / Deliveries slots are deliberately LEFT AS THEY ARE —
+                // see the hand-over note at the Enqueue call.
+                if (futures is null)
+                {
+                    int capacity = end - start;
+                    futures = new IntPtr[capacity];
+                    completions = new TaskCompletionSource<RecordMetadata>[capacity];
+                    deliveries = new DeliveryRegistration?[capacity];
+                }
+
+                futures[accepted] = future;
+                completions![accepted] = completion;
+                deliveries![accepted] = delivery;
+                accepted++;
+                continue;
             }
 
-            // Settled: drop the references so a node held anywhere does not retain user objects.
+            // Settled in place: drop the references so a node held anywhere does not retain user
+            // objects. A null Completions slot is also how FaultNode recognizes an index it must
+            // leave alone, which is what makes a throw later in this walk safe to recover from.
             node.Completions[i] = null;
             node.Deliveries[i] = null;
         }
+
+        if (accepted > 0)
+        {
+            // ⚠ OWNERSHIP TRANSFERS HERE, AND THE NULLING BELOW MUST STAY BELOW IT.
+            //
+            // If Enqueue throws (its queue growing under out-of-memory — its own _stopped branch
+            // frees the futures and returns normally), ownership never transferred, so FaultNode
+            // must still see a live future at each of these indices and free it. Nulling first would
+            // make those indices look like "the core never saw this record", and FaultNode would
+            // then fire delivery callbacks the pump is also about to fire — DUPLICATES, which the
+            // exactly-once obligation makes strictly worse than the drop (root CLAUDE.md §9.5).
+            //
+            // Unchanged in substance from the pre-grouping form, which nulled one slot after one
+            // per-record Enqueue: same invariant, one enqueue per send_batch call instead of one per
+            // record.
+            _pump.Enqueue(futures!, completions!, deliveries!, accepted);
+
+            // Transferred: release this node's claim on exactly the handed-over indices. A non-zero
+            // future in [start, end) identifies them precisely — the settle-in-place branches above
+            // zeroed theirs, and SendNode cleared the whole range before send_batch wrote it.
+            for (int i = start; i < end; i++)
+            {
+                if (node.Futures[i] != IntPtr.Zero)
+                {
+                    node.Futures[i] = IntPtr.Zero;
+                    node.Completions[i] = null;
+                    node.Deliveries[i] = null;
+                }
+            }
+        }
+
+        // Only now: everything in [start, end) is either settled in place or owned by the pump, so
+        // FaultNode has nothing left to do for this call's range.
+        settled = end;
     }
 
     /// <summary>

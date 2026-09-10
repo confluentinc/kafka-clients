@@ -556,8 +556,15 @@ public sealed class SendAccumulatorTests
         Assert.True(
             harness.Accumulator.DrainPending(s_deadline), "the accumulator did not drain in time");
 
-        // Index 0 was handed to the pump before the throw, so it resolves normally.
-        await TestTimeout.Run(() => sends[0], s_deadline);
+        // Index 0 is collected into this send_batch call's completion GROUP but not yet handed
+        // over — grouping hands the whole call over in ONE Enqueue, after the walk (M11/P3.2 §3B.2),
+        // and the walk never finishes. So ownership never transferred and FaultNode owns index 0
+        // too: it destroys that future and faults this awaiter with the same batch-thread failure.
+        // (Before S3 the hand-over was per record, so index 0 had already reached the pump here and
+        // resolved normally. The change is the recorded residual-4 window widening from one index's
+        // hand-over step to one send_batch call's — same site, same condition, stated at the axes on
+        // IDeliveryCallback.)
+        await AssertSettledByTheBatchThreadFailure(sends[0]);
 
         // Index 1 is where CompleteNode threw. SendNode's own FaultNode settles it and then throws
         // out of SendNode on its very next statement.
@@ -568,12 +575,14 @@ public sealed class SendAccumulatorTests
         // hoisted above SendNode it cannot, and this await hits its deadline instead.
         await AssertSettledByTheBatchThreadFailure(sends[2]);
 
-        // No delivery callback for 1 or 2: the core accepted both and their futures are destroyed
-        // unread, so firing here would invent a failure for a record that may still be delivered
-        // (§6.2, recorded residual). Only index 0's success fires, from the pump — asserted after a
-        // settle window, since a first observation of 1 cannot rule out 2.
+        // No delivery callback for ANY of the three: the core accepted all three and their futures
+        // are destroyed unread, so firing here would invent a failure for a record that may still be
+        // delivered (§6.2, recorded residual 4). Index 0 is included for the reason above — its
+        // group was never handed to the pump, so no core completion was ever read for it either.
+        // Asserted after a settle window, since observing 0 immediately cannot rule out a later
+        // fire.
         await Task.Delay(TimeSpan.FromMilliseconds(250));
-        Assert.Equal(1, callback.Count);
+        Assert.Equal(0, callback.Count);
 
         // The abandon path really ran — it closes the accumulator and lets the thread exit. Without
         // this the guard could go inert without saying so: a refactor that stopped FaultNode from
@@ -900,10 +909,10 @@ public sealed class SendAccumulatorTests
             // node's slots: 200 records across a bound of 4 span ~50 nodes, and a node is recycled
             // long before the burst ends, so there is no single array to read. It observes the same
             // property because the chain from append to callback is order-preserving end to end —
-            // CompleteNode enqueues a node's records to the pump in index order (the same order
-            // send_batch read them), Enqueue appends to a FIFO queue, DrainAll dequeues FIFO, and
-            // ProcessBatch fires each batch in index order. So callback order == append order ==
-            // the order records reached send_batch.
+            // CompleteNode hands the pump one group per send_batch call, holding that call's records
+            // in index order (the same order send_batch read them), Enqueue appends the groups to a
+            // FIFO queue, DequeueGroup dequeues FIFO, and ProcessBatch fires each pass in index
+            // order. So callback order == append order == the order records reached send_batch.
             List<int> observed = new List<int>(Burst);
             Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Burst];
 
@@ -1269,9 +1278,10 @@ public sealed class SendAccumulatorTests
         // The witness is the per-record delivery-callback firing order — the same witness the
         // stress half of SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound
         // uses, valid for the same reason: the chain from append to callback is order-preserving end
-        // to end (send_batch reads a node's slots in index order, CompleteNode enqueues them to the
-        // pump in that order, Enqueue/DrainAll are FIFO, ProcessBatch fires each batch in index
-        // order), so callback order == append order == the order records reached send_batch. It is
+        // to end (send_batch reads a node's slots in index order, CompleteNode hands the pump one
+        // group per send_batch call holding that call's records in that order, Enqueue/DequeueGroup
+        // are FIFO over the groups, ProcessBatch fires each pass in index order), so callback order
+        // == append order == the order records reached send_batch. It is
         // also the only witness available here: the node the flush fills is taken, sent and recycled
         // INSIDE Stop, so there is no PendingCompletions() array left to read afterwards, and the
         // mock core exposes a record count rather than a history.
@@ -1593,7 +1603,13 @@ public sealed class SendAccumulatorTests
     /// <c>NativeProducer.EnsureAccumulator</c> wires them, torn down in the same §3.8 order
     /// (accumulator drain → pump gate → flush → pump join → producer destroy).
     /// </summary>
-    private sealed class Harness : IDisposable
+    /// <remarks>
+    /// <b><see langword="internal"/> rather than <see langword="private"/> since M11/P3.2 S3</b>, so
+    /// <c>SendCompletionGroupingTests</c> drives the completion-grouping properties through this
+    /// same fixture instead of standing up a second one. DoD §12: a duplicate fixture is a fixture
+    /// that can drift from production's wiring while every assertion still passes.
+    /// </remarks>
+    internal sealed class Harness : IDisposable
     {
         private readonly NativeProducer _producer;
         private readonly SendCompletionPump _pump;
@@ -1605,8 +1621,19 @@ public sealed class SendAccumulatorTests
         }
 
         internal Harness(Func<SendAccumulatorSettings> settingsFactory)
+            : this(settingsFactory, autoComplete: true)
         {
-            _producer = NativeProducer.CreateMock(autoComplete: true);
+        }
+
+        /// <param name="settingsFactory">The accumulator settings to build with.</param>
+        /// <param name="autoComplete">
+        /// The mock core's completion mode. <see langword="false"/> leaves every accepted record
+        /// pending until <see cref="CompleteNext"/> (or the teardown flush) resolves it — the lever
+        /// that makes "one group's completions do not wait on another group's" observable at all.
+        /// </param>
+        internal Harness(Func<SendAccumulatorSettings> settingsFactory, bool autoComplete)
+        {
+            _producer = NativeProducer.CreateMock(autoComplete);
             _pump = new SendCompletionPump();
             Topics = new PinnedTopicCache();
             Accumulator = new SendAccumulator(_producer.Handle, Topics, _pump, settingsFactory());
@@ -1618,12 +1645,26 @@ public sealed class SendAccumulatorTests
 
         /// <summary>
         /// How many sends the completion pump has taken off its queue — the witness for "this
-        /// index was handed to the pump" (and, by its absence, for "this index was not").
+        /// index was handed to the pump" (and, by its absence, for "this index was not"). It counts
+        /// <b>records</b>, not groups (M11/P3.2 §3B.4).
         /// </summary>
         internal long DrainedSendCount => _pump.DrainedSendCount;
 
+        /// <summary>The number of <c>get_all</c> passes the pump has run — one per queued group.</summary>
+        internal long ProcessedBatchCount => _pump.ProcessedBatchCount;
+
+        /// <summary>The record count of the largest pass the pump has run.</summary>
+        internal int LargestProcessedBatch => _pump.LargestProcessedBatch;
+
         /// <summary>The mock core's sent-record count — what "reached the core" means (§3.5).</summary>
         internal int HistoryCount => _producer.MockHistoryCount();
+
+        /// <summary>
+        /// Resolves the OLDEST record the manual mock is still holding (its pending queue is a
+        /// FIFO: <c>src/producer/mock_producer.rs</c> pushes on send and pops the front here).
+        /// Meaningless on an auto-completing mock.
+        /// </summary>
+        internal bool CompleteNext() => _producer.MockCompleteNext();
 
         /// <summary>
         /// <b>The injection for the per-record immediate-error branch</b>: closes the CORE producer

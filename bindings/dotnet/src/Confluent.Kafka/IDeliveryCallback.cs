@@ -172,7 +172,15 @@ namespace Confluent.Kafka;
 /// <em>whole</em> batch, so the core <em>did</em> report these completions; the indices the pump had
 /// already reached fired normally and the rest are faulted with none. This is the sub-case that
 /// makes firing from the fault
-/// path unsafe (see below). <b>(b) Before</b> the read reported: the pump threw out of the batched
+/// path unsafe (see below).
+/// ⚠ <b>Sub-case (a) NARROWED in M11/P3.2 (§3B, S3) — like (b), it did not vanish.</b> "The whole
+/// batch" used to mean whatever the pump's flat per-record queue happened to hold: up to 1100
+/// records drawn from arbitrarily many unrelated sends. The pump's unit is now <b>one
+/// <c>send_batch</c> call's</b> records, so one such event faults only records that were sent
+/// together — a bounded and <em>related</em> blast radius rather than an arbitrary mixture. The
+/// batched read itself is unchanged, and the synchronous surface still shares both conditions, so
+/// this stays a recorded residual rather than a closed one.
+/// <b>(b) Before</b> the read reported: the pump threw out of the batched
 /// read itself, so no completion was ever in hand and the whole batch is faulted. This condition
 /// does <b>not</b> need an allocation failure to be reachable: a
 /// native-side failure surfacing from the pump's first batched read, for example an
@@ -195,7 +203,18 @@ namespace Confluent.Kafka;
 /// to the completion pump</b> (async only) — on the <b>send-batch thread</b>, between
 /// <c>send_batch</c> returning a live future for that index and the accumulator handing it over.
 /// In practice an <see cref="System.OutOfMemoryException"/> (the pump's queue growing), or a
-/// P/Invoke failure from a later chunk of the same node. The record <em>was</em> accepted (the core
+/// P/Invoke failure from a later chunk of the same node.
+/// ⚠ <b>M11/P3.2 (§3B, S3) WIDENED this residual's window and narrowed neither trigger — checked,
+/// not assumed.</b> The hand-over is now one <c>Enqueue</c> per <c>send_batch</c> call rather than
+/// one per record, and it runs after <em>every</em> chunk of the node has been sent (which is what
+/// keeps the pins released before any future reaches the pump). So both triggers survive, and the
+/// window they open now covers <b>all</b> of a call's accepted records rather than only the ones
+/// not yet individually handed over: a failure anywhere in a call's walk leaves that whole call's
+/// records untransferred. That is a change of <em>scope</em>, not of kind — same site, same
+/// condition, same reason — so it is recorded here rather than filed as a fifth residual. (Had the
+/// hand-over instead run immediately after each chunk's own <c>send_batch</c>, the later-chunk
+/// trigger would have gone away; it does not, and the narrowing is deliberately not written.)
+/// The record <em>was</em> accepted (the core
 /// returned a live future and no error) and may still be delivered, but the binding destroys that
 /// future unread, so no completion is ever read. It is <em>not</em> a teardown path, and no
 /// completion had arrived — as in residuals 1 and 2, and as in residual 3's sub-case (b), where the

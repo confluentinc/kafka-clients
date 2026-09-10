@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,13 +26,41 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// M11/P3.1 slice S8a — the completion pump's <c>SLOT_CAPACITY</c> drain cap (§12.2), the last
-/// place the two bindings' constants diverged. Python's poll-futures thread processes one
-/// <c>BatchNode</c> per pass and sizes its <c>get_all</c> arrays at
-/// <c>PRODUCER_RECORD_SLOT_CAPACITY</c>; this pump used to drain the whole queue and allocate three
-/// <c>IntPtr[count]</c> over whatever it found.
+/// The completion pump's <c>SLOT_CAPACITY</c> constant — originally M11/P3.1 slice S8a's <b>drain
+/// cap</b> (§12.2), <b>MIGRATED</b> by M11/P3.2 slice S3 to the constant's new job (§3B.4): the
+/// capacity of the three reused <c>get_all</c> marshalling arrays, and the bound
+/// <c>ProcessGroup</c> splits an oversized group by.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Why migrated rather than deleted (M11/P3.2 §6, test 22).</b> The queue now holds one entry per
+/// <c>send_batch</c> <b>group</b> and a pass takes exactly one group, so "a drain of 1800 becomes
+/// two passes of ≤1100" is no longer a statement about anything — but the three properties those
+/// tests actually protected all survive with the constant, in the grouped shape, and each is
+/// re-expressed below rather than dropped:
+/// </para>
+/// <list type="number">
+/// <item><b>The cap still bounds a marshalling pass</b> — now as the oversized-group split
+/// (<see cref="AGroupOverTheCap_IsSplitIntoMultiplePassesOfAtMostTheCap"/>). The pre-S3 form drove
+/// it by queueing more than the cap; the grouped form drives it by queueing ONE group larger than
+/// the cap, which is the only way a pass can be over-large now.</item>
+/// <item><b>The loop never strands a known leftover</b>
+/// (<see cref="SeveralGroups_ThenNoFurtherEnqueue_StillResolvesEveryCompletion"/>). The hang shape
+/// is unchanged in kind — a pass takes one group, so leaving the rest behind while the signal is
+/// already <c>Reset</c> hangs them forever — only the leftover is now a queued group rather than
+/// a drain remainder.</item>
+/// <item><b>The terminal drain is uncapped</b>
+/// (<see cref="TeardownWithSeveralGroupsQueued_FaultsEverySendInEveryGroup"/>), and
+/// <b>the reused arrays are read by count, never by <c>Length</c></b>
+/// (<see cref="ALargeGroupThenASmallGroup_FreesOnlyTheSmallGroupsHandles"/>). Both are the same
+/// properties, over groups.</item>
+/// </list>
+/// <para>
+/// <b>Nothing was removed.</b> One assertion changed meaning rather than being dropped:
+/// <c>ProcessedBatchCount >= 2</c> for a queue holding more than the cap is now
+/// <c>== ceil(count / DrainCap)</c> for a single oversized group — a stronger claim, because the
+/// pass count is deterministic once a pass is one group.
+/// </para>
 /// <para>
 /// <b>A <see cref="IntPtr.Zero"/> future is a legitimate driver here.</b> The ABI's <c>get_all</c>
 /// writes a null metadata and an <c>InvalidRequest</c> error for a null future rather than
@@ -40,39 +69,42 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// pre-existing gate tests use the same stand-in.
 /// </para>
 /// <para>
-/// The assertions are on the pump's own batch counters, not on "the completions resolved": an
-/// <em>uncapped</em> drain also resolves every completion, so resolution alone cannot tell whether
-/// the cap is in force.
+/// The assertions are on the pump's own counters, not on "the completions resolved": an
+/// <em>ungrouped</em> pump also resolves every completion, so resolution alone cannot tell whether
+/// a pass carries one send call's records.
 /// </para>
 /// </remarks>
 public sealed class SendCompletionPumpDrainCapTests
 {
-    // Hard deadlines. The hang-regression test below fails DETERMINISTICALLY without the inner drain
+    // Hard deadlines. The hang-regression test below fails DETERMINISTICALLY without the inner group
     // loop, so it must fail rather than hang the suite (§12.2.1).
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public void DrainOverTheCap_IsSplitIntoMultiplePassesOfAtMostTheCap()
+    public void AGroupOverTheCap_IsSplitIntoMultiplePassesOfAtMostTheCap()
     {
-        // Test 24: more than SLOT_CAPACITY queued must become MULTIPLE ProcessBatch passes, each of
-        // at most 1100 — the parity property, asserted by pass count and pass size.
+        // Migrated test 24. ONE group larger than the three marshalling arrays must become MULTIPLE
+        // ProcessBatch passes, each of at most 1100 (§3B.3). Before S3 the driver was "queue more
+        // than the cap"; a queue of records no longer exists, so the driver is now the only shape
+        // that can produce an over-large pass — a single over-large group.
+        //
+        // Asserted by pass count and pass size: an unsplit group would fault every send in it
+        // (Array.Clear over the arrays' length), which "the completions settled" cannot see, because
+        // these stand-in sends settle as FAULTED either way.
         const int Total = SendCompletionPump.DrainCap + 700;
 
         SendCompletionPump pump = new SendCompletionPump();
         try
         {
-            TaskCompletionSource<RecordMetadata>[] completions = EnqueueMany(pump, Total);
+            TaskCompletionSource<RecordMetadata>[] completions = EnqueueOneGroup(pump, Total);
 
             TestTimeout.Run(() => Task.WaitAll(Settled(completions), s_deadline), s_deadline);
 
             Assert.True(
                 pump.LargestProcessedBatch <= SendCompletionPump.DrainCap,
                 $"a pass carried {pump.LargestProcessedBatch} completions, above the " +
-                $"{SendCompletionPump.DrainCap} cap");
-            Assert.True(
-                pump.ProcessedBatchCount >= 2,
-                $"{Total} completions were handled in {pump.ProcessedBatchCount} pass(es) — with the " +
-                "cap in force it takes at least two");
+                $"{SendCompletionPump.DrainCap} array capacity");
+            Assert.Equal(2, pump.ProcessedBatchCount);
         }
         finally
         {
@@ -81,23 +113,27 @@ public sealed class SendCompletionPumpDrainCapTests
     }
 
     [Fact]
-    public void FarOverTheCap_ThenNoFurtherEnqueue_StillResolvesEveryCompletion()
+    public void SeveralGroups_ThenNoFurtherEnqueue_StillResolvesEveryCompletion()
     {
-        // ⚠ TEST 25 — THE HANG REGRESSION, the single most important test of this slice (§12.2.1).
-        // A NAIVE cap (capping DrainAll without adding RunLoop's inner drain loop) strands the
-        // leftovers DETERMINISTICALLY: 3000 queued, 1100 drained, 1900 left, and the next iteration
-        // blocks on _signal.Wait() — reset before the drain and only Set by a new Enqueue. With no
-        // further sends those 1900 completions and every awaiting Task hang FOREVER. It is not a
-        // race and needs no concurrency to reproduce, which is exactly why "stop enqueuing entirely"
-        // is the whole point of the test.
+        // ⚠ MIGRATED TEST 25 — THE HANG REGRESSION, the single most important test of S8a (§12.2.1),
+        // and its shape is unchanged by grouping: a pass takes ONE group, so a loop without the
+        // inner group loop strands every group after the first DETERMINISTICALLY. Three groups
+        // queued, one processed, two left, and the next iteration blocks on _signal.Wait() — reset
+        // before the pass and only Set by a new Enqueue. With no further sends those two groups'
+        // completions and every awaiting Task hang FOREVER. It is not a race and needs no
+        // concurrency to reproduce, which is exactly why "stop enqueuing entirely" is the whole
+        // point of the test.
         //
-        // The hard deadline is load-bearing: under the naive cap this must FAIL, not hang the suite.
-        const int Total = 3000;
+        // The hard deadline is load-bearing: without the inner loop this must FAIL, not hang the
+        // suite.
+        const int Groups = 3;
+        const int PerGroup = 1000;
 
         SendCompletionPump pump = new SendCompletionPump();
         try
         {
-            TaskCompletionSource<RecordMetadata>[] completions = EnqueueMany(pump, Total);
+            TaskCompletionSource<RecordMetadata>[] completions =
+                EnqueueGroups(pump, Groups, PerGroup);
 
             // Nothing further is enqueued from here on — no Set can arrive to rescue a stranded
             // remainder.
@@ -105,13 +141,10 @@ public sealed class SendCompletionPumpDrainCapTests
 
             foreach (TaskCompletionSource<RecordMetadata> completion in completions)
             {
-                Assert.True(completion.Task.IsCompleted, "a completion past the drain cap was stranded");
+                Assert.True(completion.Task.IsCompleted, "a completion in a later group was stranded");
             }
 
-            Assert.True(
-                pump.ProcessedBatchCount >= 3,
-                $"{Total} completions at a {SendCompletionPump.DrainCap} cap need at least three " +
-                $"passes; the pump ran {pump.ProcessedBatchCount}");
+            Assert.Equal(Groups, pump.ProcessedBatchCount);
         }
         finally
         {
@@ -120,22 +153,35 @@ public sealed class SendCompletionPumpDrainCapTests
     }
 
     [Fact]
-    public void TeardownWithMoreThanTheCapQueued_FaultsEveryCompletion()
+    public void TeardownWithSeveralGroupsQueued_FaultsEverySendInEveryGroup()
     {
-        // Test 26: Stop's terminal drain is deliberately UNCAPPED (§12.2.2). Capping it would strand
-        // every send past the cap — TCSes never completed, awaiters hanging, future handles never
-        // destroyed. Close the gate first so the loop cannot consume the queue, then stop: the
-        // terminal drain is the ONLY thing that can settle these, so the count is the assertion.
-        const int Total = SendCompletionPump.DrainCap * 2 + 13;
+        // Migrated test 26, and M11/P3.2 §6 test 14. Stop's terminal drain is deliberately UNCAPPED
+        // and now runs per group (§3B.5): capping it — at one group, or at DrainCap — would strand
+        // every send past the cap, TCSes never completed, awaiters hanging, future handles never
+        // destroyed. The COUNT is the assertion (never a message — a faulted teardown send and an
+        // accepted residual share an identical one, STATUS.md:20).
+        //
+        // ⚠ THE INJECTION IS WHAT MAKES THIS DETERMINISTIC, and the pre-S3 form was not. That form
+        // filled a pump and immediately Stop()ed it, hoping the loop had not drained the queue
+        // first — but RunLoop's INNER loop drains to empty without re-checking _stopping, so once
+        // the pump wakes it takes everything and the terminal drain gets nothing. Measured against
+        // the "cap it at one group" mutation, that shape failed 1 run in 3: a coin-flip guard on the
+        // §12.2.2 property, i.e. no guard at all on the other two runs.
+        //
+        // Setting _stopping BEFORE enqueuing closes it by construction: the pump wakes on the first
+        // Enqueue's Set, reads the volatile flag at its loop top, breaks, and exits — so every group
+        // is still queued when Stop's terminal drain runs, on every run. There is no production
+        // state that produces this (Stop sets the flag and joins in the same call), and producing it
+        // IS the injected condition — the same warrant SendAccumulatorTests' reflection injections
+        // carry. Now fails the mutation 3 runs in 3.
+        const int Groups = 3;
+        const int PerGroup = SendCompletionPump.DrainCap + 13;
+        const int Total = Groups * PerGroup;
 
         SendCompletionPump pump = new SendCompletionPump();
-        pump.CloseGate();
+        StopTheLoopWithoutDraining(pump);
 
-        // With the gate closed, Enqueue faults in place — so drive the terminal drain instead by
-        // stopping a pump whose queue was filled BEFORE the gate closed.
-        SendCompletionPump filled = new SendCompletionPump();
-        TaskCompletionSource<RecordMetadata>[] completions = EnqueueMany(filled, Total);
-        filled.Stop();
+        TaskCompletionSource<RecordMetadata>[] completions = EnqueueGroups(pump, Groups, PerGroup);
         pump.Stop();
 
         int settled = 0;
@@ -150,20 +196,45 @@ public sealed class SendCompletionPumpDrainCapTests
         Assert.Equal(Total, settled);
     }
 
-    [Fact]
-    public void LargeDrainThenSmallDrain_FreesOnlyTheSmallBatchesHandles()
+    /// <summary>
+    /// Sets the pump's <c>_stopping</c> flag without joining, so the loop exits at its next top and
+    /// leaves everything subsequently enqueued for <c>Stop</c>'s terminal drain.
+    /// </summary>
+    /// <remarks>
+    /// The field is private to <see cref="SendCompletionPump"/> and no production path sets it
+    /// without also joining in the same call, so this state cannot be reached from the outside —
+    /// which is exactly the warrant the fixture injections in <c>SendAccumulatorTests</c> carry.
+    /// Everything else in the test stays production's own primitive: the enqueue, the terminal
+    /// drain and <see cref="SendCompletionPump.Stop"/> itself.
+    /// </remarks>
+    private static void StopTheLoopWithoutDraining(SendCompletionPump pump)
     {
-        // ⚠ TEST 27 — the STALE-SLOT / DOUBLE-FREE guard for the reused marshalling arrays (§12.3).
-        // A reused array keeps the previous pass's handle values past the current pass's count, so a
-        // loop bounded by Length instead of count would hand `destroy_all` (or the finally sweep) the
-        // PREVIOUS batch's already-freed handles — a double free.
+        FieldInfo stopping = typeof(SendCompletionPump).GetField(
+            "_stopping", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(
+                "SendCompletionPump no longer exposes a _stopping flag — this injection needs to " +
+                "be re-derived against the new shape rather than silently skipped.");
+
+        Assert.False((bool)stopping.GetValue(pump)!, "the pump was already stopping");
+        stopping.SetValue(pump, true);
+    }
+
+    [Fact]
+    public void ALargeGroupThenASmallGroup_FreesOnlyTheSmallGroupsHandles()
+    {
+        // ⚠ MIGRATED TEST 27 (and M11/P3.2 §6 test 13) — the STALE-SLOT / DOUBLE-FREE guard for the
+        // reused marshalling arrays (§12.3). A reused array keeps the previous pass's handle values
+        // past the current pass's count, so a loop bounded by Length instead of count would hand
+        // `destroy_all` (or the finally sweep) the PREVIOUS pass's already-freed handles — a double
+        // free. S3 REWROTE exactly those loops, which is why this shape had to survive verbatim in
+        // meaning.
         //
-        // This test needs REAL futures: with the null-future stand-in the other tests use there is
-        // nothing to double-free, so the bug would pass unnoticed. A large pass at exactly the cap
-        // fills every slot, then a 2-record pass must touch only its own two. A double free of a
-        // FutureRecordMetadata_t corrupts the allocator, so — as with the other use-after-free
-        // guards in this project — the assertion is that this completes at all, plus that both
-        // batches settled.
+        // It needs REAL futures: with the null-future stand-in the other tests use there is nothing
+        // to double-free, so the bug would pass unnoticed. A large group at exactly the array
+        // capacity fills every slot, then a 2-record group must touch only its own two. A double
+        // free of a FutureRecordMetadata_t corrupts the allocator, so — as with the other
+        // use-after-free guards in this project — the assertion is that this completes at all, plus
+        // that both groups settled.
         const int Large = SendCompletionPump.DrainCap;
         const int Small = 2;
 
@@ -189,6 +260,10 @@ public sealed class SendCompletionPumpDrainCapTests
             }
 
             Assert.True(pump.LargestProcessedBatch <= SendCompletionPump.DrainCap);
+
+            // The grouped witness the pre-S3 form could not make: two groups in, two passes out.
+            // A pass that mixed them would read 1.
+            Assert.Equal(2, pump.ProcessedBatchCount);
         }
         finally
         {
@@ -198,7 +273,7 @@ public sealed class SendCompletionPumpDrainCapTests
 
     /// <summary>
     /// Sends <paramref name="count"/> real records through <c>send_batch</c> and hands the resulting
-    /// futures to the pump — the shape the accumulator's batch thread produces.
+    /// futures to the pump as ONE group — the shape the accumulator's batch thread produces.
     /// </summary>
     private static TaskCompletionSource<RecordMetadata>[] EnqueueRealSends(
         NativeProducer producer, SendCompletionPump pump, int count)
@@ -231,14 +306,8 @@ public sealed class SendCompletionPumpDrainCapTests
             valuePin.Free();
         }
 
-        TaskCompletionSource<RecordMetadata>[] completions = new TaskCompletionSource<RecordMetadata>[count];
-        for (int i = 0; i < count; i++)
-        {
-            completions[i] = new TaskCompletionSource<RecordMetadata>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            pump.Enqueue(futures[i], completions[i], delivery: null);
-        }
-
+        TaskCompletionSource<RecordMetadata>[] completions = NewCompletions(count);
+        pump.Enqueue(futures, completions, new DeliveryRegistration?[count], count);
         return completions;
     }
 
@@ -253,17 +322,47 @@ public sealed class SendCompletionPumpDrainCapTests
         return tasks;
     }
 
-    private static TaskCompletionSource<RecordMetadata>[] EnqueueMany(SendCompletionPump pump, int count)
+    /// <summary>
+    /// Enqueues <paramref name="count"/> stand-in sends as a <b>single</b> group — one
+    /// <c>send_batch</c> call's worth.
+    /// </summary>
+    private static TaskCompletionSource<RecordMetadata>[] EnqueueOneGroup(
+        SendCompletionPump pump, int count)
+    {
+        TaskCompletionSource<RecordMetadata>[] completions = NewCompletions(count);
+
+        // Null futures: get_all reports InvalidRequest for each, so every send settles (faulted)
+        // without a producer, and destroy_all skips null entries.
+        pump.Enqueue(new IntPtr[count], completions, new DeliveryRegistration?[count], count);
+        return completions;
+    }
+
+    /// <summary>
+    /// Enqueues <paramref name="groups"/> separate groups of <paramref name="perGroup"/> stand-in
+    /// sends each, returning every completion in enqueue order.
+    /// </summary>
+    private static TaskCompletionSource<RecordMetadata>[] EnqueueGroups(
+        SendCompletionPump pump, int groups, int perGroup)
+    {
+        TaskCompletionSource<RecordMetadata>[] all =
+            new TaskCompletionSource<RecordMetadata>[groups * perGroup];
+
+        for (int g = 0; g < groups; g++)
+        {
+            TaskCompletionSource<RecordMetadata>[] group = EnqueueOneGroup(pump, perGroup);
+            Array.Copy(group, 0, all, g * perGroup, perGroup);
+        }
+
+        return all;
+    }
+
+    private static TaskCompletionSource<RecordMetadata>[] NewCompletions(int count)
     {
         TaskCompletionSource<RecordMetadata>[] completions = new TaskCompletionSource<RecordMetadata>[count];
         for (int i = 0; i < count; i++)
         {
             completions[i] = new TaskCompletionSource<RecordMetadata>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-
-            // A null future: get_all reports InvalidRequest for it, so the send settles (faulted)
-            // without a producer, and destroy_all skips null entries.
-            pump.Enqueue(IntPtr.Zero, completions[i], delivery: null);
         }
 
         return completions;

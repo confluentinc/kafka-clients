@@ -29,10 +29,12 @@ namespace Confluent.Kafka.UnitTests;
 /// M14/P1 — the DoD §10 hot-path allocation audit for the delivery-callback overload (decision
 /// D11). Two obligations, one per direction:
 /// <list type="bullet">
-/// <item>the <b>plain</b> <c>Send(record)</c> path must not regress — widening
-/// <c>SendCompletionPump.PendingSend</c> with one nullable reference field must cost nothing,
-/// because a <c>ConcurrentQueue&lt;T&gt;</c> stores its items in segment arrays and a null field
-/// adds nothing at all;</item>
+/// <item>the <b>plain</b> <c>Send(record)</c> path must not regress — carrying the delivery
+/// registration alongside each queued send must cost nothing when there is none. (M11/P3.2 S3
+/// replaced the pump's per-record <c>PendingSend</c> struct with a per-<c>send_batch</c>
+/// <c>PendingSendBatch</c> carrying a parallel <c>DeliveryRegistration?[]</c>; the obligation is
+/// unchanged, and so is every number below — the pump allocates on its own threads, which this
+/// per-thread counter excludes.)</item>
 /// <item>the <b>callback</b> path must add only the one <c>DeliveryRegistration</c> — no captured
 /// closure, no captured <c>ProducerRecord</c>, and no eagerly-built placeholder
 /// <see cref="RecordMetadata"/> (which is failure-path-only).</item>
