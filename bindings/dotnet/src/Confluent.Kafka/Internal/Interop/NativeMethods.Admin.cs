@@ -778,4 +778,693 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DeleteRecordsResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 1: describeCluster (result shape 5) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_cluster_async</c> — Java's
+    /// <c>describeCluster(DescribeClusterOptions)</c>. No key array: Java's result holds
+    /// four attribute futures rather than a per-key map, which the header states outright
+    /// ("unlike the batch RPCs there are no per-key errors: any failure is returned").
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> means <b>unset</b>. The two booleans are
+    /// <c>DescribeClusterOptions.includeAuthorizedOperations</c> and
+    /// <c>.includeFencedBrokers</c>; both carry <c>[MarshalAs(I1)]</c> because C
+    /// <c>bool</c> is one byte and the default marshalling of a 4-byte Win32 <c>BOOL</c>
+    /// would corrupt the following argument.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_cluster_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeClusterAsync(
+        IntPtr admin,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool includeAuthorizedOperations,
+        [MarshalAs(UnmanagedType.I1)] bool includeFencedBrokers,
+        AdminCallbacks.DescribeClusterCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeClusterResult_t — a Category-3 owned borrow-root ----
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClusterResult_cluster_id</c> — Java's <c>clusterId()</c>,
+    /// borrowed and NUL-terminated (ffi §B3 row 2).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_cluster_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClusterResultClusterId(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_node_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeClusterResultNodeCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClusterResult_get_node</c> — the node at
+    /// <paramref name="index"/>, or null if out of range. <b>BORROWED</b> (<c>const</c>)
+    /// — read with the <c>kafka_common_Node_*</c> accessors through
+    /// <see cref="NodeMarshal"/>; never destroyed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_get_node", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClusterResultGetNode(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClusterResult_controller</c> — the controller node, or
+    /// <b>null if there is none</b>, which the header ties to Java: "Java's
+    /// <c>controller()</c> yields null". <b>BORROWED</b>. A null here is a successful
+    /// outcome, not a failure.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_controller", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClusterResultController(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClusterResult_authorized_operation_count</c> — always
+    /// non-negative.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>This count cannot express Java's null.</b> The header: "0 covers both 'the
+    /// broker did not report them' (Java yields null) and 'reported, but none authorized';
+    /// use <c>…_has_authorized_operations</c> to tell them apart." Reading the count alone
+    /// silently collapses null into empty.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_authorized_operation_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeClusterResultAuthorizedOperationCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClusterResult_has_authorized_operations</c> — the
+    /// discriminant the count cannot carry: "<c>false</c> is Java's null, <c>true</c> with
+    /// a count of 0 is a reported-but-empty set".
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_has_authorized_operations", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool DescribeClusterResultHasAuthorizedOperations(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClusterResult_authorized_operation</c> — the
+    /// <c>AclOperation</c> wire code at <paramref name="index"/>, or <c>-1</c> if out of
+    /// range or absent. Decoded through <see cref="AuthorizedOperationsMarshal"/>, which
+    /// mirrors Java's <c>AclOperation.fromCode</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_authorized_operation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeClusterResultAuthorizedOperation(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClusterResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeClusterResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 1: listConfigResources (result sub-shape 3b) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_config_resources_async</c> — Java's
+    /// <c>listConfigResources(Set&lt;ConfigResource.Type&gt;, options)</c>. The set of
+    /// types becomes one <c>const int32_t*</c> array of
+    /// <c>ConfigResource.Type.id()</c> codes.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>An empty filter is NOT an error — it is the "every supported type" request.</b>
+    /// The header: "pass NULL or <c>count == 0</c> for Java's empty set, which means 'every
+    /// supported type'", matching Java's no-argument <c>listConfigResources()</c>, which
+    /// delegates with <c>Set.of()</c> (<c>Admin.java:1812</c>). So the binding must never
+    /// reject an empty or absent collection here.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_config_resources_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListConfigResourcesAsync(
+        IntPtr admin,
+        int[] resourceTypes,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.ListConfigResourcesCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_ListConfigResourcesResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConfigResourcesResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListConfigResourcesResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConfigResourcesResult_get_type</c> — the
+    /// <c>ConfigResource.Type.id()</c> at <paramref name="index"/>, or <c>-1</c> if out of
+    /// range. Entries are sorted by <c>(type id, name)</c>.
+    /// </summary>
+    /// <remarks>
+    /// The walk is bounded by <see cref="ListConfigResourcesResultCount"/>, so the
+    /// out-of-range <c>-1</c> is unreachable here. How a code becomes a
+    /// <see cref="ConfigResourceType"/> — including why <c>-1</c> is not
+    /// <see cref="ConfigResourceType.Unknown"/> — is stated in
+    /// <see cref="ConfigResourceMarshal.TypeFromId"/>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConfigResourcesResult_get_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListConfigResourcesResultGetType(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConfigResourcesResult_get_name</c> — the resource name at
+    /// <paramref name="index"/>, borrowed and NUL-terminated, or null if out of range.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ There is deliberately no <c>ListConfigResourcesResult_get_error</c> to declare
+    /// beside these: Java has a single future here, so any failure is a call failure and
+    /// arrives through the callback's own <c>error</c> parameter.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConfigResourcesResult_get_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListConfigResourcesResultGetName(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConfigResourcesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListConfigResourcesResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 1: listClientMetricsResources (result sub-shape 3b) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_client_metrics_resources_async</c> — Java's
+    /// <c>listClientMetricsResources(options)</c>, which Java deprecates
+    /// (<c>@Deprecated(since = "4.1", forRemoval = true)</c>, <c>Admin.java:1821-1824</c>)
+    /// in favour of <c>listConfigResources</c> filtered to <c>CLIENT_METRICS</c>. No
+    /// arrays at all: the only inputs are the timeout and the completion.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_client_metrics_resources_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListClientMetricsResourcesAsync(
+        IntPtr admin,
+        int timeoutMs,
+        AdminCallbacks.ListClientMetricsResourcesCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_ListClientMetricsResourcesResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListClientMetricsResourcesResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListClientMetricsResourcesResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListClientMetricsResourcesResult_get_name</c> — the resource name at
+    /// <paramref name="index"/>, borrowed and NUL-terminated, or null if out of range.
+    /// Entries are sorted by name. This is the result's <b>only</b> per-index accessor:
+    /// the listing <em>is</em> the name.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListClientMetricsResourcesResult_get_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListClientMetricsResourcesResultGetName(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListClientMetricsResourcesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListClientMetricsResourcesResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 2: kafka_admin_Config_t / kafka_admin_ConfigEntry_t ----
+    //
+    // Both are BORROWED views hanging off a result root (ffi §B2 Category 4): a
+    // `Config_t` comes from `DescribeConfigsResult_get_value(i)`, a `ConfigEntry_t` from
+    // `Config_get_entry(j)`, and every string below borrows from the same root. Neither
+    // has a `_destroy`; both die with the root. Everything is copied out eagerly by
+    // ConfigMarshal before that happens.
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_Config_entry_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConfigEntryCount(IntPtr config);
+
+    /// <summary>
+    /// <c>kafka_admin_Config_get_entry</c> — the entry at <paramref name="index"/>
+    /// (borrowed), or null if out of range. Entries are sorted by name.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_Config_get_entry", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigGetEntry(IntPtr config, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntryName(IntPtr entry);
+
+    /// <summary>
+    /// <c>kafka_admin_ConfigEntry_value</c> — the value (borrowed), or <b>null when the
+    /// value is null</b>: the header ties that to Java's nullable <c>value()</c>, noting
+    /// "sensitive configs come back null". The null must round-trip as
+    /// <see langword="null"/>, never as <c>""</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntryValue(IntPtr entry);
+
+    /// <summary>
+    /// <c>kafka_admin_ConfigEntry_source</c> — the source as <b>Java's enum constant
+    /// name</b> (borrowed), e.g. <c>"DYNAMIC_TOPIC_CONFIG"</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>A NAME, not an id.</b> The header: "<c>ConfigEntry.ConfigSource</c> has no
+    /// numeric id in Java, so the name is the contract" — the opposite convention from
+    /// <see cref="ListConfigResourcesResultGetType"/> and the <c>op_types</c> array, which
+    /// carry <c>int32_t</c> wire codes. Decoded by
+    /// <see cref="ConfigMarshal.SourceFromName"/>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_source", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntrySource(IntPtr entry);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_is_sensitive", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConfigEntryIsSensitive(IntPtr entry);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_is_read_only", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConfigEntryIsReadOnly(IntPtr entry);
+
+    /// <summary>
+    /// <c>kafka_admin_ConfigEntry_type</c> — the data type as <b>Java's enum constant
+    /// name</b> (borrowed), e.g. <c>"STRING"</c>. Decoded by
+    /// <see cref="ConfigMarshal.TypeFromName"/>; see
+    /// <see cref="ConfigEntrySource"/> for why it is a name.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntryType(IntPtr entry);
+
+    /// <summary>
+    /// <c>kafka_admin_ConfigEntry_documentation</c> — the documentation (borrowed), or
+    /// <b>null when the broker did not report it</b> (Java's <c>documentation()</c> is
+    /// nullable). The null must round-trip as <see langword="null"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_documentation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntryDocumentation(IntPtr entry);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_synonym_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConfigEntrySynonymCount(IntPtr entry);
+
+    /// <summary>
+    /// <c>kafka_admin_ConfigEntry_synonym_name</c> — the synonym's name at
+    /// <paramref name="index"/> (borrowed), or null if out of range. ⚠ Synonyms "keep
+    /// Java's precedence order and are not sorted" — the order is the contract, which is
+    /// why Java's accessor returns a <c>List</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_synonym_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntrySynonymName(IntPtr entry, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ConfigEntry_synonym_value</c> — the synonym's value at
+    /// <paramref name="index"/> (borrowed), or null <b>if the value is null OR the index is
+    /// out of range</b>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ An overloaded null, the same class as <c>deleteRecords</c>' <c>-1</c>. The walk is
+    /// bounded by <see cref="ConfigEntrySynonymCount"/>, so out-of-range is unreachable and
+    /// a null inside the bound is a <b>genuine null value</b>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_synonym_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntrySynonymValue(IntPtr entry, int index);
+
+    /// <inheritdoc cref="ConfigEntrySource"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_synonym_source", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConfigEntrySynonymSource(IntPtr entry, int index);
+
+    // ---- M15/P3 Stage 2: describeConfigs (result shape 1) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_configs_async</c> — Java's
+    /// <c>describeConfigs(Collection&lt;ConfigResource&gt;, options)</c>. Java's collection
+    /// becomes <b>two parallel arrays</b>: entry <c>i</c> is the resource
+    /// <c>(resource_types[i], resource_names[i])</c>, the type being a
+    /// <c>ConfigResource.Type.id()</c> code.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The header warns that "an entry with a NULL name is skipped" — silently — so the
+    /// null check happens at the C# boundary before any pin (ffi §B5). Both booleans carry
+    /// <c>[MarshalAs(I1)]</c>: C <c>bool</c> is one byte, and the default marshalling of a
+    /// 4-byte Win32 <c>BOOL</c> would corrupt the argument beside it.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_configs_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeConfigsAsync(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool includeSynonyms,
+        [MarshalAs(UnmanagedType.I1)] bool includeDocumentation,
+        AdminCallbacks.DescribeConfigsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeConfigsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeConfigsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConfigsResult_get_key_type</c> — <b>half</b> of the composite
+    /// key at <paramref name="index"/>: the <c>ConfigResource.Type.id()</c>, or <c>-1</c>
+    /// if out of range. Decoded through <see cref="ConfigResourceMarshal.TypeFromId"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_key_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeConfigsResultGetKeyType(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConfigsResult_get_key_name</c> — the other half of the
+    /// composite key, borrowed and NUL-terminated, or null if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_key_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeConfigsResultGetKeyName(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConfigsResult_get_value</c> — that resource's configuration,
+    /// <b>borrowed</b>, or null if the resource failed or the index is out of range. The
+    /// walker reads the per-key error first, so a null reaching the value reader is the
+    /// unreachable case.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeConfigsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConfigsResult_get_error</c> — that resource's error, or null
+    /// if it succeeded. <b>BORROWED</b> (<c>const</c>, and the header adds "do not destroy
+    /// it") — read with <see cref="KafkaException.FromBorrowedHandle"/>, never destroyed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeConfigsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConfigsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeConfigsResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 2: incrementalAlterConfigs (result shape 2) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_incremental_alter_configs_async</c> — Java's
+    /// <c>incrementalAlterConfigs(Map&lt;ConfigResource, Collection&lt;AlterConfigOp&gt;&gt;, options)</c>.
+    /// Java's map becomes <b>five parallel arrays, one row per operation</b>: row <c>i</c>
+    /// applies <c>(config_names[i] -&gt; config_values[i], op_types[i])</c> to the resource
+    /// <c>(resource_types[i], resource_names[i])</c>, with rows naming the same resource
+    /// grouped in order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>A NULL <c>config_values</c> entry is the null value <c>DELETE</c> uses</b> —
+    /// the header says so — so the array carries <see cref="IntPtr.Zero"/> for it and
+    /// nothing on the path substitutes an empty string. A row with a NULL resource name or
+    /// config name is <em>silently skipped</em> by the ABI, so both are rejected at the C#
+    /// boundary instead (ffi §B5).
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>An unknown <c>op_types</c> code fails the whole call — on the INLINE callback
+    /// path.</b> This entry point's own async doc extends the inline trigger set beyond a
+    /// NULL handle: the callback runs "synchronously on the calling thread, before this
+    /// function returns, when the RPC cannot be submitted at all (a NULL <c>admin</c>
+    /// handle, or an unknown <c>AlterConfigOp.OpType</c> code)". So ordinary bad input
+    /// reaches the inline path here, which makes
+    /// <c>TaskCreationOptions.RunContinuationsAsynchronously</c> load-bearing and the
+    /// <c>GCHandle</c> free on that path a correctness requirement rather than a corner.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_incremental_alter_configs_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientIncrementalAlterConfigsAsync(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        IntPtr[] configNames,
+        IntPtr[] configValues,
+        int[] opTypes,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool validateOnly,
+        AdminCallbacks.IncrementalAlterConfigsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_AlterConfigsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterConfigsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="DescribeConfigsResultGetKeyType"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_get_key_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterConfigsResultGetKeyType(IntPtr result, int index);
+
+    /// <inheritdoc cref="DescribeConfigsResultGetKeyName"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_get_key_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterConfigsResultGetKeyName(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterConfigsResult_get_error</c> — that resource's error, or null if
+    /// it was altered successfully. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ There is deliberately no <c>_get_value</c> to declare beside this, and the header
+    /// states why: "Java's per-resource future is <c>KafkaFuture&lt;Void&gt;</c>, so a null
+    /// error <em>is</em> the success value" — result shape 2.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterConfigsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConfigsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AlterConfigsResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 3: the log-dir value tree (borrowed views, ffi §B2 Category 4) ----
+    //
+    // A `LogDirDescriptionMap_t` comes from `DescribeLogDirsResult_get_value(i)`, a
+    // `LogDirDescription_t` from `LogDirDescriptionMap_get_value(j)`, and a
+    // `ReplicaLogDirInfo_t` from `DescribeReplicaLogDirsResult_get_value(i)`. None has a
+    // `_destroy`; all die with the one result root, and LogDirMarshal copies everything out
+    // before that happens.
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescriptionMap_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int LogDirDescriptionMapCount(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_admin_LogDirDescriptionMap_get_key</c> — the log-dir path at
+    /// <paramref name="index"/> (borrowed), or null if out of range. Entries are sorted by
+    /// path.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescriptionMap_get_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr LogDirDescriptionMapGetKey(IntPtr map, int index);
+
+    /// <inheritdoc cref="LogDirDescriptionMapGetKey"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescriptionMap_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr LogDirDescriptionMapGetValue(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_LogDirDescription_error</c> — ⚠⚠ the <b>SECOND borrowed error</b> in
+    /// <c>describeLogDirs</c>, nested inside the value tree and distinct from the per-broker
+    /// <see cref="DescribeLogDirsResultGetError"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>, and the header adds "do not destroy it") — read with
+    /// <see cref="KafkaException.FromBorrowedHandle"/>, never destroyed. ⚠ It also means
+    /// something different: the header states "it is <em>not</em> the per-broker error …
+    /// the broker answered, but this particular directory is offline or unreadable", so the
+    /// per-broker task <b>succeeds</b> carrying a description whose error is non-null.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr LogDirDescriptionError(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_LogDirDescription_total_bytes</c> — the volume's total size, or
+    /// <b><c>-1</c> when the broker did not report it</b> (Java's empty
+    /// <c>OptionalLong</c>).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Here <c>-1</c> <b>is</b> a sentinel and maps to <see langword="null"/>, which is the
+    /// opposite of <see cref="DeleteRecordsResultGetLowWatermark"/>, where <c>-1</c> is a
+    /// legitimate value. <c>0</c> is a real size. See <see cref="LogDirMarshal.VolumeBytes"/>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_total_bytes", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long LogDirDescriptionTotalBytes(IntPtr description);
+
+    /// <inheritdoc cref="LogDirDescriptionTotalBytes"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_usable_bytes", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long LogDirDescriptionUsableBytes(IntPtr description);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int LogDirDescriptionReplicaCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_LogDirDescription_replica_topic</c> — one of six <b>flattened</b>
+    /// indexed replica accessors on the parent description; there is no
+    /// <c>ReplicaInfo_t</c> handle. Replicas are sorted by <c>(topic, partition)</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr LogDirDescriptionReplicaTopic(IntPtr description, int index);
+
+    /// <inheritdoc cref="LogDirDescriptionReplicaTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int LogDirDescriptionReplicaPartition(IntPtr description, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_LogDirDescription_replica_size</c> — the replica's on-disk size.
+    /// ⚠ Its documented <c>-1</c> is the <b>out-of-range</b> return only, which the
+    /// <c>replica_count</c>-bounded loop cannot reach — it is <b>not</b> the
+    /// volume-size sentinel, so the value passes through unchanged.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_size", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long LogDirDescriptionReplicaSize(IntPtr description, int index);
+
+    /// <inheritdoc cref="LogDirDescriptionReplicaSize"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_offset_lag", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long LogDirDescriptionReplicaOffsetLag(IntPtr description, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_is_future", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool LogDirDescriptionReplicaIsFuture(IntPtr description, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ReplicaLogDirInfo_current_replica_log_dir</c> — borrowed, or <b>null
+    /// when the broker hosts no replica of that partition</b>. The null must round-trip as
+    /// <see langword="null"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ReplicaLogDirInfo_current_replica_log_dir", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ReplicaLogDirInfoCurrentReplicaLogDir(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ReplicaLogDirInfoCurrentReplicaOffsetLag(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_admin_ReplicaLogDirInfo_future_replica_log_dir</c> — borrowed, or <b>null
+    /// when the replica is not being moved</b>, which is the ordinary case for a replica at
+    /// rest. The null must round-trip as <see langword="null"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ReplicaLogDirInfo_future_replica_log_dir", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ReplicaLogDirInfoFutureReplicaLogDir(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ReplicaLogDirInfoFutureReplicaOffsetLag(IntPtr info);
+
+    // ---- M15/P3 Stage 3: describeLogDirs (result shape 1, SCALAR int key) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_log_dirs_async</c> — Java's
+    /// <c>describeLogDirs(Collection&lt;Integer&gt;, options)</c>. One array of broker ids;
+    /// <c>DescribeLogDirsOptions</c> has no field of its own in Java beyond the timeout.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_log_dirs_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeLogDirsAsync(
+        IntPtr admin,
+        int[] brokers,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeLogDirsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeLogDirsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeLogDirsResult_get_broker</c> — the key at
+    /// <paramref name="index"/>: a <b>bare scalar</b> broker id, the first such key in M15.
+    /// <c>-1</c> if out of range. Entries are sorted by broker id.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_get_broker", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeLogDirsResultGetBroker(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeLogDirsResult_get_value</c> — that broker's log-dir map,
+    /// <b>borrowed</b>, or null if the broker failed. The walker reads the per-key error
+    /// first, so a null reaching the value reader is the unreachable case.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeLogDirsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeLogDirsResult_get_error</c> — <b>that broker's</b> error, or
+    /// null if it answered. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Distinct from <see cref="LogDirDescriptionError"/>, the second borrowed error
+    /// nested in the value tree. This one faults the key's task; that one does not.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeLogDirsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeLogDirsResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 3: alterReplicaLogDirs (result shape 2, 3-part key) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_alter_replica_log_dirs_async</c> — Java's
+    /// <c>alterReplicaLogDirs(Map&lt;TopicPartitionReplica, String&gt;, options)</c>. Java's
+    /// map becomes <b>four parallel arrays</b>: entry <c>i</c> moves the replica
+    /// <c>(topics[i], partitions[i], broker_ids[i])</c> to <c>log_dirs[i]</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The header warns that "an entry with a NULL topic or NULL log dir is skipped" —
+    /// silently — so both are rejected at the C# boundary before any pin (ffi §B5). ⚠ Note
+    /// the map is <c>K → V</c>, not <c>K → Collection&lt;V&gt;</c>, so every key produces
+    /// exactly one row and the zero-row shape of §9.1 item 9 cannot arise here.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_replica_log_dirs_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientAlterReplicaLogDirsAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        int[] brokerIds,
+        IntPtr[] logDirs,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.AlterReplicaLogDirsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterReplicaLogDirsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterReplicaLogDirsResult_get_topic</c> — one <b>third</b> of the
+    /// composite key at <paramref name="index"/>, borrowed and NUL-terminated. This result
+    /// declares no <c>get_key</c>; the key is
+    /// <c>(get_topic(i), get_partition(i), get_broker_id(i))</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterReplicaLogDirsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterReplicaLogDirsResultGetPartition(IntPtr result, int index);
+
+    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_broker_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterReplicaLogDirsResultGetBrokerId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterReplicaLogDirsResult_get_error</c> — that replica's error, or
+    /// null if the move was accepted. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ There is deliberately no <c>_get_value</c>, and the header says why: "Java's
+    /// per-replica future is <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the
+    /// success value" — result shape 2.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterReplicaLogDirsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AlterReplicaLogDirsResultDestroy(IntPtr result);
+
+    // ---- M15/P3 Stage 3: describeReplicaLogDirs (result shape 1, 3-part key) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_replica_log_dirs_async</c> — Java's
+    /// <c>describeReplicaLogDirs(Collection&lt;TopicPartitionReplica&gt;, options)</c>.
+    /// Java's collection becomes <b>three parallel arrays</b>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ "An entry with a NULL topic is skipped" — silently — so it is rejected at the C#
+    /// boundary instead (ffi §B5).
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_replica_log_dirs_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeReplicaLogDirsAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        int[] brokerIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeReplicaLogDirsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeReplicaLogDirsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeReplicaLogDirsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeReplicaLogDirsResultGetPartition(IntPtr result, int index);
+
+    /// <inheritdoc cref="AlterReplicaLogDirsResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_broker_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeReplicaLogDirsResultGetBrokerId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeReplicaLogDirsResult_get_value</c> — that replica's log-dir
+    /// info, <b>borrowed</b>, or null if the replica failed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeReplicaLogDirsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeReplicaLogDirsResult_get_error</c> — that replica's error, or
+    /// null if it was described successfully. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeReplicaLogDirsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeReplicaLogDirsResultDestroy(IntPtr result);
 }

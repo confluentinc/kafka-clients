@@ -44,6 +44,24 @@ namespace Confluent.Kafka.Internal.Interop;
 internal static class TopicDescriptionMarshal
 {
     /// <summary>
+    /// This type's three authorized-operation accessors, hoisted so a copy-out allocates
+    /// no delegates. The <b>rule</b> they feed — that the boolean gate, not the count,
+    /// separates Java's null from an empty set — lives once, in
+    /// <see cref="AuthorizedOperationsMarshal"/>, so <c>describeCluster</c> and every
+    /// later result carrying <c>authorizedOperations()</c> cannot re-derive it differently.
+    /// </summary>
+    private static readonly Func<IntPtr, bool> s_hasAuthorizedOperations =
+        NativeMethods.TopicDescriptionHasAuthorizedOperations;
+
+    /// <inheritdoc cref="s_hasAuthorizedOperations"/>
+    private static readonly Func<IntPtr, int> s_authorizedOperationCount =
+        NativeMethods.TopicDescriptionAuthorizedOperationCount;
+
+    /// <inheritdoc cref="s_hasAuthorizedOperations"/>
+    private static readonly Func<IntPtr, int, int> s_authorizedOperation =
+        NativeMethods.TopicDescriptionAuthorizedOperation;
+
+    /// <summary>
     /// Copies one borrowed description out.
     /// </summary>
     /// <param name="description">
@@ -81,45 +99,13 @@ internal static class TopicDescriptionMarshal
             partitions.Add(CopyOutPartition(partition));
         }
 
-        return new TopicDescription(name, isInternal, partitions, CopyOutAuthorizedOperations(description), topicId);
+        // Java's authorizedOperations(): null when the broker reported no set at all, a
+        // (possibly empty) owned collection when it did — the gate, not the count.
+        IReadOnlyCollection<AclOperation>? authorizedOperations = AuthorizedOperationsMarshal.CopyOut(
+            description, s_hasAuthorizedOperations, s_authorizedOperationCount, s_authorizedOperation);
+
+        return new TopicDescription(name, isInternal, partitions, authorizedOperations, topicId);
     }
-
-    /// <summary>
-    /// Java's <c>authorizedOperations()</c>: <see langword="null"/> when the broker
-    /// reported no set at all, an (possibly empty) owned collection when it did.
-    /// </summary>
-    private static IReadOnlyCollection<AclOperation>? CopyOutAuthorizedOperations(IntPtr description)
-    {
-        // ⚠ The discriminant, NOT the count — see the class remarks.
-        if (!NativeMethods.TopicDescriptionHasAuthorizedOperations(description))
-        {
-            return null;
-        }
-
-        int count = NativeMethods.TopicDescriptionAuthorizedOperationCount(description);
-        List<AclOperation> operations = new List<AclOperation>(Math.Max(count, 0));
-        for (int index = 0; index < count; index++)
-        {
-            // The ABI hands back the Kafka wire code, and AclOperation's members ARE those
-            // codes. An unrecognised code becomes Unknown, mirroring Java's
-            // `AclOperation.fromCode` (AclOperation.java:151-157) rather than producing an
-            // enum value with no name.
-            int code = NativeMethods.TopicDescriptionAuthorizedOperation(description, index);
-            operations.Add(FromCode(code));
-        }
-
-        return operations;
-    }
-
-    /// <summary>
-    /// Java's <c>AclOperation.fromCode</c>: a code with no matching member becomes
-    /// <see cref="AclOperation.Unknown"/> rather than an unnamed enum value. Also absorbs
-    /// the ABI's own <c>-1</c> out-of-range return.
-    /// </summary>
-    private static AclOperation FromCode(int code) =>
-        code >= (int)AclOperation.Unknown && code <= (int)AclOperation.TwoPhaseCommit
-            ? (AclOperation)code
-            : AclOperation.Unknown;
 
     private static TopicPartitionInfo CopyOutPartition(IntPtr partition)
     {

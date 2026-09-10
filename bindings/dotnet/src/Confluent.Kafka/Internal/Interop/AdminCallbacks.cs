@@ -142,6 +142,74 @@ internal static class AdminCallbacks
     internal delegate void DeleteRecordsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_describe_cluster_callback_t</c>
+    /// (result shape 5). ⚠ <paramref name="error"/> is the <b>only</b> failure channel:
+    /// Java's result holds four attribute futures rather than a per-key map, and the
+    /// header says so — "unlike the batch RPCs there are no per-key errors: any failure is
+    /// returned".
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeClusterCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_list_config_resources_callback_t</c> (result sub-shape
+    /// 3b). ⚠ <paramref name="error"/> is the <b>only</b> failure channel: the result type
+    /// has no <c>get_error</c>, and no key either.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListConfigResourcesCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_list_client_metrics_resources_callback_t</c> (result
+    /// sub-shape 3b). ⚠ <paramref name="error"/> is the <b>only</b> failure channel: the
+    /// result type has no <c>get_error</c>, and no key either.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListClientMetricsResourcesCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_describe_configs_callback_t</c>.
+    /// ⚠ A <b>per-resource</b> failure arrives inside <paramref name="result"/>, borrowed;
+    /// a non-null <paramref name="error"/> means the request could not be submitted at all
+    /// and is owned.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeConfigsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_incremental_alter_configs_callback_t</c>.
+    /// ⚠ A <b>per-resource</b> failure arrives inside <paramref name="result"/>; a non-null
+    /// <paramref name="error"/> means the request could not be submitted at all — which for
+    /// this RPC includes an <b>unknown op-type code</b>, delivered on the inline path.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void IncrementalAlterConfigsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_describe_log_dirs_callback_t</c>.
+    /// ⚠ A <b>per-broker</b> failure arrives inside <paramref name="result"/>, borrowed —
+    /// and so does a <b>per-log-directory</b> one, which is a different thing that does not
+    /// fault anything. A non-null <paramref name="error"/> is owned.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_alter_replica_log_dirs_callback_t</c>. ⚠ A
+    /// <b>per-replica</b> failure arrives inside <paramref name="result"/>, borrowed.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void AlterReplicaLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <inheritdoc cref="AlterReplicaLogDirsCallback"/>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeReplicaLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
     /// The single rooted instance passed to every <c>close_async</c> submission. Rooted
     /// for the process lifetime, so the native thunk never dangles (ffi §B6 keep-alive).
     /// </summary>
@@ -353,6 +421,213 @@ internal static class AdminCallbacks
             new DeletedRecords(NativeMethods.DeleteRecordsResultGetLowWatermark(result, index));
 
     /// <summary>
+    /// The rooted instance passed to every <c>describe_cluster_async</c> submission
+    /// (result shape 5 — not a table walk, so it has no accessor set and no readers).
+    /// </summary>
+    internal static readonly DescribeClusterCallback DescribeCluster = OnDescribeCluster;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_config_resources_async</c> submission
+    /// (result sub-shape 3b).
+    /// </summary>
+    internal static readonly ListConfigResourcesCallback ListConfigResources = OnListConfigResources;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_client_metrics_resources_async</c>
+    /// submission (result sub-shape 3b).
+    /// </summary>
+    internal static readonly ListClientMetricsResourcesCallback ListClientMetricsResources =
+        OnListClientMetricsResources;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_configs_async</c> submission
+    /// (result shape 1, composite key).
+    /// </summary>
+    internal static readonly DescribeConfigsCallback DescribeConfigs = OnDescribeConfigs;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>incremental_alter_configs_async</c>
+    /// submission (result shape 2, composite key).
+    /// </summary>
+    internal static readonly IncrementalAlterConfigsCallback IncrementalAlterConfigs =
+        OnIncrementalAlterConfigs;
+
+    /// <summary>
+    /// <c>describeConfigs</c>' universal accessors — result <b>shape 1</b>, with a
+    /// <b>borrowed</b> per-resource <c>get_error</c>.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DescribeConfigsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeConfigsResultCount,
+            NativeMethods.DescribeConfigsResultGetError);
+
+    /// <summary>
+    /// <c>incrementalAlterConfigs</c>' universal accessors — result <b>shape 2</b>: the
+    /// ABI declares no <c>_get_value</c>, so a null per-resource error <em>is</em> the
+    /// success value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors AlterConfigsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.AlterConfigsResultCount,
+            NativeMethods.AlterConfigsResultGetError);
+
+    /// <summary>
+    /// <c>describeConfigs</c>' <b>composite</b> key reader — neither result declares a
+    /// <c>get_key</c>; the key is <c>(get_key_type(i), get_key_name(i))</c>, reassembled
+    /// into the <see cref="ConfigResource"/> Java keys the map by. The type id goes through
+    /// <see cref="ConfigResourceMarshal.TypeFromId"/> rather than a raw cast, so an id this
+    /// client has no member for degrades to <see cref="ConfigResourceType.Unknown"/> as
+    /// Java's <c>Type.forId</c> does.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, ConfigResource> DescribeConfigsKey =
+        static (result, index) => new ConfigResource(
+            ConfigResourceMarshal.TypeFromId(NativeMethods.DescribeConfigsResultGetKeyType(result, index)),
+            KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeConfigsResultGetKeyName(result, index)));
+
+    /// <inheritdoc cref="DescribeConfigsKey"/>
+    internal static readonly Func<IntPtr, int, ConfigResource> AlterConfigsKey =
+        static (result, index) => new ConfigResource(
+            ConfigResourceMarshal.TypeFromId(NativeMethods.AlterConfigsResultGetKeyType(result, index)),
+            KeyedResultMarshal.ReadStringKey(NativeMethods.AlterConfigsResultGetKeyName(result, index)));
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_log_dirs_async</c> submission
+    /// (result shape 1, scalar key).
+    /// </summary>
+    internal static readonly DescribeLogDirsCallback DescribeLogDirs = OnDescribeLogDirs;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>alter_replica_log_dirs_async</c> submission
+    /// (result shape 2, 3-part key).
+    /// </summary>
+    internal static readonly AlterReplicaLogDirsCallback AlterReplicaLogDirs = OnAlterReplicaLogDirs;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_replica_log_dirs_async</c>
+    /// submission (result shape 1, 3-part key).
+    /// </summary>
+    internal static readonly DescribeReplicaLogDirsCallback DescribeReplicaLogDirs = OnDescribeReplicaLogDirs;
+
+    /// <summary>
+    /// <c>describeLogDirs</c>' universal accessors — result <b>shape 1</b>, with a
+    /// <b>borrowed</b> per-broker <c>get_error</c>. ⚠ That is the FIRST of this RPC's two
+    /// borrowed errors; the second is nested in the value tree
+    /// (<see cref="LogDirMarshal"/>).
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DescribeLogDirsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeLogDirsResultCount,
+            NativeMethods.DescribeLogDirsResultGetError);
+
+    /// <summary>
+    /// <c>alterReplicaLogDirs</c>' universal accessors — result <b>shape 2</b>: the ABI
+    /// declares no <c>_get_value</c>, so a null per-replica error <em>is</em> the success
+    /// value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors AlterReplicaLogDirsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.AlterReplicaLogDirsResultCount,
+            NativeMethods.AlterReplicaLogDirsResultGetError);
+
+    /// <inheritdoc cref="DescribeLogDirsAccessors"/>
+    internal static readonly KeyedResultMarshal.Accessors DescribeReplicaLogDirsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeReplicaLogDirsResultCount,
+            NativeMethods.DescribeReplicaLogDirsResultGetError);
+
+    /// <summary>
+    /// <c>describeLogDirs</c>' key reader — a <b>bare scalar</b> broker id, the first such
+    /// key in M15. The <c>(result, index)</c> seam takes it unchanged, with no parsing and
+    /// no composition.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, int> DescribeLogDirsKey =
+        static (result, index) => NativeMethods.DescribeLogDirsResultGetBroker(result, index);
+
+    /// <summary>
+    /// <c>describeLogDirs</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>LogDirDescriptionMap_t</c>, whose whole description-and-replica tree is copied out
+    /// before the root dies.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, IReadOnlyDictionary<string, LogDirDescription>> LogDirDescriptionsValue =
+        static (result, index) =>
+            LogDirMarshal.CopyOutMap(NativeMethods.DescribeLogDirsResultGetValue(result, index));
+
+    /// <summary>
+    /// <c>alterReplicaLogDirs</c>' <b>3-part composite</b> key reader — this result declares
+    /// no <c>get_key</c>; the key is
+    /// <c>(get_topic(i), get_partition(i), get_broker_id(i))</c>, reassembled into the
+    /// <see cref="TopicPartitionReplica"/> Java keys the map by.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartitionReplica> AlterReplicaLogDirsKey =
+        static (result, index) => new TopicPartitionReplica(
+            KeyedResultMarshal.ReadStringKey(NativeMethods.AlterReplicaLogDirsResultGetTopic(result, index)),
+            NativeMethods.AlterReplicaLogDirsResultGetPartition(result, index),
+            NativeMethods.AlterReplicaLogDirsResultGetBrokerId(result, index));
+
+    /// <inheritdoc cref="AlterReplicaLogDirsKey"/>
+    internal static readonly Func<IntPtr, int, TopicPartitionReplica> DescribeReplicaLogDirsKey =
+        static (result, index) => new TopicPartitionReplica(
+            KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeReplicaLogDirsResultGetTopic(result, index)),
+            NativeMethods.DescribeReplicaLogDirsResultGetPartition(result, index),
+            NativeMethods.DescribeReplicaLogDirsResultGetBrokerId(result, index));
+
+    /// <summary>
+    /// <c>describeReplicaLogDirs</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>ReplicaLogDirInfo_t</c>, copied out before the root dies.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>
+        ReplicaLogDirInfoValue =
+            static (result, index) =>
+                LogDirMarshal.CopyOutReplicaInfo(
+                    NativeMethods.DescribeReplicaLogDirsResultGetValue(result, index));
+
+    /// <summary>
+    /// <c>describeConfigs</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>Config_t</c>, whose whole entry-and-synonym tree is copied out before the root
+    /// dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Reached only when the entry's <c>get_error</c> was null — the walker checks the
+    /// error first — which is why the header's "null value if that resource failed" case
+    /// cannot arrive here.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, Config> ConfigValue =
+        static (result, index) =>
+            ConfigMarshal.CopyOut(NativeMethods.DescribeConfigsResultGetValue(result, index));
+
+    /// <summary>
+    /// <c>listConfigResources</c>' element reader — sub-shape 3b, so this is a <b>value</b>
+    /// reader with no key beside it. The element is <b>composite</b>, assembled from
+    /// <c>get_type(i)</c> and <c>get_name(i)</c>, which is why the walker's reader seam
+    /// takes <c>(result, index)</c> rather than a single pointer.
+    /// </summary>
+    /// <remarks>
+    /// The type id goes through <see cref="ConfigResourceMarshal.TypeFromId"/>, which owns
+    /// the rule that separates the ABI's out-of-range <c>-1</c> from a non-negative id this
+    /// client has no member for. The name goes through
+    /// <see cref="KeyedResultMarshal.ReadStringKey"/>. Either can throw; the throw
+    /// propagates to the trampoline's no-throw boundary, which faults the one awaiter this
+    /// shape has.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ConfigResource> ConfigResourceValue =
+        static (result, index) => new ConfigResource(
+            ConfigResourceMarshal.TypeFromId(NativeMethods.ListConfigResourcesResultGetType(result, index)),
+            KeyedResultMarshal.ReadStringKey(NativeMethods.ListConfigResourcesResultGetName(result, index)));
+
+#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
+
+    /// <summary>
+    /// <c>listClientMetricsResources</c>' element reader — the whole listing <em>is</em>
+    /// the name, so <c>get_name(i)</c> is the result's only per-index accessor.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, ClientMetricsResourceListing> ClientMetricsResourceListingValue =
+        static (result, index) => new ClientMetricsResourceListing(
+            KeyedResultMarshal.ReadStringKey(
+                NativeMethods.ListClientMetricsResourcesResultGetName(result, index)));
+
+#pragma warning restore CS0618
+
+    /// <summary>
     /// The result-root destroys, hoisted for the same reason as the accessor sets: a
     /// method group converted at the call site would allocate a delegate per completion.
     /// All are null-safe, so the trampoline's <c>finally</c> can call them
@@ -372,6 +647,45 @@ internal static class AdminCallbacks
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyDeleteRecordsResult = NativeMethods.DeleteRecordsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyListConfigResourcesResult =
+        NativeMethods.ListConfigResourcesResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyListClientMetricsResourcesResult =
+        NativeMethods.ListClientMetricsResourcesResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDescribeConfigsResult =
+        NativeMethods.DescribeConfigsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyAlterConfigsResult =
+        NativeMethods.AlterConfigsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDescribeLogDirsResult =
+        NativeMethods.DescribeLogDirsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyAlterReplicaLogDirsResult =
+        NativeMethods.AlterReplicaLogDirsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDescribeReplicaLogDirsResult =
+        NativeMethods.DescribeReplicaLogDirsResultDestroy;
+
+    /// <summary>
+    /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
+    /// everything else here.
+    /// </summary>
+    private static readonly KeyedResultMarshal.CountAccessor s_listConfigResourcesCount =
+        NativeMethods.ListConfigResourcesResultCount;
+
+    /// <inheritdoc cref="s_listConfigResourcesCount"/>
+    private static readonly KeyedResultMarshal.CountAccessor s_listClientMetricsResourcesCount =
+        NativeMethods.ListClientMetricsResourcesResultCount;
 
     private static void OnClose(IntPtr error, IntPtr userData)
     {
@@ -499,6 +813,12 @@ internal static class AdminCallbacks
             else
             {
                 KeyedResultMarshal.Complete(result, accessors, context, readKey);
+
+                // Keys the ABI request could not carry are resolved here, after the walk and
+                // before FailUncompleted sees them. A no-op for every RPC that has none —
+                // see VoidKeyedAdminOperation.SetKeysWithNoRequest for the one shape that
+                // does, and why it is deliberately not reached on the failure branch above.
+                context.CompleteKeysWithNoRequest();
             }
         }
         catch (Exception exception)
@@ -580,6 +900,54 @@ internal static class AdminCallbacks
             DeletedRecordsValue,
             s_destroyDeleteRecordsResult);
 
+    private static void OnDescribeConfigs(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeConfigsAccessors,
+            DescribeConfigsKey,
+            ConfigValue,
+            s_destroyDescribeConfigsResult);
+
+    private static void OnIncrementalAlterConfigs(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            AlterConfigsAccessors,
+            AlterConfigsKey,
+            s_destroyAlterConfigsResult);
+
+    private static void OnDescribeLogDirs(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeLogDirsAccessors,
+            DescribeLogDirsKey,
+            LogDirDescriptionsValue,
+            s_destroyDescribeLogDirsResult);
+
+    private static void OnAlterReplicaLogDirs(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            AlterReplicaLogDirsAccessors,
+            AlterReplicaLogDirsKey,
+            s_destroyAlterReplicaLogDirsResult);
+
+    private static void OnDescribeReplicaLogDirs(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeReplicaLogDirsAccessors,
+            DescribeReplicaLogDirsKey,
+            ReplicaLogDirInfoValue,
+            s_destroyDescribeReplicaLogDirsResult);
+
     /// <summary>
     /// The <b>shape-3</b> trampoline: one awaiter, no per-key error channel.
     /// </summary>
@@ -628,4 +996,125 @@ internal static class AdminCallbacks
             context?.FreeGcHandle();
         }
     }
+
+    /// <summary>
+    /// The <b>shape-5</b> trampoline: one awaiter over four cluster attributes, and no
+    /// table to walk.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>The callback's <c>error</c> parameter is the ONLY error this RPC can see, and
+    /// it is OWNED.</b> There is no per-key <c>get_error</c> anywhere in
+    /// <c>kafka_admin_DescribeClusterResult_t</c> — so unlike every keyed RPC bound so far,
+    /// there is nothing here that is <em>borrowed</em>, and reaching for
+    /// <see cref="KafkaException.FromBorrowedHandle"/> would leak this handle rather than
+    /// protect it. <see cref="KafkaException.FromHandle"/> frees it exactly once.
+    /// <para>
+    /// The <c>finally</c> discharges the same three obligations as every other trampoline:
+    /// destroy the owned root (null-safe, so the error branch is a no-op), fault an awaiter
+    /// nothing completed, and release the <c>GCHandle</c> plus the span-the-op client
+    /// reference. The destroy runs strictly after the copy-out, because every value the
+    /// copy-out reads is borrowed from that root.
+    /// </para>
+    /// </remarks>
+    private static void OnDescribeCluster(IntPtr result, IntPtr error, IntPtr userData)
+    {
+        SingleAdminOperation<DescribeClusterSnapshot>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (SingleAdminOperation<DescribeClusterSnapshot>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                context.SetException(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                context.SetResult(DescribeClusterMarshal.CopyOut(result));
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Task.
+            context?.SetException(exception);
+        }
+        finally
+        {
+            NativeMethods.DescribeClusterResultDestroy(result);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+    /// <summary>
+    /// The one completion body both <b>sub-shape-3b</b> trampolines delegate to: one
+    /// awaiter over an ordered collection, with no key and no per-key error channel.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Same ownership asymmetry as <see cref="OnDescribeCluster"/> and
+    /// <see cref="OnListTopics"/>: <paramref name="error"/> is <b>OWNED</b> and freed by
+    /// <see cref="KafkaException.FromHandle"/>. These result types declare no
+    /// <c>get_error</c> at all, so there is no borrowed error anywhere on this path.
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    /// <param name="count">That RPC's <c>*Result_count</c>.</param>
+    /// <param name="readValue">That RPC's element reader.</param>
+    /// <param name="destroyResult">That RPC's <c>*Result_destroy</c>.</param>
+    private static void CompleteListRpc<TValue>(
+        IntPtr result,
+        IntPtr error,
+        IntPtr userData,
+        KeyedResultMarshal.CountAccessor count,
+        Func<IntPtr, int, TValue> readValue,
+        Action<IntPtr> destroyResult)
+    {
+        SingleAdminOperation<IReadOnlyCollection<TValue>>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (SingleAdminOperation<IReadOnlyCollection<TValue>>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                context.SetException(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                KeyedResultMarshal.CompleteList(result, count, context, readValue);
+            }
+        }
+        catch (Exception exception)
+        {
+            context?.SetException(exception);
+        }
+        finally
+        {
+            destroyResult(result);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+    private static void OnListConfigResources(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteListRpc(
+            result,
+            error,
+            userData,
+            s_listConfigResourcesCount,
+            ConfigResourceValue,
+            s_destroyListConfigResourcesResult);
+
+#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
+    private static void OnListClientMetricsResources(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteListRpc(
+            result,
+            error,
+            userData,
+            s_listClientMetricsResourcesCount,
+            ClientMetricsResourceListingValue,
+            s_destroyListClientMetricsResourcesResult);
+#pragma warning restore CS0618
 }

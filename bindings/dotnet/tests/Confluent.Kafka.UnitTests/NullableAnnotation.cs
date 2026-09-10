@@ -122,8 +122,33 @@ internal static class NullableAnnotation
     };
 
     /// <summary>The flag for a parameter, including a <c>ReturnParameter</c>.</summary>
-    internal static byte Flag(ParameterInfo parameter) =>
-        Own(parameter.GetCustomAttributesData()) ?? Context(parameter.Member);
+    internal static byte Flag(ParameterInfo parameter) => Flag(parameter, 0);
+
+    /// <summary>
+    /// The flag at one <b>position</b> of a parameter's flattened type — position 0 is the
+    /// outermost type, 1 its first type argument, and so on.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Position 0 cannot see a nullable type ARGUMENT, and that is the whole reason
+    /// this overload exists (M15/P3).</b> <c>Task&lt;Node&gt;</c> and
+    /// <c>Task&lt;Node?&gt;</c> both emit <see cref="NotAnnotated"/> at position 0 — the
+    /// <see cref="System.Threading.Tasks.Task"/> itself is never null — and differ only at
+    /// position 1. Every M15 result accessor returns a <c>Task&lt;T&gt;</c>, so an
+    /// assertion written against position 0 is unfalsifiable for exactly the nullability
+    /// the accessor is about. The earlier phases' assertions are still correct as written:
+    /// they pin the <em>Task</em>'s own nullability (<c>DescribeTopicsResult</c>'s
+    /// accessors really do return <c>Task&lt;…&gt;?</c>), which is a different claim.
+    /// <para>
+    /// A single-byte attribute means every position agrees, so it answers for any position;
+    /// a member with no attribute of its own resolves against the enclosing context, which
+    /// is likewise one value for all positions.
+    /// </para>
+    /// </remarks>
+    /// <param name="parameter">The parameter, or a <c>ReturnParameter</c>.</param>
+    /// <param name="position">The position in the flattened type.</param>
+    /// <returns>The flag byte.</returns>
+    internal static byte Flag(ParameterInfo parameter, int position) =>
+        Own(parameter.GetCustomAttributesData(), position) ?? Context(parameter.Member);
 
     /// <summary>
     /// Walks outward — declaring method, then each enclosing type — for the nearest
@@ -144,16 +169,15 @@ internal static class NullableAnnotation
         return Oblivious;
     }
 
-    private static byte? Own(IList<CustomAttributeData> attributes) =>
-        Read(attributes, NullableAttributeName);
+    private static byte? Own(IList<CustomAttributeData> attributes, int position = 0) =>
+        Read(attributes, NullableAttributeName, position);
 
     /// <summary>
-    /// Reads the first flag byte out of a compiler-emitted nullability attribute, which
-    /// carries either a single <see cref="byte"/> (every position agrees) or a
-    /// <see cref="byte"/> array whose first element is the outermost type's flag — the one
-    /// being asserted.
+    /// Reads one flag byte out of a compiler-emitted nullability attribute, which carries
+    /// either a single <see cref="byte"/> (every position agrees) or a <see cref="byte"/>
+    /// array indexed by position in the flattened type — position 0 being the outermost.
     /// </summary>
-    private static byte? Read(IList<CustomAttributeData> attributes, string attributeFullName)
+    private static byte? Read(IList<CustomAttributeData> attributes, string attributeFullName, int position = 0)
     {
         foreach (CustomAttributeData attribute in attributes)
         {
@@ -165,12 +189,13 @@ internal static class NullableAnnotation
             object? argument = attribute.ConstructorArguments[0].Value;
             if (argument is byte flag)
             {
+                // One byte means every position agrees, so it answers for any position.
                 return flag;
             }
 
-            if (argument is IReadOnlyList<CustomAttributeTypedArgument> flags && flags.Count > 0)
+            if (argument is IReadOnlyList<CustomAttributeTypedArgument> flags && flags.Count > position)
             {
-                return (byte)flags[0].Value!;
+                return (byte)flags[position].Value!;
             }
         }
 

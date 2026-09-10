@@ -53,6 +53,19 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <see cref="CompleteAggregate{TKey, TValue}"/>, which has <b>no error parameter at
 /// all</b>.
 /// </item>
+/// <item>
+/// <b>Sub-shape 3b</b> — one aggregate future over an ordered <b>collection</b>, with no
+/// per-key error <em>and no key at all</em>: <c>kafka_admin_ListConfigResourcesResult_t</c>
+/// exposes <c>count</c> / <c>get_type</c> / <c>get_name</c> / <c>destroy</c>, and
+/// <c>kafka_admin_ListClientMetricsResourcesResult_t</c> only <c>count</c> /
+/// <c>get_name</c> / <c>destroy</c>. Java's accessors are
+/// <c>KafkaFuture&lt;Collection&lt;ConfigResource&gt;&gt;</c>
+/// (<c>ListConfigResourcesResult.java:42</c>) and
+/// <c>KafkaFuture&lt;Collection&lt;ClientMetricsResourceListing&gt;&gt;</c>
+/// (<c>ListClientMetricsResourcesResult.java:45</c>) — a LIST, not a map. Goes through
+/// <see cref="CompleteList{TValue}"/>, which has <b>no accessor set, no key reader and no
+/// error channel</b>.
+/// </item>
 /// </list>
 /// <para>
 /// ⚠ <b>Neither the key nor the value is part of <see cref="Accessors"/>, and that is
@@ -328,6 +341,71 @@ internal static class KeyedResultMarshal
             // sorted, so a duplicate is a core contract violation. Faulting the one
             // awaiter loudly beats silently collapsing two entries into one.
             entries.Add(readKey(result, index), readValue(result, index));
+        }
+
+        operation.SetResult(entries);
+    }
+
+    /// <summary>
+    /// <b>Sub-shape 3b — one aggregate future over an ordered collection.</b> Builds the
+    /// whole <c>Collection&lt;V&gt;</c> out of the result table and resolves the
+    /// operation's single awaiter with it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Its own callable, with no <see cref="Accessors"/>, no key reader and no error
+    /// channel — because the ABI has none of the three.</b> This is P2b's general rule
+    /// applied once more: when a defect would be "the shape is encoded in whether a field
+    /// is null", make each shape a <em>distinct callable</em> rather than adding another
+    /// nullable discriminator. So <see cref="Accessors"/> is untouched by this addition —
+    /// it still carries exactly <c>count</c> plus a <b>required</b> <c>getError</c>, and
+    /// gaining a nullable field to spell "no key" or "no error" would re-open, on two more
+    /// axes, the hazard P2b removed from the value axis.
+    /// </para>
+    /// <para>
+    /// <b>Why <see cref="CompleteAggregate{TKey, TValue}"/> cannot serve.</b> It builds a
+    /// <c>Dictionary&lt;TKey, TValue&gt;</c>, and these results have no key: Java's
+    /// accessors yield a <c>Collection</c>. Forcing a map — say
+    /// <c>IReadOnlyDictionary&lt;ConfigResource, bool&gt;</c> — would invent a public
+    /// surface Java does not have (<c>definition-of-done.md</c> §7).
+    /// <c>listClientMetricsResources</c> makes that plainest: its only per-index accessor
+    /// is <c>get_name(i)</c>, and the listing <em>is</em> the name.
+    /// </para>
+    /// <para>
+    /// <b>Any failure faults the one task.</b> There is no per-key channel to fault into,
+    /// so a throw from <paramref name="readValue"/> propagates to the trampoline's
+    /// no-throw boundary, which faults the single awaiter. That is Java's shape: one
+    /// <c>KafkaFuture&lt;Collection&lt;…&gt;&gt;</c>.
+    /// </para>
+    /// <para>
+    /// <b>Order is preserved exactly as the ABI delivers it.</b> The header documents
+    /// <c>listConfigResources</c> entries "sorted by <c>(type id, name)</c>" and
+    /// <c>listClientMetricsResources</c> "sorted by name". Java returns a
+    /// <c>Collection</c>, so order is not part of the contract — but neither shuffle it
+    /// nor sort it again.
+    /// </para>
+    /// </remarks>
+    /// <param name="result">The owned result root.</param>
+    /// <param name="count">That RPC's <c>*Result_count</c>.</param>
+    /// <param name="operation">The single-awaiter bridge.</param>
+    /// <param name="readValue">
+    /// Reads the element at one index straight out of the result root and copies it into an
+    /// owned managed <typeparamref name="TValue"/> — the same <c>(result, index)</c> reader
+    /// shape the keyed overloads use, so an element assembled from several accessors
+    /// (<c>get_type(i)</c> + <c>get_name(i)</c>) is expressible.
+    /// </param>
+    /// <typeparam name="TValue">The managed element type.</typeparam>
+    internal static void CompleteList<TValue>(
+        IntPtr result,
+        CountAccessor count,
+        SingleAdminOperation<IReadOnlyCollection<TValue>> operation,
+        Func<IntPtr, int, TValue> readValue)
+    {
+        int total = count(result);
+        List<TValue> entries = new List<TValue>(Math.Max(total, 0));
+        for (int index = 0; index < total; index++)
+        {
+            entries.Add(readValue(result, index));
         }
 
         operation.SetResult(entries);

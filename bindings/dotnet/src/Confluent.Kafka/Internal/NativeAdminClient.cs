@@ -68,6 +68,30 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     private const int DefaultPartitionSizeLimitPerResponse = 2000;
 
+    /// <summary>
+    /// The comparer every <see cref="ConfigResource"/>-keyed bridge and result view is
+    /// built with, so a lookup in a per-key map and a lookup in an aggregate can never
+    /// disagree about a key.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="EqualityComparer{T}.Default"/> dispatches to
+    /// <see cref="ConfigResource.Equals(object)"/> — type plus an ordinal name — which is
+    /// exactly Java's <c>equals</c>. Naming it once here is what lets the submit, the
+    /// bridge and the public result all be handed the <em>same</em> instance rather than
+    /// each reaching for a default that could later diverge.
+    /// </remarks>
+    private static readonly IEqualityComparer<ConfigResource> s_configResourceComparer =
+        EqualityComparer<ConfigResource>.Default;
+
+    /// <summary>
+    /// The comparer every <see cref="TopicPartitionReplica"/>-keyed bridge and result view
+    /// is built with, for the same reason as <see cref="s_configResourceComparer"/>: it is a
+    /// reference type with custom value equality, so a per-key map and an aggregate built
+    /// with different comparers could disagree about whether a key is present.
+    /// </summary>
+    private static readonly IEqualityComparer<TopicPartitionReplica> s_replicaComparer =
+        EqualityComparer<TopicPartitionReplica>.Default;
+
     private readonly SafeAdminHandle _handle;
     private int _closed;
 
@@ -164,6 +188,118 @@ internal sealed class NativeAdminClient : IDisposable
         int count,
         int timeoutMs,
         AdminCallbacks.DeleteRecordsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_cluster_async</c> submit shape, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>. ⚠ No key array and no key type at all — the
+    /// result is four attributes of one cluster (result shape 5), so this RPC uses
+    /// <see cref="SingleAdminOperation{TValue}"/>.
+    /// </summary>
+    internal delegate void NativeDescribeClusterSubmit(
+        IntPtr admin,
+        int timeoutMs,
+        bool includeAuthorizedOperations,
+        bool includeFencedBrokers,
+        AdminCallbacks.DescribeClusterCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_config_resources_async</c> submit shape, injectable for the same reason
+    /// as <see cref="NativeCreateTopicsSubmit"/>. The <c>int[]</c> carries
+    /// <c>ConfigResource.Type.id()</c> codes; a <c>count</c> of 0 is the legitimate
+    /// "every supported type" request, not an error.
+    /// </summary>
+    internal delegate void NativeListConfigResourcesSubmit(
+        IntPtr admin,
+        int[] resourceTypes,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.ListConfigResourcesCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_client_metrics_resources_async</c> submit shape, injectable for the same
+    /// reason as <see cref="NativeCreateTopicsSubmit"/>. No arrays at all.
+    /// </summary>
+    internal delegate void NativeListClientMetricsResourcesSubmit(
+        IntPtr admin,
+        int timeoutMs,
+        AdminCallbacks.ListClientMetricsResourcesCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_log_dirs_async</c> submit shape — <b>one</b> array of broker ids,
+    /// injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeDescribeLogDirsSubmit(
+        IntPtr admin,
+        int[] brokers,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeLogDirsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>alter_replica_log_dirs_async</c> submit shape — <b>four</b> parallel arrays,
+    /// injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeAlterReplicaLogDirsSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        int[] brokerIds,
+        IntPtr[] logDirs,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.AlterReplicaLogDirsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_replica_log_dirs_async</c> submit shape — <b>three</b> parallel
+    /// arrays, injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeDescribeReplicaLogDirsSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        int[] brokerIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeReplicaLogDirsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_configs_async</c> submit shape — <b>two</b> parallel arrays plus two
+    /// booleans, injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeDescribeConfigsSubmit(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int count,
+        int timeoutMs,
+        bool includeSynonyms,
+        bool includeDocumentation,
+        AdminCallbacks.DescribeConfigsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>incremental_alter_configs_async</c> submit shape — <b>five</b> parallel
+    /// arrays, one row per operation, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeIncrementalAlterConfigsSubmit(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        IntPtr[] configNames,
+        IntPtr[] configValues,
+        int[] opTypes,
+        int count,
+        int timeoutMs,
+        bool validateOnly,
+        AdminCallbacks.IncrementalAlterConfigsCallback callback,
         IntPtr userData);
 
     internal SafeAdminHandle Handle => _handle;
@@ -919,6 +1055,943 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         return new DeleteRecordsResult(operation.Tasks);
+    }
+
+    internal DescribeClusterResult DescribeCluster(DescribeClusterOptions? options) =>
+        DescribeCluster(options, NativeMethods.AdminClientDescribeClusterAsync);
+
+    /// <summary>
+    /// Submits <c>describeCluster</c> and returns immediately with the four awaitables
+    /// Java's <c>DescribeClusterResult</c> exposes (result shape 5).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>One completion, four projections.</b> Java holds four independent
+    /// <c>KafkaFuture</c> fields; the ABI settles the whole result together and has no
+    /// <c>KafkaFuture</c> type with which to express independent timing, so the four public
+    /// tasks derive from this single <see cref="SingleAdminOperation{TValue}"/> over an
+    /// internal snapshot. The deviation is recorded on
+    /// <see cref="DescribeClusterResult"/> (M15/P3 decision D12 — there is deliberately no
+    /// public aggregate type).
+    /// </remarks>
+    internal DescribeClusterResult DescribeCluster(
+        DescribeClusterOptions? options, NativeDescribeClusterSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool includeAuthorizedOperations = false;
+        bool includeFencedBrokers = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClusterOptions));
+            includeAuthorizedOperations = options.IncludeAuthorizedOperations;
+            includeFencedBrokers = options.IncludeFencedBrokers;
+        }
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<DescribeClusterSnapshot> operation =
+            new SingleAdminOperation<DescribeClusterSnapshot>("describeCluster");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+        try
+        {
+            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
+            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                timeoutMs,
+                includeAuthorizedOperations,
+                includeFencedBrokers,
+                AdminCallbacks.DescribeCluster,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return new DescribeClusterResult(operation.Task);
+    }
+
+    internal ListConfigResourcesResult ListConfigResources(
+        IReadOnlyCollection<ConfigResourceType>? configResourceTypes, ListConfigResourcesOptions? options) =>
+        ListConfigResources(configResourceTypes, options, NativeMethods.AdminClientListConfigResourcesAsync);
+
+    /// <summary>
+    /// Submits <c>listConfigResources</c> and returns immediately with the <b>single</b>
+    /// awaitable Java's <c>ListConfigResourcesResult</c> wraps (result sub-shape 3b).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>An empty or absent type filter is the "every supported type" request and must
+    /// NOT be rejected.</b> The header: "pass NULL or <c>count == 0</c> for Java's empty
+    /// set, which means 'every supported type'", matching Java's no-argument
+    /// <c>listConfigResources()</c>, which delegates with <c>Set.of()</c>
+    /// (<c>Admin.java:1812</c>). So there is deliberately no emptiness guard and no
+    /// <c>?? throw</c> here — either would turn Java's most common call into an error.
+    /// </para>
+    /// <para>
+    /// The types are de-duplicated because Java's parameter is a <c>Set</c>. Request order
+    /// is preserved among the survivors; it does not reach the result, whose entries the
+    /// ABI sorts by <c>(type id, name)</c>.
+    /// </para>
+    /// </remarks>
+    internal ListConfigResourcesResult ListConfigResources(
+        IReadOnlyCollection<ConfigResourceType>? configResourceTypes,
+        ListConfigResourcesOptions? options,
+        NativeListConfigResourcesSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListConfigResourcesOptions));
+        }
+
+        int[] resourceTypes = DistinctTypeIds(configResourceTypes);
+
+        SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation =
+            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            // The blittable int[] is pinned by the interop marshaller for the duration of
+            // the call; the ABI copies out during it (ffi §A4 call-scoped).
+            submit(
+                _handle.DangerousGetHandle(),
+                resourceTypes,
+                resourceTypes.Length,
+                timeoutMs,
+                AdminCallbacks.ListConfigResources,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return new ListConfigResourcesResult(operation.Task);
+    }
+
+#pragma warning disable CS0618 // Java deprecates this RPC and its three types; mirrored, not avoided.
+
+    internal ListClientMetricsResourcesResult ListClientMetricsResources(
+        ListClientMetricsResourcesOptions? options) =>
+        ListClientMetricsResources(options, NativeMethods.AdminClientListClientMetricsResourcesAsync);
+
+    /// <summary>
+    /// Submits <c>listClientMetricsResources</c> and returns immediately with the
+    /// <b>single</b> awaitable Java's <c>ListClientMetricsResourcesResult</c> wraps (result
+    /// sub-shape 3b).
+    /// </summary>
+    /// <remarks>
+    /// Java deprecates this RPC in favour of <c>listConfigResources</c> filtered to
+    /// <c>CLIENT_METRICS</c> (<c>Admin.java:1821-1824</c>); it is bound for parity, and the
+    /// deprecation is carried onto the public surface rather than dropped.
+    /// </remarks>
+    internal ListClientMetricsResourcesResult ListClientMetricsResources(
+        ListClientMetricsResourcesOptions? options,
+        NativeListClientMetricsResourcesSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListClientMetricsResourcesOptions));
+        }
+
+        SingleAdminOperation<IReadOnlyCollection<ClientMetricsResourceListing>> operation =
+            new SingleAdminOperation<IReadOnlyCollection<ClientMetricsResourceListing>>(
+                "listClientMetricsResources");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                timeoutMs,
+                AdminCallbacks.ListClientMetricsResources,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return new ListClientMetricsResourcesResult(operation.Task);
+    }
+
+#pragma warning restore CS0618
+
+    internal DescribeConfigsResult DescribeConfigs(
+        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options) =>
+        DescribeConfigs(resources, options, NativeMethods.AdminClientDescribeConfigsAsync);
+
+    /// <summary>
+    /// Submits <c>describeConfigs</c> and returns immediately with one awaitable per
+    /// resource. Java's <c>Collection&lt;ConfigResource&gt;</c> becomes the ABI's two
+    /// parallel arrays — <c>resource_types</c> (Java's <c>Type.id()</c> codes) and
+    /// <c>resource_names</c>.
+    /// </summary>
+    /// <remarks>
+    /// De-duplication mirrors Java, whose result is a <c>Map</c>, so a repeated resource is
+    /// one entry — the same reasoning as <c>createTopics</c>. The null-element check is
+    /// mandatory rather than defensive: the header says "an entry with a NULL name is
+    /// skipped", silently, which would drop a resource whose <see cref="Task"/> the caller
+    /// is holding (ffi §B5).
+    /// </remarks>
+    internal DescribeConfigsResult DescribeConfigs(
+        IReadOnlyCollection<ConfigResource> resources,
+        DescribeConfigsOptions? options,
+        NativeDescribeConfigsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (resources is null)
+        {
+            throw new ArgumentNullException(nameof(resources));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool includeSynonyms = false;
+        bool includeDocumentation = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeConfigsOptions));
+            includeSynonyms = options.IncludeSynonyms;
+            includeDocumentation = options.IncludeDocumentation;
+        }
+
+        List<ConfigResource> keys = DistinctResources(resources, nameof(resources));
+
+        int[] resourceTypes = new int[keys.Count];
+        for (int i = 0; i < keys.Count; i++)
+        {
+            resourceTypes[i] = (int)keys[i].Type;
+        }
+
+        KeyedAdminOperation<ConfigResource, Config> operation =
+            new KeyedAdminOperation<ConfigResource, Config>(
+                "describeConfigs", keys, s_configResourceComparer);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] resourceNames = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(keys[i].Name);
+                pinned.Add(name);
+                resourceNames[i] = name.Pointer;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                resourceTypes,
+                resourceNames,
+                keys.Count,
+                timeoutMs,
+                includeSynonyms,
+                includeDocumentation,
+                AdminCallbacks.DescribeConfigs,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String name in pinned)
+                {
+                    name.Dispose();
+                }
+            }
+        }
+
+        return new DescribeConfigsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal AlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
+        AlterConfigsOptions? options) =>
+        IncrementalAlterConfigs(configs, options, NativeMethods.AdminClientIncrementalAlterConfigsAsync);
+
+    /// <summary>
+    /// Submits <c>incrementalAlterConfigs</c> and returns immediately with one awaitable
+    /// per resource. Java's <c>Map&lt;ConfigResource, Collection&lt;AlterConfigOp&gt;&gt;</c>
+    /// becomes the ABI's <b>five parallel arrays, one row per operation</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Rows for one resource are emitted contiguously, in the caller's op order</b> —
+    /// the header requires it ("rows naming the same resource are grouped in order"), and
+    /// the flattening below walks the map resource-by-resource so two resources can never
+    /// interleave.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>A null config value is passed through as a null pointer.</b> It is the value
+    /// <see cref="AlterConfigOpType.Delete"/> uses, and the header names it. There is
+    /// deliberately no <c>?? string.Empty</c> anywhere on this path: an empty value and an
+    /// absent value are different requests.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>A null resource name or config name is rejected here</b>, because the ABI
+    /// <em>silently skips</em> such a row — the caller would be left holding a
+    /// <see cref="Task"/> for a resource the broker was never asked about
+    /// (<c>FailUncompleted</c> would fault it, but with a far less useful message).
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>A resource mapped to an EMPTY operation collection completes successfully
+    /// LOCALLY, and that is a recorded divergence — not a full fix</b>
+    /// (<c>definition-of-done.md</c> §7; M15/P3 round 3, finding 69.6). Java keys its
+    /// futures on the <em>resource collection</em>, which it sends alongside the ops map
+    /// (<c>KafkaAdminClient.java:2889-2896</c>, <c>:2902</c>), so the broker <b>does</b> hear
+    /// about a zero-op resource and answers for it. The ABI request is
+    /// <b>row-flattened</b> — one row per operation — so a zero-op resource contributes no
+    /// row and is <b>absent from the request entirely</b>
+    /// (<c>src/ffi/admin.rs:4233-4260</c> builds the resource map from rows alone). There is
+    /// no encoding for it: a row with a null config name is <em>skipped</em> by the ABI, and
+    /// any non-null config name would be a real operation.
+    /// </para>
+    /// <para>
+    /// <b>The root of the divergence is single and stated once: the resource is never
+    /// sent, so any answer the broker would have given for it is lost.</b> Local completion
+    /// therefore reproduces Java's outcome for a resource that exists and is authorized.
+    /// Three instances where it does not, each independently checkable — this is a list of
+    /// what was found, not a claim that nothing else follows from the root:
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// <b>The resource does not exist.</b> Java's future fails; here it succeeds. Evidence
+    /// that this is a real answer rather than a hypothetical: the Rust core checks the
+    /// resource <em>before</em> applying any operation — <c>mock_admin_client.rs:630-636</c>
+    /// resolves the topic and returns <c>UnknownTopicOrPartition</c> "No such topic as {name}"
+    /// on the way to a no-op <c>apply_alter_ops</c> — so with a zero-op list the core would
+    /// still fail it, exactly as Java does. Only the FFI encoding loses it.
+    /// </item>
+    /// <item>
+    /// <b>Authorization fails for the resource.</b> Java sends it and surfaces the broker's
+    /// per-resource authorization error; here nothing is asked, so it succeeds.
+    /// </item>
+    /// <item>
+    /// <b><see cref="AlterConfigsOptions.ValidateOnly"/> is set.</b> This is the case a
+    /// caller most plausibly reaches with an empty collection — "validate this resource,
+    /// change nothing" — and it is the case local completion answers without validating
+    /// anything.
+    /// </item>
+    /// </list>
+    /// <para>
+    /// Closing the root needs a way to express a zero-operation resource in the request,
+    /// which is a <b>Rust-core (Mode-B) dependency</b> and is escalated as such rather than worked around further. The core
+    /// already behaves correctly; only the row encoding cannot carry it. Faulting the
+    /// awaitable instead was the shipped behaviour and was worse — it reported a defect for
+    /// a call Java accepts — and rejecting the input outright is not open, because Java
+    /// accepts it too.
+    /// </para>
+    /// </remarks>
+    internal AlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
+        AlterConfigsOptions? options,
+        NativeIncrementalAlterConfigsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (configs is null)
+        {
+            throw new ArgumentNullException(nameof(configs));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool validateOnly = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterConfigsOptions));
+            validateOnly = options.ValidateOnly;
+        }
+
+        // ---- Flatten the map to one row per operation, grouped by resource ----
+        List<ConfigResource> keys = new List<ConfigResource>(configs.Count);
+        List<ConfigResource> rowResources = new List<ConfigResource>();
+        List<AlterConfigOp> rowOps = new List<AlterConfigOp>();
+
+        // ⚠ Resources the ABI request cannot carry. `configs` is a map, so each key appears
+        // once, and every operation becomes exactly one row — so "the collection is empty"
+        // IS "contributes no row". See the divergence note on this method.
+        List<ConfigResource> keysWithNoRequest = new List<ConfigResource>();
+        foreach (KeyValuePair<ConfigResource, IReadOnlyCollection<AlterConfigOp>> entry in configs)
+        {
+            if (entry.Key is null)
+            {
+                throw new ArgumentException(
+                    "The configs map must not contain a null resource.", nameof(configs));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    $"The operations for '{entry.Key}' must not be null.", nameof(configs));
+            }
+
+            // The header skips a row whose resource name or config name is NULL. Neither
+            // can be null here: ConfigResource's and ConfigEntry's constructors both reject
+            // a null name, so the guard lives there rather than being restated per row —
+            // a second check would only shadow the one that actually runs.
+
+            keys.Add(entry.Key);
+            if (entry.Value.Count == 0)
+            {
+                keysWithNoRequest.Add(entry.Key);
+            }
+
+            foreach (AlterConfigOp op in entry.Value)
+            {
+                if (op is null)
+                {
+                    throw new ArgumentException(
+                        $"The operations for '{entry.Key}' must not contain a null element.", nameof(configs));
+                }
+
+                rowResources.Add(entry.Key);
+                rowOps.Add(op);
+            }
+        }
+
+        int rowCount = rowOps.Count;
+        int[] resourceTypes = new int[rowCount];
+        int[] opTypes = new int[rowCount];
+        for (int i = 0; i < rowCount; i++)
+        {
+            resourceTypes[i] = (int)rowResources[i].Type;
+            opTypes[i] = (int)rowOps[i].OpType;
+        }
+
+        VoidKeyedAdminOperation<ConfigResource> operation =
+            new VoidKeyedAdminOperation<ConfigResource>(
+                "incrementalAlterConfigs", keys, s_configResourceComparer);
+
+        // Registering these makes the completion resolve them successfully instead of
+        // letting FailUncompleted fault them — see the divergence note above this method.
+        operation.SetKeysWithNoRequest(keysWithNoRequest);
+
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(rowCount * 3);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] resourceNames = new IntPtr[rowCount];
+            IntPtr[] configNames = new IntPtr[rowCount];
+            IntPtr[] configValues = new IntPtr[rowCount];
+            for (int i = 0; i < rowCount; i++)
+            {
+                Utf8Marshal.PinnedUtf8String resourceName = Utf8Marshal.Pin(rowResources[i].Name);
+                pinned.Add(resourceName);
+                resourceNames[i] = resourceName.Pointer;
+
+                Utf8Marshal.PinnedUtf8String configName = Utf8Marshal.Pin(rowOps[i].ConfigEntry.Name);
+                pinned.Add(configName);
+                configNames[i] = configName.Pointer;
+
+                // ⚠ A null value stays a NULL POINTER — it is DELETE's null value, and the
+                // ABI documents it as such. No `?? string.Empty` here, ever.
+                string? value = rowOps[i].ConfigEntry.Value;
+                if (value is null)
+                {
+                    configValues[i] = IntPtr.Zero;
+                }
+                else
+                {
+                    Utf8Marshal.PinnedUtf8String configValue = Utf8Marshal.Pin(value);
+                    pinned.Add(configValue);
+                    configValues[i] = configValue.Pointer;
+                }
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                resourceTypes,
+                resourceNames,
+                configNames,
+                configValues,
+                opTypes,
+                rowCount,
+                timeoutMs,
+                validateOnly,
+                AdminCallbacks.IncrementalAlterConfigs,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String value in pinned)
+                {
+                    value.Dispose();
+                }
+            }
+        }
+
+        return new AlterConfigsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal DescribeLogDirsResult DescribeLogDirs(
+        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options) =>
+        DescribeLogDirs(brokers, options, NativeMethods.AdminClientDescribeLogDirsAsync);
+
+    /// <summary>
+    /// Submits <c>describeLogDirs</c> and returns immediately with one awaitable per broker.
+    /// Java's <c>Collection&lt;Integer&gt;</c> becomes the ABI's single broker-id array.
+    /// </summary>
+    /// <remarks>
+    /// De-duplication mirrors Java, whose result is a <c>Map</c> keyed by broker id, so a
+    /// repeated broker is one entry. There is no null-element check because the element type
+    /// is <see cref="int"/> — there is no null to reject, which is also why this is the one
+    /// Stage-3 input with no silent-skip hazard.
+    /// </remarks>
+    internal DescribeLogDirsResult DescribeLogDirs(
+        IReadOnlyCollection<int> brokers,
+        DescribeLogDirsOptions? options,
+        NativeDescribeLogDirsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (brokers is null)
+        {
+            throw new ArgumentNullException(nameof(brokers));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeLogDirsOptions));
+        }
+
+        List<int> keys = new List<int>(brokers.Count);
+        HashSet<int> seen = new HashSet<int>();
+        foreach (int broker in brokers)
+        {
+            if (seen.Add(broker))
+            {
+                keys.Add(broker);
+            }
+        }
+
+        KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> operation =
+            new KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>>(
+                "describeLogDirs", keys, EqualityComparer<int>.Default);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            // The blittable int[] is pinned by the interop marshaller for the duration of
+            // the call; the ABI copies out during it (ffi §A4 call-scoped).
+            submit(
+                _handle.DangerousGetHandle(),
+                keys.ToArray(),
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.DescribeLogDirs,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return new DescribeLogDirsResult(operation.Tasks);
+    }
+
+    internal AlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
+        AlterReplicaLogDirsOptions? options) =>
+        AlterReplicaLogDirs(
+            replicaAssignment, options, NativeMethods.AdminClientAlterReplicaLogDirsAsync);
+
+    /// <summary>
+    /// Submits <c>alterReplicaLogDirs</c> and returns immediately with one awaitable per
+    /// replica. Java's <c>Map&lt;TopicPartitionReplica, String&gt;</c> becomes the ABI's four
+    /// parallel arrays.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>§9.1 item 9 (KEY-SET vs ROW-SET) was checked here BEFORE the RPC was written,
+    /// and the zero-row shape CANNOT arise.</b> The finding it exists for (69.6) needed a
+    /// <c>Map&lt;K, Collection&lt;V&gt;&gt;</c>, where a key can map to an empty collection
+    /// and so flatten to no rows. This map is <c>K → V</c>: <b>every key carries exactly one
+    /// value and therefore produces exactly one row</b>, so <c>count</c> always equals the
+    /// key count and no key can vanish from the request. Nothing is completed locally here,
+    /// and no divergence arises.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>A null topic or null log directory is rejected here</b>, because the ABI
+    /// <em>silently skips</em> such a row — the caller would be left holding a
+    /// <see cref="Task"/> for a replica the broker was never asked about. That is the one
+    /// way a key could still lose its row, and it is turned into an
+    /// <see cref="ArgumentException"/> naming the entry rather than a late
+    /// <c>FailUncompleted</c> message (ffi §B5).
+    /// </para>
+    /// </remarks>
+    internal AlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
+        AlterReplicaLogDirsOptions? options,
+        NativeAlterReplicaLogDirsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (replicaAssignment is null)
+        {
+            throw new ArgumentNullException(nameof(replicaAssignment));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterReplicaLogDirsOptions));
+        }
+
+        List<TopicPartitionReplica> keys = new List<TopicPartitionReplica>(replicaAssignment.Count);
+        List<string> logDirs = new List<string>(replicaAssignment.Count);
+        foreach (KeyValuePair<TopicPartitionReplica, string> entry in replicaAssignment)
+        {
+            if (entry.Key is null)
+            {
+                throw new ArgumentException(
+                    "The replica assignment must not contain a null replica.", nameof(replicaAssignment));
+            }
+
+            // The ABI skips a row whose log dir is NULL, which would silently drop this
+            // replica. The topic cannot be null — TopicPartitionReplica's constructor
+            // rejects that — so the guard lives there and is not restated here.
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    $"The log directory for '{entry.Key}' must not be null.", nameof(replicaAssignment));
+            }
+
+            keys.Add(entry.Key);
+            logDirs.Add(entry.Value);
+        }
+
+        VoidKeyedAdminOperation<TopicPartitionReplica> operation =
+            new VoidKeyedAdminOperation<TopicPartitionReplica>(
+                "alterReplicaLogDirs", keys, s_replicaComparer);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count * 2);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            int[] partitions = new int[keys.Count];
+            int[] brokerIds = new int[keys.Count];
+            IntPtr[] directories = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+                partitions[i] = keys[i].Partition;
+                brokerIds[i] = keys[i].BrokerId;
+
+                Utf8Marshal.PinnedUtf8String directory = Utf8Marshal.Pin(logDirs[i]);
+                pinned.Add(directory);
+                directories[i] = directory.Pointer;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                partitions,
+                brokerIds,
+                directories,
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.AlterReplicaLogDirs,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String value in pinned)
+                {
+                    value.Dispose();
+                }
+            }
+        }
+
+        return new AlterReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
+        IReadOnlyCollection<TopicPartitionReplica> replicas, DescribeReplicaLogDirsOptions? options) =>
+        DescribeReplicaLogDirs(
+            replicas, options, NativeMethods.AdminClientDescribeReplicaLogDirsAsync);
+
+    /// <summary>
+    /// Submits <c>describeReplicaLogDirs</c> and returns immediately with one awaitable per
+    /// replica. Java's <c>Collection&lt;TopicPartitionReplica&gt;</c> becomes the ABI's three
+    /// parallel arrays.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// De-duplication mirrors Java, whose result is a <c>Map</c>, so a repeated replica is
+    /// one entry. The topic cannot be null (<see cref="TopicPartitionReplica"/>'s
+    /// constructor rejects it), so the ABI's "an entry with a NULL topic is skipped" cannot
+    /// be reached through this surface.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The result count is NOT guaranteed to equal the request count, and the honest
+    /// outcome for a missing key is a FAULT.</b> Java's real client pre-registers a future
+    /// per requested replica and completes each one — defaulting to an empty
+    /// <c>ReplicaLogDirInfo</c> when the broker said nothing about it
+    /// (<c>KafkaAdminClient.java:3103-3106</c> seeds <c>replicaDirInfoByPartition</c>, and
+    /// <c>:3155-3160</c> completes every entry) — and the <b>Rust core does the same</b>
+    /// (<c>src/admin/kafka_admin_client.rs:3705-3708</c> inserts a future for every
+    /// requested replica). So against a real client every requested key gets an entry and
+    /// <c>FailUncompleted</c> never fires.
+    /// </para>
+    /// <para>
+    /// The <b>mock</b> is the exception: it omits replicas of unknown topics outright
+    /// (<c>src/admin/mock_admin_client.rs:1352-1355</c>), so a broker-less test can reach
+    /// the missing-key path. There <c>FailUncompleted</c> faults that key with a message
+    /// naming it. That is deliberately <b>not</b> smoothed over by completing locally with a
+    /// default: unlike the Stage-2 zero-op case, the key here is genuinely sent and the
+    /// answer genuinely absent, so fabricating an "empty" description would report data the
+    /// binding does not have — the same reasoning that keeps
+    /// <see cref="LogDirDescription"/> free of a faked <c>IsCordoned</c>.
+    /// </para>
+    /// </remarks>
+    internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
+        IReadOnlyCollection<TopicPartitionReplica> replicas,
+        DescribeReplicaLogDirsOptions? options,
+        NativeDescribeReplicaLogDirsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (replicas is null)
+        {
+            throw new ArgumentNullException(nameof(replicas));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeReplicaLogDirsOptions));
+        }
+
+        List<TopicPartitionReplica> keys = new List<TopicPartitionReplica>(replicas.Count);
+        HashSet<TopicPartitionReplica> seen = new HashSet<TopicPartitionReplica>(s_replicaComparer);
+        foreach (TopicPartitionReplica replica in replicas)
+        {
+            if (replica is null)
+            {
+                throw new ArgumentException(
+                    "The replicas must not contain a null element.", nameof(replicas));
+            }
+
+            if (seen.Add(replica))
+            {
+                keys.Add(replica);
+            }
+        }
+
+        KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> operation =
+            new KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(
+                "describeReplicaLogDirs", keys, s_replicaComparer);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            int[] partitions = new int[keys.Count];
+            int[] brokerIds = new int[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+                partitions[i] = keys[i].Partition;
+                brokerIds[i] = keys[i].BrokerId;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                partitions,
+                brokerIds,
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.DescribeReplicaLogDirs,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+                {
+                    topic.Dispose();
+                }
+            }
+        }
+
+        return new DescribeReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    /// <summary>
+    /// De-duplicates the requested config resources, preserving request order, and rejects
+    /// a null element before it can reach the ABI.
+    /// </summary>
+    /// <remarks>
+    /// De-duplication mirrors Java, whose result is a <c>Map</c>. The null check is
+    /// mandatory: the header skips an entry with a NULL name silently.
+    /// </remarks>
+    private static List<ConfigResource> DistinctResources(
+        IReadOnlyCollection<ConfigResource> resources, string parameterName)
+    {
+        List<ConfigResource> keys = new List<ConfigResource>(resources.Count);
+        HashSet<ConfigResource> seen = new HashSet<ConfigResource>(s_configResourceComparer);
+        foreach (ConfigResource resource in resources)
+        {
+            if (resource is null)
+            {
+                throw new ArgumentException("The resources must not contain a null element.", parameterName);
+            }
+
+            if (seen.Add(resource))
+            {
+                keys.Add(resource);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <summary>
+    /// De-duplicates the requested config-resource types into the ABI's
+    /// <c>ConfigResource.Type.id()</c> array, preserving request order.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>A null or empty input yields an empty array, and that is a valid request</b> —
+    /// Java's <c>Set.of()</c>, which the header maps to "every supported type". De-dup
+    /// mirrors Java's <c>Set</c> parameter. There is no null-element check because the
+    /// element type is an enum, which has no null.
+    /// </remarks>
+    private static int[] DistinctTypeIds(IReadOnlyCollection<ConfigResourceType>? types)
+    {
+        if (types is null || types.Count == 0)
+        {
+            return Array.Empty<int>();
+        }
+
+        List<int> ids = new List<int>(types.Count);
+        HashSet<ConfigResourceType> seen = new HashSet<ConfigResourceType>();
+        foreach (ConfigResourceType type in types)
+        {
+            if (seen.Add(type))
+            {
+                ids.Add((int)type);
+            }
+        }
+
+        return ids.ToArray();
     }
 
     /// <summary>

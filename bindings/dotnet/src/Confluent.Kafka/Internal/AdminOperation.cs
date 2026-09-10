@@ -311,6 +311,8 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
 internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, bool>
     where TKey : notnull
 {
+    private IReadOnlyCollection<TKey> _keysWithNoRequest = Array.Empty<TKey>();
+
     /// <inheritdoc cref="KeyedAdminOperation{TKey, TValue}(string, IReadOnlyCollection{TKey}, IEqualityComparer{TKey})"/>
     internal VoidKeyedAdminOperation(
         string operationName,
@@ -318,6 +320,45 @@ internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, 
         IEqualityComparer<TKey> keyComparer)
         : base(operationName, keys, keyComparer)
     {
+    }
+
+    /// <summary>
+    /// Records the keys that the ABI request could not carry, so the completion can resolve
+    /// them locally instead of leaving them for <c>FailUncompleted</c>.
+    /// </summary>
+    /// <param name="keys">The keys that contributed no row to the request.</param>
+    /// <remarks>
+    /// ⚠ <b>This exists for one shape: a per-key result whose key set comes from the
+    /// caller's map while the ABI request is ROW-flattened</b>, so a key mapped to an empty
+    /// collection flattens to zero rows and is absent from the request — and therefore from
+    /// the result. Java keys its futures on the <em>resource collection</em>, which travels
+    /// alongside the ops map (<c>KafkaAdminClient.java:2889-2896</c>), so such a key
+    /// completes there. Without this the result would carry no entry for it and the
+    /// awaitable would fault, reporting a defect where Java reports success (M15/P3 round 3,
+    /// finding 69.6).
+    /// <para>
+    /// The divergence this leaves is enumerated at the registering call site — it is not
+    /// nothing, and it must not be re-derived from this method alone.
+    /// </para>
+    /// </remarks>
+    internal void SetKeysWithNoRequest(IReadOnlyCollection<TKey> keys) => _keysWithNoRequest = keys;
+
+    /// <summary>
+    /// Resolves every key registered by <see cref="SetKeysWithNoRequest"/> with the void
+    /// success token.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Called only on the successful-completion path.</b> When the call itself failed
+    /// there is no result table and <c>FailAll</c> has already faulted every awaitable,
+    /// including these — which is Java's outcome too, since the resource really is in the
+    /// request it sends and a transport failure fails its future with the rest.
+    /// </remarks>
+    internal void CompleteKeysWithNoRequest()
+    {
+        foreach (TKey key in _keysWithNoRequest)
+        {
+            SetResult(key, true);
+        }
     }
 }
 

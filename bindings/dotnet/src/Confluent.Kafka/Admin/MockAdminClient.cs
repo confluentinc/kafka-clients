@@ -87,6 +87,54 @@ public sealed class MockAdminClient : IAdmin
         _native.DeleteRecords(recordsToDelete, options);
 
     /// <inheritdoc/>
+    public DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null) =>
+        _native.DescribeCluster(options);
+
+    /// <inheritdoc/>
+    public ListConfigResourcesResult ListConfigResources(
+        IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
+        ListConfigResourcesOptions? options = null) =>
+        _native.ListConfigResources(configResourceTypes, options);
+
+    /// <inheritdoc/>
+    [Obsolete(
+        "Deprecated in Kafka since 4.1. Use ListConfigResources filtered to "
+        + "ConfigResourceType.ClientMetrics instead.")]
+    public ListClientMetricsResourcesResult ListClientMetricsResources(
+        ListClientMetricsResourcesOptions? options = null) =>
+        _native.ListClientMetricsResources(options);
+
+
+    /// <inheritdoc/>
+    public DescribeConfigsResult DescribeConfigs(
+        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null) =>
+        _native.DescribeConfigs(resources, options);
+
+    /// <inheritdoc/>
+    public AlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
+        AlterConfigsOptions? options = null) =>
+        _native.IncrementalAlterConfigs(configs, options);
+
+
+    /// <inheritdoc/>
+    public DescribeLogDirsResult DescribeLogDirs(
+        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null) =>
+        _native.DescribeLogDirs(brokers, options);
+
+    /// <inheritdoc/>
+    public AlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
+        AlterReplicaLogDirsOptions? options = null) =>
+        _native.AlterReplicaLogDirs(replicaAssignment, options);
+
+    /// <inheritdoc/>
+    public DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
+        IReadOnlyCollection<TopicPartitionReplica> replicas,
+        DescribeReplicaLogDirsOptions? options = null) =>
+        _native.DescribeReplicaLogDirs(replicas, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

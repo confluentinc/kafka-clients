@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Internal;
@@ -194,6 +195,127 @@ public sealed class AdminKeySeamShapeTests
     }
 
     /// <summary>
+    /// The walker's non-public static methods are exactly these five. Adding one is a
+    /// deliberate act that must be recorded here.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>This assertion exists to go RED when a method is added to the walker, and the
+    /// correct reaction is to extend it.</b> M15/P2b learned the shape of that lesson when
+    /// its second <c>Complete</c> overload broke
+    /// <see cref="EveryCompleteOverload_ReadsTheKeyFromTheResultHandleAndIndex_NotAString"/>'s
+    /// <c>Single(…)</c>; the fix there was to pin <em>both</em> overloads rather than relax
+    /// the predicate. M15/P3 added <see cref="KeyedResultMarshal.CompleteList"/>, which the
+    /// earlier assertions' name filters (<c>== nameof(Complete)</c>,
+    /// <c>== nameof(CompleteAggregate)</c>) did not match, so it landed without turning any
+    /// of them red — this set-equality is the reaction to that.
+    /// <para>
+    /// ⚠ <b>The set is selected by <see cref="BindingFlags"/> alone — never by a name
+    /// predicate — and that is the whole point (M15/P3 round 2, finding 69.4).</b> An
+    /// earlier version of this test filtered on <c>StartsWith("Complete")</c>, which
+    /// reproduced the very defect the paragraph above describes, one width wider: a
+    /// callable named anything else (measured with <c>WalkSomething</c>) landed green,
+    /// while the <c>CompleteSomething</c> control went red. A name filter can only pin the
+    /// names it already knows, so the next addition escapes it exactly when it is least
+    /// expected to.
+    /// </para>
+    /// <para>
+    /// <see cref="CompilerGeneratedAttribute"/> is excluded so a future compiler-emitted
+    /// static cannot turn this red for no reason. Measured today: none of the five is
+    /// compiler-generated, and the lambda display class is a <em>nested type</em>, which
+    /// <see cref="Type.GetMethods(BindingFlags)"/> on the containing type never returns.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheWalker_ExposesExactlyTheKnownCallables()
+    {
+        string[] callables = typeof(KeyedResultMarshal)
+            .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+            .Where(method => !method.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))
+            .Select(method => method.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                nameof(KeyedResultMarshal.Complete),
+                nameof(KeyedResultMarshal.Complete),
+                nameof(KeyedResultMarshal.CompleteAggregate),
+                nameof(KeyedResultMarshal.CompleteList),
+                nameof(KeyedResultMarshal.ReadStringKey),
+            },
+            callables);
+    }
+
+    /// <summary>
+    /// The <b>sub-shape-3b</b> walker takes <b>no accessor set, no key reader and no error
+    /// channel</b>, and produces a <em>collection</em> rather than a map.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>This is M15/P3's D14, pinned structurally.</b> The tempting alternative was to
+    /// describe "no key" and "no error" by nulling fields on
+    /// <see cref="KeyedResultMarshal.Accessors"/> — which is precisely the
+    /// null-as-shape-discriminator hazard P2b removed from the value axis and
+    /// <see cref="TheAggregateWalker_HasNoPerKeyErrorChannel"/> already forbids on the
+    /// error axis. Giving the shape its own callable states the same intent with nothing to
+    /// get wrong, and leaves <see cref="KeyedResultMarshal.Accessors"/> untouched —
+    /// which <see cref="Accessors_CarryNeitherAKeyNorAValueAccessor"/> re-asserts.
+    /// </para>
+    /// <para>
+    /// The collection-vs-map distinction is asserted because it is the thing Java's
+    /// signature decides: <c>KafkaFuture&lt;Collection&lt;ConfigResource&gt;&gt;</c>
+    /// (<c>ListConfigResourcesResult.java:42</c>), not a map. Routing these RPCs through
+    /// <see cref="KeyedResultMarshal.CompleteAggregate{TKey, TValue}"/> would have forced an
+    /// invented key onto the public surface.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheListWalker_HasNoAccessorSet_NoKeyReader_AndNoErrorChannel()
+    {
+        MethodInfo list = Assert.Single(
+            typeof(KeyedResultMarshal).GetMethods(BindingFlags.NonPublic | BindingFlags.Static),
+            method => method.Name == nameof(KeyedResultMarshal.CompleteList));
+
+        ParameterInfo[] parameters = list.GetParameters();
+
+        // No accessor set at all — so there is no GetError reachable through it either.
+        Assert.DoesNotContain(parameters, parameter => parameter.ParameterType == typeof(KeyedResultMarshal.Accessors));
+        Assert.DoesNotContain(
+            parameters,
+            parameter => parameter.Name!.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0);
+
+        // And no key reader: these results have no key, composite or otherwise.
+        Assert.DoesNotContain(
+            parameters,
+            parameter => parameter.Name!.IndexOf("key", StringComparison.OrdinalIgnoreCase) >= 0);
+
+        // It takes the count accessor directly, in place of the set.
+        Assert.Single(parameters, parameter => parameter.ParameterType == typeof(KeyedResultMarshal.CountAccessor));
+
+        // The value reader is the same (result, index) shape as the keyed overloads', and
+        // is NOT nullable — "no value" is not spellable on this callable either.
+        ParameterInfo reader = Assert.Single(parameters, parameter => parameter.Name == "readValue");
+        Type[] typeArguments = reader.ParameterType.GetGenericArguments();
+        Assert.Equal(typeof(Func<,,>), reader.ParameterType.GetGenericTypeDefinition());
+        Assert.Equal(typeof(IntPtr), typeArguments[0]);
+        Assert.Equal(typeof(int), typeArguments[1]);
+        Assert.True(typeArguments[2].IsGenericParameter);
+        Assert.Equal("TValue", typeArguments[2].Name);
+        Assert.False(
+            IsNullableAnnotated(reader),
+            "a nullable value reader re-opens the silent-discard misuse M15/P2b removed");
+
+        // The awaiter is the single-completion bridge, carrying a COLLECTION — not the
+        // dictionary CompleteAggregate builds.
+        ParameterInfo operation = Assert.Single(parameters, parameter => parameter.Name == "operation");
+        Assert.Equal(typeof(SingleAdminOperation<>), operation.ParameterType.GetGenericTypeDefinition());
+        Assert.Equal(
+            typeof(IReadOnlyCollection<>),
+            operation.ParameterType.GetGenericArguments()[0].GetGenericTypeDefinition());
+    }
+
+    /// <summary>
     /// Neither <c>get_key</c> nor <c>get_value</c> is part of the shared accessor set,
     /// because neither is universal — see
     /// <see cref="EveryCompleteOverload_ReadsTheKeyFromTheResultHandleAndIndex_NotAString"/>
@@ -210,6 +332,15 @@ public sealed class AdminKeySeamShapeTests
 
         Assert.DoesNotContain(properties, property => property.Name.Contains("Key", StringComparison.Ordinal));
         Assert.DoesNotContain(properties, property => property.Name.Contains("Value", StringComparison.Ordinal));
+
+        // ⚠ M15/P3's D14, restated as a count: the set is exactly `count` + `getError` and
+        // gained NOTHING when sub-shape 3b landed. A phase describing a new shape by adding
+        // a nullable field here — a null key reader, a null error channel — is the defect
+        // this whole file exists to make impossible, so the surface is pinned as a set
+        // rather than only checked for two forbidden names.
+        Assert.Equal(
+            new[] { "Count", "GetError" },
+            properties.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
 
         ConstructorInfo only = Assert.Single(
             typeof(KeyedResultMarshal.Accessors)
@@ -268,6 +399,8 @@ public sealed class AdminKeySeamShapeTests
     [InlineData(nameof(AdminCallbacks.CreatePartitionsKey))]
     [InlineData(nameof(AdminCallbacks.DeleteRecordsKey))]
     [InlineData(nameof(AdminCallbacks.DeletedRecordsValue))]
+    [InlineData(nameof(AdminCallbacks.ConfigResourceValue))]
+    [InlineData(nameof(AdminCallbacks.ClientMetricsResourceListingValue))]
     public void EveryReader_IsAHoistedStaticReadonlyField(string fieldName)
     {
         FieldInfo field = Assert.IsAssignableFrom<FieldInfo>(

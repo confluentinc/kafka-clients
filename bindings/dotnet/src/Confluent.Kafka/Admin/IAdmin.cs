@@ -244,6 +244,237 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         DeleteRecordsOptions? options = null);
 
     /// <summary>
+    /// Describes the cluster — Java's <c>describeCluster(DescribeClusterOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults — notably
+    /// <see cref="DescribeClusterOptions.IncludeAuthorizedOperations"/>
+    /// <see langword="false"/>, so <see cref="DescribeClusterResult.AuthorizedOperations"/>
+    /// yields <see langword="null"/>.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>Four</b> awaitables — one per cluster attribute — rather than one per key. Two
+    /// of them are genuinely nullable: see <see cref="DescribeClusterResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
+    /// client default — the ABI reads a negative timeout as "unset", so a negative value
+    /// would be silently reinterpreted rather than honoured.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null);
+
+    /// <summary>
+    /// Lists the cluster's configuration resources — Java's
+    /// <c>listConfigResources(Set&lt;ConfigResource.Type&gt;, ListConfigResourcesOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="configResourceTypes">
+    /// The resource types to list. ⚠ <see langword="null"/> or an <b>empty</b> collection
+    /// means <b>every supported type</b> — that is Java's own default, whose no-argument
+    /// <c>listConfigResources()</c> delegates with <c>Set.of()</c>
+    /// (<c>Admin.java:1812</c>) — so neither is rejected. Java's parameter is a
+    /// <c>Set</c>, so a repeated type is one entry.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole listing, and a <em>collection</em> rather than
+    /// a map: there is no per-resource outcome to report, so either the call fails and the
+    /// task faults, or the whole listing succeeds.
+    /// </returns>
+    /// <remarks>
+    /// Java also declares a no-argument <c>listConfigResources()</c> convenience overload,
+    /// collapsed here into the two optional parameters — the same treatment the other RPCs
+    /// give Java's <c>default</c> overloads, and for the same reason (C# default interface
+    /// methods need .NET Standard 2.1, above this binding's floor).
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListConfigResourcesResult ListConfigResources(
+        IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
+        ListConfigResourcesOptions? options = null);
+
+    /// <summary>
+    /// Lists the cluster's client-metrics resources — Java's
+    /// <c>listClientMetricsResources(ListClientMetricsResourcesOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole listing — see
+    /// <see cref="ListConfigResources"/>.
+    /// </returns>
+    /// <remarks>
+    /// ⚠ <b>Deprecated in Kafka since 4.1, and the deprecation is carried through rather
+    /// than dropped</b> (<c>Admin.java:1821-1824</c>:
+    /// <c>@Deprecated(since = "4.1", forRemoval = true)</c>). Java deprecates the result,
+    /// options and listing types on the same grounds, so all four carry
+    /// <see cref="ObsoleteAttribute"/> here. Prefer
+    /// <see cref="ListConfigResources"/> filtered to
+    /// <see cref="ConfigResourceType.ClientMetrics"/>.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    [Obsolete(
+        "Deprecated in Kafka since 4.1. Use ListConfigResources filtered to "
+        + "ConfigResourceType.ClientMetrics instead.")]
+    ListClientMetricsResourcesResult ListClientMetricsResources(
+        ListClientMetricsResourcesOptions? options = null);
+
+    /// <summary>
+    /// Describes the configuration of the given resources — Java's
+    /// <c>describeConfigs(Collection&lt;ConfigResource&gt;, DescribeConfigsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// awaitable per resource.
+    /// </summary>
+    /// <param name="resources">
+    /// The resources to describe. A repeated resource yields one entry, as Java's
+    /// map-keyed result does.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults — notably
+    /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/> and
+    /// <see cref="DescribeConfigsOptions.IncludeDocumentation"/> both
+    /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms"/> comes back empty and
+    /// <see cref="ConfigEntry.Documentation"/> <see langword="null"/>.
+    /// </param>
+    /// <returns>
+    /// One awaitable per resource, each carrying that resource's own <see cref="Config"/>
+    /// or its own failure. A resource that fails faults only <em>its own</em> awaitable;
+    /// a partially failed batch is not a failed call.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="resources"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="resources"/> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeConfigsResult DescribeConfigs(
+        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null);
+
+    /// <summary>
+    /// Incrementally alters the configuration of the given resources — Java's
+    /// <c>incrementalAlterConfigs(Map&lt;ConfigResource, Collection&lt;AlterConfigOp&gt;&gt;,
+    /// AlterConfigsOptions)</c>. Returns <b>immediately</b>, without waiting for the
+    /// broker; the result carries one awaitable per resource.
+    /// </summary>
+    /// <param name="configs">
+    /// Resource → the operations to apply to it, in order. ⚠ An
+    /// <see cref="AlterConfigOpType.Delete"/> whose
+    /// <see cref="ConfigEntry.Value"/> is <see langword="null"/> is a <b>real request</b>
+    /// and the null reaches the broker as a null; it is not the same as an empty string.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per resource, each reporting only whether <em>that</em> resource was
+    /// altered — Java's per-resource future is <c>KafkaFuture&lt;Void&gt;</c>.
+    /// </returns>
+    /// <remarks>
+    /// ⚠ <b>The result type is named for Java's return type</b>,
+    /// <see cref="AlterConfigsResult"/> (<c>Admin.java:501, :530</c>) — there is no
+    /// <c>IncrementalAlterConfigsResult</c> in Java or in the ABI.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="configs"/> contains a null resource, a null operation collection, or
+    /// a null operation.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
+        AlterConfigsOptions? options = null);
+
+    /// <summary>
+    /// Queries the log directories of the given brokers — Java's
+    /// <c>describeLogDirs(Collection&lt;Integer&gt;, DescribeLogDirsOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker; the result carries one awaitable
+    /// per broker.
+    /// </summary>
+    /// <param name="brokers">
+    /// The broker ids to query. A repeated broker yields one entry, as Java's map-keyed
+    /// result does.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable per broker, each yielding that broker's log directories keyed by path.
+    /// ⚠ A <b>log directory</b> that is offline does not fault anything — the awaitable
+    /// succeeds and that directory's <see cref="LogDirDescription.Error"/> is non-null.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeLogDirsResult DescribeLogDirs(
+        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null);
+
+    /// <summary>
+    /// Moves the given replicas to new log directories — Java's
+    /// <c>alterReplicaLogDirs(Map&lt;TopicPartitionReplica, String&gt;,
+    /// AlterReplicaLogDirsOptions)</c>. Returns <b>immediately</b>, without waiting for the
+    /// broker; the result carries one awaitable per replica.
+    /// </summary>
+    /// <param name="replicaAssignment">Replica → the log directory to move it to.</param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable per replica, each reporting only whether <em>that</em> move was
+    /// accepted — Java's per-replica future is <c>KafkaFuture&lt;Void&gt;</c>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="replicaAssignment"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory —
+    /// the ABI would silently skip such a row, leaving the caller holding an awaitable for a
+    /// replica the broker was never asked about.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
+        AlterReplicaLogDirsOptions? options = null);
+
+    /// <summary>
+    /// Queries the log directories of the given replicas — Java's
+    /// <c>describeReplicaLogDirs(Collection&lt;TopicPartitionReplica&gt;,
+    /// DescribeReplicaLogDirsOptions)</c>. Returns <b>immediately</b>, without waiting for
+    /// the broker; the result carries one awaitable per replica.
+    /// </summary>
+    /// <param name="replicas">
+    /// The replicas to query. A repeated replica yields one entry, as Java's map-keyed
+    /// result does.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>One awaitable per replica, each carrying where that replica's log lives.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="replicas"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="replicas"/> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
+        IReadOnlyCollection<TopicPartitionReplica> replicas,
+        DescribeReplicaLogDirsOptions? options = null);
+
+    /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background
     /// task to finish — Java's <c>close(Duration)</c>. Idempotent: closing an
     /// already-closed client completes without error.
