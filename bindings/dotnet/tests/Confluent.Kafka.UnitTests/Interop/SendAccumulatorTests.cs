@@ -1218,6 +1218,88 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
+    public async Task Close_FlushesQueuedSubmissionsToSendBatchInCallOrder()
+    {
+        // ⚠ F1 ON THE TEARDOWN PATH (M11/P3.2 §F1 × slice S2; Critic 71 finding 71.8). S2's own
+        // rationale claims — at SendAccumulator.Stop's step-2 item — that having the SUBMITTER do
+        // the bypass appends rather than the teardown thread is what keeps S1's single-appender
+        // invariant "and therefore its call-order property" true through teardown. Nothing asserted
+        // it. Every S2 test asserts records ARRIVE (HistoryCount, SendBatchRecordCount, callback
+        // counts, successful Tasks), and part (i) of the steady-state ordering test derives order
+        // from "nothing was appended while queued" — which is the MECHANISM, not the order. So a
+        // submitter mutated to dequeue LIFO once _queueSealed is set left the whole suite green:
+        // every record still reached the core exactly once, every awaiter still succeeded, every
+        // delivery callback still fired exactly once, a stalled submitter still appended nothing —
+        // only the order was wrong. This is the assertion that bites on that mutation, on the one
+        // append path S2 introduces (the bypass under a sealed queue).
+        //
+        // The witness is the per-record delivery-callback firing order — the same witness the
+        // stress half of SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound
+        // uses, valid for the same reason: the chain from append to callback is order-preserving end
+        // to end (send_batch reads a node's slots in index order, CompleteNode enqueues them to the
+        // pump in that order, Enqueue/DrainAll are FIFO, ProcessBatch fires each batch in index
+        // order), so callback order == append order == the order records reached send_batch. It is
+        // also the only witness available here: the node the flush fills is taken, sent and recycled
+        // INSIDE Stop, so there is no PendingCompletions() array left to read afterwards, and the
+        // mock core exposes a record count rather than a history.
+        const int Queued = 5;
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+
+        // The frozen bound, as in Close_CompletesASendThatWasQueuedForSpace_RatherThanFaultingIt:
+        // the permits are consumed with nothing accumulated, so no drain can ever free capacity and
+        // all five submissions stay queued until teardown flushes them. Deterministic — the order
+        // under test is fixed by the enqueue, not by a race against a release.
+        harness.ConsumePermits(4);
+
+        List<int> observed = new List<int>(Queued);
+        Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Queued];
+        for (int i = 0; i < Queued; i++)
+        {
+            sends[i] = harness.AppendOne(
+                (byte)(0xE0 + i), new OrderRecordingDeliveryCallback(observed, i));
+        }
+
+        Assert.Equal(Queued, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(0, harness.HistoryCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // Teardown: seal, flush the queue into the chain through the submitter, close, join.
+        Assert.True(harness.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+
+        // Arrival first — not the property under test, but without it the order loop below could be
+        // satisfied by a short list, and a zero-match assertion is not evidence.
+        Assert.Equal(Queued, harness.HistoryCount);
+        Assert.Equal(Queued, harness.Accumulator.SendBatchRecordCount);
+        Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
+
+        // Each callback fires immediately BEFORE its own awaiter is released (M14/P1 ordering), so
+        // awaiting all five already implies all five ran; the settle window then rules out a sixth.
+        foreach (Task<RecordMetadata> send in sends)
+        {
+            await TestTimeout.Run(() => send, s_deadline);
+        }
+
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+
+        int[] order;
+        lock (observed)
+        {
+            order = observed.ToArray();
+        }
+
+        // THE assertion: the flushed records reached send_batch in CALL order — not merely that all
+        // of them did. The length assertion is the one that keeps the loop from being vacuous.
+        Assert.Equal(Queued, order.Length);
+        for (int i = 0; i < Queued; i++)
+        {
+            Assert.Equal(i, order[i]);
+        }
+
+        harness.Dispose();
+    }
+
+    [Fact]
     public async Task Close_WithQueuedSubmissions_DoesNotExceedTheBoundedTeardownWait()
     {
         // M11/P3.2 §F2(c) — the flush must not turn Stop's bounded wait into an unbounded one, and
@@ -1361,8 +1443,10 @@ public sealed class SendAccumulatorTests
 
     /// <summary>
     /// Records the order in which delivery notifications fire, each instance carrying the index of
-    /// the send it was handed to — the cross-node submission-order witness (see the stress half of
-    /// <see cref="SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound"/>).
+    /// the send it was handed to — the cross-node submission-order witness, used by the stress half
+    /// of <see cref="SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound"/> (the
+    /// steady-state path) and by
+    /// <see cref="Close_FlushesQueuedSubmissionsToSendBatchInCallOrder"/> (the teardown path).
     /// </summary>
     private sealed class OrderRecordingDeliveryCallback : IDeliveryCallback
     {

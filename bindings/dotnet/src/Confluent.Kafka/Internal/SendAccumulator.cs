@@ -550,9 +550,18 @@ internal sealed class SendAccumulator
     /// <c>!closed</c> at <c>:529</c> <b>outside</b> <c>record_batches_mutex</c>, so a record
     /// appended in the narrow gap between its <c>mtx_unlock</c> (<c>:577</c>/<c>:638</c>) and that
     /// re-test is never sent and never completed. The common path is safe because the thread spends
-    /// its time in <c>cnd_timedwait</c> (<c>:548</c>) <em>holding</em> that mutex. So this is
-    /// Python-aligned <b>and</b> closes a window Python leaves open — not a claim that Python is
-    /// airtight.
+    /// its time <em>inside</em> the <c>record_batches_mutex</c> critical section, releasing the lock
+    /// only while parked in <c>cnd_timedwait</c> (<c>:548</c>) — which <b>atomically releases</b> it
+    /// for the duration of the wait and reacquires it on wake, and that release is precisely how
+    /// <c>py_Producer_shutdown</c> can take the lock at <c>:961</c> to set <c>closed</c> at
+    /// <c>:962</c>. So the park is the only window in which shutdown can win the lock; the thread
+    /// then wakes holding it again, falls out of the inner wait (<c>:539</c>'s <c>!closed</c>
+    /// guard) and performs one final take-and-send. So this is Python-aligned <b>and</b> closes a
+    /// window Python leaves open — not a claim that Python is airtight. (⚠ This paragraph first
+    /// said the thread parks <em>holding</em> the mutex, which inverts the mechanism and makes its
+    /// own conclusion unreachable — shutdown could then never have set <c>closed</c> at all. The
+    /// conclusion is unchanged; only the mechanism sentence was wrong. Critic 71 finding 71.10;
+    /// M11/P3.2 PLAN §1.3, corrected in the same round.)
     /// </para>
     /// <para>
     /// Two things the bypass does <b>not</b> change. It ignores the <em>bound</em>, never
@@ -1065,7 +1074,10 @@ internal sealed class SendAccumulator
     /// <c>_queued</c> to reach zero. The <em>submitter</em> does the appending, not this thread:
     /// keeping the single-appender invariant is what preserves S1's call-order property through
     /// teardown, and it is also the only way the submission already dequeued and parked on the gate
-    /// is included.</item>
+    /// is included. ⚠ That call-order half is asserted by
+    /// <c>Close_FlushesQueuedSubmissionsToSendBatchInCallOrder</c> — it was claimed here and by no
+    /// test until Critic 71 finding 71.8, and a submitter mutated to dequeue LIFO once the queue is
+    /// sealed left the whole suite green.</item>
     /// <item><b><c>_closed = true</c> + pulse.</b> Strictly after the flush, because <c>_closed</c>
     /// is what tells the batch thread the chain it takes next is its <em>final</em> one — set it
     /// first and the thread can take an empty chain and exit before the flush's appends land,
@@ -1142,9 +1154,24 @@ internal sealed class SendAccumulator
         // could not be woken by a concurrent close at all (§2.2 / §4.6). AFTER the seal, so the
         // submission it wakes takes the bypass instead of faulting.
         //
-        // ⚠ This is the ONLY _spaceGate.Cancel() call site. AbandonOnThreadFailure deliberately
-        // does not cancel (M11/P3.2 §F5 is its own slice) — and it must not start, or a submission
-        // it releases would take the bypass into an accumulator whose thread is already gone.
+        // ⚠ This is the ONLY _spaceGate.Cancel() call site TODAY, and the reason is SEQUENCING, not
+        // safety. AbandonOnThreadFailure does not cancel because M11/P3.2 §F5 / decision D5 approves
+        // adding it there as its own slice (S5), so that behaviour change stays attributable — NOT
+        // because cancelling there would be unsafe.
+        //
+        // It would not be. The bypass is gated on _queueSealed, which ONLY this method writes
+        // (below, under _gate), so a waiter that handler releases reaches AppendQueuedAsync's
+        // `catch (ObjectDisposedException) when (_queueSealed)` filter with the filter FALSE: the
+        // throw propagates to the outer catch and that submission is FAULTED, never appended. And
+        // where a concurrent Stop HAS sealed, the record still cannot be stranded, because
+        // AbandonOnThreadFailure sets _closed and calls TakeChainLocked in ONE _gate acquisition —
+        // so the bypass append is either refused by _closed or lands in a node that same acquisition
+        // takes, and SettleAbandonedChain settles it.
+        //
+        // ⚠ This comment previously stated that hazard as real ("it must not start, or a submission
+        // it releases would take the bypass into an accumulator whose thread is already gone") — a
+        // correctness prohibition against an approved decision, which would have misdirected S5.
+        // Critic 71 finding 71.9.
         _spaceGate.Cancel();
 
         if (flush)
