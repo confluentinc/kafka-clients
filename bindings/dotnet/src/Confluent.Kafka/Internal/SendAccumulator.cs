@@ -548,20 +548,33 @@ internal sealed class SendAccumulator
     /// send thread's final iteration then drains and sends the record. ⚠ Python's guarantee is
     /// <em>almost</em> unconditional rather than unconditional: <c>Producer_send_thread</c> tests
     /// <c>!closed</c> at <c>:529</c> <b>outside</b> <c>record_batches_mutex</c>, so a record
-    /// appended in the narrow gap between its <c>mtx_unlock</c> (<c>:577</c>/<c>:638</c>) and that
-    /// re-test is never sent and never completed. The common path is safe because the thread spends
-    /// its time <em>inside</em> the <c>record_batches_mutex</c> critical section, releasing the lock
-    /// only while parked in <c>cnd_timedwait</c> (<c>:548</c>) — which <b>atomically releases</b> it
-    /// for the duration of the wait and reacquires it on wake, and that release is precisely how
-    /// <c>py_Producer_shutdown</c> can take the lock at <c>:961</c> to set <c>closed</c> at
-    /// <c>:962</c>. So the park is the only window in which shutdown can win the lock; the thread
-    /// then wakes holding it again, falls out of the inner wait (<c>:539</c>'s <c>!closed</c>
-    /// guard) and performs one final take-and-send. So this is Python-aligned <b>and</b> closes a
-    /// window Python leaves open — not a claim that Python is airtight. (⚠ This paragraph first
-    /// said the thread parks <em>holding</em> the mutex, which inverts the mechanism and makes its
-    /// own conclusion unreachable — shutdown could then never have set <c>closed</c> at all. The
-    /// conclusion is unchanged; only the mechanism sentence was wrong. Critic 71 finding 71.10;
-    /// M11/P3.2 PLAN §1.3, corrected in the same round.)
+    /// appended after the thread's last <c>mtx_unlock</c> of that mutex (<c>:577</c>, or
+    /// <c>:556</c>/<c>:563</c> on the two early-continues) and before that re-test is never taken,
+    /// never sent and never completed. Why the common path is nonetheless safe is a <b>timing</b>
+    /// argument, not a structural one: the thread spends almost all of its time parked in
+    /// <c>cnd_timedwait</c> (<c>:548</c>), which <b>atomically releases</b>
+    /// <c>record_batches_mutex</c> for the duration of the wait and reacquires it on wake — and
+    /// that release is precisely how <c>py_Producer_shutdown</c> takes the lock at <c>:961</c> to
+    /// set <c>closed</c> at <c>:962</c>. Shutdown winning the lock <em>there</em> is the safe case:
+    /// the thread wakes holding the mutex, falls out of the inner wait (<c>:539</c>'s
+    /// <c>!closed</c> guard) and performs one final take-and-send. It is <b>not</b> the only
+    /// window, though — the thread also holds no <c>record_batches_mutex</c> from <c>:577</c>
+    /// through the whole send loop (<c>:581-638</c>, every <c>send_batch</c> call plus its GIL
+    /// acquisition) to the next <c>:533</c>, and a close landing <em>there</em> skips the final
+    /// take entirely. For a full <c>PRODUCER_RECORD_SLOT_CAPACITY</c> batch that window lasts as
+    /// long as a <c>send_batch</c> call, so Python's gap is materially wider than one narrow race.
+    /// That <b>strengthens</b> this slice rather than weakening it: .NET completes such a record on
+    /// every path, Python only when close lands while its send thread is parked. So this is
+    /// Python-aligned <b>and</b> closes a window Python leaves open — not a claim that Python is
+    /// airtight. (⚠ Corrected twice, and both errors reached this comment. It first said the
+    /// thread parks <em>holding</em> the mutex, which inverts <c>cnd_timedwait</c> and makes its
+    /// own conclusion unreachable — shutdown could then never have set <c>closed</c> at all
+    /// (Critic 71 finding 71.10). The correction then claimed the thread holds the mutex whenever
+    /// it is not parked, hence that the park was the only window shutdown could win the lock —
+    /// also false, per the three unlock sites and the unlocked send loop above; it also mispaired
+    /// the cites, <c>:638</c> being a <c>pending_batches_mutex</c> unlock rather than a
+    /// <c>record_batches_mutex</c> one (finding 71.11). The surviving argument is <b>timing</b>,
+    /// never structure. M11/P3.2 PLAN §1.3.)
     /// </para>
     /// <para>
     /// Two things the bypass does <b>not</b> change. It ignores the <em>bound</em>, never
@@ -1159,8 +1172,8 @@ internal sealed class SendAccumulator
         // adding it there as its own slice (S5), so that behaviour change stays attributable — NOT
         // because cancelling there would be unsafe.
         //
-        // It would not be. The bypass is gated on _queueSealed, which ONLY this method writes
-        // (below, under _gate), so a waiter that handler releases reaches AppendQueuedAsync's
+        // It would not be. The bypass is gated on _queueSealed, which ONLY this method writes (in
+        // step 1 above, under _gate), so a waiter that handler releases reaches AppendQueuedAsync's
         // `catch (ObjectDisposedException) when (_queueSealed)` filter with the filter FALSE: the
         // throw propagates to the outer catch and that submission is FAULTED, never appended. And
         // where a concurrent Stop HAS sealed, the record still cannot be stranded, because
