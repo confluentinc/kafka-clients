@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 use crate::admin::transaction_listing::TransactionListing;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::kafka_future::{KafkaFuture, KafkaFutureOps};
 
 /// The (top-level) future value: a map from broker id to that broker's listing
@@ -96,7 +96,7 @@ struct AllByBrokerIdFuture {
 impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFuture {
     fn get(
         &self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, KafkaError>> + Send + '_>>
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, Error>> + Send + '_>>
     {
         Box::pin(async move {
             let broker_futures = self.source.get().await?;
@@ -111,12 +111,12 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
     fn get_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, KafkaError>> + Send + '_>>
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, Error>> + Send + '_>>
     {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(KafkaError::Timeout(format!(
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture after {} ms",
                     timeout.as_millis()
                 ))),
@@ -141,7 +141,7 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
 mod tests {
     use super::*;
     use crate::admin::transaction_state::TransactionState;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::kafka_future::KafkaFutureImpl;
     use std::collections::HashSet;
 
@@ -154,7 +154,7 @@ mod tests {
     async fn all_futures_fail_if_lookup_fails() {
         let top: KafkaFutureImpl<BrokerFutures> = KafkaFutureImpl::new();
         let result = ListTransactionsResult::new(top.future());
-        top.complete_exceptionally(KafkaError::new(crate::common::protocol::Errors::UnknownServerError));
+        top.complete_with_error(Error::new(crate::common::protocol::Errors::UnknownServerError));
         assert!(result.all().get().await.is_err());
         assert!(result.all_by_broker_id().get().await.is_err());
         assert!(result.by_broker_id().get().await.is_err());
@@ -208,7 +208,7 @@ mod tests {
 
         let broker1 = vec![listing("foo", 12345, TransactionState::Ongoing)];
         f1.complete(broker1.clone());
-        f2.complete_exceptionally(KafkaError::new(crate::common::protocol::Errors::UnknownServerError));
+        f2.complete_with_error(Error::new(crate::common::protocol::Errors::UnknownServerError));
 
         let by_broker = result.by_broker_id().get().await.unwrap();
         assert_eq!(by_broker.keys().copied().collect::<HashSet<_>>(), HashSet::from([1, 2]));

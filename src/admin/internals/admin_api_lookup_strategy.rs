@@ -17,10 +17,10 @@
 //! Corresponds to
 //! `org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 
 use super::api_request_scope::ApiRequestScope;
@@ -36,13 +36,28 @@ pub(crate) struct LookupResult<K> {
     /// Keys mapped to a specific broker for fulfillment.
     pub(crate) mapped_keys: HashMap<K, i32>,
     /// Keys that encountered a fatal error during lookup.
-    pub(crate) failed_keys: HashMap<K, KafkaError>,
+    pub(crate) failed_keys: HashMap<K, Error>,
 }
 
 impl<K: Eq + Hash> LookupResult<K> {
     /// Creates a result with only failed and mapped keys (no completed keys).
-    pub(crate) fn new(failed_keys: HashMap<K, KafkaError>, mapped_keys: HashMap<K, i32>) -> Self {
+    pub(crate) fn new(failed_keys: HashMap<K, Error>, mapped_keys: HashMap<K, i32>) -> Self {
         Self { completed_keys: Vec::new(), mapped_keys, failed_keys }
+    }
+}
+
+impl<K: Clone + Eq + Hash> LookupResult<K> {
+    /// Fails every key the lookup request covered with the same error.
+    ///
+    /// The lookup-stage counterpart of [`ApiResult::failed_all`]: Java's
+    /// `AdminApiDriver.onFailure` generic `else` branch routes a
+    /// `LookupRequestScope` spec to `completeLookupExceptionally(errors)`
+    /// (`AdminApiDriver.java:311`).
+    ///
+    /// [`ApiResult::failed_all`]: super::admin_api_handler::ApiResult::failed_all
+    pub(crate) fn failed_all(keys: &HashSet<K>, error: Error) -> Self {
+        let failed_keys = keys.iter().map(|key| (key.clone(), error.clone())).collect();
+        Self::new(failed_keys, HashMap::new())
     }
 }
 
@@ -72,15 +87,11 @@ pub(crate) trait AdminApiLookupStrategy<K>: Send {
     /// maps every key to the exception (the request should not be retried).
     ///
     /// Mirrors `handleUnsupportedVersionException`.
-    fn handle_unsupported_version_exception(
-        &self,
-        exception: &KafkaError,
-        keys: &std::collections::HashSet<K>,
-    ) -> HashMap<K, KafkaError>
+    fn handle_unsupported_version_error(&self, error: &Error, keys: &std::collections::HashSet<K>) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,
     {
-        keys.iter().map(|k| (k.clone(), exception.clone())).collect()
+        keys.iter().map(|k| (k.clone(), error.clone())).collect()
     }
 
     /// Disables batched lookups for this strategy after the broker signals it
