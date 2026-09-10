@@ -387,6 +387,26 @@ internal sealed class SendCompletionPump
     /// <see cref="ConcurrentQueue{T}"/> and allocate three <c>IntPtr[count]</c> over whatever it
     /// found — unbounded by construction, and the one place the two bindings' constants diverged.
     /// <para>
+    /// ⚠ <b>NARROWED (M11/P3.2 §F3, S0): the cap is parity of SIZE, not of GROUPING.</b> The claim
+    /// above — and M11/P3.1 §12.2 with its §12 audit row — read as parity on both axes of the
+    /// anchor's completion batch. The <b>number</b> is now identical; the <b>shape</b> is not. The
+    /// anchor completes exactly one <c>BatchNode</c> per <c>get_all</c>
+    /// (<c>_confluentkafka.c:487-495</c>) and one node <em>is</em> one <c>send_batch</c>
+    /// (<c>:593</c>), so a completion batch there is one drain's worth from one send call and never
+    /// mixes records from different drains. This queue holds one entry per <b>record</b>, so one
+    /// capped pass can span records from arbitrarily many <c>send_batch</c> calls — and
+    /// <c>get_all</c> returns only once <em>every</em> future in the array resolves, so the first
+    /// record's completion is gated on the slowest of up to 1100 records it was never sent with.
+    /// </para>
+    /// <para>
+    /// That grouping difference is <b>removed by M11/P3.2 S3</b> — one <c>get_all</c> per
+    /// <c>send_batch</c> group (user decision D2), after which the ≤1100 bound follows from the
+    /// unit rather than from a hand-picked constant, and this constant survives with a changed job
+    /// (array capacity plus an oversized-group sub-pass bound). It is therefore a difference this
+    /// binding <b>closes</b>, not a deviation it keeps: M11/P3.2 §10 records it as a deleted
+    /// deviation entry rather than a filed one.
+    /// </para>
+    /// <para>
     /// ⚠ <b>Capping this made <see cref="RunLoop"/>'s inner drain loop mandatory</b> — see the hang
     /// analysis there. And the cap belongs <b>here only</b>: see
     /// <see cref="DrainAndFaultRemaining"/> for why capping the terminal drain would be a defect

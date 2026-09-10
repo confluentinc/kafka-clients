@@ -7,6 +7,11 @@
 > **Supersedes:** the Option-A rejection recorded in `design/history/M11/P3-producer-send/PLAN.md` §3.3,
 > `design/current/producer-send-completion-approaches.html` (Option A section),
 > `design/current/STATUS.md:99`, and `src/Confluent.Kafka/Internal/Interop/NativeMethods.cs:2237-2243`.
+> **Followed by:** `../P3.2-producer-send-ordering-parity/PLAN.md` — M11/P3.2 (N=71), the
+> submission-**ordering** fix plus the parity record this plan left open. Three amendments to *this*
+> file were made by its S0: **§1.5's pump carve-out is superseded as a whole by P3.2 §8.3**, §12/§12.2
+> are **narrowed** to size-not-grouping parity (§12.2.3), and P3.2's deviation list is mirrored at
+> **§3.10** (DV-1, DV-2, DV-4, DV-6 — DV-3 deleted, DV-5/DV-7 filed later by its S3).
 
 ---
 
@@ -119,6 +124,26 @@ mechanically:
 
 Anything touching the pump beyond that table is an unsanctioned change, regardless of merit.
 
+**⚠ SUPERSEDED AS A WHOLE by M11/P3.2 §8.3** (S0, N=71). This carve-out is a **phase-scope**
+boundary — written for P3.1 and approved by the user on 2026-09-07 — so it does not bind later
+phases; but per the standing practice of this record (§2) it is superseded **explicitly** rather
+than quietly contradicted. M11/P3.2 breaches it in two places: per-`send_batch` completion
+**grouping** (user decision **D2**, 2026-09-10 — which changes the pump's queue *element type*,
+`RunLoop`, `ProcessBatch` and `Enqueue`'s arity), and a bounded **pre-stop pump drain** (**D3**,
+adjacent to `Stop`). Two ad-hoc breaches would leave a reviewer with no boundary at all, so the
+replacement in/out table is stated **once, for both**, at
+`../P3.2-producer-send-ordering-parity/PLAN.md` **§8.3**.
+
+**Apply §8.3's table, not this one, to any work at or after M11/P3.2**; this one stays as the
+record of what P3.1 itself was allowed to touch. The replacement is deliberately **not copied
+here** — a second copy is the paraphrase-goes-stale failure mode this record has already paid for
+(§12.3 item 3, and the residual restatements in the Critic-65 round). Note what §8.3 keeps out of
+scope even under D2/D3, because it is the part most likely to be assumed permissive: `Enqueue`'s
+**semantics** (the `_stopLock`-guarded stopped-check and its fault-in-place branch),
+`ProcessBatch`'s **per-index completion logic and ordering**, the reset-before-drain ordering and
+its rationale, the fault-and-**continue** `catch`, the `_stopping` check's **position**, and any
+cap on `DrainAndFaultRemaining`.
+
 ---
 
 ## 2 · Superseding the recorded rejection (do this first, in code and in docs)
@@ -177,6 +202,25 @@ Routing a blocking send through a 0–10 ms accumulator window would add that wi
 sync send's latency — against a measured baseline of p50 ≈ 7 ms, i.e. a potential doubling.
 **Decision:** sync stays exactly as it is (`NativeProducer.cs:579`, `ProducerSendMarshal.Send`,
 call-scoped `fixed` pins). This is a deliberate, user-directed asymmetry.
+
+**⚠ RE-AFFIRMED as M11/P3.2 decision D4 (user, 2026-09-10) — recorded as DV-6. No code change.**
+M11/P3.2 §F7 surfaced this again *deliberately*, against the user's bar for that phase (*"fully
+aligned with python producer send except the GIL part"*), so that the phase's **largest**
+structural divergence from the anchor would be re-confirmed rather than inherited by assumption.
+It was confirmed, on the quantitative case above plus two properties of the sync surface that only
+became visible after P3.1 shipped:
+
+- the sync path is the only surface with **no buffer-mutation window** (§4.7 — its pins are
+  call-scoped and the core copies inside the call), and
+- it has **no exposure to the submission-ordering defect** M11/P3.2 §F1 fixes: its append is
+  inline and inside the call, so a later `Send` cannot overtake an earlier one there.
+
+Two consequences for a reviewer. First, **do not re-file the sync/async asymmetry as a parity
+gap** — it is user-directed and twice-decided (M11/P3.2 §12 says so in the Critic brief). Second,
+the re-open option was priced, not dismissed: routing sync through the accumulator would be full
+structural parity with the anchor at the cost of roughly doubling sync send latency, and would
+need its own phase, its own perf measurement, and a public-doc change to the sync surface's
+mutation contract.
 
 ### 3.2 The anchor's constants are kept — by name and by value — but made tunable
 
@@ -396,6 +440,42 @@ Both are in its Option A row and both matter for the implementation:
    `Send → …accumulator… → send_batch returns` — and **not** the returned `Task`. This is the
    same "borrow ends when the call returns" fact §A4 rests on, merely applied to `send_batch`
    instead of `send`. It is what keeps this design inside §A4's existing carve-out (§5.1).
+
+### 3.10 Deviations filed by M11/P3.2 (S0, N=71) — DV-1, DV-2, DV-4, DV-6
+
+**Why they are mirrored here.** §3 is where a Critic looks to tell "deliberate" from "missed" on
+this surface (§1's rationale), so M11/P3.2's deviation list is mirrored into it rather than left
+only in the newer plan. **The authoritative table is
+`../P3.2-producer-send-ordering-parity/PLAN.md` §10** — the rationales below are the same ones,
+not paraphrases of a longer text.
+
+**⚠ Only four of the seven entries are filed, and this is deliberate — do not add the others
+here.**
+
+- **DV-3 is DELETED, not filed.** It would have recorded *"a completion batch may span many
+  `send_batch` drains"*. User decision **D2** (2026-09-10) chose to **implement** per-`send_batch`
+  grouping in M11/P3.2 (§3B, slice S3) rather than record the difference, and a phase must not
+  record a deviation it removes. The **claim-narrowing** that goes with it is real and is filed —
+  see §12's audit row and §12.2.3 — but it describes a difference the next phase **closes**, not
+  one this record keeps.
+- **DV-5 and DV-7 are filed by S3, when the code lands**, not by S0. DV-5's earlier per-record
+  form (*"futures reach the completion thread one at a time, and that is the mechanism behind
+  DV-3"*) is superseded by M11/P3.2 §3B.1: under grouping the *grouping* becomes identical and
+  only the hand-off **timing** still differs, in .NET's favour. DV-7 (an oversized group split
+  into `DrainCap`-bounded sub-passes) does not exist until S3 creates the case.
+
+| # | Deviation from the anchor | Why | Status as of this entry |
+|---|---|---|---|
+| **DV-1** | A **FIFO submission queue with a single appender** in front of the accumulator; Python appends inline, under its mutex, with no queue | .NET's `Send` returns the **record's delivery `Task`** (Java's shape) and therefore has **no post-append suspension point** to carry the throttle, whereas Python's `send` is a coroutine and does — so "append first, then wait" has nowhere to attach without blocking the caller inside `Send` or changing the public signature. The queue keeps the anchor's *observable property* (records reach `send_batch` in call order) at the cost of a .NET-only mechanism. A routing counter **alone** is not enough: two consecutively parked sends can still invert, and `SemaphoreSlim` ordering must not be relied on — the .NET docs guarantee none. M11/P3.2 §3.1, §3.3; user decision **D1** | **Filed ahead of the code.** The mechanism lands in M11/P3.2 **S1**; it is **not** in the tree as of this entry. Until it does, the async submission path can let a send that finds capacity overtake one still waiting for it (M11/P3.2 §F1) |
+| **DV-2** | The stage-1 bound is **hard** — exactly `MaxAccumulatedRecords`, a `SemaphoreSlim(bound, bound)`. The anchor's is **soft**: up to `bound + C − 1` with C concurrent senders | The softness is an **artefact of checking after appending**, not a design goal: `py_Producer_send` appends unconditionally under the mutex (`_confluentkafka.c:819-823`) and only then computes `full` (`:830`), so every sender can overshoot by one. A hard bound is **strictly more conservative**, and overshooting a *memory* bound to imitate an artefact of the anchor's check order buys nothing and costs predictability. **Do not loosen it.** M11/P3.2 §F2 | **In effect today; no code change.** The rationale is also stated at the site — `SendAccumulator.WaitForSpaceAsync`'s remarks, which previously recorded only the *no-lost-wakeup* property of the `SemaphoreSlim` substitution and not the strictness it introduces |
+| **DV-4** | At teardown, a send already queued to the **completion pump** may be **faulted** rather than completed | Python's poll thread drains unconditionally: its loop condition is `!send_completed \|\| current_pending_batch != NULL` (`:484`) and its send thread calls `Producer_flush` before joining it (`:651`), so there is **no fault-the-remainder path in Python at all**. .NET has a recorded case where the premise "the teardown flush resolves everything" is false (`AsyncMockProducer.Clear()`, §6.3), and `get_all` cannot be bounded — so a "drain first, then stop" loop is not safely available. M11/P3.2 §F4; user decision **D3** | **In effect today in its UN-narrowed form**, and the accumulator made it routine rather than rare: teardown now drains the whole buffered chain into the pump immediately before `_stopping` is set. M11/P3.2 **S4** adds a bounded pre-stop wait that reduces it to the **pathological** case, and restates `STATUS.md:20`'s "out-of-scope pump race" note alongside that fix — **S0 deliberately leaves that note alone** |
+| **DV-6** | The **sync** `Send` does not use the accumulator at all; Python routes **both** surfaces through the same accumulating `Producer_send` (`producer.py:373` and `:685`) | .NET's sync `Send` returns a **materialized** `RecordMetadata` where Python's returns a `Future`, so the 0–10 ms stage-1 window would land on the critical path of every sync send against a measured p50 ≈ 7 ms — a potential doubling. The sync surface is also the only one free of the §4.7 buffer-mutation window and of the §F1 ordering exposure. §3.1 | **In effect today; no code change.** User-directed in P3.1, **re-affirmed** as M11/P3.2 decision **D4** (2026-09-10) against that phase's "fully aligned except the GIL" bar. Recorded at §3.1 |
+
+**One entry that is not a deviation and must not be filed as one:** the GIL-specific mechanisms
+(`Py_BEGIN_ALLOW_THREADS`, `PyGILState_Ensure` batching, `Py_INCREF`/`Py_DECREF` refcounting, the
+per-record `topic_owned` malloc, and the GIL-amortization *motivation* for batching itself) are
+correctly translated or have no .NET counterpart. M11/P3.2 §4 enumerates them precisely so a
+reviewer hitting them does not re-file them.
 
 ---
 
@@ -939,12 +1019,16 @@ against `bindings/python/_confluentkafka.c` while writing this section — not r
 | backpressure bound | `PRODUCER_MAX_ACCUMULATED_RECORDS = SLOT_THRESHOLD` = 1000 `:27` | 1000, expressed as `= threshold` | ✅ identical, and coupled the same way |
 | linger window | bare literal `10000000` ns = 10 ms `:535` | 10 ms | ✅ identical value (now named + tunable, §3.2) |
 | per-`send_batch` chunk | *no constant*; effective max = one node = `SLOT_CAPACITY` `:585`/`:806`/`:593` | 1100 | ✅ identical **effective** value; the *name* is net-new (§3.2) |
-| completion-batch bound | one `BatchNode` per `get_all`; arrays sized `SLOT_CAPACITY` `:429-430`, one node per loop iteration `:480-513` | 1100 (`DrainAll` capped, §12.2) | ✅ identical — **brought into scope 2026-09-07**; was the one pre-existing divergence |
+| completion-batch **size** (⚠ *not* its grouping — see below) | one `BatchNode` per `get_all`; arrays sized `SLOT_CAPACITY` `:429-430`, one node per loop iteration `:480-513` | 1100 (`DrainAll` capped, §12.2) | ✅ identical **as a size** — brought into scope 2026-09-07; was the one pre-existing *constant* divergence. ⚠ **NARROWED by M11/P3.2 §F3 (S0, N=71):** this row read *"completion-batch bound … ✅ identical"*, which reads as parity on **both** axes. The cap settles the **number** only; the **grouping** is not the anchor's. See §12.2.3 |
 | **topic-cache cap** | **no counterpart** — Python has no topic cache at all (a per-record `topic_owned` malloc, `:30-36`) | **1024**, insert-only, per-record fallback beyond (§4.1) | ⚠ **the sole remaining deviation** — see §12.1 |
 
 **Result: the constant set is fully Python-aligned.** Every constant with a Python counterpart now
 takes Python's value. The only non-Python number in the phase is the topic-cache cap, which has no
 counterpart to align to (§12.1).
+
+⚠ **That result is about *constants*, and it is exactly as strong as it sounds — no stronger.**
+Aligning a number is not the same as aligning the *structure* the anchor derives that number from.
+Row 6 is where the two come apart: see §12.2.3.
 
 ### 12.1 The sole remaining deviation: the topic-cache cap (1024)
 
@@ -968,6 +1052,11 @@ the cache is a strict improvement on that, and the cap is what keeps it one.
 **Decision: cap the completion pump's drain at `SLOT_CAPACITY` (1100).** Rationale: full alignment
 with Python's constant values, which is the standing principle (§11). This was raised as a
 follow-up note; the user brought it in scope.
+
+⚠ **Read §12.2.3 before quoting this section as parity.** *"Full alignment with Python's constant
+values"* is accurate about the **constants** and only about them: the cap aligns the completion
+batch's **size**, not its **grouping**. M11/P3.2 §F3 narrowed the claim; M11/P3.2 S3 removes the
+grouping difference.
 
 **The parity citation.** Python bounds its completion batch: the poll-futures thread processes
 **one `BatchNode` at a time** (`:480-513` — `Producer_complete_callbacks(..., current_pending_batch->count)`
@@ -1034,6 +1123,50 @@ An easy and damaging over-application. `Stop`'s terminal drain
 
 Make the asymmetry explicit in the code and in the review brief: **`DrainAll` is capped;
 `DrainAndFaultRemaining` is not.**
+
+#### ⚠ 12.2.3 NARROWED by M11/P3.2 §F3 (S0, N=71): this establishes SIZE parity, not GROUPING parity
+
+**The claim as written above is over-broad, in this section and in §12's audit row.** The two
+sentences that over-claim are §12.2's opening — *"Decision: cap the completion pump's drain at
+`SLOT_CAPACITY` (1100). Rationale: full alignment with Python's constant values"* — read together
+with the audit row's *"completion-batch bound … ✅ identical"*, and the code comment the cap
+shipped with (`SendCompletionPump.DrainAll`'s remarks, *"The cap is Python parity … the one place
+the two bindings' constants diverged"*). Taken together they read as parity on **both** axes of
+the anchor's completion batch. The cap settles **one**.
+
+**What the cap does buy — the size.** After it, one `get_all` pass handles at most 1100
+completions, which is the anchor's `SLOT_CAPACITY` and the size of its own `get_all` output arrays
+(`:429-430`). That is real and it is what §12.2 was brought into scope to fix.
+
+**What it does NOT buy — the grouping.** The anchor completes **exactly one `BatchNode` per
+`get_all`** (`Producer_complete_callbacks(..., current_pending_batch->count)`, `:487-495`, then
+advance at `:501`), and one node **is** one `send_batch` (`:593`). So an anchor completion batch is
+one drain's worth of records from one send call, and it **never mixes records from different
+drains**. .NET's queue holds one entry per **record** (`CompleteNode` → `_pump.Enqueue(...)`, one
+call per accepted record), so a capped pass can span records from arbitrarily many `send_batch`
+calls, and `get_all` returns only when **every** future in the array resolves — the first record's
+completion is therefore gated on the slowest of up to 1100 records it was never sent with. The
+number matches; the shape does not, and the shape is what the head-of-line behaviour depends on.
+
+**This is a difference the NEXT phase REMOVES — not a deviation this record keeps.** M11/P3.2 **S3**
+implements per-`send_batch` completion grouping (§3B of that plan; user decision **D2**,
+2026-09-10, taken over the plan's own doc-only recommendation): the accumulator hands the pump one
+immutable batch object per `send_batch` call and the pump processes exactly one such group per
+pass, so the ≤1100 bound then follows from the **unit** rather than from a hand-picked cap. Because
+the phase closes it, it is filed **nowhere** as a deviation — M11/P3.2 §10 records `DV-3` as
+explicitly **deleted**, and S0 was instructed not to file it.
+
+**`DrainCap` survives S3 with a changed job**, which is worth knowing here so this section is not
+read as scheduling its removal: it stops being a *drain* cap (one pass takes one group, so there is
+no drain to cap) and becomes (i) the capacity of the three reused marshalling arrays of §12.3 and
+(ii) the sub-pass bound for a group larger than those arrays — reachable because node capacity is
+**runtime**-tunable (`CONFLUENT_KAFKA_PRODUCER_BATCH_THRESHOLD`) while `DrainCap` is a compile-time
+`const`. That case is M11/P3.2 §3B.3 and is filed by S3 as **DV-7**.
+
+**Unaffected by all of the above, and still load-bearing:** §12.2.1's inner-drain loop (its
+*purpose* survives S3 in a new form — keep going while another group is queued) **and** its
+reset-before-drain rationale, which the inner loop does **not** subsume; and §12.2.2's asymmetry —
+`DrainAndFaultRemaining` stays **uncapped**, per batch, under grouping too.
 
 ### 12.3 Consequence taken: three reusable `IntPtr[SLOT_CAPACITY]` arrays
 

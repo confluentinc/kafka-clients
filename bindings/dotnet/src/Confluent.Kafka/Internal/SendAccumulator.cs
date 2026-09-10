@@ -191,6 +191,21 @@ internal sealed class SendAccumulator
     /// (as the anchor fires its space callbacks after unlocking, <c>:581</c>), which matters:
     /// releasing under the lock could run a waiter's continuation inline on the batch thread, and
     /// that continuation appends.
+    /// <para>
+    /// ⚠ <b>Deviation DV-2 (M11/P3.2 §F2) — the substituted primitive also makes this bound HARD,
+    /// where the anchor's is SOFT. That is deliberate and must not be "fixed".</b> The
+    /// <see cref="SemaphoreSlim"/> is constructed with exactly
+    /// <see cref="SendAccumulatorSettings.MaxAccumulatedRecords"/> permits, so the accumulation can
+    /// never exceed it. The anchor's cannot hold that: <c>py_Producer_send</c> appends
+    /// <em>unconditionally</em> under its mutex (<c>_confluentkafka.c:819-823</c>) and computes
+    /// <c>full</c> only afterwards (<c>:830</c>), so with C concurrent senders it can reach
+    /// <c>bound + C - 1</c> before anybody waits. The softness is an artefact of checking after
+    /// appending, not a design goal; a hard bound is strictly more conservative, and overshooting a
+    /// <em>memory</em> bound to imitate that artefact buys nothing and costs predictability. The
+    /// no-lost-wakeup note above covers the primitive's <em>equivalence</em>; it does not cover this
+    /// strictness difference, which is why the difference is recorded here as well as in the
+    /// deviation list (M11/P3.2 §10, mirrored at M11/P3.1 PLAN §3.10).
+    /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">Teardown cancelled the gate; nothing was appended.</exception>
     internal async Task WaitForSpaceAsync(CancellationToken cancellationToken)

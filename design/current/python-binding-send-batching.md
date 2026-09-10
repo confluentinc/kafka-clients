@@ -407,56 +407,140 @@ which makes low-throughput latency measurements hard to interpret.
 
 ## Implications for the .NET binding
 
-The .NET producer is **Option C**, recorded at
-`bindings/dotnet/src/Confluent.Kafka/Internal/Interop/NativeMethods.cs:2237-2243`:
+> **⚠ Rewritten by M11/P3.2 S0 (N=71, 2026-09-10) — the previous text was stale.**
+> It said *"the .NET producer is **Option C**"*, listed every piece of Python's
+> stage 1 as **new**, and marked `Py_INCREF` a **blocker**. All of that shipped in
+> **M11/P3.1**
+> (`bindings/dotnet/design/history/M11/P3.1-producer-python-alignment/PLAN.md`,
+> slices S0–S8b), and the blocker was answered rather than worked around. The
+> analysis itself is **kept, not deleted** — it is the reference the .NET plans are
+> told to cite instead of re-deriving (P3.1 §1.1, M11/P3.2 §1.1), and being the
+> anchor's own analysis document is exactly why leaving it stale was
+> self-propagating (M11/P3.2 §F8).
 
-> Option C — inline pull-pump: the SINGULAR `Producer_send` is called INLINE on
-> the caller thread … No `ProducerRecord_t` mirror struct (**that is send_batch /
-> Option A**), no per-send callback (that is `send_async` / Option B).
+### The shipped split — .NET is not "Option C" as a whole
 
-So .NET already has Python's **third** thread — `SendCompletionPump` is the
-analog of `Producer_poll_futures_thread`, with the same batched `get_all`. What
-it lacks is the **middle** (send/accumulator) thread.
+| .NET surface | shape | mechanism |
+|---|---|---|
+| **sync `Send`** | **Option C, inline** | the singular `Producer_send` on the caller's own thread with call-scoped `fixed` pins (`ProducerSendMarshal`), then a blocking `FutureRecordMetadata_get`. No accumulator, and **no pump** — the caller's thread is the completion thread. Deliberately unchanged; see "the sync path stays inline" below. |
+| **async `Send`** | **Option A** — Python's stage 1 | pins the record's buffers, appends it to a binding-side `SendAccumulator`, and returns the record's `Task` immediately. A send-batch thread waits for `SLOT_THRESHOLD` or the free-running 10 ms window, takes the node chain, and issues one `kafka_producer_Producer_send_batch` per chunk. |
+| **async completion** | the **pull pump** — the *model* is unchanged | `SendCompletionPump` blocks on a batched `get_all`. This is `ffi-marshalling.md` §A7's **Option A** — ⚠ a *different lettering* from this section's A/B/C: §A7's "Option A" **is** the PLAN's Option C (P3.1 §1.3, and §A7 records the collision itself). Neither `Producer_send_async` nor any per-send Cdecl callback is declared, so §A7's completion-**model** decision is untouched. The pump itself was **not** left alone, though: P3.1 §12.2 capped its per-pass drain at `SLOT_CAPACITY` and §12.3 made its three marshalling arrays reused fields. |
 
-Porting Python's stage 1 to .NET ("Option A") would need:
+The decision record in
+`bindings/dotnet/src/Confluent.Kafka/Internal/Interop/NativeMethods.cs` (the
+`SEND path` comment block, `:2236-2303`) was rewritten by P3.1 S0 to state that
+split — it opens *"⚠ SUPERSEDED IN PART by M11/P3.1"* — together with three
+sibling records
+(`bindings/dotnet/design/current/STATUS.md`,
+`design/history/M11/P3-producer-send/PLAN.md` §3.3, and the Option A section of
+`design/current/producer-send-completion-approaches.html`). This file was the
+**fifth** such record and was missed at the time.
+
+### What the port needed, piece by piece
+
+Rows are stated individually and **not** swept in one direction — one of them
+does not move the way the others do.
 
 | Python piece | .NET equivalent | status |
 |---|---|---|
-| `next_batches_to_send` + mutex | a `SendAccumulator` | new |
-| `Producer_send_thread` | a send-batch `Thread` | new |
-| `BatchNode.producer_structs[]` | `ProducerRecordNative[]` mirror struct | new |
-| `full` + `on_space_available` | one `SemaphoreSlim` | new |
-| `Producer_poll_futures_thread` | `SendCompletionPump` | **exists** |
-| `get_all` / `destroy_all` | `GetAll` / `DestroyAll` | **exists** |
-| `Py_INCREF(record)` | *no equivalent* — see below | **blocker** |
+| `next_batches_to_send` + mutex | `SendAccumulator` (`Internal/SendAccumulator.cs`) | **shipped** (P3.1) |
+| `Producer_send_thread` | the send-batch `Thread` the accumulator owns | **shipped** (P3.1) |
+| `BatchNode.producer_structs[]` | `ProducerRecordNative[]` mirror struct (`Internal/Interop/ProducerRecordNative.cs`), filled by `ProducerSendBatchMarshal` | **shipped** (P3.1) |
+| `full` + `on_space_available` | one `SemaphoreSlim` of `MAX_ACCUMULATED_RECORDS` permits | **shipped** (P3.1) — with one recorded deviation: .NET's bound is *hard* where the anchor's is *soft* (M11/P3.2 DV-2) |
+| `Producer_poll_futures_thread` | `SendCompletionPump` | ⚠ **pre-existing as a *thread* — see the note below.** This row is the one that does not read "new → shipped" |
+| `get_all` / `destroy_all` | `GetAll` / `DestroyAll` | **pre-existing**, and unchanged by P3.1 |
+| `Py_INCREF(record)` | `ReadOnlyMemory<byte>.Pin()` → `MemoryHandle` per key/value, a process-wide **static** pinned 1-byte sentinel for empty-but-present buffers, and one **interned** permanently-pinned NUL-terminated buffer per *distinct topic* | **resolved** (P3.1 §4.1/§4.2) — was *"blocker"* |
 
-Two arguments against it, in order of weight:
+⚠ **The `Producer_poll_futures_thread` row moves in the opposite direction from
+every other row, which is why it is called out.** It read **exists** before P3.1
+and it still does — but only of the *thread*. `SendCompletionPump` has always
+been the analog of the anchor's poll thread, and P3.1 additionally gave it the
+anchor's per-pass **size** bound (`DrainCap` = `SLOT_CAPACITY` = 1100, P3.1
+§12.2). What it does **not** have today is the anchor's **grouping**: the anchor
+completes exactly one `BatchNode` per `get_all` (`:487-495`) and one node is one
+`send_batch` (`:593`), so a completion batch never mixes records from different
+drains — whereas .NET's queue holds one entry per *record*, so one pass can span
+records from arbitrarily many `send_batch` calls and its `get_all` blocks on
+their union. So this row over-stated parity before P3.1 and still over-states it
+now. Per-`send_batch` grouping is being implemented in **M11/P3.2 S3** (user
+decision **D2**, 2026-09-10), after which the row becomes true of the grouping
+too — and the ≤1100 bound follows from the unit instead of from a hand-picked
+constant.
 
-1. **It would import the 0–10 ms untunable floor.** .NET's `linger.ms` is
-   currently the *only* delay and is fully honoured. This is a user-visible
-   latency regression, not merely an implementation cost.
+### The `Py_INCREF` blocker: resolved, not worked around
 
-2. **Python's lifetime trick does not port.** Python keeps the record alive with
-   `Py_INCREF` and hands Rust a raw pointer into the live `PyBytes`; CPython
-   never moves heap objects, so this is free. The .NET GC compacts. Today .NET
-   sidesteps the problem entirely — `ProducerSendMarshal` uses call-scoped
-   `fixed` pins (`:64-75`) and the core copies key/value synchronously inside
-   `Producer_send` (`src/ffi/producer.rs:262-281`), so the pin ends when the
-   call ends. Deferring the send by ~10 ms would require either one
-   `GCHandle.Alloc(..., Pinned)` per in-flight record (up to 2000 pins,
-   fragmenting the GC heap) or a per-record copy into a pooled buffer — which
-   reintroduces exactly the copy CLAUDE.md §12 forbids.
+Python keeps the record alive with `Py_INCREF` and hands Rust a raw pointer into
+the live `PyBytes`; CPython never moves heap objects, so this is free. The .NET
+GC compacts, so the faithful translation is **pinning** — and the correct
+primitive is *not* `GCHandle.Alloc(..., Pinned)`, which pins objects and cannot
+pin a `ReadOnlyMemory<byte>` at all. It is `ReadOnlyMemory<byte>.Pin()` →
+`MemoryHandle`, available on every TFM this binding targets. Three buffers need
+lifetime coverage per record, not two: key, value, **and the topic** — the one
+that gets missed, since a call-scoped topic pointer becomes a use-after-free the
+moment the send is deferred. .NET covers it by interning one permanently-pinned
+buffer per distinct topic, i.e. **O(distinct topics) permanent pins instead of
+O(records) transient ones**, which drops the per-record pin count from 3 to ≤2
+and removes the fragmentation the earlier analysis charged against the port. The
+pin window ends when `send_batch` **returns** (the core serializes each record's
+bytes into the batch buffer synchronously inside the call), not when the returned
+`Task` completes. No per-record copy was introduced, so root `CLAUDE.md` §12
+still holds. Full design: P3.1 §4.1/§4.2/§4.4.
 
-The upside — one P/Invoke per ~1000 records instead of per record — is also
-worth far less in .NET: a P/Invoke is ~5 ns with no GIL to contend for, whereas
-in Python the boundary crossing is the actual bottleneck. Note the batching saves
-only the *crossings*: inside one `send_batch`, `send_batch_inner`
+### The two arguments against it: accepted costs, not open objections
+
+Both were real, both were weighed, and both are now **accepted costs of a
+user-directed port** rather than reasons not to do it.
+
+1. **The 0–10 ms floor — accepted, and no longer untunable.** P3.1 §3.3 keeps the
+   anchor's 10 ms *and* its free-running-timer shape as a deliberate parity
+   choice, mitigated three ways: the window is a **named constant**, it is
+   **env-overridable** (read once at construction), and it lands on the **async**
+   surface only. Note the delay is uniform over 0–10 ms, not a fixed 10 ms, so
+   any timing assertion against it must be a *bound*. A
+   first-record-starts-the-timer variant is explicitly out of scope — changing
+   the mechanism and the magnitude at once would make the deferred measurement
+   uninterpretable. **The cost is not yet measured:** performance was deferred by
+   P3.1 decision D3, and P3.1 §8.2 records the measurement design (a low-rate /
+   paced baseline first — the one that matters, and the one that does not exist,
+   since at max rate the window is noise against a p50 ≈ 96 ms deep-pipeline
+   latency).
+
+2. **The lifetime problem — resolved**, as above. The specific objection was
+   *"either one `GCHandle.Alloc(..., Pinned)` per in-flight record (up to 2000
+   pins, fragmenting the GC heap) or a per-record copy into a pooled buffer"*.
+   Neither was taken: the primitive is `MemoryHandle` rather than `GCHandle`, and
+   the third buffer — the topic — is interned rather than pinned per record.
+
+**The sync path stays inline** (P3.1 §3.1, re-affirmed as M11/P3.2 decision
+**D4** on 2026-09-10, recorded as **DV-6**). Python has no sync/async split at
+its C layer — `Producer.send` and `AsyncProducer.send` both call the accumulating
+`Producer_send` — so this is the .NET binding's largest structural divergence
+from this anchor, and it is deliberate: Python's sync `send` returns a `Future`
+(it does not block for the result), whereas .NET's sync `Send` returns a
+materialized `RecordMetadata`, so the accumulator window would land on the
+critical path of **every** sync send against a measured p50 ≈ 7 ms — a potential
+doubling.
+
+**The throughput argument still stands, and was never the reason for the port.**
+One P/Invoke per ~1000 records instead of per record is worth far less in .NET: a
+P/Invoke is ~5 ns with no GIL to contend for, whereas in Python the boundary
+crossing is the actual bottleneck. Note the batching saves only the *crossings*:
+inside one `send_batch`, `send_batch_inner`
 (`src/ffi/producer.rs:1504-1568`) still loops record-by-record doing
-`rt.block_on(producer.send(rec))`.
+`rt.block_on(producer.send(rec))`. The .NET-side reason for adopting the shape is
+recorded separately in P3.1 §2.2 — it converts the caller's block from a *native*
+block inside the core's coarse producer mutex into a **managed, cancellable**
+wait, which is closer to Java on `send` and fixes part of an already-accepted
+residual.
 
-`kafka_producer_Producer_send_batch` is already exported
-(`src/ffi/producer.rs:1609`) but not declared in `NativeMethods`, so Option A
-would be **Mode A** — .NET-only, no Rust change.
+`kafka_producer_Producer_send_batch` (`src/ffi/producer.rs:1609`) is now
+**declared** in `NativeMethods` — `internal static extern` count 218 → 219, the
+port's only new import — and the port was **Mode A** exactly as predicted:
+.NET-only, no Rust, ABI, header or `cbindgen.toml` change.
+
+**Where the deviations from this anchor are recorded** (rationales live there, not
+here, so there is one authoritative copy): P3.1 §3 and §3.10, and M11/P3.2 §10
+(`bindings/dotnet/design/history/M11/P3.2-producer-send-ordering-parity/PLAN.md`).
 
 ## Code reference index
 
@@ -510,10 +594,17 @@ would be **Mode A** — .NET-only, no Rust change.
 
 ### .NET binding
 
+Line numbers re-verified for M11/P3.2 S0; the port moved most of them.
+
 | location | what |
 |---|---|
-| `Internal/Interop/NativeMethods.cs:2237-2243` | the Option A / B / C decision record |
-| `Internal/NativeProducer.cs:373` | `SendViaPump` (async path) |
-| `Internal/NativeProducer.cs:579` | `Send` (sync path, blocking `get`) |
-| `Internal/SendCompletionPump.cs` | the one existing pump thread |
-| `Internal/Interop/ProducerSendMarshal.cs:64-75` | call-scoped `fixed` pins |
+| `Internal/Interop/NativeMethods.cs:2236-2303` | the send-model decision record, rewritten by P3.1 S0 to the sync/async split |
+| `Internal/NativeProducer.cs:448` | `SendViaPump` (async path — pins, then appends to the accumulator) |
+| `Internal/NativeProducer.cs:554` | `SendWhenSpaceAvailable` (the deferred-append slow path) |
+| `Internal/NativeProducer.cs:670` | `Send` (sync path, inline `Producer_send` + blocking `get`) |
+| `Internal/SendAccumulator.cs` | the accumulator + its batch thread (`:139`) — the analog of `Producer_send_thread` |
+| `Internal/SendAccumulatorSettings.cs` | the constants and their env overrides |
+| `Internal/Interop/ProducerSendBatchMarshal.cs` | pin / fill `ProducerRecordNative[]` / call `send_batch` / unpin |
+| `Internal/PinnedTopicCache.cs` | the interned per-topic pinned buffers (the `topic_owned` analog) |
+| `Internal/SendCompletionPump.cs` | the completion pump thread (`:168`) — the `Producer_poll_futures_thread` analog |
+| `Internal/Interop/ProducerSendMarshal.cs:74-75` | the **sync** path's call-scoped `fixed` pins |
