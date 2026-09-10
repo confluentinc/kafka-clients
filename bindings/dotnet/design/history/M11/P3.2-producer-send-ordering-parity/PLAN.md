@@ -87,10 +87,16 @@ the corrected ones and nobody "fails to find" the quoted code:
 Python's "a record already accumulated is still sent on close" is **almost** unconditional, not
 unconditional. `Producer_send_thread`'s outer loop tests `!producer->closed` at `:529`
 **outside** `record_batches_mutex`. The overwhelmingly common path is safe: the thread spends its
-time inside `cnd_timedwait` at `:548` *holding* that mutex, so `py_Producer_shutdown` can only set
-`closed` while the thread is parked there, and the thread then wakes, falls out of the inner wait
-(`:539`'s `&& !producer->closed`), and performs one final take-and-send before the outer test ends
-it. But a record appended in the narrow gap between the thread's `mtx_unlock` (`:577` / `:638`) and
+time parked in `cnd_timedwait` at `:548`, which **atomically releases** `record_batches_mutex` for
+the duration of the wait and reacquires it on wake — that release is precisely how
+`py_Producer_shutdown` acquires the lock at `:961` to set `closed` at `:962`. The thread then wakes
+holding the mutex again, falls out of the inner wait (`:539`'s `&& !producer->closed`), and performs
+one final take-and-send before the outer test ends it. (⚠ **Corrected 2026-09-10.** This paragraph
+first said the thread parks *holding* the mutex, which inverts the mechanism and makes its own
+conclusion unreachable — shutdown could never have taken the lock. The conclusion is unchanged: the
+thread holds the mutex whenever it is *not* parked, so shutdown can only win the lock while it is
+parked, which is the case the final drain covers. Critic 71 finding 71.10 caught this in the text
+the S2 Actor had copied from here.) But a record appended in the narrow gap between the thread's `mtx_unlock` (`:577` / `:638`) and
 its re-test at `:529` is never sent and never completed. So where this plan says ".NET should
 complete, as Python does", the accurate statement is **".NET should complete, as Python does on
 every path except one narrow race Python leaves open"** — i.e. the proposed .NET behaviour is
