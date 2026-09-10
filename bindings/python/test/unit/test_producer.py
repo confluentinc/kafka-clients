@@ -478,6 +478,35 @@ def test_kafka_producer_send_after_close_raises():
         p.send(ProducerRecord("test-topic", b"v"))
 
 
+def test_kafka_producer_flush_after_close_raises(monkeypatch):
+    # Real-producer twin of test_flush_after_close_raises (same inherited method;
+    # the stub proves the guard fires before the drain wait touches C).
+    p = KafkaProducer({"bootstrap.servers": "localhost:9092"})
+    p.close()
+    monkeypatch.setattr(_lib, "Producer_on_drained", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.flush()
+
+
+def test_kafka_producer_partitions_for_after_close_raises(monkeypatch):
+    p = KafkaProducer({"bootstrap.servers": "localhost:9092"})
+    p.close()
+    monkeypatch.setattr(_lib, "Producer_partitions_for_async", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.partitions_for("test-topic")
+
+
+def test_close_is_per_instance():
+    # Closing one producer must not make another's flush/partitions_for/helpers
+    # raise: the closed flag is per instance.
+    a = MockProducer(auto_complete=True)
+    with MockProducer(auto_complete=True) as b:
+        a.close()
+        b.flush()
+        assert b.partitions_for("test-topic") == []
+        assert b.history_count() == 0
+
+
 def test_kafka_producer_invalid_config():
     with pytest.raises(RuntimeError):
         KafkaProducer({"batch.size": "not-a-number"})
@@ -839,6 +868,39 @@ async def test_async_flush_after_close_raises(monkeypatch):
 
 async def test_async_partitions_for_after_close_raises(monkeypatch):
     p = AsyncMockProducer(auto_complete=True)
+    await p.close()
+    monkeypatch.setattr(_lib, "Producer_partitions_for_async", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        await p.partitions_for("test-topic")
+
+
+async def test_async_mock_helpers_after_close_raise(monkeypatch):
+    # Async twin of test_mock_helpers_after_close_raise (same mixin, AsyncProducer base).
+    p = AsyncMockProducer(auto_complete=True)
+    await p.close()
+    for symbol in ("MockProducer_complete_next", "MockProducer_error_next",
+                   "MockProducer_history_count", "MockProducer_clear"):
+        monkeypatch.setattr(_lib, symbol, _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.complete_next()
+    with pytest.raises(RuntimeError, match="closed"):
+        p.error_next(1)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.history_count()
+    with pytest.raises(RuntimeError, match="closed"):
+        p.clear()
+
+
+async def test_async_kafka_producer_flush_after_close_raises(monkeypatch):
+    p = AsyncKafkaProducer({"bootstrap.servers": "localhost:9092"})
+    await p.close()
+    monkeypatch.setattr(_lib, "Producer_on_drained", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        await p.flush()
+
+
+async def test_async_kafka_producer_partitions_for_after_close_raises(monkeypatch):
+    p = AsyncKafkaProducer({"bootstrap.servers": "localhost:9092"})
     await p.close()
     monkeypatch.setattr(_lib, "Producer_partitions_for_async", _c_entered_after_close)
     with pytest.raises(RuntimeError, match="closed"):
@@ -1485,6 +1547,20 @@ def test_txn_unawaited_send_is_committed():
         assert p.history_count() == 1
 
 
+def test_flush_inside_open_transaction():
+    # flush() inside a transaction (allowed in Java) hands the un-awaited record
+    # over and completes it, but does not commit it; commit then does.
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        fut = p.send(ProducerRecord("test-topic", b"v"))  # no .result()
+        p.flush()
+        fut.result(timeout=FUTURE_TIMEOUT)
+        assert p.history_count() == 0, "flush must not commit"
+        p.commit_transaction()
+        assert p.history_count() == 1
+
+
 def test_txn_unawaited_send_is_discarded_by_abort():
     # The un-awaited record is drained to the producer inside the aborting
     # transaction, then discarded by the abort -- it must not leak into history
@@ -1818,6 +1894,18 @@ async def test_async_txn_unawaited_send_is_committed():
         assert p.history_count() == 1
 
 
+async def test_async_flush_inside_open_transaction():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        fut = await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+        await p.flush()
+        await asyncio.wait_for(fut, timeout=FUTURE_TIMEOUT)
+        assert p.history_count() == 0, "flush must not commit"
+        await p.commit_transaction()
+        assert p.history_count() == 1
+
+
 async def test_async_txn_unawaited_send_is_discarded_by_abort():
     async with AsyncMockProducer(auto_complete=True) as p:
         await p.init_transactions()
@@ -2069,6 +2157,139 @@ async def test_async_drain_wait_timeout(monkeypatch):
 
         _lib.Producer_test_set_paused(p.c_producer, False)
         await p.commit_transaction()  # record now drains; commit succeeds
+        assert p.history_count() == 1
+        await asyncio.sleep(0.05)  # a stale drain entry firing later: no error
+        assert p.history_count() == 1
+    finally:
+        await p.close()
+
+
+# ---- flush twins of T4/T5/T6/T7 --------------------------------------------
+# flush() shares _wait_drained + the post-wait closed re-check with the txn ops
+# but is not a txn op, so the parked / released / cancelled / timed-out paths are
+# exercised for it too (no transaction involved).
+
+
+def test_close_releases_parked_flush():
+    # Flush twin of T4 (sync): a flush parked behind a paused send task is
+    # released by close(); the post-wait re-check raises instead of flushing a
+    # torn-down producer.
+    p = MockProducer(auto_complete=True)
+    _lib.Producer_test_set_paused(p.c_producer, True)
+    p.send(ProducerRecord("test-topic", b"v"))  # accepted, not handed (paused)
+
+    result = {}
+    started = threading.Event()
+
+    def run_flush():
+        started.set()
+        try:
+            p.flush()
+            result["ok"] = True
+        except Exception as e:  # noqa: BLE001
+            result["exc"] = e
+
+    t = threading.Thread(target=run_flush, daemon=True)
+    t.start()
+    assert started.wait(timeout=FUTURE_TIMEOUT)
+    time.sleep(0.1)
+    assert not result, "flush must park while the record is undrained"
+
+    p.close()  # releases the parked waiter; must not raise
+    t.join(timeout=FUTURE_TIMEOUT)
+    assert not t.is_alive()
+    assert "ok" not in result, "flush must not run against a closing producer"
+    assert isinstance(result.get("exc"), RuntimeError)
+    assert "closed" in str(result["exc"]).lower()
+
+
+async def test_async_close_releases_parked_flush():
+    # Flush twin of T4 (async).
+    p = AsyncMockProducer(auto_complete=True)
+    _lib.Producer_test_set_paused(p.c_producer, True)
+    await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+
+    task = asyncio.ensure_future(p.flush())
+    await asyncio.sleep(0.1)
+    assert not task.done(), "flush must park while the record is undrained"
+
+    await p.close()  # releases the parked waiter; must not raise
+    with pytest.raises(RuntimeError, match="closed"):
+        await asyncio.wait_for(task, timeout=FUTURE_TIMEOUT)
+
+
+async def test_async_flush_cancellation_never_flushes():
+    # Flush twin of T5: cancelling a parked flush (outer wait_for timeout) must not
+    # flush anything, and the stale drain cb landing on the cancelled fut after
+    # unpause must raise no loop exception. A fresh flush then completes the record.
+    p = AsyncMockProducer(auto_complete=True)
+    loop = asyncio.get_running_loop()
+    loop_errors = []
+    loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
+    try:
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        fut = await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(p.flush(), timeout=0.1)
+        assert p.history_count() == 0, "nothing may be flushed while undrained"
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        await asyncio.sleep(0.1)  # let the late cb land on the loop
+        assert loop_errors == [], f"loop exception after cancellation: {loop_errors}"
+
+        await p.flush()  # a fresh flush completes the record
+        await asyncio.wait_for(fut, timeout=FUTURE_TIMEOUT)
+        assert p.history_count() == 1
+    finally:
+        await p.close()
+
+
+def test_sync_flush_drain_wait_timeout(monkeypatch):
+    # Flush twin of T6: a parked sync flush whose drain never completes (paused)
+    # times out with the retriable, non-abortable KafkaError; after unpause a
+    # fresh flush completes the record and the stale drain entry causes no error.
+    import producer as producer_module
+    p = MockProducer(auto_complete=True)
+    try:
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        p.send(ProducerRecord("test-topic", b"v"))  # accepted, not handed (paused)
+
+        monkeypatch.setattr(producer_module, "_DRAIN_WAIT_TIMEOUT_S", 0.1)
+        with pytest.raises(KafkaError) as ei:
+            p.flush()
+        err = ei.value
+        assert err.is_retriable is True
+        assert err.txn_requires_abort is False
+        assert p.history_count() == 0, "nothing may be flushed while undrained"
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        p.flush()  # record now drains; flush completes it
+        assert p.history_count() == 1
+        time.sleep(0.05)  # the stale drain entry firing later must cause no error
+        assert p.history_count() == 1
+    finally:
+        p.close()
+
+
+async def test_async_flush_drain_wait_timeout(monkeypatch):
+    # Flush twin of T7 (relies on P2.1 bounding the async wait).
+    import producer as producer_module
+    p = AsyncMockProducer(auto_complete=True)
+    try:
+        _lib.Producer_test_set_paused(p.c_producer, True)
+        await p.send(ProducerRecord("test-topic", b"v"))  # Future not awaited
+
+        monkeypatch.setattr(producer_module, "_DRAIN_WAIT_TIMEOUT_S", 0.1)
+        with pytest.raises(KafkaError) as ei:
+            await p.flush()
+        err = ei.value
+        assert err.is_retriable is True
+        assert err.txn_requires_abort is False
+        assert p.history_count() == 0, "nothing may be flushed while undrained"
+
+        _lib.Producer_test_set_paused(p.c_producer, False)
+        await p.flush()  # record now drains; flush completes it
         assert p.history_count() == 1
         await asyncio.sleep(0.05)  # a stale drain entry firing later: no error
         assert p.history_count() == 1
