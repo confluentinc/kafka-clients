@@ -227,7 +227,8 @@ other things: what happens to a record whose send is waiting for room when the p
   (`:966`), signals the send thread (`:967`) and fires the waiters after the join (`:972`); and
   `py_Producer_on_space_available` returns "available" the moment `closed` is set (`:857-861`), so a
   waiter never parks through a close. The send thread's final iteration drains and sends the record
-  (§1.3 records the one narrow race in this).
+  — **but only when close lands while that thread is parked**; §1.3 records the unlocked send-loop
+  window in which it does not, which is as long as a `send_batch` call rather than a narrow gap.
 - *Bound strictness.* Every sender appends before checking, so with C concurrent senders the
   accumulation can reach `bound + C − 1` before anybody waits. The bound is **soft** by construction.
 
