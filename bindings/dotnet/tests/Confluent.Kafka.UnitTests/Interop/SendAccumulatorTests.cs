@@ -784,6 +784,405 @@ public sealed class SendAccumulatorTests
         Assert.Contains(nameof(NativeProducer), failure.Message, StringComparison.Ordinal);
     }
 
+    // ----------------------------------------------------- submission order (M11/P3.2 §F1) ----
+
+    [Fact]
+    public async Task SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound()
+    {
+        // ⚠ THE F1 REGRESSION TEST. Before the fix, Send took the backpressure permit FIRST and
+        // deferred the append to a thread-pool continuation when it could not get one, so a later
+        // send that found a free permit appended AHEAD of an earlier one still waiting — and since
+        // SendChain, Append and send_batch_inner all preserve order, the binding's append order IS
+        // the wire order. Java documents ordering as preserved in the default configuration
+        // (ProducerConfig.java:274), and the reorder happens before the core sees the records, so
+        // nothing downstream can repair it. No test in the suite asserted append order at all.
+
+        // ---- part (i): deterministic. With a submission queued, the inline path is REFUSED and
+        // the next send lands behind it in the queue — nothing is appended and nothing is pinned.
+        Harness frozen = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+
+        // Saturate the bound WITHOUT appending anything: a drain then frees `_accumulated == 0`
+        // permits, so a queued submission stays queued for the whole test rather than racing a
+        // release. That is what makes this half deterministic instead of a timing window.
+        frozen.ConsumePermits(4);
+
+        Task<RecordMetadata> firstQueued = frozen.AppendOne(0x01);
+        Assert.Equal(1, frozen.Accumulator.QueuedSubmissionCount);
+
+        Task<RecordMetadata> secondQueued = frozen.AppendOne(0x02);
+        Assert.Equal(2, frozen.Accumulator.QueuedSubmissionCount);
+
+        // The non-blocking probe is refused too, and the count is unchanged by a refusal.
+        Assert.Null(frozen.TryAppendOne(0xFF));
+        Assert.Equal(2, frozen.Accumulator.QueuedSubmissionCount);
+
+        // Nothing appended => no node => no slot => NO PIN is held while a submission is queued
+        // (M11/P3.1 §4.4: the pin must not be taken before the permit). The absence of a node is
+        // the structural witness for that — pins live only in a node's slots.
+        Assert.Equal(0, frozen.PendingCount());
+        Assert.Equal(0, frozen.HistoryCount);
+        Assert.Equal(0, frozen.Accumulator.SendBatchCallCount);
+        Assert.False(firstQueued.IsCompleted);
+        Assert.False(secondQueued.IsCompleted);
+
+        frozen.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => firstQueued, s_deadline));
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => secondQueued, s_deadline));
+
+        // ---- part (ii): stress. The interleaving that produced the bug — a saturating burst on ONE
+        // thread, with permits being freed underneath it — and the observed order must equal the
+        // call order every time. This is the half that fails on unmodified HEAD.
+        //
+        // ⚠ The drains MUST overlap the send loop, and leaving that to the batch thread's own
+        // window does not achieve it: 200 sends on one thread complete in well under a millisecond,
+        // so with any usable window every send is issued before the first drain, the bound never
+        // un-saturates mid-burst, and the "a released permit is taken by a LATER send" step of the
+        // bug is never reached. (Measured: with the routing predicate reverted, a burst against a
+        // 5 ms window passes.) So the window is 60 s — nothing drains on its own — and a drainer
+        // task forces a drain as fast as it can while the sender sends. Every send still comes from
+        // ONE thread, which is what the per-caller ordering claim is about.
+        const int Burst = 200;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+
+        // The witness here is the per-record delivery callback's firing order, not the pending
+        // node's slots: 200 records across a bound of 4 span ~50 nodes, and a node is recycled long
+        // before the burst ends, so there is no single array to read. It observes the same property
+        // because the chain from append to callback is order-preserving end to end — CompleteNode
+        // enqueues a node's records to the pump in index order (the same order send_batch read
+        // them), Enqueue appends to a FIFO queue, DrainAll dequeues FIFO, and ProcessBatch fires
+        // each batch in index order. So callback order == append order == the order records reached
+        // send_batch.
+        List<int> observed = new List<int>(Burst);
+        Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Burst];
+
+        using (CancellationTokenSource sending = new CancellationTokenSource())
+        {
+            Task drainer = Task.Run(() =>
+            {
+                while (!sending.IsCancellationRequested)
+                {
+                    harness.ForceDrainWithoutWaiting();
+                }
+            });
+
+            for (int i = 0; i < Burst; i++)
+            {
+                sends[i] = harness.AppendOne((byte)i, new OrderRecordingDeliveryCallback(observed, i));
+            }
+
+            sending.Cancel();
+            await TestTimeout.Run(() => drainer, s_deadline);
+        }
+
+        harness.DrainNow();
+        await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
+
+        // A settle window: the last callback fires immediately before its awaiter is released, so
+        // WhenAll already implies all 200 ran — but read the list under its own lock either way.
+        int[] order;
+        lock (observed)
+        {
+            order = observed.ToArray();
+        }
+
+        Assert.Equal(Burst, order.Length);
+        for (int i = 0; i < Burst; i++)
+        {
+            Assert.Equal(i, order[i]);
+        }
+    }
+
+    [Fact]
+    public async Task SendAccumulator_TwoConsecutivelyParkedSends_AppendInCallOrder()
+    {
+        // The case a bare "someone is parked" counter does NOT fix, and therefore the evidence for
+        // D1(a) over the cheaper option: ReleaseSpace hands out MANY permits at once, so every
+        // parked send's continuation becomes runnable together and they race for _gate in Append.
+        // A documented-FIFO queue drained by a SINGLE appender is what removes the race — it must
+        // not rest on SemaphoreSlim fairness, which .NET explicitly does not guarantee.
+        //
+        // Eight parked sends rather than two, deliberately: with two, a broken implementation still
+        // produces the right order half the time.
+        const int Parked = 8;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: Parked, batchWindowMs: 3_000, batchChunk: 1100));
+
+        // Fill the bound inline, so the next sends have no permit and must queue.
+        Task<RecordMetadata>[] filled = harness.Append(Parked);
+
+        // Setup precondition, asserted rather than assumed: the window has not elapsed, so no drain
+        // has freed a permit yet. If it had, the sends below would go inline and this test would be
+        // measuring nothing.
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        Task<RecordMetadata>[] parked = new Task<RecordMetadata>[Parked];
+        TaskCompletionSource<RecordMetadata>[] queued = new TaskCompletionSource<RecordMetadata>[Parked];
+        for (int i = 0; i < Parked; i++)
+        {
+            parked[i] = harness.AppendOne(
+                (byte)(0xA0 + i), callback: null, CancellationToken.None, out queued[i]);
+        }
+
+        Assert.Equal(Parked, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // The window elapses, the batch thread takes the filled node and releases all eight permits
+        // at once — the exact multi-permit release that makes independent continuations race — and
+        // the single submitter appends the eight queued sends into a fresh node. The free-running
+        // window then gives ~3 s before that node is taken, which is what the read below needs.
+        //
+        // Both halves of the predicate are load-bearing: the FILLED node also holds eight records,
+        // so "the pending node holds eight" alone is satisfied before the drain has even happened.
+        await PollUntil(
+            () => harness.Accumulator.SendBatchCallCount == 1 && harness.PendingCount() == Parked,
+            s_deadline,
+            "the parked sends did not all reach a pending node after the first drain");
+
+        // The witness: the node's Completions slots, compared BY REFERENCE against the awaiters the
+        // calls created, in call order. This is the array send_batch's companion loop walks.
+        TaskCompletionSource<RecordMetadata>?[] slots = harness.PendingCompletions();
+        for (int i = 0; i < Parked; i++)
+        {
+            Assert.Same(queued[i], slots[i]);
+        }
+
+        harness.DrainNow();
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+        await TestTimeout.Run(() => Task.WhenAll(parked), s_deadline);
+    }
+
+    [Fact]
+    public async Task Flush_IncludesASendStillQueuedForSpace()
+    {
+        // M11/P3.2 §3.4 item 1: "empty and idle" now has TWO stages, because a record whose Send
+        // has ALREADY RETURNED can be sitting in the submission queue while the node chain is
+        // empty. A predicate that looked only at the chain would let this drain return with those
+        // records unsent — silently re-opening the gap M11/P3.1 §3.5 closed on purpose (flush()
+        // returning while records the caller believes were sent have not reached the core).
+        //
+        // DrainPending IS Flush's accumulator drain (NativeProducer.FlushWithAccumulatorDrainBound
+        // calls it), driven here with explicit settings so the bound actually saturates — the public
+        // producer's bound is 1000 records.
+        const int Queued = 20;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 2, batchWindowMs: 60_000, batchChunk: 1100));
+
+        Task<RecordMetadata>[] appended = harness.Append(2);
+
+        Task<RecordMetadata>[] queued = new Task<RecordMetadata>[Queued];
+        for (int i = 0; i < Queued; i++)
+        {
+            queued[i] = harness.AppendOne((byte)(0xB0 + i));
+        }
+
+        // A bound of 2 against 20 queued sends: each drain frees two permits, so the chain empties
+        // and refills many times over. A predicate that returned at the first empty chain would
+        // have to guess right twenty times to pass this.
+        Assert.Equal(Queued, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(0, harness.HistoryCount);
+
+        harness.DrainNow();
+
+        // Asserted SYNCHRONOUSLY after the drain returns — that is the contract being tested.
+        Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(Queued + 2, harness.HistoryCount);
+        Assert.Equal(Queued + 2, harness.Accumulator.SendBatchRecordCount);
+
+        await TestTimeout.Run(() => Task.WhenAll(appended), s_deadline);
+        await TestTimeout.Run(() => Task.WhenAll(queued), s_deadline);
+
+        // The ASYNC drain — what the async Flush awaits — rides the same two-stage predicate, but
+        // reaches it through a different site: its waiters are released by SignalIdleLocked, not by
+        // DrainPending's loop, so the blocking half above leaves that site ungraded. Asserted on a
+        // FROZEN bound, because that is the only shape that makes it deterministic: with the
+        // permits consumed and nothing accumulated, no drain can ever free capacity, so the queued
+        // submissions cannot append and SignalIdleLocked is guaranteed to be called with an empty
+        // chain and a non-empty queue — the exact state whose stage-one term is under test. (On a
+        // releasable bound the submitter usually appends before that call runs, so the single-stage
+        // form passes; verified by mutation.)
+        Harness frozen = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+        frozen.ConsumePermits(4);
+
+        Task<RecordMetadata>[] stuck = new Task<RecordMetadata>[3];
+        for (int i = 0; i < stuck.Length; i++)
+        {
+            stuck[i] = frozen.AppendOne((byte)(0xD0 + i));
+        }
+
+        Assert.Equal(3, frozen.Accumulator.QueuedSubmissionCount);
+
+        Task drain = frozen.Accumulator.DrainPendingAsync(CancellationToken.None);
+
+        // A settle window, not a poll: the assertion is that something must NOT happen, so it needs
+        // time to have happened. DrainPendingAsync armed the force flag and pulsed, so the batch
+        // thread wakes at once, finds the chain empty, takes nothing and calls SignalIdleLocked —
+        // the site under test — well inside this window.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(0, frozen.Accumulator.SendBatchCallCount);
+        Assert.False(
+            drain.IsCompleted,
+            "the async drain reported idle while three sends were still queued for capacity");
+
+        // Teardown settles the queue, which is also what releases the drain — it resolves rather
+        // than hanging forever once the second stage empties.
+        Assert.True(frozen.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+        await TestTimeout.Run(() => drain, s_deadline);
+        Assert.Equal(0, frozen.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(0, frozen.HistoryCount);
+
+        frozen.Dispose();
+        foreach (Task<RecordMetadata> send in stuck)
+        {
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => TestTimeout.Run(() => send, s_deadline));
+        }
+    }
+
+    [Fact]
+    public async Task Teardown_SettlesEverySubmissionStillQueuedForSpace()
+    {
+        // M11/P3.2 §3.4 item 3: nothing may be left holding an unsettled TaskCompletionSource.
+        // In THIS slice a queued submission is FAULTED at teardown — today's semantics, kept
+        // deliberately: the anchor still *sends* such a record because it appended before waiting
+        // (§F2), and turning this fault into a send is an observable teardown change, so it is its
+        // own slice and must stay separable from the ordering fix.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+
+        // Frozen bound (see part (i) of the ordering test): the submissions cannot be released by a
+        // drain, so teardown is the only thing that can settle them.
+        harness.ConsumePermits(4);
+
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<RecordMetadata>[] sends = new Task<RecordMetadata>[3];
+        for (int i = 0; i < sends.Length; i++)
+        {
+            sends[i] = harness.AppendOne((byte)(0xC0 + i), callback);
+        }
+
+        Assert.Equal(3, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(0, harness.HistoryCount);
+
+        // Nothing is pinned while queued: pins live only in a node's slots, and there is no node.
+        Assert.Equal(0, harness.PendingCount());
+
+        Assert.True(harness.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+
+        // The accounting must return to zero. Not asserted synchronously: Stop's sweep empties the
+        // QUEUE, but one submission has already been dequeued by the submitter and is parked on the
+        // backpressure gate — Stop's cancel of that gate is what settles it, on the submitter's own
+        // task. Both are counted as "queued-or-appending", so the count reaching zero is the check
+        // that every submission was accounted out exactly once, by whichever side took it.
+        await PollUntil(
+            () => harness.Accumulator.QueuedSubmissionCount == 0,
+            TimeSpan.FromSeconds(10),
+            "a queued submission was never accounted out of the queued-or-appending count");
+
+        foreach (Task<RecordMetadata> send in sends)
+        {
+            ObjectDisposedException failure = await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => TestTimeout.Run(() => send, TimeSpan.FromSeconds(10)));
+            Assert.Contains(nameof(NativeProducer), failure.Message, StringComparison.Ordinal);
+        }
+
+        // No record reached the core, so no delivery notification is owed (M11/P3.1 D5) — asserted
+        // after a settle window, since a first observation of 0 cannot rule out a later one.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(0, callback.Count);
+        Assert.Equal(0, harness.HistoryCount);
+
+        harness.Dispose();
+    }
+
+    [Fact]
+    public async Task QueuedSubmission_CancelledBeforeAppend_IsNotSentAndCancelsWithTheCallerToken()
+    {
+        // M11/P3.2 §3.4 item 4: a queued submission whose token fires before it is appended must
+        // cancel WITH the caller's token and must NOT be appended — the pre-queue slow path's
+        // behaviour, preserved.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 2, batchWindowMs: 60_000, batchChunk: 1100));
+
+        Task<RecordMetadata>[] appended = harness.Append(2);
+
+        using CancellationTokenSource cancellation = new CancellationTokenSource();
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<RecordMetadata> cancelled = harness.AppendOne(
+            0xD0, callback, cancellation.Token, out _);
+
+        Assert.Equal(1, harness.Accumulator.QueuedSubmissionCount);
+        Assert.False(cancelled.IsCompleted);
+
+        cancellation.Cancel();
+
+        // The drain is taken FIRST, deliberately: it frees the capacity this submission was waiting
+        // for, which is the only moment a cancellation that is merely *observed* rather than
+        // *enforced* could let the record through. The drain also waits for the second idle stage,
+        // so it does not return until the cancellation has been accounted out — which makes "two
+        // records reached the core, not three" the deterministic discriminator, reached before any
+        // await on the cancelled task could mask it.
+        harness.DrainNow();
+        Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(2, harness.HistoryCount);
+        Assert.Equal(2, harness.Accumulator.SendBatchRecordCount);
+
+        OperationCanceledException failure = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => cancelled, s_deadline));
+        Assert.Equal(cancellation.Token, failure.CancellationToken);
+
+        await TestTimeout.Run(() => Task.WhenAll(appended), s_deadline);
+
+        // Nothing reached the core for the cancelled send, so no delivery notification is owed.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(0, callback.Count);
+    }
+
+    /// <summary>
+    /// Polls <paramref name="condition"/> until it holds or <paramref name="timeout"/> expires,
+    /// then asserts it — so a property that never arrives fails with
+    /// <paramref name="because"/> rather than hanging the run.
+    /// </summary>
+    private static async Task PollUntil(Func<bool> condition, TimeSpan timeout, string because)
+    {
+        Stopwatch elapsed = Stopwatch.StartNew();
+        while (!condition() && elapsed.Elapsed < timeout)
+        {
+            await Task.Delay(2);
+        }
+
+        Assert.True(condition(), because);
+    }
+
+    /// <summary>
+    /// Records the order in which delivery notifications fire, each instance carrying the index of
+    /// the send it was handed to — the cross-node submission-order witness (see the stress half of
+    /// <see cref="SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound"/>).
+    /// </summary>
+    private sealed class OrderRecordingDeliveryCallback : IDeliveryCallback
+    {
+        private readonly List<int> _order;
+        private readonly int _index;
+
+        internal OrderRecordingDeliveryCallback(List<int> order, int index)
+        {
+            _order = order;
+            _index = index;
+        }
+
+        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        {
+            lock (_order)
+            {
+                _order.Add(_index);
+            }
+        }
+    }
+
     /// <summary>
     /// Parks the thread that fires it until the test releases it. Used to hold the <b>batch</b>
     /// thread inside a drain deterministically: <c>CompleteNode</c>'s immediate-error branch is the
@@ -947,19 +1346,37 @@ public sealed class SendAccumulatorTests
             return sends;
         }
 
-        /// <summary>Appends one record, blocking on the backpressure bound if it is full.</summary>
-        internal Task<RecordMetadata> AppendOne(byte tag, IDeliveryCallback? callback = null)
+        /// <summary>
+        /// Appends one record, queueing it behind the backpressure bound if it is full — through the
+        /// <b>same two entry points</b> <c>NativeProducer.SendViaPump</c> uses, so the routing rule
+        /// itself is production's (DoD §12; M11/P3.2 §3.3). This fixture used to re-implement
+        /// "permit-then-<c>Submit</c>, else await-then-<c>Submit</c>", which would have left the
+        /// ordering tests below proving a property of the fixture rather than of the code.
+        /// </summary>
+        internal Task<RecordMetadata> AppendOne(byte tag, IDeliveryCallback? callback = null) =>
+            AppendOne(tag, callback, CancellationToken.None, out _);
+
+        /// <summary>
+        /// <see cref="AppendOne(byte, IDeliveryCallback?)"/>, handing back the record's
+        /// <see cref="TaskCompletionSource{TResult}"/> so an ordering test can compare a pending
+        /// node's <c>Completions</c> slots <b>by reference</b> against the call order.
+        /// </summary>
+        internal Task<RecordMetadata> AppendOne(
+            byte tag,
+            IDeliveryCallback? callback,
+            CancellationToken cancellationToken,
+            out TaskCompletionSource<RecordMetadata> completion)
         {
             SerializedProducerRecord record = NewRecord(tag);
-            TaskCompletionSource<RecordMetadata> completion = NewCompletion();
+            completion = NewCompletion();
+            DeliveryRegistration? delivery = NewDelivery(callback);
 
-            if (Accumulator.TryAcquireSpace())
+            if (!Accumulator.TrySubmitInline(record, completion, delivery))
             {
-                Accumulator.Submit(record, completion, NewDelivery(callback));
-                return completion.Task;
+                Accumulator.SubmitQueued(record, completion, delivery, cancellationToken);
             }
 
-            return SubmitWhenSpaceAvailable(record, completion);
+            return completion.Task;
         }
 
         /// <summary>
@@ -1049,17 +1466,74 @@ public sealed class SendAccumulatorTests
         }
 
         /// <summary>The single node the accumulator is currently filling.</summary>
-        private object PendingNode()
+        private object PendingNode() =>
+            PendingNodeOrNull()
+                ?? throw new InvalidOperationException(
+                    "the accumulator holds no pending node — it drained before the injection landed");
+
+        private object? PendingNodeOrNull()
         {
             FieldInfo head = typeof(SendAccumulator).GetField(
                 "_head", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException(
                     "SendAccumulator no longer exposes a _head field.");
 
-            return head.GetValue(Accumulator)
-                ?? throw new InvalidOperationException(
-                    "the accumulator holds no pending node — it drained before the injection landed");
+            return head.GetValue(Accumulator);
         }
+
+        /// <summary>
+        /// How many records the pending node holds; 0 when there is no pending node.
+        /// </summary>
+        internal int PendingCount()
+        {
+            object? node = PendingNodeOrNull();
+            if (node is null)
+            {
+                return 0;
+            }
+
+            PropertyInfo count = node.GetType().GetProperty(
+                "Count", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                ?? throw new InvalidOperationException(
+                    "SendAccumulator's node no longer exposes a Count property — this witness " +
+                    "needs to be re-derived against the new shape rather than silently skipped.");
+
+            return (int)count.GetValue(node)!;
+        }
+
+        /// <summary>
+        /// <b>The submission-order witness.</b> The pending node's <c>Completions</c> slots — the
+        /// exact array <c>send_batch</c>'s companion loop walks, in the exact order it will walk it
+        /// — so a test compares slot <c>i</c> <b>by reference</b> against the
+        /// <see cref="TaskCompletionSource{TResult}"/> its <c>i</c>-th call created.
+        /// </summary>
+        /// <remarks>
+        /// Chosen over reading the tag byte back through <c>Natives[i]</c>: reference identity needs
+        /// no <c>unsafe</c>, no pointer read, and no assumption about which field
+        /// <c>ProducerSendBatchMarshal.Fill</c> writes first — it compares the object the caller
+        /// handed in against the slot the accumulator stored it in. Both witnesses observe the same
+        /// array; this one cannot be satisfied by a coincidence in the record bytes.
+        /// <para>
+        /// Reflection is warranted for the same reason
+        /// <see cref="TruncateDeliveriesOfPendingNode"/>'s is: the node type is private to
+        /// <see cref="SendAccumulator"/> and there is no production observable for slot order.
+        /// The read is unsynchronized, so the caller must hold the node still — a window far longer
+        /// than the test (no threshold reached, no forced drain).
+        /// </para>
+        /// </remarks>
+        internal TaskCompletionSource<RecordMetadata>?[] PendingCompletions()
+        {
+            object node = PendingNode();
+            return (TaskCompletionSource<RecordMetadata>?[])
+                NodeField(node, "Completions").GetValue(node)!;
+        }
+
+        private static FieldInfo NodeField(object node, string name) =>
+            node.GetType().GetField(
+                name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                ?? throw new InvalidOperationException(
+                    $"SendAccumulator's node no longer exposes a {name} member — this witness " +
+                    "needs to be re-derived against the new shape rather than silently skipped.");
 
         private static SerializedProducerRecord NewRecord(byte tag) =>
             new SerializedProducerRecord(Topic, 0, null, null, new byte[] { tag, 0xAA, 0xBB });
@@ -1070,42 +1544,59 @@ public sealed class SendAccumulatorTests
         private static DeliveryRegistration? NewDelivery(IDeliveryCallback? callback) =>
             callback is null ? null : new DeliveryRegistration(callback, Topic, 0);
 
-        /// <summary>Attempts one append WITHOUT blocking; null when the bound refused it.</summary>
+        /// <summary>
+        /// Attempts one append <b>inline</b>, through production's own routing entry point; null
+        /// when it was refused — because the bound is full, <b>or</b> because a submission is
+        /// already queued ahead of it (M11/P3.2 §F1: the second condition is the ordering fix, and
+        /// this probe reports it the same way).
+        /// </summary>
         internal Task<RecordMetadata>? TryAppendOne(byte tag)
         {
-            if (!Accumulator.TryAcquireSpace())
-            {
-                return null;
-            }
+            SerializedProducerRecord record = NewRecord(tag);
+            TaskCompletionSource<RecordMetadata> completion = NewCompletion();
 
-            SerializedProducerRecord record = new SerializedProducerRecord(
-                Topic, 0, null, null, new byte[] { tag, 0xAA, 0xBB });
-            TaskCompletionSource<RecordMetadata> completion =
-                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            Accumulator.Submit(record, completion, delivery: null);
-            return completion.Task;
+            return Accumulator.TrySubmitInline(record, completion, delivery: null)
+                ? completion.Task
+                : null;
         }
 
-        private async Task<RecordMetadata> SubmitWhenSpaceAvailable(
-            SerializedProducerRecord record, TaskCompletionSource<RecordMetadata> completion)
+        /// <summary>
+        /// Consumes <paramref name="count"/> backpressure permits <b>without appending anything</b>,
+        /// so the bound can be saturated while the node chain stays empty.
+        /// </summary>
+        /// <remarks>
+        /// The one lever that makes a queued submission's wait <b>deterministic</b>: with the
+        /// permits consumed and nothing accumulated, the batch thread's drain frees
+        /// <c>_accumulated == 0</c> permits, so a queued submission stays queued until something
+        /// settles it (teardown, or its own token). Safe in the other direction too — this creates a
+        /// permanent permit <em>deficit</em>, never a surplus, so it cannot provoke the
+        /// <see cref="SemaphoreFullException"/> over-release that
+        /// <see cref="AppendWithoutAPermit"/> injects.
+        /// </remarks>
+        internal void ConsumePermits(int count)
         {
-            try
+            for (int i = 0; i < count; i++)
             {
-                await Accumulator.WaitForSpaceAsync(CancellationToken.None);
-                Accumulator.Submit(record, completion, delivery: null);
+                Assert.True(
+                    Accumulator.TryAcquireSpace(),
+                    "the bound was already exhausted, so the fixture consumed nothing");
             }
-            catch (Exception exception)
-            {
-                completion.TrySetException(exception);
-            }
-
-            return await completion.Task;
         }
 
         /// <summary>Forces one drain and waits for it, the way the test drain hook does.</summary>
         internal void DrainNow() =>
             Assert.True(Accumulator.DrainPending(s_deadline), "the accumulator did not drain in time");
+
+        /// <summary>
+        /// Arms one drain and returns immediately — <see cref="SendAccumulator.DrainPending"/> with
+        /// a zero timeout sets the force flag, pulses the batch thread and gives up waiting.
+        /// </summary>
+        /// <remarks>
+        /// The lever that makes drains overlap a send loop deterministically, instead of hoping the
+        /// batch thread's free-running window lands inside it. Its <see langword="false"/> return
+        /// ("not drained within zero") is the expected outcome and is deliberately ignored.
+        /// </remarks>
+        internal void ForceDrainWithoutWaiting() => Accumulator.DrainPending(TimeSpan.Zero);
 
         public void Dispose()
         {

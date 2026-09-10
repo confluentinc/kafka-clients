@@ -277,6 +277,34 @@ starts neither thread. A per-send thread and a poll loop remain forbidden, verba
     prohibitions it was really about are unchanged and still hold: the batch thread is
     one thread for all of a producer's sends (not per-send), and it does not poll. The
     **sync** path starts neither thread, so a sync-only producer still spins nothing.
+  - **Submission order is call order.** The submission path must hand records to the
+    core in the order a caller called `Send`. Java documents ordering as preserved in
+    the default configuration
+    (`kafka/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java:274`
+    — *"if retries are disabled or if `enable.idempotence` is set to true, ordering
+    will be preserved"*), and a binding-side reorder happens **before** the core sees
+    the records, so **no core-side or broker-side setting can restore it** —
+    idempotence protects against retry-induced reordering, not against being handed
+    the records in the wrong order. A deferred / accumulating submission path must
+    therefore not let a send that finds capacity overtake one still waiting for it.
+    Do **not** rest this on `SemaphoreSlim` fairness: the .NET documentation
+    guarantees **no ordering** in which blocked waiters enter the semaphore, so an
+    ordering claim built on it is unfounded. The property is claimed **per caller**
+    (a caller's own successive sends), which is all Java's guarantee is about;
+    concurrent callers are not ordered against each other, and the anchor does not
+    order them either.
+    ⚠ **Added in M11/P3.2** — no rule stated this, which is a large part of why the
+    defect shipped: the accumulator introduced in M11/P3.1 took the backpressure
+    permit *before* appending and deferred the append when it could not get one, so a
+    later send that found a permit appended ahead of a parked one. The fix that
+    satisfies this rule is a routing count (the inline path is refused while anything
+    is queued ahead) plus a documented-FIFO submission queue drained by a **single**
+    appender.
+    ⚠ **That single submitter is NOT a third background thread**, so the "at most
+    two" cap above is unaffected: it is a task-based loop, started by whichever caller
+    queued the first submission, with **at most one** in flight per producer, and it
+    does not poll — it awaits a permit and appends. A *dedicated thread* for it would
+    breach the cap and is not the sanctioned shape.
   - FFI is callable from any .NET thread; the core serializes via the producer's
     internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
@@ -304,12 +332,38 @@ pump deadlock-free (the Sender runs on other worker threads).
     serializes concurrent `Send` (don't double-lock).
   - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
     (shared, §0.3).
+  - A submission path that appends inline whenever capacity happens to be free, with
+    an earlier send still waiting for it — the ordering defect above. Equally: an
+    ordering argument that rests on `SemaphoreSlim` waiter order, or on many
+    independent per-send continuations being released "in order" by one
+    multi-permit `Release`.
+  - A **dedicated thread** for the submission queue's appender (the cap is two);
+    conversely, more than one appender draining that queue, which reintroduces the
+    race the queue exists to remove.
 
 **Tests required:**
 
   - Concurrent `Send` from many threads is correct (the `Mutex` holds).
   - `Dispose` drains before destroying the handle — joins the pump (Option A, §A7).
   - *(Option A only)* a long-blocked pump doesn't stop new sends being enqueued.
+  - **The order records reach `send_batch` equals call order, across a saturated
+    bound.** Two parts, because the raw interleaving is a race: a *deterministic*
+    half (with a submission queued, the inline path is refused and the next send
+    lands behind it — nothing appended, nothing pinned) and a *stress* half (a
+    same-thread burst that saturates the bound, with the observed order equal to the
+    call order every iteration). The stress half must be shown to **fail** without
+    the routing rule; the deterministic half is the one that cannot flake.
+  - **A drain / `Flush` includes a send still queued for capacity.** Once a
+    submission queue sits upstream of the accumulator's chain, "empty and idle" has
+    **two** stages, and a predicate that tests only the chain lets `Flush` return
+    with records the caller's `Send` already returned for — re-opening the
+    Java-faithfulness gap the accumulator drain exists to close.
+  - **Teardown settles every queued submission exactly once**, with nothing left
+    holding an unsettled `TaskCompletionSource`, and **nothing pinned while queued**
+    (the pin belongs after the permit, §A4).
+  - **A queued submission whose token fires before it is appended cancels with the
+    caller's token and is not sent** — asserted on the core's record count, not only
+    on the awaiter's state.
 
 ---
 

@@ -402,6 +402,17 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// window would add that window to every sync send. It still calls the singular
     /// <c>Producer_send</c> inline with call-scoped <c>fixed</c> pins.
     /// </para>
+    /// <para>
+    /// <b>M11/P3.2 — records reach <c>send_batch</c> in the order a caller called this method</b>
+    /// (§F1). Deferring the append opened a window in which a send that found capacity could
+    /// overtake one still waiting for it; the routing now runs through
+    /// <see cref="SendAccumulator.TrySubmitInline"/> /
+    /// <see cref="SendAccumulator.SubmitQueued"/>, which refuse the inline path while anything is
+    /// queued ahead and append everything queued from a single FIFO submitter. Java documents
+    /// ordering as preserved in the default configuration
+    /// (<c>ProducerConfig.java:274</c>), and the reorder happened <em>before</em> the core saw the
+    /// records, so no core-side setting could have restored it.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// <b>Preconditions (ffi §A5).</b> An already-canceled <paramref name="cancellationToken"/> →
@@ -512,70 +523,51 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // into an unbounded pin window. Submit does the pinning and the append, and releases both
         // the pins and the permit if the append is refused.
         //
-        // ⚠ THIS METHOD MUST NOT BECOME `async`. The fast path has to stay synchronous so a
-        // serializer throw (raised above this carrier, before the call) and the precondition throws
-        // above still surface synchronously rather than as a faulted Task — the reason
-        // AsyncKafkaProducer.SendValidated is deliberately not `async` either. Only the SLOW path
-        // yields, in the separate async method below.
-        if (accumulator.TryAcquireSpace())
-        {
-            try
-            {
-                accumulator.Submit(record, completion, delivery);
-            }
-            catch (Exception)
-            {
-                // Submit can throw ObjectDisposedException when teardown closed the accumulator
-                // between the guards above and the append. The throw is the documented outcome
-                // (nothing reached the core, so it stays SYNCHRONOUS — D5), but it leaves
-                // `completion` unsettled, so the disposing continuation chained to it never runs.
-                // Release the registration here instead; the slow path routes the same failure
-                // through `completion` and so disposes it that way.
-                cancellationRegistration.Dispose();
-                throw;
-            }
-
-            return completion.Task;
-        }
-
-        return SendWhenSpaceAvailable(accumulator, record, delivery, completion, cancellationToken);
-    }
-
-    /// <summary>
-    /// The backpressure slow path: waits for accumulator space, then submits. Only reached when the
-    /// bound is already full, so the yield it introduces is exactly what the bound is for.
-    /// </summary>
-    /// <remarks>
-    /// The failure is routed through <paramref name="completion"/> rather than thrown straight out
-    /// of this <c>async</c> method, so the cancellation registration wired to that awaiter (and its
-    /// disposing continuation) still settles — and so the caller sees one consistent awaitable
-    /// whichever path the send took.
-    /// </remarks>
-    private static async Task<RecordMetadata> SendWhenSpaceAvailable(
-        SendAccumulator accumulator,
-        SerializedProducerRecord record,
-        DeliveryRegistration? delivery,
-        TaskCompletionSource<RecordMetadata> completion,
-        CancellationToken cancellationToken)
-    {
+        // ⚠ THE ROUTING DECISION IS THE ACCUMULATOR'S, NOT THIS METHOD'S (M11/P3.2 §F1). It used to
+        // read "permit? append inline : await a permit, then append", which let a later send that
+        // found capacity overtake an earlier one still waiting for it — the records then reached
+        // send_batch, and so the wire, out of call order. TrySubmitInline refuses the inline path
+        // while anything is queued ahead, and SubmitQueued puts this send behind it in a FIFO drained
+        // by a single appender. Both live on SendAccumulator so the test fixture routes through the
+        // same decision (DoD §12) — a fixture with its own copy of the rule would make the ordering
+        // test a proof about the fixture.
+        //
+        // ⚠ THIS METHOD MUST NOT BECOME `async`. It has to stay synchronous so a serializer throw
+        // (raised above this carrier, before the call) and the precondition throws above still
+        // surface synchronously rather than as a faulted Task — the reason
+        // AsyncKafkaProducer.SendValidated is deliberately not `async` either. Neither route yields
+        // here: the queued route returns as soon as the submission is queued, and the waiting
+        // happens on the accumulator's submitter loop.
         try
         {
-            await accumulator.WaitForSpaceAsync(cancellationToken).ConfigureAwait(false);
-            accumulator.Submit(record, delivery: delivery, completion: completion);
+            if (!accumulator.TrySubmitInline(record, completion, delivery))
+            {
+                accumulator.SubmitQueued(record, completion, delivery, cancellationToken);
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (Exception)
         {
-            // Cancelled WITH the caller's token, matching the post-append cancellation path.
-            completion.TrySetCanceled(cancellationToken);
-        }
-        catch (Exception exception)
-        {
-            // Teardown cancelled the gate, or the accumulator refused the append. Nothing reached
-            // the core either way, so no delivery callback fires (decision D5).
-            completion.TrySetException(exception);
+            // TrySubmitInline can throw ObjectDisposedException when teardown closed the
+            // accumulator between the guards above and the append. The throw is the documented
+            // outcome (nothing reached the core, so it stays SYNCHRONOUS — D5), but it leaves
+            // `completion` unsettled, so the disposing continuation chained to it never runs.
+            // Release the registration here instead; the queued route routes the same failure
+            // through `completion` and so disposes it that way.
+            //
+            // Note which failures reach here, since the routing narrowed it: only a send that took
+            // the INLINE route can fail synchronously. A send routed to the queue while teardown is
+            // closing the accumulator is faulted through `completion` instead — the pre-queue slow
+            // path did exactly the same for the same state, so the only shift is that "closed AND a
+            // submission already queued" now takes the async form where a free permit would once
+            // have made it synchronous. Both surface the identical ObjectDisposedException, and the
+            // ThrowIfClosed guard above still makes the ordinary closed-producer case synchronous.
+            cancellationRegistration.Dispose();
+            throw;
         }
 
-        return await completion.Task.ConfigureAwait(false);
+        // The SAME awaitable on both routes — the record's delivery future, never a submission
+        // handle. (It only held before because the slow path re-awaited `completion.Task` itself.)
+        return completion.Task;
     }
 
     /// <summary>

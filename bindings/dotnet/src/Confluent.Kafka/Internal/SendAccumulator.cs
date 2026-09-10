@@ -14,6 +14,7 @@
 
 using System;
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
@@ -52,6 +53,26 @@ namespace Confluent.Kafka.Internal;
 /// the pins and releases them if the append throws; after it, this type owns them and releases every
 /// one exactly once — in a <c>finally</c>, after <c>send_batch</c> returns and before the futures
 /// reach the pump (§4.4). Never in the pump, never across the returned <see cref="Task"/>.
+/// </para>
+/// <para>
+/// <b>Submission order is call order</b> (M11/P3.2 §F1, decision D1(a)). The anchor appends
+/// <em>unconditionally</em> under its mutex and computes "full" only afterwards
+/// (<c>_confluentkafka.c:819-830</c>), so its append order is its call order by construction. .NET
+/// cannot copy that mechanism — <c>IAsyncProducer.Send</c> returns the <em>record's delivery</em>
+/// <see cref="Task"/> (Java's shape), so there is no post-append suspension point to carry the
+/// throttle (deviation DV-1) — so it reproduces the <em>property</em> instead, with the two-part
+/// mechanism <see cref="TrySubmitInline"/> / <see cref="SubmitQueued"/> documents: the inline path
+/// is refused while anything is queued ahead of it, and everything queued is appended by a
+/// <b>single</b> submitter walking a documented-FIFO queue. Both entry points live here rather than
+/// in <c>NativeProducer</c> so the test fixture routes through the same decision production does
+/// (DoD §12).
+/// </para>
+/// <para>
+/// ⚠ <b>The submitter is NOT a third background thread.</b> It is a task-based loop, started by
+/// whichever caller queued the first submission, with <b>at most one</b> in flight per accumulator,
+/// and it does not poll — it awaits a backpressure permit and appends. <c>ffi-marshalling.md</c>
+/// §A1's "at most two background threads" cap (this batch thread + the completion pump) is
+/// therefore unaffected.
 /// </para>
 /// <para>
 /// <b>Teardown is minimal-but-correct in this slice.</b> <see cref="Stop"/> closes the accumulator
@@ -107,6 +128,26 @@ internal sealed class SendAccumulator
     // never destroyed — and Stop still reported the thread as exited, so the interned topic buffers
     // those un-released pins point at were freed.
     private Node? _inFlight;
+
+    // The FIFO submission queue and its single appender (M11/P3.2 §3.3). ConcurrentQueue<T> is
+    // documented FIFO, which is exactly what SemaphoreSlim is NOT: the .NET documentation states
+    // there is "no guaranteed order, such as FIFO or LIFO, in which blocked threads enter the
+    // semaphore", so ordering must not rest on the permit primitive.
+    private readonly ConcurrentQueue<QueuedSubmission> _submissions =
+        new ConcurrentQueue<QueuedSubmission>();
+
+    // Submissions queued-or-appending. Incremented SYNCHRONOUSLY by SubmitQueued before Send
+    // returns (what makes the routing correct for one caller), decremented under _gate once the
+    // submission has settled. Read lock-free by TrySubmitInline (one volatile read, DoD §10) and
+    // under _gate by the two-stage idle predicate.
+    //
+    // The increment precedes the enqueue, so `_queued == 0` implies BOTH "the queue is empty" and
+    // "no submitter is mid-append" — it is the single authority for both questions.
+    private int _queued;
+
+    // 0/1 token: at most ONE submitter loop exists at a time, which is what makes the appends
+    // ordered without depending on how many permits ReleaseSpace hands out at once.
+    private int _submitterRunning;
 
     private Node? _head;      // oldest node, the one the wait loop measures (anchor: next_batches_to_send)
     private Node? _tail;      // the node being filled (anchor: last_accumulating_batch)
@@ -240,6 +281,285 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
+    /// How many submissions are queued-or-appending — the witness for the second stage of
+    /// "empty and idle", and for "this send was routed to the queue rather than appended inline".
+    /// </summary>
+    internal int QueuedSubmissionCount => Volatile.Read(ref _queued);
+
+    /// <summary>
+    /// <b>The routing decision, slice 1 of the M11/P3.2 §F1 ordering fix.</b> Appends
+    /// <paramref name="record"/> inline — on the caller's thread, before returning — and reports
+    /// <see langword="true"/>; or reports <see langword="false"/>, in which case the caller must
+    /// hand the same submission to <see cref="SubmitQueued"/> and nothing has been appended,
+    /// pinned, or charged against the bound.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two conditions, and the first is the fix.</b> The inline path is taken only when
+    /// (i) <b>nothing is queued ahead of this send</b> and (ii) a backpressure permit is free. Test
+    /// (ii) alone — which is what this path used to be — lets a later send overtake an earlier one
+    /// that is still waiting for capacity: <see cref="ReleaseSpace"/> hands out <em>many</em>
+    /// permits at once, so the waiter's continuation and a fresh inline send become runnable
+    /// together, and the inline one can reach <see cref="Append"/> first. The records then reach
+    /// <c>send_batch</c> — and therefore the wire — in an order the caller never asked for, which
+    /// no core-side or broker-side setting can repair, because the reorder happened <b>before</b>
+    /// the core saw the records. Java documents ordering as preserved in the default configuration
+    /// (<c>ProducerConfig.java:274</c>).
+    /// </para>
+    /// <para>
+    /// <b>Why the count is enough for one caller, and why it is only claimed for one caller.</b>
+    /// <see cref="SubmitQueued"/> increments the count <em>synchronously</em>, so a caller's next
+    /// <c>Send</c> — which cannot start until the previous one returned — always observes it. Two
+    /// <em>different</em> threads racing here are not ordered against each other, and are not
+    /// claimed to be: the anchor does not order them either (its interleaving is whatever its mutex
+    /// grants), and Java's ordering guarantee is per-producer-per-partition as observed by the
+    /// caller, not across concurrent callers.
+    /// </para>
+    /// <para>
+    /// <b>The count is read first, deliberately.</b> Reading it before touching
+    /// <see cref="TryAcquireSpace"/> keeps the refusal allocation-free and permit-neutral (no
+    /// permit is taken only to be given back), and it is one volatile read on the steady-state
+    /// send path (DoD §10 — no new allocation).
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">
+    /// The producer is closing — nothing was appended (the same synchronous outcome
+    /// <see cref="Submit"/> produces, propagated rather than swallowed).
+    /// </exception>
+    internal bool TrySubmitInline(
+        in SerializedProducerRecord record,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery)
+    {
+        if (Volatile.Read(ref _queued) != 0)
+        {
+            return false;
+        }
+
+        if (!TryAcquireSpace())
+        {
+            return false;
+        }
+
+        Submit(record, completion, delivery);
+        return true;
+    }
+
+    /// <summary>
+    /// <b>The FIFO submission queue, slice 2 of the M11/P3.2 §F1 ordering fix.</b> Takes ownership
+    /// of a submission <see cref="TrySubmitInline"/> refused: enqueues it, and ensures the single
+    /// submitter loop that will wait for a permit and append it is running. Returns as soon as the
+    /// submission is queued — the caller's awaitable is <paramref name="completion"/>'s
+    /// <see cref="Task"/>, identical on both routes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One appender, so there is no race to order.</b> The naive fix — a "someone is parked"
+    /// counter with a per-send <see cref="WaitForSpaceAsync"/> continuation each — still inverts two
+    /// consecutively parked sends from the same caller, because a multi-permit
+    /// <see cref="ReleaseSpace"/> makes both continuations runnable at once and they then race for
+    /// <see cref="_gate"/>. Nor can that be repaired by leaning on <see cref="SemaphoreSlim"/>
+    /// fairness: .NET explicitly guarantees no ordering among semaphore waiters. So the queue is a
+    /// documented-FIFO <see cref="ConcurrentQueue{T}"/> and exactly one loop drains it.
+    /// </para>
+    /// <para>
+    /// <b>The increment is synchronous and precedes the enqueue.</b> Synchronous, because that is
+    /// what makes <see cref="TrySubmitInline"/>'s refusal correct for the caller's <em>next</em>
+    /// send. Before the enqueue, because a submitter that dequeued an item whose increment had not
+    /// landed would decrement below zero and, worse, would let the idle predicate report empty
+    /// while a submission was in flight.
+    /// </para>
+    /// <para>
+    /// <b>Pins are still taken after the permit</b> (M11/P3.1 §4.4, preserved verbatim). A queued
+    /// submission holds the <em>unpinned</em> <see cref="SerializedProducerRecord"/> only; all
+    /// pinning happens inside <see cref="Submit"/>, after the permit is in hand. The invariant that
+    /// rule states — <em>the pin must not be taken before the backpressure permit, or a blocked
+    /// sender holds pins while waiting</em> — is therefore unchanged by this fix: what waits in the
+    /// queue is a record reference, never a pin.
+    /// </para>
+    /// <para>
+    /// <b>The loop runs on the thread pool, not on the caller's thread.</b> Started via
+    /// <see cref="Task.Run(Func{Task})"/> so a caller's <c>Send</c> never synchronously appends
+    /// <em>other</em> callers' queued submissions. Ordering does not depend on when it starts: the
+    /// queue position is fixed by the enqueue above.
+    /// </para>
+    /// </remarks>
+    internal void SubmitQueued(
+        in SerializedProducerRecord record,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _queued);
+        _submissions.Enqueue(new QueuedSubmission(record, completion, delivery, cancellationToken));
+        EnsureSubmitterRunning();
+    }
+
+    /// <summary>
+    /// Starts the submitter loop if one is not already running. The 0 → 1 transition is the
+    /// exclusive token, so at most one loop exists per accumulator (see <see cref="SubmitQueued"/>).
+    /// </summary>
+    private void EnsureSubmitterRunning()
+    {
+        if (Interlocked.CompareExchange(ref _submitterRunning, 1, 0) == 0)
+        {
+            _ = Task.Run(RunSubmitterAsync);
+        }
+    }
+
+    /// <summary>
+    /// The single submitter: dequeues one submission at a time, waits for a backpressure permit,
+    /// and appends — so queued submissions reach <see cref="Append"/> in enqueue order.
+    /// </summary>
+    /// <remarks>
+    /// <b>The whole loop is one state machine, on purpose.</b> Keeping the per-submission body
+    /// inline (rather than in its own <c>async</c> helper) means a burst of N queued sends allocates
+    /// one state machine between them, replacing the one-per-send box the previous per-send
+    /// continuation allocated (DoD §10). It never throws: every failure is routed to that
+    /// submission's own awaiter, because this is a fire-and-forget task and an escaping exception
+    /// would both go unobserved and kill the loop, stranding every submission behind it.
+    /// </remarks>
+    private async Task RunSubmitterAsync()
+    {
+        while (true)
+        {
+            while (_submissions.TryDequeue(out QueuedSubmission submission))
+            {
+                try
+                {
+                    await AppendQueuedAsync(submission).ConfigureAwait(false);
+                }
+                finally
+                {
+                    // This submission is no longer queued-or-appending. Under _gate, because the
+                    // idle predicate reads the count and the drain waiters must be released the
+                    // moment the second stage empties.
+                    ReleaseQueuedSlot();
+                }
+            }
+
+            Volatile.Write(ref _submitterRunning, 0);
+
+            // A submission enqueued between the failed dequeue and that release would have found
+            // the token taken and started no loop, so it would sit there with nothing to append it.
+            // Re-check, and take the token back if it is still free.
+            if (_submissions.IsEmpty
+                || Interlocked.CompareExchange(ref _submitterRunning, 1, 0) != 0)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits for a permit and appends one queued submission, settling its awaiter on every failure
+    /// path so no <see cref="Task"/> is left pending.
+    /// </summary>
+    /// <remarks>
+    /// <b>Cancellation must not append</b> (M11/P3.2 §3.4 item 4 — today's
+    /// <c>SendWhenSpaceAvailable</c> behaviour, preserved). The caller's token both aborts the wait
+    /// (so a cancelled submission stops holding up the ones behind it) and is re-checked with the
+    /// permit in hand, because <see cref="SemaphoreSlim"/> resolves a cancel racing a
+    /// <see cref="SemaphoreSlim.Release(int)"/> either way — a wait can therefore return
+    /// successfully for a submission whose token has already fired, and that record must not reach
+    /// the core. Cancellation carries the <em>caller's</em> token, so the idiomatic
+    /// <c>catch (OperationCanceledException e) when (e.CancellationToken == ct)</c> matches.
+    /// </remarks>
+    private async Task AppendQueuedAsync(QueuedSubmission submission)
+    {
+        CancellationToken cancellationToken = submission.CancellationToken;
+        try
+        {
+            await WaitForSpaceAsync(cancellationToken).ConfigureAwait(false);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // The permit is in hand but this record must not be appended: give it back, or the
+                // bound leaks one slot per cancelled submission.
+                //
+                // ⚠ This branch is DEFENSIVE and is deliberately not claimed as test-covered.
+                // SemaphoreSlim.WaitAsync checks the token before granting a permit, so the
+                // deterministically-reachable cancellations are caught by the `catch` below, not
+                // here; what reaches here is only a cancel that raced a concurrent
+                // SemaphoreSlim.Release, which the primitive may resolve either way and which no
+                // broker-free test can schedule. Removing the whole cancellation handling IS
+                // covered (the record then reaches the core); removing only this branch is not.
+                ReleaseSpace(1);
+                submission.Completion.TrySetCanceled(cancellationToken);
+                return;
+            }
+
+            Submit(submission.Record, submission.Completion, submission.Delivery);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            submission.Completion.TrySetCanceled(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            // Teardown cancelled the backpressure gate, or the accumulator refused the append.
+            // Nothing reached the core either way, so no delivery callback fires (M11/P3.1 D5) —
+            // the same outcome, and the same exception, the pre-queue slow path produced.
+            submission.Completion.TrySetException(exception);
+        }
+    }
+
+    /// <summary>
+    /// Accounts one settled submission out of the queued-or-appending count, and releases the drain
+    /// waiters if that emptied the accumulator's second stage.
+    /// </summary>
+    private void ReleaseQueuedSlot()
+    {
+        lock (_gate)
+        {
+            Interlocked.Decrement(ref _queued);
+
+            // Wakes DrainPending, which waits on _gate while only queued submissions remain.
+            Monitor.PulseAll(_gate);
+            SignalIdleLocked();
+        }
+    }
+
+    /// <summary>
+    /// Settles every submission still queued for capacity, faulting each exactly once. Called by
+    /// <see cref="Stop"/> after <c>_closed</c> is set, and by the batch thread's failure handler.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exactly once, even against a live submitter.</b> Both this and
+    /// <see cref="RunSubmitterAsync"/> dequeue from the same <see cref="ConcurrentQueue{T}"/>, so
+    /// each submission is taken by exactly one of them; whichever wins settles it with the same
+    /// outcome (this method's fault, or the submitter's — the cancelled gate makes
+    /// <see cref="WaitForSpaceAsync"/> throw the identical exception). The count is decremented by
+    /// the taker, so <see cref="ReleaseQueuedSlot"/> runs here too.
+    /// <para>
+    /// <b>Anything enqueued after this ran still settles</b>, without a second sweep: the gate is
+    /// already cancelled, so its submitter's wait faults immediately; and if it somehow reached a
+    /// permit, <c>_closed</c> makes <see cref="Append"/> refuse it. This sweep is what makes the
+    /// queue <em>empty when <see cref="Stop"/> returns</em> rather than eventually.
+    /// </para>
+    /// <para>
+    /// <b>Faulting is this slice's semantics, deliberately.</b> The anchor still <em>sends</em> a
+    /// record whose caller is waiting for capacity, because it appended before waiting
+    /// (M11/P3.2 §F2); turning this fault into a send is an observable teardown change and is
+    /// therefore its own slice. No delivery callback fires — nothing reached the core (D5).
+    /// </para>
+    /// </remarks>
+    private void SettleQueuedSubmissions()
+    {
+        while (_submissions.TryDequeue(out QueuedSubmission submission))
+        {
+            try
+            {
+                submission.Completion.TrySetException(ClosedDuringBackpressure());
+            }
+            finally
+            {
+                ReleaseQueuedSlot();
+            }
+        }
+    }
+
+    /// <summary>
     /// Pins the record's buffers and appends it, taking ownership of the permit the caller acquired.
     /// The one primitive both the production send path and the tests use, so a fixture cannot
     /// diverge from what production does (DoD §12).
@@ -367,9 +687,10 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
-    /// Blocks until every record appended before this call has been handed to <c>send_batch</c> and
-    /// its future enqueued to the completion pump — i.e. the accumulator is empty and no drain is in
-    /// flight. Wakes the batch thread immediately rather than waiting out its window.
+    /// Blocks until every send that had <b>returned</b> before this call has been handed to
+    /// <c>send_batch</c> and its future enqueued to the completion pump — i.e. the accumulator is
+    /// empty and idle in <see cref="IsEmptyAndIdleLocked"/>'s two-stage sense. Wakes the batch
+    /// thread immediately rather than waiting out its window.
     /// </summary>
     /// <remarks>
     /// This is the primitive behind two things: the test-only "drain now and wait" hook that
@@ -386,17 +707,25 @@ internal sealed class SendAccumulator
 
         lock (_gate)
         {
-            while (_head is not null || _draining)
+            while (!IsEmptyAndIdleLocked())
             {
-                // Re-arm the force flag on EVERY iteration, not once before the loop. The batch
-                // thread consumes it when it takes a chain, and a record can land after that — a
-                // backpressure waiter released by the very drain this forced is the ordinary case —
-                // so a single arming would leave the newcomer waiting out the full window while this
-                // caller waits out its whole timeout. "Drain until empty AND idle" is the contract;
-                // one drain is not it.
-                _forceDrain = true;
-                Monitor.PulseAll(_gate);
+                if (_head is not null || _draining)
+                {
+                    // Re-arm the force flag on EVERY iteration, not once before the loop. The batch
+                    // thread consumes it when it takes a chain, and a record can land after that — a
+                    // backpressure waiter released by the very drain this forced is the ordinary case
+                    // — so a single arming would leave the newcomer waiting out the full window while
+                    // this caller waits out its whole timeout. "Drain until empty AND idle" is the
+                    // contract; one drain is not it.
+                    _forceDrain = true;
+                    Monitor.PulseAll(_gate);
+                }
 
+                // Otherwise only STAGE TWO is outstanding — submissions waiting for a permit. There
+                // is nothing for the batch thread to take, so forcing another drain would just
+                // ping-pong the two threads; the wake comes from ReleaseQueuedSlot's pulse as each
+                // submission appends or settles, and the next iteration then forces the drain that
+                // its append made necessary.
                 int remainingMs = RemainingMilliseconds(deadline);
                 if (remainingMs <= 0)
                 {
@@ -429,7 +758,7 @@ internal sealed class SendAccumulator
         TaskCompletionSource<bool> waiter;
         lock (_gate)
         {
-            if (_head is null && !_draining)
+            if (IsEmptyAndIdleLocked())
             {
                 return s_alreadyDrained;
             }
@@ -470,6 +799,23 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
+    /// "Empty and idle", in the <b>two stages</b> a submission passes through: no submission is
+    /// queued-or-appending (stage one — <see cref="SubmitQueued"/>), and the node chain is empty
+    /// with no drain in flight (stage two). Caller holds <see cref="_gate"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Stage one is what the M11/P3.2 §F1 fix added, and omitting it silently re-opens the gap
+    /// M11/P3.1 §3.5 closed on purpose.</b> A record whose <c>Send</c> has already <em>returned</em>
+    /// can now be sitting in the submission queue while the chain is empty, so a predicate that
+    /// looked only at the chain would let <c>Flush</c> return without it — flush() reporting
+    /// completion for records the caller believes were sent and that have not reached the core,
+    /// which is precisely the divergence <em>toward</em> Java that the accumulator drain exists to
+    /// remove.
+    /// </remarks>
+    private bool IsEmptyAndIdleLocked() =>
+        _head is null && !_draining && Volatile.Read(ref _queued) == 0;
+
+    /// <summary>
     /// Releases every <see cref="DrainPendingAsync"/> waiter if the accumulator is now empty and
     /// idle, and re-arms the force flag if it is not. Caller holds <see cref="_gate"/>.
     /// </summary>
@@ -480,13 +826,19 @@ internal sealed class SendAccumulator
             return;
         }
 
-        if (_head is not null || _draining)
+        if (!IsEmptyAndIdleLocked())
         {
-            // Not idle yet — a record landed after the drain that was forced for these waiters took
-            // its chain. Re-arm rather than let them wait out the window (the same reason
-            // DrainPending re-arms on every iteration).
-            _forceDrain = true;
-            Monitor.PulseAll(_gate);
+            if (_head is not null || _draining)
+            {
+                // Not idle yet — a record landed after the drain that was forced for these waiters
+                // took its chain. Re-arm rather than let them wait out the window (the same reason
+                // DrainPending re-arms on every iteration).
+                _forceDrain = true;
+                Monitor.PulseAll(_gate);
+            }
+
+            // With only stage one outstanding there is nothing to force: the next
+            // ReleaseQueuedSlot re-enters here, and it re-arms then if that submission appended.
             return;
         }
 
@@ -500,8 +852,9 @@ internal sealed class SendAccumulator
 
     /// <summary>
     /// Teardown steps 2–4 of the §3.8 handshake: cancel the backpressure gate, close the
-    /// accumulator to new appends, wake the batch thread, and wait — <b>bounded</b> — for it to
-    /// finish its final drain and exit. Idempotent.
+    /// accumulator to new appends, settle every submission still queued for capacity, wake the
+    /// batch thread, and wait — <b>bounded</b> — for it to finish its final drain and exit.
+    /// Idempotent.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -551,6 +904,11 @@ internal sealed class SendAccumulator
             _closed = true;
             Monitor.PulseAll(_gate);
         }
+
+        // Settle the submission queue AFTER _closed, so nothing this sweep misses can still be
+        // appended, and BEFORE the join, so Stop returns with the queue empty rather than relying
+        // on a thread-pool continuation to get there (M11/P3.2 §3.4 item 3).
+        SettleQueuedSubmissions();
 
         return _thread.Join(timeout);
     }
@@ -607,6 +965,14 @@ internal sealed class SendAccumulator
 
         SettleAbandonedChain(inFlight, cause);
         SettleAbandonedChain(chain, cause);
+
+        // The submission queue too: with the batch thread gone, a submission still waiting behind
+        // another for a permit has nothing that will ever append it, so faulting it here is what
+        // keeps this handler's "settle what is in hand" property true of BOTH stages. A submission
+        // already parked in WaitForSpaceAsync is released by the ReleaseSpace below when the
+        // abandoned chain frees capacity — the one path where that arithmetic is load-bearing
+        // rather than incidental (M11/P3.2 §F5 makes it unconditional; that is its own slice).
+        SettleQueuedSubmissions();
 
         try
         {
@@ -1075,6 +1441,44 @@ internal sealed class SendAccumulator
 
         double ms = remaining * 1000.0 / Stopwatch.Frequency;
         return ms >= 1.0 ? (int)Math.Min(ms, int.MaxValue) : 1;
+    }
+
+    /// <summary>
+    /// One send waiting for backpressure capacity — everything <see cref="Submit"/> needs, held
+    /// until a permit is free (M11/P3.2 §3.3). No anchor counterpart: the anchor appends first and
+    /// throttles afterwards, in Python, so it never queues a submission (deviation DV-1).
+    /// </summary>
+    /// <remarks>
+    /// <b>A struct, and it carries the record UNPINNED.</b> A struct because
+    /// <see cref="ConcurrentQueue{T}"/> stores value types inline in its segments, so a queued send
+    /// costs no object of its own — the queued path allocates strictly less than the per-send
+    /// <c>async</c> state machine it replaces (DoD §10). Unpinned because pinning belongs after the
+    /// permit, inside <see cref="Submit"/>: a pin taken here would be held for the whole wait,
+    /// turning a bound on <em>records</em> into an unbounded pin window (M11/P3.1 §4.4).
+    /// </remarks>
+    private readonly struct QueuedSubmission
+    {
+        internal QueuedSubmission(
+            in SerializedProducerRecord record,
+            TaskCompletionSource<RecordMetadata> completion,
+            DeliveryRegistration? delivery,
+            CancellationToken cancellationToken)
+        {
+            Record = record;
+            Completion = completion;
+            Delivery = delivery;
+            CancellationToken = cancellationToken;
+        }
+
+        internal SerializedProducerRecord Record { get; }
+
+        internal TaskCompletionSource<RecordMetadata> Completion { get; }
+
+        internal DeliveryRegistration? Delivery { get; }
+
+        /// <summary>The <em>caller's</em> token — cancellation is reported with it, not a
+        /// substitute, so <c>e.CancellationToken == ct</c> matches at the call site.</summary>
+        internal CancellationToken CancellationToken { get; }
     }
 
     /// <summary>
