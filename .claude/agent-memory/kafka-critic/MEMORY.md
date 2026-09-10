@@ -129,3 +129,4 @@
 - [FFI send_offsets multilang wiring](review_ffi_send_offsets_multilang.md) — CLEAN; parallel-array/proto sentinel at READER's per-element contract; no __grpc_rust
 - [Python _run_async cancellation leak](review_python_run_async_cancellation.md) — producer deliver drops payload w/o free on cancelled fut; consumer _deliver frees
 - [C-ext tp_new owned-handle audit](review_cext_tp_new_owned_handle.md) — CLEAN; 4-path leak/double-free table, ordering trap, two-paths-one-dealloc; tinycthread now vendored
+- [Python C-tray drain before control ops](review_python_ctray_drain.md) — CLEAN (Critic 65); handed uses PRE-compaction take size or waiters hang; teeth = history_count not fut.done(); §13 suggestion
