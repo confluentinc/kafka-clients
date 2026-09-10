@@ -17,9 +17,7 @@ endif
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
-	build-grpc-images-python-macos build-grpc-images-c-macos \
 	test test-rust test-integration test-integration-python test-integration-c \
-	test-integration-python-macos test-integration-c-macos \
 	test-c test-python test-rust-all-features \
 	test-c-macos-docker test-python-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
@@ -100,15 +98,6 @@ build-grpc-images-python: build-rust-all-features build-python
 # image consumes.
 build-grpc-images-c: build-rust-all-features
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
-
-# macOS variants: build libconfluent_kafka inside the image (Dockerfile.grpc.macos
-# et al), since the host build is Mach-O and unusable in the Linux gRPC images.
-build-grpc-images-python-macos: build-python
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-macos
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async-macos
-
-build-grpc-images-c-macos:
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-macos
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests).
@@ -245,13 +234,6 @@ test-integration-c:
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c; \
 	fi
 
-# macOS variants of the two targets above.
-test-integration-python-macos: build-grpc-images-python-macos
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
-
-test-integration-c-macos: build-grpc-images-c-macos
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
-
 # ── Performance integration tests ────────────────────────────────────────
 #
 # Separated from the functional suites because they assert latency and
@@ -312,22 +294,22 @@ producer-perf-test-python: build-python
 test-c: build-c
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test
 
-# macOS variant of test-c.
+# macOS variant of test-c: C unit tests (ctest). The gRPC multilanguage arm
+# runs on Linux only (verify-c).
 test-c-macos-docker: build-c
 	cd bindings/c/build && ctest --output-on-failure
-	$(MAKE) test-integration-c-macos
 
 test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
-# macOS variant of test-python.
+# macOS variant of test-python: Python unit tests (pytest test/unit). The gRPC
+# multilanguage arm runs on Linux only (verify-python).
 test-python-macos-docker: build-python
 	@(. venv/bin/activate && \
 	cd $(RUST_PROJECT_ROOT)/bindings/python && \
 	(pip install .[dev] || pip install --no-dependencies .[dev]) && \
 	python -m pytest test/unit -v)
-	$(MAKE) test-integration-python-macos
 
 verify: build format-check lint test check-bindings
 
@@ -338,12 +320,11 @@ verify-c-macos-docker: test-c-macos-docker
 verify-python: test-python check-bindings
 	$(MAKE) test-integration-perf-python
 
-# macOS perf p99 budget (ms)
+# macOS perf p99 budget (ms), used by verify-rust-macos-docker.
 MACOS_P99_LIMIT_MS ?= 150
 
-# macOS verify-python; perf tail uses MACOS_P99_LIMIT_MS.
+# macOS verify-python: unit tests.
 verify-python-macos-docker: test-python-macos-docker
-	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-python
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
