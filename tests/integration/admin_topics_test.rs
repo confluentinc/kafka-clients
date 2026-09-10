@@ -77,7 +77,14 @@ async fn create_then_list_and_describe_topics<F: AdminBackendFactory>(ctx: &mut 
 
     let topic = ctx.topic("admin_create_list");
     let created = admin
-        .create_topics(&[NewTopic::new(topic.clone(), 2, 1)], CreateTopicsOptions::new())
+        .create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.clone(),
+                Some(2),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create topics: {e}"));
     all_of(&created).unwrap_or_else(|e| panic!("{backend} backend: create topics should succeed: {e}"));
@@ -179,8 +186,8 @@ async fn create_multiple_topics_partition_round_trip<F: AdminBackendFactory>(ctx
     let created = admin
         .create_topics(
             &[
-                NewTopic::new(topic_a.clone(), 3, 1),
-                NewTopic::new(topic_b.clone(), 1, 1),
+                NewTopic::new_num_partitions_replication_factor(topic_a.clone(), Some(3), Some(1)),
+                NewTopic::new_num_partitions_replication_factor(topic_b.clone(), Some(1), Some(1)),
             ],
             CreateTopicsOptions::new(),
         )
@@ -332,8 +339,10 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
     let topic = ctx.topic("admin_create_metadata");
     let created = admin
         .create_topics(
-            &[NewTopic::new(topic.clone(), 2, 1)
-                .configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())]))],
+            &[
+                NewTopic::new_num_partitions_replication_factor(topic.clone(), Some(2), Some(1))
+                    .set_configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())])),
+            ],
             CreateTopicsOptions::new(),
         )
         .await
@@ -430,7 +439,7 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
     let assignments = BTreeMap::from([(0, vec![broker_id]), (1, vec![broker_id])]);
     let created = admin
         .create_topics(
-            &[NewTopic::with_replicas_assignments(topic.clone(), assignments)],
+            &[NewTopic::new_replicas_assignments(topic.clone(), assignments)],
             CreateTopicsOptions::new(),
         )
         .await
@@ -492,8 +501,12 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
     let topic = ctx.topic("admin_validate_only");
     let created = admin
         .create_topics(
-            &[NewTopic::new(topic.clone(), 1, 1)],
-            CreateTopicsOptions::new().validate_only(true),
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.clone(),
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new().set_validate_only(true),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create topics: {e}"));
@@ -555,7 +568,14 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
 
     let topic = ctx.topic("admin_unreachable");
     let created = admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
+        .create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.clone(),
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        )
         .await;
     // Either shape is a legitimate failure: the batch may fail as a whole or per
     // key, depending on where the deadline hits. What must not happen is
@@ -566,7 +586,7 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
             let err = all_of(&outcomes)
                 .expect_err(&format!("{backend} backend: createTopics must not succeed with no broker"));
             assert!(
-                err.is_retriable() || matches!(err.error(), Errors::RequestTimedOut),
+                err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
                 "{backend} backend: expected a timeout, got {err:?}"
             );
         },

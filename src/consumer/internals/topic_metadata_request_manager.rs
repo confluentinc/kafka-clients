@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::PartitionInfo;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
@@ -46,9 +46,9 @@ use super::timed_request_state::TimedRequestState;
 ///
 /// Mirrors Java's `CompletableFuture<Map<String, List<PartitionInfo>>>` —
 /// the receiver resolves with the topic → partition-info map on success or
-/// a [`KafkaError`] on failure (timeout, invalid topic, authorization
+/// a [`Error`] on failure (timeout, invalid topic, authorization
 /// failure, ...).
-pub(crate) type TopicMetadataResult = Result<HashMap<String, Vec<PartitionInfo>>, KafkaError>;
+pub(crate) type TopicMetadataResult = Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
 /// Mutable state held behind `Arc<TopicMetadataRequestManagerInner>` so the
 /// spawned response forwarder (launched inside
@@ -283,12 +283,12 @@ impl TopicMetadataRequestManager {
     /// `handleError(Throwable, long)`:
     ///
     /// - For a retriable error: if the deadline has passed, complete with
-    ///   a [`KafkaError::timeout`] and remove the inflight request.
+    ///   a [`Error::timeout`] and remove the inflight request.
     ///   Otherwise call `on_failed_attempt` to extend the backoff and
     ///   leave the request in the queue.
     /// - For any other (fatal) error: complete the future with the error
     ///   and remove the inflight request.
-    pub(crate) fn on_failure(&self, request_id: u64, current_time_ms: i64, error: KafkaError) {
+    pub(crate) fn on_failure(&self, request_id: u64, current_time_ms: i64, error: Error) {
         Self::on_failure_inner(&self.inner, request_id, current_time_ms, error);
     }
 
@@ -296,19 +296,17 @@ impl TopicMetadataRequestManager {
         inner: &Arc<TopicMetadataRequestManagerInner>,
         request_id: u64,
         current_time_ms: i64,
-        error: KafkaError,
+        error: Error,
     ) {
         let mut guard = inner.inflight_requests.lock().expect("inflight poisoned");
         let Some(idx) = guard.iter().position(|s| s.id == request_id) else {
             return;
         };
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             if guard[idx].is_expired(current_time_ms) {
                 let mut state = guard.remove(idx);
                 drop(guard);
-                state.complete(Err(KafkaError::timeout(
-                    "Timeout expired while fetching topic metadata".to_string(),
-                )));
+                state.complete(Err(Error::timeout("Timeout expired while fetching topic metadata".to_string())));
             } else {
                 guard[idx].timed_state.on_failed_attempt(current_time_ms);
             }
@@ -321,16 +319,16 @@ impl TopicMetadataRequestManager {
 
     /// Java: private `handleTopicMetadataResponse(MetadataResponse)`.
     /// Returns the topic → partition-info map on success, or a
-    /// [`KafkaError`] mirroring the Java exception path:
+    /// [`Error`] mirroring the Java exception path:
     ///
     /// - `TopicAuthorizationException` if any unauthorized topics are
     ///   present in the response.
     /// - `InvalidTopicException` if any topic has
-    ///   `Errors::InvalidTopicException`.
+    ///   `Errors::InvalidTopicError`.
     /// - The retriable error itself (wrapped in
-    ///   [`KafkaError::with_message`]) if any topic has a retriable error
+    ///   [`Error::with_message`]) if any topic has a retriable error
     ///   (e.g. `Errors::LeaderNotAvailable`).
-    /// - A generic [`KafkaError`] otherwise.
+    /// - A generic [`Error`] otherwise.
     ///
     /// `Errors::UnknownTopicOrPartition` is treated as "topic absent" and
     /// simply omitted from the returned map — matching Java's `continue`
@@ -340,7 +338,7 @@ impl TopicMetadataRequestManager {
 
         let unauthorized_topics = cluster.unauthorized_topics();
         if !unauthorized_topics.is_empty() {
-            return Err(KafkaError::topic_authorization(unauthorized_topics.clone()));
+            return Err(Error::topic_authorization(unauthorized_topics.clone()));
         }
 
         for (topic, error) in response.errors() {
@@ -348,20 +346,31 @@ impl TopicMetadataRequestManager {
             if error == Errors::UnknownTopicOrPartition {
                 continue;
             }
-            if error == Errors::InvalidTopicException {
-                return Err(KafkaError::with_message(
-                    Errors::InvalidTopicException,
+            if error == Errors::InvalidTopicError {
+                return Err(Error::with_message(
+                    Errors::InvalidTopicError,
                     format!("Topic '{topic}' is invalid"),
                 ));
             }
             // Java: `error.exception() instanceof RetriableException` →
             // throw the exception (retriable, so callers retry).
-            if error.is_retriable() {
-                return Err(KafkaError::new(error));
+            if error.error().is_some_and(|e| e.is_retriable_error()) {
+                return Err(Error::new(error));
             }
-            return Err(KafkaError::with_message(
-                error,
+            // Java: `throw new KafkaException("Unexpected error fetching
+            // metadata for topic " + topic, error.exception());`
+            // (`TopicMetadataRequestManager.java:268-269`) — a BARE
+            // `KafkaException` wrapping the typed error as its cause, not the
+            // typed error re-messaged. `Error::with_message(error, ..)` would
+            // resolve the code back to its own class, so the "wrapper" would
+            // *be* the wrapped thing: a `CLUSTER_AUTHORIZATION_FAILED` here
+            // would answer `true` to `is_api_error()` /
+            // `is_authorization_error()` / `is_fatal_error()` where Java
+            // answers `false`, and the cause would be dropped. Contrast the
+            // `InvalidTopicError` arm above, where Java does name the class.
+            return Err(Error::kafka_message_source(
                 format!("Unexpected error fetching metadata for topic {topic}"),
+                Error::new(error),
             ));
         }
 
@@ -383,7 +392,7 @@ impl TopicMetadataRequestManager {
     ///
     /// Two passes mirror Java's `requestStateIterator` walk:
     ///   1. Expire stale requests (`isExpired`) → complete with
-    ///      [`KafkaError::timeout`] and remove from inflight.
+    ///      [`Error::timeout`] and remove from inflight.
     ///   2. Build [`UnsentRequest`]s for everything that
     ///      `can_send_request` at `current_time_ms`, spawning a forwarder
     ///      per request.
@@ -403,9 +412,7 @@ impl TopicMetadataRequestManager {
                 // facing future may run continuations that themselves
                 // touch the manager.
                 drop(guard);
-                state.complete(Err(KafkaError::timeout(
-                    "Timeout expired while fetching topic metadata".to_string(),
-                )));
+                state.complete(Err(Error::timeout("Timeout expired while fetching topic metadata".to_string())));
                 guard = self.inner.inflight_requests.lock().expect("inflight poisoned");
                 // Don't advance idx — the next element has shifted left.
                 continue;
@@ -425,7 +432,7 @@ impl TopicMetadataRequestManager {
             state.timed_state.on_send_attempt(current_time_ms);
 
             let builder: Box<dyn RequestBuilder> = match state.topic.as_deref() {
-                Some(topic) => Box::new(MetadataRequestBuilder::new(
+                Some(topic) => Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(
                     Some(&[topic]),
                     self.inner.allow_auto_topic_creation,
                 )),
@@ -450,7 +457,7 @@ impl TopicMetadataRequestManager {
                                 &inner_for_handler,
                                 request_id,
                                 now_ms,
-                                KafkaError::new(Errors::UnknownServerError),
+                                Error::new(Errors::UnknownServerError),
                             );
                         },
                     },
@@ -462,7 +469,7 @@ impl TopicMetadataRequestManager {
                             &inner_for_handler,
                             request_id,
                             now_ms,
-                            KafkaError::new(Errors::NetworkException),
+                            Error::new(Errors::NetworkError),
                         );
                     },
                 }
@@ -498,7 +505,7 @@ mod tests {
     use crate::client_response::ClientResponse;
     use crate::common::Node;
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, RequestHeader};
+    use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
 
     use super::*;
@@ -506,8 +513,7 @@ mod tests {
     const RETRY_BACKOFF_MS: i64 = 100;
 
     fn setup_manager() -> TopicMetadataRequestManager {
-        let mut config =
-            ConsumerConfig::new(vec!["localhost:9092".to_string()]).with_retry_backoff_ms(RETRY_BACKOFF_MS);
+        let mut config = ConsumerConfig::new(vec!["localhost:9092".to_string()]).set_retry_backoff_ms(RETRY_BACKOFF_MS);
         // Java's `ALLOW_AUTO_CREATE_TOPICS_CONFIG = false` matches Java's
         // `testSetup` properties. The field is `pub(crate)` so we set it
         // directly in tests (no public builder method exposed).
@@ -549,7 +555,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Builds a `MetadataResponse` carrying two topics (`topic1`, `topic2`),
@@ -585,7 +591,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![t1, t2]);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestTopicMetadata`.
@@ -629,27 +635,27 @@ mod tests {
     /// (parameterized: UNKNOWN_TOPIC_OR_PARTITION, INVALID_TOPIC_EXCEPTION,
     /// UNKNOWN_SERVER_ERROR, NETWORK_EXCEPTION, NONE).
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_unknown_topic_or_partition() {
-        topic_exception_and_inflight(Errors::UnknownTopicOrPartition, false);
+    async fn test_topic_error_and_inflight_requests_unknown_topic_or_partition() {
+        topic_error_and_inflight(Errors::UnknownTopicOrPartition, false);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_invalid_topic_exception() {
-        topic_exception_and_inflight(Errors::InvalidTopicException, false);
+    async fn test_topic_error_and_inflight_requests_invalid_topic_error() {
+        topic_error_and_inflight(Errors::InvalidTopicError, false);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_unknown_server_error() {
-        topic_exception_and_inflight(Errors::UnknownServerError, false);
+    async fn test_topic_error_and_inflight_requests_unknown_server_error() {
+        topic_error_and_inflight(Errors::UnknownServerError, false);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_network_exception() {
-        topic_exception_and_inflight(Errors::NetworkException, true);
+    async fn test_topic_error_and_inflight_requests_network_error() {
+        topic_error_and_inflight(Errors::NetworkError, true);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_none() {
-        topic_exception_and_inflight(Errors::None, false);
+    async fn test_topic_error_and_inflight_requests_none() {
+        topic_error_and_inflight(Errors::None, false);
     }
 
-    fn topic_exception_and_inflight(error: Errors, should_retry: bool) {
+    fn topic_error_and_inflight(error: Errors, should_retry: bool) {
         let topic = "hello";
         let mut manager = setup_manager();
         let _rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
@@ -667,27 +673,27 @@ mod tests {
     /// (parameterized: UNKNOWN_TOPIC_OR_PARTITION, INVALID_TOPIC_EXCEPTION,
     /// UNKNOWN_SERVER_ERROR, NETWORK_EXCEPTION, NONE).
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_unknown_topic_or_partition() {
-        all_topics_exception_and_inflight(Errors::UnknownTopicOrPartition, false);
+    async fn test_all_topics_error_and_inflight_requests_unknown_topic_or_partition() {
+        all_topics_error_and_inflight(Errors::UnknownTopicOrPartition, false);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_invalid_topic_exception() {
-        all_topics_exception_and_inflight(Errors::InvalidTopicException, false);
+    async fn test_all_topics_error_and_inflight_requests_invalid_topic_error() {
+        all_topics_error_and_inflight(Errors::InvalidTopicError, false);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_unknown_server_error() {
-        all_topics_exception_and_inflight(Errors::UnknownServerError, false);
+    async fn test_all_topics_error_and_inflight_requests_unknown_server_error() {
+        all_topics_error_and_inflight(Errors::UnknownServerError, false);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_network_exception() {
-        all_topics_exception_and_inflight(Errors::NetworkException, true);
+    async fn test_all_topics_error_and_inflight_requests_network_error() {
+        all_topics_error_and_inflight(Errors::NetworkError, true);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_none() {
-        all_topics_exception_and_inflight(Errors::None, false);
+    async fn test_all_topics_error_and_inflight_requests_none() {
+        all_topics_error_and_inflight(Errors::None, false);
     }
 
-    fn all_topics_exception_and_inflight(error: Errors, should_retry: bool) {
+    fn all_topics_error_and_inflight(error: Errors, should_retry: bool) {
         let mut manager = setup_manager();
         let _rx = manager.request_all_topics_metadata(i64::MAX);
         let res = manager.poll(100);
@@ -741,7 +747,7 @@ mod tests {
         assert_eq!(0, manager.inflight_count());
         match rx.try_recv() {
             Ok(Err(_)) => {},
-            other => panic!("expected exceptional completion, got {other:?}"),
+            other => panic!("expected completion with an error, got {other:?}"),
         }
     }
 
@@ -752,33 +758,35 @@ mod tests {
     /// future.
     #[tokio::test]
     async fn test_hard_failures_timeout() {
-        hard_failures(KafkaError::timeout("timeout"));
+        hard_failures(Error::timeout("timeout"));
     }
 
     #[tokio::test]
-    async fn test_hard_failures_kafka_exception() {
-        // Java's `KafkaException` is non-retriable by default. The Rust
-        // analog with no specific error code is `KafkaError::Generic`
-        // with `Errors::UnknownServerError` (also non-retriable per the
-        // Rust `Errors::is_retriable` table).
-        hard_failures(KafkaError::with_message(Errors::UnknownServerError, "non-retriable exception"));
+    async fn test_hard_failures_kafka_error() {
+        // Java's bare `KafkaException` is non-retriable. `Error::kafka` is its
+        // spelling: `Error::with_message(Errors::UnknownServerError, ..)` would
+        // resolve the code back to `UnknownServerException`, an `ApiException`,
+        // which is a *subclass* of `KafkaException` rather than the bare class
+        // this test is named for. Retriability is decided by the payload's
+        // declared ancestry (`ErrorHierarchy`), not by a table on `Errors`.
+        hard_failures(Error::kafka_message("non-retriable error"));
     }
 
     #[tokio::test]
-    async fn test_hard_failures_network_exception() {
+    async fn test_hard_failures_network_error() {
         // Java's `NetworkException` is retriable
         // (`extends RetriableException`).
-        hard_failures(KafkaError::new(Errors::NetworkException));
+        hard_failures(Error::new(Errors::NetworkError));
     }
 
-    fn hard_failures(error: KafkaError) {
+    fn hard_failures(error: Error) {
         let topic = "hello";
         let mut manager = setup_manager();
         let _rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
         let res = manager.poll(0);
         assert_eq!(1, res.unsent_requests.len());
 
-        let retriable = error.is_retriable();
+        let retriable = error.is_retriable_error();
         let request_id = manager.inflight_snapshot()[0].0;
         manager.on_failure(request_id, 0, error);
 
@@ -809,7 +817,7 @@ mod tests {
 
         // Mimic a network timeout via `on_failure`.
         let request_id = manager.inflight_snapshot()[0].0;
-        manager.on_failure(request_id, 0, KafkaError::timeout("network timeout"));
+        manager.on_failure(request_id, 0, Error::timeout("network timeout"));
 
         // Read the backoff the manager computed and sleep one ms short of
         // it — the next poll must still be empty.
@@ -830,7 +838,7 @@ mod tests {
     }
 
     /// Regression test: when the response carries `TopicAuthorizationFailed`,
-    /// the future resolves with `KafkaError::TopicAuthorization` and the
+    /// the future resolves with `Error::TopicAuthorization` and the
     /// inflight request is removed. Mirrors Java's
     /// `throw new TopicAuthorizationException(unauthorizedTopics)` branch.
     #[tokio::test]
@@ -853,7 +861,7 @@ mod tests {
         let received = rx.try_recv().expect("response delivered");
         let err = received.expect_err("authorization is a fatal error");
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got {err}"
         );
     }
@@ -947,7 +955,7 @@ mod tests {
 
         let request_id = manager.inflight_snapshot()[0].0;
         // Should not panic even though the receiver is gone.
-        manager.on_failure(request_id, 0, KafkaError::new(Errors::UnknownServerError));
+        manager.on_failure(request_id, 0, Error::new(Errors::UnknownServerError));
         assert_eq!(0, manager.inflight_count());
     }
 
@@ -1005,7 +1013,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
         let request_id = manager.inflight_snapshot()[0].0;
         manager.on_response(request_id, 0, &response);
@@ -1074,10 +1082,18 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        let metadata_response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let metadata_response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
-        let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.latest_version(), "", 1).unwrap();
-        let response = ClientResponse::with_timeout(
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build(),
+        )
+        .unwrap();
+        let response = ClientResponse::new_timed_out(
             header,
             None,
             "0",
@@ -1105,7 +1121,7 @@ mod tests {
     }
 
     /// Phase 12.5 regression — failure path: when the response receiver
-    /// resolves with `Err(KafkaError)` (transport-layer failure), the
+    /// resolves with `Err(Error)` (transport-layer failure), the
     /// forwarder must call `on_failure_inner`. For a retriable error
     /// inside the deadline, the inflight entry stays and the future is
     /// NOT resolved (matches Java's `handleError` retriable branch).
@@ -1125,7 +1141,7 @@ mod tests {
         // observable side effect deterministically (replaces fragile
         // `yield_now` pairs — `yield_now` re-queues the current task
         // but does not guarantee a spawned task ran).
-        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkError));
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
         loop {
             if manager.inflight_remaining_backoff_ms(0, 0) > 0 {
@@ -1159,5 +1175,65 @@ mod tests {
         let id1 = inflight[0].0;
         let id2 = inflight[1].0;
         assert_ne!(id1, id2, "concurrent requests for the same topic get distinct ids");
+    }
+
+    /// Java's final `else` builds a BARE `KafkaException` wrapping the typed
+    /// error as its cause:
+    /// `throw new KafkaException("Unexpected error fetching metadata for topic "
+    /// + topic, error.exception())` (`TopicMetadataRequestManager.java:268-269`).
+    ///
+    /// Re-messaging the code instead would resolve it back to its own class, so
+    /// the "wrapper" would *be* the wrapped thing — flipping
+    /// `is_api_error()` / `is_authorization_error()` / `is_fatal_error()` and
+    /// dropping the cause. `CLUSTER_AUTHORIZATION_FAILED` makes all four
+    /// observable in one response.
+    #[tokio::test]
+    async fn test_unexpected_error_is_a_bare_kafka_error_with_the_typed_cause() {
+        let topic = "hello";
+        let mut manager = setup_manager();
+        let mut rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        let response = build_topic_metadata_response(topic, Errors::ClusterAuthorizationFailed);
+        let request_id = manager.inflight_snapshot()[0].0;
+        manager.on_response(request_id, 0, &response);
+
+        let err = rx
+            .try_recv()
+            .expect("response delivered")
+            .expect_err("a non-retriable error is fatal to the request");
+
+        assert_eq!("Unexpected error fetching metadata for topic hello", err.message());
+        // A bare `KafkaException` is a SIBLING of `ApiException`, not a subclass.
+        assert!(err.is_kafka_error());
+        assert!(!err.is_api_error());
+        assert!(!err.is_authorization_error());
+        assert!(!crate::common::requests::request_utils::is_fatal_error(&err));
+        // Java's `getCause()` — the typed error the wrapper carries.
+        let cause = err.source().expect("the typed error is the cause");
+        assert_eq!(cause.error(), Errors::ClusterAuthorizationFailed);
+        assert!(cause.is_authorization_error());
+    }
+
+    /// The adjacent arm is NOT a bare `KafkaException`: Java does name
+    /// `InvalidTopicException` there (`TopicMetadataRequestManager.java:260`).
+    /// Asserted so the fix above cannot be over-applied.
+    #[tokio::test]
+    async fn test_invalid_topic_keeps_its_own_class() {
+        let topic = "hello";
+        let mut manager = setup_manager();
+        let mut rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        let response = build_topic_metadata_response(topic, Errors::InvalidTopicError);
+        let request_id = manager.inflight_snapshot()[0].0;
+        manager.on_response(request_id, 0, &response);
+
+        let err = rx.try_recv().expect("response delivered").expect_err("invalid topic");
+        assert_eq!(err.error(), Errors::InvalidTopicError);
+        assert_eq!("Topic 'hello' is invalid", err.message());
+        assert!(err.is_api_error());
     }
 }

@@ -115,7 +115,7 @@ pub struct DescribeConfigsRequestBuilder {
 
 impl DescribeConfigsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DescribeConfigsRequestData) -> Self {
+    pub fn new(data: DescribeConfigsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_CONFIGS.oldest_version(),

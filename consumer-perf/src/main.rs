@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
@@ -57,7 +57,7 @@ use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 struct LenDeserializer;
 
 impl Deserializer<usize> for LenDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
         Ok(data.len())
     }
 }
@@ -588,16 +588,16 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.max_poll_records.map_or("default".to_string(), |v| v.to_string()),
     );
     let config = ConsumerConfig::from_properties(&props)?
-        .with_client_id("consumer-perf")
-        .with_group_id(args.group_id.clone())
-        .with_group_protocol("consumer")
-        .with_auto_offset_reset(args.offset_reset.clone())
-        .with_enable_auto_commit(true);
+        .set_client_id("consumer-perf")
+        .set_group_id(args.group_id.clone())
+        .set_group_protocol("consumer")
+        .set_auto_offset_reset(args.offset_reset.clone())
+        .set_enable_auto_commit(true);
 
     let mut consumer: Box<dyn Consumer<usize, usize>> =
         new_consumer::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
-    consumer.subscribe(vec![args.topic.clone()]).await?;
+    consumer.subscribe_topics(vec![args.topic.clone()]).await?;
     println!("\n>>> Subscribed; waiting for partition assignment (KIP-848 join)...");
 
     // Wait for assignment before starting the producer, so the very first

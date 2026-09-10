@@ -16,6 +16,7 @@
 
 use crate::api_message_type::{ApiMessageType, ListenerType};
 use crate::api_versions_response_data::ApiVersion;
+use std::fmt;
 
 /// Identifiers for all the Kafka APIs.
 ///
@@ -249,6 +250,12 @@ impl ApiKeys {
     }
 
     /// An english description of the api — used for debugging and metric names.
+    ///
+    /// This is Java's public `name` field (`ApiKeys.java:162`, assigned from
+    /// `messageType.name` at `:189`), which carries the specification spelling
+    /// (e.g. `"Metadata"`). It is **not** what Java renders when the enum value
+    /// itself is interpolated into a string — see the [`fmt::Display`]
+    /// implementation for that.
     pub fn name(&self) -> &'static str {
         self.message_type.name()
     }
@@ -269,7 +276,7 @@ impl ApiKeys {
     }
 
     /// The latest supported version, with optional control over unstable versions.
-    pub fn latest_version_with_unstable(&self, enable_unstable_last_version: bool) -> i16 {
+    pub fn latest_version_enable_unstable_last_version(&self, enable_unstable_last_version: bool) -> i16 {
         self.message_type.highest_supported_version(enable_unstable_last_version)
     }
 
@@ -292,7 +299,7 @@ impl ApiKeys {
             return true;
         }
         api_version >= self.oldest_version()
-            && api_version <= self.latest_version_with_unstable(enable_unstable_last_version)
+            && api_version <= self.latest_version_enable_unstable_last_version(enable_unstable_last_version)
     }
 
     /// Whether the given version is deprecated.
@@ -355,7 +362,7 @@ impl ApiKeys {
         } else {
             self.oldest_version()
         };
-        let latest_version = self.latest_version_with_unstable(enable_unstable_last_version);
+        let latest_version = self.latest_version_enable_unstable_last_version(enable_unstable_last_version);
 
         // API is entirely disabled if latestStableVersion is smaller than oldestVersion.
         if latest_version >= oldest_version {
@@ -416,6 +423,23 @@ impl ApiKeys {
     }
 }
 
+/// Renders the API key the way Java renders it when the enum value is
+/// interpolated into a string.
+///
+/// Java's `ApiKeys` is an enum that does **not** override `toString()`, so
+/// `"The node does not support " + apiKey` (`NodeApiVersions.java:151`) yields
+/// the enum constant name — `METADATA`, `CREATE_TOPICS` — not the
+/// specification spelling carried by the `name` field ([`ApiKeys::name`]).
+///
+/// Every `ApiKeys` constant is named after the `ApiMessageType` constant it
+/// wraps (`ApiKeys.java:174-192`), so this delegates to
+/// [`ApiMessageType::enum_name`], the translation of Java's `Enum.name()`.
+impl fmt::Display for ApiKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message_type.enum_name())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +458,43 @@ mod tests {
         assert_eq!(ApiKeys::FETCH.name(), "Fetch");
         assert_eq!(ApiKeys::METADATA.name(), "Metadata");
         assert_eq!(ApiKeys::API_VERSIONS.name(), "ApiVersions");
+    }
+
+    /// Java's `ApiKeys` is an enum with no `toString()` override, so a string
+    /// interpolation of the enum value yields the constant name. This is a
+    /// different spelling from the public `name` field asserted above, and both
+    /// are observable in Java-visible messages (`NodeApiVersions.java:151`).
+    #[test]
+    fn test_api_key_display_is_the_java_enum_constant_name() {
+        assert_eq!(ApiKeys::PRODUCE.to_string(), "PRODUCE");
+        assert_eq!(ApiKeys::FETCH.to_string(), "FETCH");
+        assert_eq!(ApiKeys::METADATA.to_string(), "METADATA");
+        assert_eq!(ApiKeys::API_VERSIONS.to_string(), "API_VERSIONS");
+        assert_eq!(ApiKeys::LIST_OFFSETS.to_string(), "LIST_OFFSETS");
+        assert_eq!(ApiKeys::OFFSET_FOR_LEADER_EPOCH.to_string(), "OFFSET_FOR_LEADER_EPOCH");
+        assert_eq!(ApiKeys::DESCRIBE_TOPIC_PARTITIONS.to_string(), "DESCRIBE_TOPIC_PARTITIONS");
+
+        // Java derives every `ApiMessageType` constant name from the
+        // specification name via `toSnakeCase(name).toUpperCase()`
+        // (`ApiMessageTypeGenerator.java:224`), and every `ApiKeys` constant is
+        // named after the `ApiMessageType` it wraps (`ApiKeys.java:174-192`), so
+        // the two spellings must agree modulo case and word separators for
+        // every API — a mismatch would mean the generated tables diverged.
+        for key in ApiKeys::ALL {
+            let display = key.to_string();
+            assert!(
+                !display.is_empty()
+                    && display
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()),
+                "{display} is not a SCREAMING_SNAKE_CASE constant name"
+            );
+            assert!(
+                display.replace('_', "").eq_ignore_ascii_case(key.name()),
+                "constant name {display} does not match specification name {}",
+                key.name()
+            );
+        }
     }
 
     #[test]
@@ -596,13 +657,11 @@ mod tests {
             if (api_key.is_cluster_action() && !cluster_actions_with_throttle.contains(&api_key.id()))
                 || authentication_keys.contains(&api_key.id())
             {
-                assert!(
-                    throttle_time_field.is_none(),
-                    "Unexpected throttle time field: {}",
-                    api_key.name()
-                );
+                // Java interpolates the `ApiKeys` value, so the message carries the
+                // enum constant name (`ApiKeysTest.java:73`, `:75`).
+                assert!(throttle_time_field.is_none(), "Unexpected throttle time field: {api_key}");
             } else {
-                assert!(throttle_time_field.is_some(), "Throttle time field missing: {}", api_key.name());
+                assert!(throttle_time_field.is_some(), "Throttle time field missing: {api_key}");
             }
         }
     }

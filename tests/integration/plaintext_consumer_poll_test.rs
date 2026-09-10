@@ -72,7 +72,7 @@
 //! - `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout` (line 471)
 //!   → `test_async_consumer_poll_eventually_returns_records_with_zero_timeout`
 //! - `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero` (line 494)
-//!   → `test_async_consumer_no_offset_for_partition_exception_on_poll_zero`
+//!   → `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
 //! - `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance` (line 518)
 //!   → `test_async_consumer_recovery_on_poll_after_delayed_rebalance`
 //!
@@ -133,7 +133,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -198,7 +198,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -268,14 +268,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -346,12 +346,12 @@ impl TestConsumerReassignmentListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -582,9 +582,9 @@ async fn test_async_consumer_max_poll_interval_ms() {
     let listener: Arc<dyn ConsumerRebalanceListener> =
         Arc::new(TestConsumerReassignmentListener::new(counters.clone()));
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -644,7 +644,7 @@ struct DelayInRevocationListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayInRevocationListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.revoked_partitions_seen
             .lock()
             .expect("revoked_partitions_seen lock poisoned")
@@ -686,7 +686,7 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -704,7 +704,7 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
     /// `on_partitions_lost` delegates to `on_partitions_revoked`, so without it
     /// a lost-partitions event would run the 1500 ms sleep and the in-callback
     /// commit for a member that no longer owns the partition.
-    async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -750,7 +750,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let admin = admin_for(ctx.bootstrap_servers());
     create_topic(admin.as_ref(), &topic, 2, 1).await;
     create_topic(admin.as_ref(), &other_topic, 2, 1).await;
-    admin.close(Duration::from_secs(5)).await;
+    admin.close_timeout(Duration::from_secs(5)).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
@@ -779,9 +779,9 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     });
 
     consumer
-        .subscribe_with_listener(vec![topic.clone()], Arc::clone(&listener))
+        .subscribe_topics_listener(vec![topic.clone()], Arc::clone(&listener))
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -826,14 +826,14 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     //     awaitRebalance(consumer, listener);
     //     consumer.subscribe(List.of("otherTopic"), listener);
     //
-    // and so must this, because `subscribe_with_listener` REPLACES the stored
+    // and so must this, because `subscribe_topics_listener` REPLACES the stored
     // listener (`subscribe_internal_topics` assigns into
     // `self.rebalance_listener`). Installing a different one here swapped
     // `DelayInRevocationListener` out immediately before the revocation it
     // exists to observe, so the in-callback commit never ran and
     // `committed_position` stayed at its -1 sentinel.
     consumer
-        .subscribe_with_listener(vec![other_topic.clone()], Arc::clone(&listener))
+        .subscribe_topics_listener(vec![other_topic.clone()], Arc::clone(&listener))
         .await
         .expect("second subscribe should succeed");
 
@@ -895,12 +895,12 @@ struct DelayInAssignmentListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayInAssignmentListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         // Sleep longer than the session timeout (Java: 1.5s vs
         // session.timeout.ms=1000); we should still be in the group
         // after invocation.
@@ -939,9 +939,9 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     let listener: Arc<dyn ConsumerRebalanceListener> =
         Arc::new(DelayInAssignmentListener { counters: counters.clone() });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment (with the in-listener sleep).
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -981,9 +981,9 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     let listener: Arc<dyn ConsumerRebalanceListener> =
         Arc::new(TestConsumerReassignmentListener::new(counters.clone()));
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -1030,7 +1030,10 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Drive `poll(0)` until we've collected `num_messages` records on
     // `tp`. Java's `awaitNonEmptyRecords(consumer, partition, 0L)`
@@ -1070,7 +1073,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// we drive `poll(Duration::ZERO)` in a loop and check for the error)
 /// eventually surfaces `NoOffsetForPartition`.
 ///
-/// The Rust error variant flattens through `KafkaError::IllegalState`
+/// The Rust error variant flattens through `Error::LocalIllegalState`
 /// per Phase-1 design (see `src/consumer/errors.rs:237-265`); we
 /// assert against the canonical message substring "Undefined offset
 /// with no reset policy", as the pilot assign test does.
@@ -1085,7 +1088,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// a small non-zero timeout (50ms) per poll to give the bg task room
 /// to deliver the response. Outcome parity with Java is preserved.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_no_offset_for_partition_exception_on_poll_zero() {
+async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_no_offset_poll_zero");
@@ -1147,7 +1150,7 @@ struct DelayedRevocationFenceListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         if !partitions.is_empty() && partitions.contains(&self.tp) {
             // On the second rebalance, sleep longer than the rebalance
             // timeout to get fenced.
@@ -1161,7 +1164,7 @@ impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -1218,15 +1221,15 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
         rebalance_timeout,
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], Arc::clone(&listener))
+        .subscribe_topics_listener(vec![topic.clone()], Arc::clone(&listener))
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Subscribe to get first assignment (no delays) and verify
     // consumption. Java passes `0L` for the poll timeout, but Rust's
     // `poll(Duration::ZERO)` exits its inner loop immediately
     // without giving the bg task time to deliver records (see the
-    // rustdoc on `test_async_consumer_no_offset_for_partition_exception_on_poll_zero`
+    // rustdoc on `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
     // for the equivalent translation deviation). Use 100ms per poll.
     let count =
         await_non_empty_records_count(consumer.as_mut(), &tp, Duration::from_millis(100), Duration::from_secs(60))
@@ -1236,7 +1239,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     // Subscribe to different topic. This will trigger the delayed
     // revocation exceeding rebalance timeout and get fenced.
     consumer
-        .subscribe_with_listener(vec![other_topic.clone()], listener)
+        .subscribe_topics_listener(vec![other_topic.clone()], listener)
         .await
         .expect("second subscribe should succeed");
 
@@ -1301,13 +1304,13 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
 /// (a no-op record is just appended).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.to_string(),
             Some(partition),
             Some(b"__provisioner__".to_vec()),
             Some(b"__provisioner__".to_vec()),
         )
-        .expect("ProducerRecord::with_partition should succeed");
+        .expect("ProducerRecord::new_partition_key should succeed");
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
             .await
             .expect("provisioner send should succeed");

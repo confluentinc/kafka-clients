@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::PartitionInfo;
@@ -46,15 +46,15 @@ pub trait Producer<K, V> {
     ///
     /// Returns `Err` if:
     /// - No `transactional.id` has been configured
-    ///   ([`IllegalState`](KafkaError::IllegalState))
+    ///   ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The broker does not support transactions
-    ///   ([`UnsupportedVersion`](KafkaError::UnsupportedVersion))
+    ///   ([`UnsupportedVersion`](Error::UnsupportedVersion))
     /// - The configured `transactional.id` is not authorized, or the idempotent
     ///   producer id is unavailable
     /// - The producer has encountered a previous fatal error
     /// - Initialization does not complete within `max.block.ms`
-    ///   ([`Timeout`](KafkaError::Timeout))
-    async fn init_transactions(&self) -> Result<(), KafkaError>;
+    ///   ([`Timeout`](Error::Timeout))
+    async fn init_transactions(&self) -> Result<(), Error>;
 
     /// Should be called before the start of each new transaction.
     ///
@@ -70,7 +70,7 @@ pub trait Producer<K, V> {
     /// `init_transactions` has not yet been invoked, if another producer with
     /// the same `transactional.id` has fenced this one, or if the producer has
     /// encountered a previous fatal error.
-    fn begin_transaction(&self) -> Result<(), KafkaError>;
+    fn begin_transaction(&self) -> Result<(), Error>;
 
     /// Sends a list of specified offsets to the consumer group coordinator, and
     /// also marks those offsets as part of the current transaction.
@@ -82,12 +82,12 @@ pub trait Producer<K, V> {
     /// Returns `Err` if no `transactional.id` has been configured or no
     /// transaction has been started, if `group_metadata` is invalid, if the
     /// commit failed and cannot be retried, or if the offsets are not sent
-    /// within `max.block.ms` ([`Timeout`](KafkaError::Timeout)).
+    /// within `max.block.ms` ([`Timeout`](Error::Timeout)).
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// Commits the ongoing transaction.
     ///
@@ -98,8 +98,8 @@ pub trait Producer<K, V> {
     /// Returns `Err` if no `transactional.id` has been configured or no
     /// transaction has been started, if the producer has encountered a previous
     /// fatal or abortable error, or if the commit does not complete within
-    /// `max.block.ms` ([`Timeout`](KafkaError::Timeout)).
-    async fn commit_transaction(&self) -> Result<(), KafkaError>;
+    /// `max.block.ms` ([`Timeout`](Error::Timeout)).
+    async fn commit_transaction(&self) -> Result<(), Error>;
 
     /// Aborts the ongoing transaction.
     ///
@@ -110,14 +110,14 @@ pub trait Producer<K, V> {
     /// Returns `Err` if no `transactional.id` has been configured or no
     /// transaction has been started, if the producer has encountered a previous
     /// fatal error, or if the abort does not complete within `max.block.ms`
-    /// ([`Timeout`](KafkaError::Timeout)).
-    async fn abort_transaction(&self) -> Result<(), KafkaError>;
+    /// ([`Timeout`](Error::Timeout)).
+    async fn abort_transaction(&self) -> Result<(), Error>;
 
     /// Asynchronously send a record to a topic. Equivalent to
-    /// `send_with_callback(record, None)`.
+    /// `send_callback(record, None)`.
     ///
-    /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError>;
+    /// See [`send_callback`](Producer::send_callback) for details.
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error>;
 
     /// Asynchronously send a record to a topic and invoke the provided callback
     /// when the send has been acknowledged.
@@ -135,14 +135,14 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if:
-    /// - The producer has already been closed ([`IllegalState`](KafkaError::IllegalState))
-    /// - The key or value cannot be serialized ([`Serialization`](KafkaError::Serialization))
+    /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
+    /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
     /// - A Kafka-related error occurs
-    async fn send_with_callback(
+    async fn send_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError>;
+    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
 
     /// Invoking this method makes all buffered records immediately available to send
     /// and awaits the completion of the requests associated with these records.
@@ -150,7 +150,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during flushing.
-    async fn flush(&self) -> Result<(), KafkaError>;
+    async fn flush(&self) -> Result<(), Error>;
 
     /// Get the partition metadata for the given topic.
     ///
@@ -159,9 +159,9 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if:
-    /// - The topic cannot be found within `max.block.ms` ([`Timeout`](KafkaError::Timeout))
+    /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
     /// - The producer has been closed
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
 
     /// Get the full set of producer metrics maintained by this producer.
     ///
@@ -181,7 +181,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close(&self) -> Result<(), KafkaError>;
+    async fn close(&self) -> Result<(), Error>;
 
     /// Close this producer, waiting up to the given timeout for pending requests
     /// to complete.
@@ -193,5 +193,5 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError>;
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error>;
 }

@@ -164,7 +164,7 @@ impl InFlightRequest {
     ///
     /// A timed-out request is also considered disconnected.
     pub fn timed_out(&mut self, time_ms: i64) -> ClientResponse {
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             self.header.clone(),
             self.callback.take(),
             &self.destination,
@@ -447,6 +447,7 @@ mod tests {
     use super::*;
     use crate::common::network::{ByteBufferSend, NetworkSend};
     use crate::common::protocol::ApiKeys;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
     fn add_request(
         in_flight_requests: &mut InFlightRequests,
@@ -458,8 +459,15 @@ mod tests {
         let id = *correlation_id;
         *correlation_id += 1;
 
-        let header =
-            RequestHeader::new(&ApiKeys::METADATA, 0, "clientId", id).expect("header creation should not fail");
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(0)
+                .set_client_id("clientId")
+                .set_correlation_id(id)
+                .build(),
+        )
+        .expect("header creation should not fail");
 
         // Create a minimal completed NetworkSend for testing.
         // An empty ByteBufferSend is immediately "completed" (remaining == 0).

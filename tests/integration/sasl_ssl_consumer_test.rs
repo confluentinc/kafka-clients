@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -61,7 +61,7 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -149,13 +149,13 @@ async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &Topic
 
     let mut last_future = None;
     for i in 0..num_records {
-        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition(
+        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::new_partition_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(format!("key {i}").into_bytes()),
             Some(format!("value {i}").into_bytes()),
         )
-        .expect("ProducerRecord::with_partition should not fail for a non-negative partition");
+        .expect("ProducerRecord::new_partition_key should not fail for a non-negative partition");
         // Call the `Producer` trait `send` (1-arg) via fully-qualified syntax
         // so the inherent zero-copy
         // `KafkaProducer::<Vec<u8>,Vec<u8>>::send(record, callback)` does not
@@ -209,7 +209,10 @@ async fn test_sasl_ssl_consume_records() {
     )
     .expect("new_consumer should succeed for SASL_SSL");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     let records = consume_records(&mut *consumer, NUM_RECORDS).await;
     assert_eq!(
@@ -247,7 +250,10 @@ async fn test_sasl_ssl_wrong_credentials() {
     )
     .expect("new_consumer should succeed (config is structurally valid)");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Drive poll for a bounded period; authentication must fail and surface as
     // an error rather than hanging. We bound the whole sequence with an outer

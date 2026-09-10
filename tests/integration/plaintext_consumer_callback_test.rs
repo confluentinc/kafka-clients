@@ -86,7 +86,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -119,7 +119,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -170,13 +170,13 @@ fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
 /// Provision a single-partition topic (this suite only cares about
 /// partition 0 of `topic` and `newTopic`).
 async fn ensure_topic(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    let record = ProducerRecord::with_partition(
+    let record = ProducerRecord::new_partition_key(
         topic.to_string(),
         Some(0),
         Some(b"__provisioner__".to_vec()),
         Some(b"__provisioner__".to_vec()),
     )
-    .expect("ProducerRecord::with_partition should succeed");
+    .expect("ProducerRecord::new_partition_key should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
         .await
         .expect("provisioner send should succeed");
@@ -199,11 +199,11 @@ struct RecordingAssignedListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for RecordingAssignedListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         let got: HashSet<TopicPartition> = partitions.iter().cloned().collect();
         // Java: `if (partitions.containsAll(expectedPartitionsInCallback))`.
         if self.expected.iter().all(|tp| got.contains(tp)) {
@@ -263,7 +263,7 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
         captured: Arc::clone(&captured1),
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener1)
+        .subscribe_topics_listener(vec![topic.clone()], listener1)
         .await
         .expect("first subscribe should succeed");
     let got1 = poll_until_captured(consumer.as_mut(), &captured1, Duration::from_secs(90)).await;
@@ -283,7 +283,7 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
         captured: Arc::clone(&captured2),
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone(), new_topic.clone()], listener2)
+        .subscribe_topics_listener(vec![topic.clone(), new_topic.clone()], listener2)
         .await
         .expect("expand subscribe should succeed");
     let got2 = poll_until_captured(consumer.as_mut(), &captured2, Duration::from_secs(90)).await;
@@ -317,7 +317,7 @@ enum CallbackAction {
     /// then assert the exact message. Records the resulting error.
     Assign {
         tp: TopicPartition,
-        result: Arc<Mutex<Option<Result<(), KafkaError>>>>,
+        result: Arc<Mutex<Option<Result<(), Error>>>>,
     },
     /// Java: `assertTrue(consumer.assignment().contains(tp))`. Records the
     /// `assignment()` set seen from inside the callback.
@@ -334,14 +334,14 @@ enum CallbackAction {
     /// position result.
     Position {
         tp: TopicPartition,
-        result: Arc<Mutex<Option<Result<i64, KafkaError>>>>,
+        result: Arc<Mutex<Option<Result<i64, Error>>>>,
     },
-    /// Java: `consumer.seek(tp, offset); consumer.pause([tp])`. Records the
+    /// Java: `consumer.seek_offset(tp, offset); consumer.pause([tp])`. Records the
     /// combined result.
     SeekAndPause {
         tp: TopicPartition,
         offset: i64,
-        result: Arc<Mutex<Option<Result<(), KafkaError>>>>,
+        result: Arc<Mutex<Option<Result<(), Error>>>>,
     },
 }
 
@@ -368,7 +368,7 @@ impl CallbackAction {
             },
             CallbackAction::SeekAndPause { tp, offset, result } => {
                 let r = async {
-                    handle.seek(tp.clone(), *offset).await?;
+                    handle.seek_offset(tp.clone(), *offset).await?;
                     handle.pause(std::slice::from_ref(tp)).await
                 }
                 .await;
@@ -396,7 +396,7 @@ struct ReentrantListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for ReentrantListener {
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         if self.on_assigned && partitions.contains(&self.tp) {
             self.action.run(&self.handle).await;
             self.done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -404,7 +404,7 @@ impl ConsumerRebalanceListener for ReentrantListener {
         Ok(())
     }
 
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         if !self.on_assigned && partitions.contains(&self.tp) {
             self.action.run(&self.handle).await;
             self.done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -431,7 +431,7 @@ async fn trigger_on_partitions_assigned(
         done: Arc::clone(&done),
     });
     consumer
-        .subscribe_with_listener(vec![topic.to_string()], listener)
+        .subscribe_topics_listener(vec![topic.to_string()], listener)
         .await
         .expect("subscribe should succeed");
     poll_until_flag(consumer, &done, Duration::from_secs(90)).await;
@@ -457,7 +457,7 @@ async fn trigger_on_partitions_revoked(
         revoked: Arc::clone(&revoked),
     });
     consumer
-        .subscribe_with_listener(vec![topic.to_string()], listener)
+        .subscribe_topics_listener(vec![topic.to_string()], listener)
         .await
         .expect("subscribe should succeed");
     poll_until_flag(consumer, &assigned, Duration::from_secs(90)).await;
@@ -488,14 +488,14 @@ struct RevokeTrackingListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for RevokeTrackingListener {
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         if partitions.contains(&self.tp) {
             self.assigned.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     }
 
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         if partitions.contains(&self.tp) {
             self.action.run(&self.handle).await;
             self.revoked.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -524,7 +524,7 @@ const MUTUALLY_EXCLUSIVE_MSG: &str = "Subscription to topics, partitions and pat
 
 /// Java `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned`
 /// (line 66): `assign()` inside `onPartitionsAssigned` throws
-/// `IllegalState` "Subscription to topics, partitions and pattern are
+/// `LocalIllegalState` "Subscription to topics, partitions and pattern are
 /// mutually exclusive".
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rebalance_listener_assign_on_partitions_assigned() {
@@ -538,7 +538,7 @@ async fn test_rebalance_listener_assign_on_partitions_assigned() {
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
-    let result: Arc<Mutex<Option<Result<(), KafkaError>>>> = Arc::new(Mutex::new(None));
+    let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
         &topic,
@@ -554,7 +554,7 @@ async fn test_rebalance_listener_assign_on_partitions_assigned() {
         .expect("action ran")
         .expect_err("assign() must fail inside callback");
     assert!(
-        matches!(&err, KafkaError::IllegalState(msg) if msg == MUTUALLY_EXCLUSIVE_MSG),
+        matches!(&err, Error::LocalIllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
         "expected IllegalState '{MUTUALLY_EXCLUSIVE_MSG}', got {err:?}"
     );
     consumer.close().await.expect("consumer close should succeed");
@@ -634,7 +634,7 @@ async fn test_rebalance_listener_assign_on_partitions_revoked() {
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
-    let result: Arc<Mutex<Option<Result<(), KafkaError>>>> = Arc::new(Mutex::new(None));
+    let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_revoked(
         consumer.as_mut(),
         &topic,
@@ -650,7 +650,7 @@ async fn test_rebalance_listener_assign_on_partitions_revoked() {
         .expect("action ran")
         .expect_err("assign() must fail inside callback");
     assert!(
-        matches!(&err, KafkaError::IllegalState(msg) if msg == MUTUALLY_EXCLUSIVE_MSG),
+        matches!(&err, Error::LocalIllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
         "expected IllegalState '{MUTUALLY_EXCLUSIVE_MSG}', got {err:?}"
     );
     consumer.close().await.expect("consumer close should succeed");
@@ -730,7 +730,7 @@ async fn test_get_position_of_newly_assigned_partition_on_partitions_assigned_ca
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
-    let result: Arc<Mutex<Option<Result<i64, KafkaError>>>> = Arc::new(Mutex::new(None));
+    let result: Arc<Mutex<Option<Result<i64, Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
         &topic,
@@ -762,13 +762,13 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     for i in 0..total_records {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.clone(),
             Some(0),
             Some(format!("key-{i}").into_bytes()),
             Some(format!("value-{i}").into_bytes()),
         )
-        .expect("ProducerRecord::with_partition should succeed");
+        .expect("ProducerRecord::new_partition_key should succeed");
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
             .await
             .expect("send should succeed");
@@ -778,7 +778,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
-    let result: Arc<Mutex<Option<Result<(), KafkaError>>>> = Arc::new(Mutex::new(None));
+    let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
         &topic,
@@ -808,7 +808,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
         let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
-        for rec in records.records_for_partition(&tp) {
+        for rec in records.records_partition(&tp) {
             assert_eq!(
                 rec.offset(),
                 next_offset,

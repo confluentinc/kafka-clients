@@ -73,7 +73,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -129,7 +129,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -198,14 +198,14 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
                 .await
@@ -404,12 +404,12 @@ async fn consume_and_verify_records_bytes(
 ///
 /// Rust counterpart uses `Arc<AtomicUsize>` for the counters (the
 /// callback is shared across the test task and the bg task via
-/// `Arc<dyn OffsetCommitCallback>`) and `Arc<Mutex<Option<KafkaError>>>`
+/// `Arc<dyn OffsetCommitCallback>`) and `Arc<Mutex<Option<Error>>>`
 /// for the last error.
 struct CountConsumerCommitCallback {
     success_count: Arc<AtomicUsize>,
     fail_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<KafkaError>>>,
+    last_error: Arc<Mutex<Option<Error>>>,
 }
 
 impl CountConsumerCommitCallback {
@@ -436,7 +436,7 @@ impl CountConsumerCommitCallback {
 struct CountConsumerCommitCallbackHandles {
     success_count: Arc<AtomicUsize>,
     fail_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<KafkaError>>>,
+    last_error: Arc<Mutex<Option<Error>>>,
 }
 
 impl CountConsumerCommitCallbackHandles {
@@ -458,7 +458,7 @@ impl CountConsumerCommitCallbackHandles {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
@@ -514,9 +514,9 @@ async fn test_async_assign_and_commit_async_not_committed() {
     let cb = CountConsumerCommitCallback::new();
     let handles = cb.handles();
     consumer
-        .commit_async_with_callback(Arc::new(cb))
+        .commit_async_callback(Arc::new(cb))
         .await
-        .expect("commit_async_with_callback should succeed");
+        .expect("commit_async_callback should succeed");
 
     poll_until_true(
         consumer.as_mut(),
@@ -623,7 +623,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
 
     consumer.commit_sync().await.expect("commit_sync should succeed");
@@ -707,7 +707,7 @@ async fn test_async_assign_and_consume_skipping_position() {
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     let offset: i64 = 1;
-    consumer.seek(tp.clone(), offset).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), offset).await.expect("seek should succeed");
     consume_and_verify_records_bytes(
         consumer.as_mut(),
         &tp,
@@ -757,7 +757,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         create_topic(consumer.as_mut(), &topic, 1).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-        consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+        consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
         consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
         consumer.commit_sync().await.expect("commit_sync should succeed");
 
@@ -906,7 +906,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
     consumer.commit_sync().await.expect("commit_sync should succeed");
 

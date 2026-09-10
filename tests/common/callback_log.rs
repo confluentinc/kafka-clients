@@ -19,11 +19,11 @@
 //! # Why this is not on the `Consumer` / `Producer` trait
 //!
 //! For the native Rust backend a test could simply pass an
-//! `Arc<dyn ConsumerRebalanceListener>` to `subscribe_with_listener`. For the
+//! `Arc<dyn ConsumerRebalanceListener>` to `subscribe_topics_listener`. For the
 //! gRPC backends it cannot: the callback must be registered *by the server's own
 //! binding* (that is the thing under test), so it fires in another process and
 //! nothing can be handed across the wire. `MultilanguageConsumer`'s
-//! `subscribe_with_listener` / `commit_async_*_with_callback` therefore stay
+//! `subscribe_topics_listener` / `commit_async_*_with_callback` therefore stay
 //! `unsupported` — synthesizing local listener invocations out of a remote log
 //! would re-test the Rust core rather than the binding, and would be timing
 //! fragile.
@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use confluent_kafka::common::{KafkaError, TopicPartition};
+use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerRebalanceListener, OffsetAndMetadata, OffsetCommitCallback};
 use confluent_kafka::producer::{Producer, ProducerRecord, RecordMetadata};
 
@@ -132,17 +132,17 @@ struct LoggingRebalanceListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for LoggingRebalanceListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         push(&self.log, rebalance_entry(KIND_REVOKED, partitions));
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         push(&self.log, rebalance_entry(KIND_ASSIGNED, partitions));
         Ok(())
     }
 
-    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         push(&self.log, rebalance_entry(KIND_LOST, partitions));
         Ok(())
     }
@@ -155,7 +155,7 @@ struct LoggingCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for LoggingCommitCallback {
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
         let mut entry = CallbackLogEntry {
             kind: KIND_COMMIT.to_string(),
             partitions: Vec::with_capacity(offsets.len()),
@@ -172,7 +172,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
     }
 }
 
-fn delivery_entry(metadata: Option<&RecordMetadata>, error: Option<&KafkaError>) -> CallbackLogEntry {
+fn delivery_entry(metadata: Option<&RecordMetadata>, error: Option<&Error>) -> CallbackLogEntry {
     let mut entry = CallbackLogEntry {
         kind: KIND_DELIVERY.to_string(),
         error: error.map(|e| e.to_string()).unwrap_or_default(),
@@ -221,17 +221,17 @@ impl ConsumerCallbackLog {
     /// so the native arm can reach the real trait method.
     ///
     /// Registration is per-subscribe: calling this again re-registers a listener
-    /// writing to the same log, while a plain `consumer.subscribe(topics)`
+    /// writing to the same log, while a plain `consumer.subscribe_topics(topics)`
     /// releases it.
     pub async fn subscribe_with_logging_listener(
         &self,
         consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
         topics: Vec<String>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {
                 let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log) });
-                consumer.subscribe_with_listener(topics, listener).await
+                consumer.subscribe_topics_listener(topics, listener).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ConsumerCallbackLog::Grpc(remote) => remote.subscribe_with_listener(topics).await,
@@ -243,19 +243,19 @@ impl ConsumerCallbackLog {
     pub async fn commit_async_with_logging_callback(
         &self,
         consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {
                 let callback = Arc::new(LoggingCommitCallback { log: Arc::clone(log) });
-                consumer.commit_async_with_callback(callback).await
+                consumer.commit_async_callback(callback).await
             },
             #[cfg(feature = "multilanguage-tests")]
-            ConsumerCallbackLog::Grpc(remote) => remote.commit_async_with_callback().await,
+            ConsumerCallbackLog::Grpc(remote) => remote.commit_async_callback().await,
         }
     }
 
     /// Snapshot the log, oldest entry first. Does not clear it.
-    pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, KafkaError> {
+    pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, Error> {
         match self {
             ConsumerCallbackLog::Native(log) => Ok(log.lock().expect("callback log poisoned").clone()),
             #[cfg(feature = "multilanguage-tests")]
@@ -285,10 +285,10 @@ impl ProducerCallbackLog {
 
     /// Send `record` with a delivery callback that appends a `"delivery"` entry
     /// to this log. Returns the send future so the caller can still await the
-    /// record's completion, exactly like `Producer::send_with_callback`.
+    /// record's completion, exactly like `Producer::send_callback`.
     ///
     /// The gRPC arm passes a no-op callback rather than one that appends
-    /// locally: `MultilanguageProducer::send_with_callback` sets the proto
+    /// locally: `MultilanguageProducer::send_callback` sets the proto
     /// `with_callback` flag from `callback.is_some()` (which is what makes the
     /// *server* register a real delivery callback) and then invokes the closure
     /// client-side. Appending there too would double-count, and would record the
@@ -297,7 +297,7 @@ impl ProducerCallbackLog {
         &self,
         producer: &P,
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
-    ) -> Result<confluent_kafka::common::KafkaFuture<RecordMetadata>, KafkaError>
+    ) -> Result<confluent_kafka::common::KafkaFuture<RecordMetadata>, Error>
     where
         P: Producer<Vec<u8>, Vec<u8>>,
     {
@@ -306,18 +306,18 @@ impl ProducerCallbackLog {
                 let log = Arc::clone(log);
                 let callback: confluent_kafka::producer::Callback =
                     Box::new(move |metadata, error| push(&log, delivery_entry(metadata, error)));
-                producer.send_with_callback(record, Some(callback)).await
+                producer.send_callback(record, Some(callback)).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ProducerCallbackLog::Grpc(_) => {
                 let callback: confluent_kafka::producer::Callback = Box::new(|_, _| {});
-                producer.send_with_callback(record, Some(callback)).await
+                producer.send_callback(record, Some(callback)).await
             },
         }
     }
 
     /// Snapshot the log, oldest entry first. Does not clear it.
-    pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, KafkaError> {
+    pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, Error> {
         match self {
             ProducerCallbackLog::Native(log) => Ok(log.lock().expect("callback log poisoned").clone()),
             #[cfg(feature = "multilanguage-tests")]
@@ -383,7 +383,7 @@ pub mod grpc {
     //! The `GetCallbackLog` client side, plus the two flag-setting RPCs that
     //! ask a server to register real callbacks.
 
-    use confluent_kafka::common::KafkaError;
+    use confluent_kafka::common::Error;
     use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
     use multilanguage_test_server::proto::producer_service_client::ProducerServiceClient;
     use multilanguage_test_server::proto::{self};
@@ -418,7 +418,7 @@ pub mod grpc {
         }
 
         /// `Subscribe` with `with_listener = true`.
-        pub async fn subscribe_with_listener(&self, topics: Vec<String>) -> Result<(), KafkaError> {
+        pub async fn subscribe_with_listener(&self, topics: Vec<String>) -> Result<(), Error> {
             let mut client = self.client.clone();
             let response = client
                 .subscribe(proto::SubscribeRequest { consumer_id: self.consumer_id, topics, with_listener: true })
@@ -433,7 +433,7 @@ pub mod grpc {
 
         /// `CommitAsync` with `with_callback = true` and no explicit offsets
         /// (commit the current positions).
-        pub async fn commit_async_with_callback(&self) -> Result<(), KafkaError> {
+        pub async fn commit_async_callback(&self) -> Result<(), Error> {
             let mut client = self.client.clone();
             let response = client
                 .commit_async(proto::CommitAsyncRequest {
@@ -450,7 +450,7 @@ pub mod grpc {
             }
         }
 
-        pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, KafkaError> {
+        pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, Error> {
             let mut client = self.client.clone();
             let response = client
                 .get_callback_log(proto::CallbackLogRequest { consumer_id: self.consumer_id })
@@ -473,7 +473,7 @@ pub mod grpc {
             Self { client: ProducerServiceClient::new(channel), producer_id, backend }
         }
 
-        pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, KafkaError> {
+        pub async fn entries(&self) -> Result<Vec<CallbackLogEntry>, Error> {
             let mut client = self.client.clone();
             let response = client
                 .get_callback_log(proto::ProducerCallbackLogRequest { producer_id: self.producer_id })

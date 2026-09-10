@@ -28,6 +28,7 @@ use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
     ApiVersionsRequestBuilder, MetadataRequestBuilder, MetadataResponse, RequestBuilder, RequestHeader,
+    RequestHeaderOptionsBuilder,
 };
 
 use crate::common::cluster_config::ClusterConfig;
@@ -86,8 +87,15 @@ async fn send_and_receive(
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header =
-        RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
+    let header = RequestHeader::new_options(
+        RequestHeaderOptionsBuilder::new()
+            .set_request_api_key(api_key)
+            .set_request_version(version)
+            .set_client_id(client_id)
+            .set_correlation_id(correlation_id)
+            .build(),
+    )
+    .expect("Failed to create request header");
 
     let send = request.to_send(&header).expect("Failed to serialize request");
     let network_send = NetworkSend::new(NODE_ID, Box::new(send));
@@ -138,7 +146,8 @@ async fn send_metadata_request(
     topics: Option<&[&str]>,
     correlation_id: i32,
 ) -> MetadataResponse {
-    let mut builder = MetadataRequestBuilder::new_with_version(topics, true, metadata_version);
+    let mut builder =
+        MetadataRequestBuilder::new_topics_allow_auto_topic_creation_version(topics, true, metadata_version);
 
     let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", correlation_id).await;
 

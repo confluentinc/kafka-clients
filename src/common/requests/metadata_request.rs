@@ -128,7 +128,7 @@ impl MetadataRequest {
 
         response_data.set_throttle_time_ms(throttle_time_ms);
         response_data.set_error_code(error.code());
-        ConcreteResponse::Metadata(MetadataResponse::from_data(response_data, true))
+        ConcreteResponse::Metadata(MetadataResponse::new_has_reliable_leader_epochs(response_data, true))
     }
 
     /// Parses a `MetadataRequest` from a readable buffer at the given version.
@@ -182,9 +182,126 @@ pub struct MetadataRequestBuilder {
     latest_allowed_version: i16,
 }
 
+/// The parameters of Java's
+/// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`
+/// (`MetadataRequest.java:52`).
+///
+/// Java's four `Builder` constructors (`:43`, `:48`, `:52`, `:79`) share no
+/// parameter name, so all four of `:52`'s parameters reach its derived name.
+/// CLAUDE.md §2 caps that at three and makes this struct the method's *only*
+/// parameter, so every Java parameter lives here. This struct has no Java
+/// counterpart: it exists solely to satisfy that naming rule (DoD #7).
+///
+/// It deliberately has **no** `Default`. Java's narrowest `Builder(topics,
+/// allowAutoTopicCreation)` (`:79`) does supply the version range
+/// (`ApiKeys.METADATA.oldestVersion()`, `latestVersion()`) but takes `topics`
+/// and `allowAutoTopicCreation` from its caller, so those two have no
+/// Java-derived default — and a synthesised `topics` of `None` means *all*
+/// topics, which is a materially different request. Build it from
+/// [`MetadataRequestBuilderOptionsBuilder::new`], setting those two and
+/// overriding the versions you need: [`MetadataRequestBuilderOptionsBuilder::build`] panics if any of `topics`, `allow_auto_topic_creation` was not set.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct MetadataRequestBuilderOptions<'a> {
+    /// Java's `topics`. `None` requests every topic, as in Java's `null`.
+    pub topics: Option<&'a [&'a str]>,
+    /// Java's `allowAutoTopicCreation`.
+    pub allow_auto_topic_creation: bool,
+    /// Java's `minVersion`. Starts as `ApiKeys.METADATA.oldestVersion()`, as in
+    /// `:79`.
+    pub min_version: i16,
+    /// Java's `maxVersion`. Starts as `ApiKeys.METADATA.latestVersion()`, as in
+    /// `:79`.
+    pub max_version: i16,
+}
+
+/// Fluent builder for [`MetadataRequestBuilderOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`MetadataRequestBuilderOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct MetadataRequestBuilderOptionsBuilder<'a> {
+    topics: Option<Option<&'a [&'a str]>>,
+    allow_auto_topic_creation: Option<bool>,
+    min_version: i16,
+    max_version: i16,
+}
+
+impl<'a> Default for MetadataRequestBuilderOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> MetadataRequestBuilderOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            topics: None,
+            allow_auto_topic_creation: None,
+            min_version: ApiKeys::METADATA.oldest_version(),
+            max_version: ApiKeys::METADATA.latest_version(),
+        }
+    }
+
+    /// Sets [`MetadataRequestBuilderOptions::topics`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_topics(mut self, topics: Option<&'a [&'a str]>) -> Self {
+        self.topics = Some(topics);
+        self
+    }
+    /// Sets [`MetadataRequestBuilderOptions::allow_auto_topic_creation`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_allow_auto_topic_creation(mut self, allow_auto_topic_creation: bool) -> Self {
+        self.allow_auto_topic_creation = Some(allow_auto_topic_creation);
+        self
+    }
+    /// Sets [`MetadataRequestBuilderOptions::min_version`].
+    pub fn set_min_version(mut self, min_version: i16) -> Self {
+        self.min_version = min_version;
+        self
+    }
+    /// Sets [`MetadataRequestBuilderOptions::max_version`].
+    pub fn set_max_version(mut self, max_version: i16) -> Self {
+        self.max_version = max_version;
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `topics`, `allow_auto_topic_creation`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
+    pub fn build(self) -> MetadataRequestBuilderOptions<'a> {
+        MetadataRequestBuilderOptions {
+            topics: self.topics.unwrap_or_else(|| Self::missing("topics")),
+            allow_auto_topic_creation: self
+                .allow_auto_topic_creation
+                .unwrap_or_else(|| Self::missing("allow_auto_topic_creation")),
+            min_version: self.min_version,
+            max_version: self.max_version,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("MetadataRequestBuilderOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
+    }
+}
+
 impl MetadataRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: MetadataRequestData) -> Self {
+    ///
+    /// Corresponds to Java's `MetadataRequest.Builder(MetadataRequestData)`
+    /// (`MetadataRequest.java:43`).
+    pub fn new_data(data: MetadataRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::METADATA.oldest_version(),
@@ -193,27 +310,45 @@ impl MetadataRequestBuilder {
     }
 
     /// Creates a builder with the given topics and auto-creation flag.
-    pub fn new(topics: Option<&[&str]>, allow_auto_topic_creation: bool) -> Self {
-        Self::new_with_version_range(
-            topics,
-            allow_auto_topic_creation,
-            ApiKeys::METADATA.oldest_version(),
-            ApiKeys::METADATA.latest_version(),
+    ///
+    /// Corresponds to Java's `MetadataRequest.Builder(List<String>, boolean)`
+    /// (`MetadataRequest.java:79`).
+    pub fn new_topics_allow_auto_topic_creation(topics: Option<&[&str]>, allow_auto_topic_creation: bool) -> Self {
+        Self::new_options(
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(topics)
+                .set_allow_auto_topic_creation(allow_auto_topic_creation)
+                .build(),
         )
     }
 
     /// Creates a builder targeting a specific version.
-    pub fn new_with_version(topics: Option<&[&str]>, allow_auto_topic_creation: bool, version: i16) -> Self {
-        Self::new_with_version_range(topics, allow_auto_topic_creation, version, version)
+    ///
+    /// Corresponds to Java's
+    /// `MetadataRequest.Builder(List<String>, boolean, short allowedVersion)`
+    /// (`MetadataRequest.java:48`).
+    pub fn new_topics_allow_auto_topic_creation_version(
+        topics: Option<&[&str]>,
+        allow_auto_topic_creation: bool,
+        version: i16,
+    ) -> Self {
+        Self::new_options(
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(topics)
+                .set_allow_auto_topic_creation(allow_auto_topic_creation)
+                .set_min_version(version)
+                .set_max_version(version)
+                .build(),
+        )
     }
 
     /// Creates a builder with the given topics, auto-creation flag, and version range.
-    pub fn new_with_version_range(
-        topics: Option<&[&str]>,
-        allow_auto_topic_creation: bool,
-        min_version: i16,
-        max_version: i16,
-    ) -> Self {
+    ///
+    /// Corresponds to Java's
+    /// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`
+    /// (`MetadataRequest.java:52`).
+    pub fn new_options(options: MetadataRequestBuilderOptions<'_>) -> Self {
+        let MetadataRequestBuilderOptions { topics, allow_auto_topic_creation, min_version, max_version } = options;
         let data = Self::request_topic_names_or_all_topics(topics, allow_auto_topic_creation);
         Self { data, oldest_allowed_version: min_version, latest_allowed_version: max_version }
     }
@@ -265,12 +400,12 @@ impl MetadataRequestBuilder {
         let mut data = MetadataRequestData::new();
         data.set_topics(None);
         data.set_allow_auto_topic_creation(true);
-        Self::from_data(data)
+        Self::new_data(data)
     }
 
     /// Creates a builder for metadata request using topic names.
     pub fn for_topic_names(topic_names: &[&str], allow_auto_topic_creation: bool) -> Self {
-        Self::new(Some(topic_names), allow_auto_topic_creation)
+        Self::new_topics_allow_auto_topic_creation(Some(topic_names), allow_auto_topic_creation)
     }
 
     /// Creates a builder for metadata request using topic IDs.
@@ -281,7 +416,7 @@ impl MetadataRequestBuilder {
     /// the Rust port is stricter for reproducibility and easier wire-byte
     /// comparison against Java when input is a `TreeSet<Uuid>`.
     pub fn for_topic_ids(topic_ids: &BTreeSet<Uuid>) -> Self {
-        Self::from_data(Self::request_topic_ids(topic_ids))
+        Self::new_data(Self::request_topic_ids(topic_ids))
     }
 
     /// Returns whether this builder has an empty topic list.
@@ -391,19 +526,26 @@ mod tests {
     /// Translated from `MetadataRequestTest.testMetadataRequestVersion`.
     #[test]
     fn test_metadata_request_version() {
-        let builder = MetadataRequestBuilder::new(Some(&["topic"]), false);
+        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["topic"]), false);
         assert_eq!(ApiKeys::METADATA.oldest_version(), builder.oldest_allowed_version());
         assert_eq!(ApiKeys::METADATA.latest_version(), builder.latest_allowed_version());
 
         let version: i16 = 5;
-        let builder2 = MetadataRequestBuilder::new_with_version(Some(&["topic"]), false, version);
+        let builder2 =
+            MetadataRequestBuilder::new_topics_allow_auto_topic_creation_version(Some(&["topic"]), false, version);
         assert_eq!(version, builder2.oldest_allowed_version());
         assert_eq!(version, builder2.latest_allowed_version());
 
         let min_version: i16 = 1;
         let max_version: i16 = 6;
-        let builder3 =
-            MetadataRequestBuilder::new_with_version_range(Some(&["topic"]), false, min_version, max_version);
+        let builder3 = MetadataRequestBuilder::new_options(
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(Some(&["topic"]))
+                .set_allow_auto_topic_creation(false)
+                .set_min_version(min_version)
+                .set_max_version(max_version)
+                .build(),
+        );
         assert_eq!(min_version, builder3.oldest_allowed_version());
         assert_eq!(max_version, builder3.latest_allowed_version());
     }
@@ -447,7 +589,7 @@ mod tests {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
-                let mut builder = MetadataRequestBuilder::from_data(data);
+                let mut builder = MetadataRequestBuilder::new_data(data);
                 let result = builder.build_version(*version);
                 assert!(result.is_err(), "Expected error for version {version} with topic {:?}", topic);
             }
@@ -505,11 +647,30 @@ mod tests {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
-                let mut builder = MetadataRequestBuilder::from_data(data);
+                let mut builder = MetadataRequestBuilder::new_data(data);
                 // Should succeed since topic_id is zero UUID
                 let result = builder.build_version(*version);
                 assert!(result.is_ok(), "Should not fail for version {version} with topic {:?}", topic);
             }
         }
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`MetadataRequestBuilderOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(expected = "MetadataRequestBuilderOptionsBuilder::build: mandatory parameter `topics` was not set")]
+    fn metadata_request_builder_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = MetadataRequestBuilderOptionsBuilder::new().build();
+    }
+
+    /// Validation covers every mandatory parameter, not just the first: setting
+    /// all but one still panics, naming the one left unset.
+    #[test]
+    #[should_panic(
+        expected = "MetadataRequestBuilderOptionsBuilder::build: mandatory parameter `allow_auto_topic_creation` was not set"
+    )]
+    fn metadata_request_builder_options_builder_build_panics_when_only_allow_auto_topic_creation_is_unset() {
+        let _ = MetadataRequestBuilderOptionsBuilder::new().set_topics(None).build();
     }
 }

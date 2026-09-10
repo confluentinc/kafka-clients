@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::feature::SupportedVersionRange;
 use crate::common::protocol::ApiKeys;
 use crate::common::requests::ApiVersionsResponse;
@@ -57,7 +57,7 @@ impl NodeApiVersions {
                 api_versions.push(ApiVersionsResponse::to_api_version(api_key));
             }
         }
-        Self::new(&api_versions, &[], &[], -1)
+        Self::new_node_finalized_features_finalized_features_epoch(&api_versions, &[], &[], -1)
     }
 
     /// Create a `NodeApiVersions` object with a single ApiKey. Mainly used in tests.
@@ -70,16 +70,13 @@ impl NodeApiVersions {
     }
 
     /// Create a `NodeApiVersions` from API versions and supported features.
-    pub fn with_supported_features(
-        node_api_versions: &[ApiVersion],
-        node_supported_features: &[SupportedFeatureKey],
-    ) -> Self {
-        Self::new(node_api_versions, node_supported_features, &[], -1)
+    pub fn new(node_api_versions: &[ApiVersion], node_supported_features: &[SupportedFeatureKey]) -> Self {
+        Self::new_node_finalized_features_finalized_features_epoch(node_api_versions, node_supported_features, &[], -1)
     }
 
     /// Create a `NodeApiVersions` from API versions, supported features,
     /// finalized features, and epoch.
-    pub fn new(
+    pub fn new_node_finalized_features_finalized_features_epoch(
         node_api_versions: &[ApiVersion],
         node_supported_features: &[SupportedFeatureKey],
         node_finalized_features: &[FinalizedFeatureKey],
@@ -99,9 +96,10 @@ impl NodeApiVersions {
 
         let mut supported_features = HashMap::new();
         for supported_feature in node_supported_features {
-            // SupportedVersionRange::new returns Result; since the data comes from the broker
+            // SupportedVersionRange::new_min_version returns Result; since the data comes from the broker
             // we trust the values are valid, but handle the error gracefully.
-            if let Ok(range) = SupportedVersionRange::new(supported_feature.min_version, supported_feature.max_version)
+            if let Ok(range) =
+                SupportedVersionRange::new_min_version(supported_feature.min_version, supported_feature.max_version)
             {
                 supported_features.insert(supported_feature.name.clone(), range);
             }
@@ -125,7 +123,7 @@ impl NodeApiVersions {
     ///
     /// # Errors
     /// Returns an error if the node does not support the given API key.
-    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, KafkaError> {
+    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, Error> {
         self.latest_usable_version_in_range(api_key, api_key.oldest_version(), api_key.latest_version())
     }
 
@@ -139,11 +137,15 @@ impl NodeApiVersions {
         api_key: &ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
-    ) -> Result<i16, KafkaError> {
+    ) -> Result<i16, Error> {
         let supported_version = self
             .supported_versions
             .get(api_key)
-            .ok_or_else(|| KafkaError::unsupported_version(format!("The node does not support {}", api_key.name())))?;
+            // Java interpolates the `ApiKeys` enum value itself
+            // (`NodeApiVersions.java:151`), and `ApiKeys` overrides no
+            // `toString()`, so the message carries the enum constant name
+            // (`METADATA`) — not the `name` field (`Metadata`).
+            .ok_or_else(|| Error::unsupported_version(format!("The node does not support {api_key}")))?;
 
         let mut allowed = ApiVersion::new();
         allowed.set_api_key(api_key.id());
@@ -153,10 +155,12 @@ impl NodeApiVersions {
         let intersect_version = ApiVersionsResponse::intersect(Some(supported_version), Some(&allowed));
         match intersect_version {
             Some(v) => Ok(v.max_version),
-            None => Err(KafkaError::unsupported_version(format!(
+            None => Err(Error::unsupported_version(format!(
+                // As above: Java interpolates the enum value
+                // (`NodeApiVersions.java:162`), giving the constant name.
                 "The node does not support {} with version in range [{},{}]. \
                  The supported range is [{},{}].",
-                api_key.name(),
+                api_key,
                 oldest_allowed_version,
                 latest_allowed_version,
                 supported_version.min_version,
@@ -285,7 +289,7 @@ mod tests {
     /// Translated from `NodeApiVersionsTest.testUnsupportedVersionsToString`
     #[test]
     fn test_unsupported_versions_to_string() {
-        let versions = NodeApiVersions::with_supported_features(&[], &[]);
+        let versions = NodeApiVersions::new(&[], &[]);
         let mut bld = String::new();
         let mut prefix = "(";
         for api_key in ApiKeys::client_apis() {
@@ -326,7 +330,7 @@ mod tests {
                 version_list.push(ApiVersionsResponse::to_api_version(api_key));
             }
         }
-        let versions = NodeApiVersions::with_supported_features(&version_list, &[]);
+        let versions = NodeApiVersions::new(&version_list, &[]);
         let mut bld = String::new();
         let mut prefix = "(";
         for api_key in ApiKeys::ALL {
@@ -405,8 +409,32 @@ mod tests {
     /// Translated from `NodeApiVersionsTest.testUsableVersionCalculationNoKnownVersions`
     #[test]
     fn test_usable_version_calculation_no_known_versions() {
-        let versions = NodeApiVersions::with_supported_features(&[], &[]);
+        let versions = NodeApiVersions::new(&[], &[]);
         assert!(versions.latest_usable_version(&ApiKeys::FETCH).is_err());
+    }
+
+    /// Java builds both diagnostics by interpolating the `ApiKeys` enum value
+    /// (`NodeApiVersions.java:151` and `:162`). `ApiKeys` overrides no
+    /// `toString()`, so `Enum.toString()` renders the constant name — `FETCH`,
+    /// `PRODUCE` — and NOT the `name` field spelling (`Fetch`, `Produce`).
+    #[test]
+    fn test_unsupported_api_message_uses_the_enum_constant_name() {
+        let versions = NodeApiVersions::new(&[], &[]);
+        let err = versions.latest_usable_version(&ApiKeys::FETCH).unwrap_err();
+        assert_eq!(err.to_string(), "The node does not support FETCH");
+
+        // Multi-word keys keep the SCREAMING_SNAKE_CASE spelling too.
+        let err = versions.latest_usable_version(&ApiKeys::LIST_OFFSETS).unwrap_err();
+        assert_eq!(err.to_string(), "The node does not support LIST_OFFSETS");
+
+        let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 1, 2);
+        let err = api_versions
+            .latest_usable_version_in_range(&ApiKeys::PRODUCE, 3, 4)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "The node does not support PRODUCE with version in range [3,4]. The supported range is [1,2]."
+        );
     }
 
     /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRange`
@@ -438,7 +466,7 @@ mod tests {
         unknown.set_min_version(0);
         unknown.set_max_version(1);
         version_list.push(unknown);
-        let versions = NodeApiVersions::with_supported_features(&version_list, &[]);
+        let versions = NodeApiVersions::new(&version_list, &[]);
         for api_key in ApiKeys::apis_for_listener(scope) {
             assert_eq!(
                 api_key.latest_version(),
@@ -464,7 +492,7 @@ mod tests {
 
     fn test_construction_from_api_versions_response(scope: ListenerType) {
         let api_versions_response = ApiVersionsResponse::default_api_versions_response(scope);
-        let versions = NodeApiVersions::with_supported_features(&api_versions_response.data().api_keys, &[]);
+        let versions = NodeApiVersions::new(&api_versions_response.data().api_keys, &[]);
 
         for api_version_key in &api_versions_response.data().api_keys {
             let api_key = ApiKeys::for_id(api_version_key.api_key).unwrap();
@@ -488,7 +516,12 @@ mod tests {
         finalized_feature.set_max_version_level(2);
         finalized_feature.set_min_version_level(2);
 
-        let versions = NodeApiVersions::new(&[], &[supported_feature], &[finalized_feature], 0);
+        let versions = NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            &[],
+            &[supported_feature],
+            &[finalized_feature],
+            0,
+        );
 
         let supported_version_range = versions.supported_features().get("transaction.version").unwrap();
         assert_eq!(0, supported_version_range.min());

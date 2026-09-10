@@ -19,7 +19,7 @@
 
 use bytes::Bytes;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::header::Headers;
 use crate::common::serialization::Deserializer;
 
@@ -48,12 +48,12 @@ impl BytesDeserializer {
 }
 
 impl Deserializer<Bytes> for BytesDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Bytes, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Bytes, Error> {
         // Fallback path: no shared owning buffer available, so copy.
         Ok(Bytes::copy_from_slice(data))
     }
 
-    fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<Bytes, KafkaError> {
+    fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<Bytes, Error> {
         // Zero-copy: `data` is a subslice of `source` (the owning fetch /
         // decompression buffer), so `slice_ref` hands out a refcounted view
         // into the same allocation with no copy. `slice_ref` requires `data`
@@ -62,13 +62,13 @@ impl Deserializer<Bytes> for BytesDeserializer {
         Ok(source.slice_ref(data))
     }
 
-    fn deserialize_from_shared_with_headers(
+    fn deserialize_from_shared_headers(
         &self,
         _topic: &str,
         _headers: &dyn Headers,
         source: &Bytes,
         data: &[u8],
-    ) -> Result<Bytes, KafkaError> {
+    ) -> Result<Bytes, Error> {
         // ByteArray semantics ignore headers; keep the zero-copy slice path
         // (the trait default would route through the copying `deserialize`).
         Ok(source.slice_ref(data))
@@ -108,14 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_from_shared_with_headers_delegates() {
+    fn test_deserialize_from_shared_headers_delegates() {
         let de = BytesDeserializer::new();
         let source = Bytes::from(vec![9u8, 8, 7, 6]);
         let data: &[u8] = &source[1..3];
         let headers = RecordHeaders::new();
-        let result = de
-            .deserialize_from_shared_with_headers("topic", &headers, &source, data)
-            .unwrap();
+        let result = de.deserialize_from_shared_headers("topic", &headers, &source, data).unwrap();
         assert_eq!(&result[..], &[8, 7]);
         assert_eq!(result.as_ptr(), data.as_ptr());
     }

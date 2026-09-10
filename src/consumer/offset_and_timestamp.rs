@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// A container class for offset and timestamp.
 ///
@@ -42,24 +42,24 @@ impl OffsetAndTimestamp {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` or `timestamp` is
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
-    pub fn new(offset: i64, timestamp: i64) -> Result<Self, KafkaError> {
-        Self::with_leader_epoch(offset, timestamp, None)
+    pub fn new(offset: i64, timestamp: i64) -> Result<Self, Error> {
+        Self::new_leader_epoch(offset, timestamp, None)
     }
 
     /// Create a new `OffsetAndTimestamp` with an optional leader epoch.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` or `timestamp` is
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
-    pub fn with_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, KafkaError> {
+    pub fn new_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, Error> {
         if offset < 0 {
-            return Err(KafkaError::illegal_argument("Invalid negative offset"));
+            return Err(Error::local_illegal_argument("Invalid negative offset"));
         }
         if timestamp < 0 {
-            return Err(KafkaError::illegal_argument("Invalid negative timestamp"));
+            return Err(Error::local_illegal_argument("Invalid negative timestamp"));
         }
         Ok(Self { offset, timestamp, leader_epoch })
     }
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_with_leader_epoch() {
-        let oat = OffsetAndTimestamp::with_leader_epoch(10, 100, Some(5)).unwrap();
+        let oat = OffsetAndTimestamp::new_leader_epoch(10, 100, Some(5)).unwrap();
         assert_eq!(oat.leader_epoch(), Some(5));
     }
 
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let oat = OffsetAndTimestamp::with_leader_epoch(10, 100, Some(5)).unwrap();
+        let oat = OffsetAndTimestamp::new_leader_epoch(10, 100, Some(5)).unwrap();
         assert_eq!(oat.to_string(), "(timestamp=100, leaderEpoch=5, offset=10)");
 
         let oat = OffsetAndTimestamp::new(10, 100).unwrap();
@@ -140,9 +140,9 @@ mod tests {
 
     #[test]
     fn test_equality() {
-        let a = OffsetAndTimestamp::with_leader_epoch(10, 100, Some(5)).unwrap();
-        let b = OffsetAndTimestamp::with_leader_epoch(10, 100, Some(5)).unwrap();
-        let c = OffsetAndTimestamp::with_leader_epoch(10, 100, Some(6)).unwrap();
+        let a = OffsetAndTimestamp::new_leader_epoch(10, 100, Some(5)).unwrap();
+        let b = OffsetAndTimestamp::new_leader_epoch(10, 100, Some(5)).unwrap();
+        let c = OffsetAndTimestamp::new_leader_epoch(10, 100, Some(6)).unwrap();
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

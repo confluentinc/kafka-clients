@@ -148,7 +148,7 @@ impl EndTxnRequestBuilder {
             // `latestVersionUnstable: true`, so the unstable-inclusive
             // `latest_version()` would offer one version higher than Java ever
             // does. Use the explicit `false` form.
-            latest_allowed_version: ApiKeys::END_TXN.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::END_TXN.latest_version_enable_unstable_last_version(false),
         }
     }
 
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_builder_offers_only_released_versions() {
         let builder = EndTxnRequestBuilder::new(data(true), true);
-        let released = ApiKeys::END_TXN.latest_version_with_unstable(false);
+        let released = ApiKeys::END_TXN.latest_version_enable_unstable_last_version(false);
 
         assert_eq!(builder.latest_allowed_version(), released);
 

@@ -67,20 +67,20 @@ impl KafkaConsumerMetrics {
                 ((now - last_poll_ms) / 1000) as f64
             }
         });
-        let last_poll_metric_name = metrics.metric_name(
+        let last_poll_metric_name = metrics.metric_name_description_tags(
             "last-poll-seconds-ago",
             metric_group_name,
             "The number of seconds since the last poll() invocation.",
             std::collections::BTreeMap::new(),
         );
         metrics
-            .add_metric(last_poll_metric_name.clone(), Box::new(last_poll))
+            .add_metric_measurable(last_poll_metric_name.clone(), Box::new(last_poll))
             .expect("registering last-poll-seconds-ago metric");
 
         let time_between_poll_sensor = metrics.sensor("time-between-poll").expect("creating time-between-poll sensor");
         time_between_poll_sensor
-            .add(
-                metrics.metric_name(
+            .add_metric_name(
+                metrics.metric_name_description_tags(
                     "time-between-poll-avg",
                     metric_group_name,
                     "The average delay between invocations of poll() in milliseconds.",
@@ -90,8 +90,8 @@ impl KafkaConsumerMetrics {
             )
             .expect("adding time-between-poll-avg");
         time_between_poll_sensor
-            .add(
-                metrics.metric_name(
+            .add_metric_name(
+                metrics.metric_name_description_tags(
                     "time-between-poll-max",
                     metric_group_name,
                     "The max delay between invocations of poll() in milliseconds.",
@@ -105,8 +105,8 @@ impl KafkaConsumerMetrics {
             .sensor("poll-idle-ratio-avg")
             .expect("creating poll-idle-ratio-avg sensor");
         poll_idle_sensor
-            .add(
-                metrics.metric_name(
+            .add_metric_name(
+                metrics.metric_name_description_tags(
                     "poll-idle-ratio-avg",
                     metric_group_name,
                     "The average fraction of time the consumer's poll() is idle as opposed to waiting for the user code to process records.",
@@ -120,8 +120,8 @@ impl KafkaConsumerMetrics {
             .sensor("commit-sync-time-ns-total")
             .expect("creating commit-sync-time-ns-total sensor");
         commit_sync_sensor
-            .add(
-                metrics.metric_name(
+            .add_metric_name(
+                metrics.metric_name_description_tags(
                     "commit-sync-time-ns-total",
                     metric_group_name,
                     "The total time the consumer has spent in commitSync in nanoseconds",
@@ -135,8 +135,8 @@ impl KafkaConsumerMetrics {
             .sensor("committed-time-ns-total")
             .expect("creating committed-time-ns-total sensor");
         committed_sensor
-            .add(
-                metrics.metric_name(
+            .add_metric_name(
+                metrics.metric_name_description_tags(
                     "committed-time-ns-total",
                     metric_group_name,
                     "The total time the consumer has spent in committed in nanoseconds",
@@ -169,7 +169,7 @@ impl KafkaConsumerMetrics {
             0
         };
         self.time_since_last_poll_ms.store(time_since_last_poll_ms, Ordering::SeqCst);
-        self.time_between_poll_sensor.record(time_since_last_poll_ms as f64);
+        self.time_between_poll_sensor.record_value(time_since_last_poll_ms as f64);
         self.last_poll_ms.store(poll_start_ms, Ordering::SeqCst);
     }
 
@@ -178,17 +178,17 @@ impl KafkaConsumerMetrics {
         let poll_time_ms = poll_end_ms - self.poll_start_ms.load(Ordering::SeqCst);
         let time_since_last_poll_ms = self.time_since_last_poll_ms.load(Ordering::SeqCst);
         let poll_idle_ratio = poll_time_ms as f64 * 1.0 / (poll_time_ms + time_since_last_poll_ms) as f64;
-        self.poll_idle_sensor.record(poll_idle_ratio);
+        self.poll_idle_sensor.record_value(poll_idle_ratio);
     }
 
     /// Java: `recordCommitSync(long duration)`.
     pub(crate) fn record_commit_sync(&self, duration: i64) {
-        self.commit_sync_sensor.record(duration as f64);
+        self.commit_sync_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordCommitted(long duration)`.
     pub(crate) fn record_committed(&self, duration: i64) {
-        self.committed_sensor.record(duration as f64);
+        self.committed_sensor.record_value(duration as f64);
     }
 
     /// Java: `close()` (`AutoCloseable`). Removes the registered metric and the
@@ -249,7 +249,7 @@ mod tests {
     }
 
     fn metric_name(metrics: &Metrics, name: &str) -> MetricName {
-        metrics.metric_name_group(name, CONSUMER_METRIC_GROUP_NAME)
+        metrics.metric_name(name, CONSUMER_METRIC_GROUP_NAME)
     }
 
     fn assert_metric_value(metrics: &Metrics, name: &str) {
@@ -293,7 +293,7 @@ mod tests {
         // so the first poll's `last_poll_ms` is distinguishable from the
         // "no poll yet" sentinel (0).
         time.sleep(1_000_000);
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let consumer_metrics = KafkaConsumerMetrics::new(Arc::clone(&metrics));
 
         // Default values: -1 / NaN / NaN.
@@ -347,7 +347,7 @@ mod tests {
 
         let time = Arc::new(MockTime::new());
         time.sleep(1_000_000);
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let consumer_metrics = KafkaConsumerMetrics::new(Arc::clone(&metrics));
 
         // Default value: NaN.

@@ -44,7 +44,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::serialization::StringSerializer;
@@ -85,8 +85,8 @@ fn cluster_config_with_kip848() -> ClusterConfig {
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
-        String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(format!("invalid utf-8: {}", e)))
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+        String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
     }
 }
 
@@ -142,7 +142,7 @@ async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usiz
     .expect("Failed to build test producer");
 
     for i in 0..count {
-        let rec = ProducerRecord::with_key(topic.to_string(), Some(format!("k{}", i)), Some(format!("v{}", i)));
+        let rec = ProducerRecord::new_key(topic.to_string(), Some(format!("k{}", i)), Some(format!("v{}", i)));
         let future = producer.send(rec).await.expect("send should succeed");
         future
             .get_timeout(Duration::from_secs(30))
@@ -171,7 +171,10 @@ async fn test_subscribe_and_poll_records() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     let mut collected: Vec<(String, String, i32, i64)> = Vec::new();
     let start = Instant::now();
@@ -307,7 +310,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         .expect("consumer1 ctor should succeed");
 
         consumer1
-            .subscribe(vec![topic.clone()])
+            .subscribe_topics(vec![topic.clone()])
             .await
             .expect("subscribe should succeed");
 
@@ -340,7 +343,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         .expect("consumer2 ctor should succeed");
 
         consumer2
-            .subscribe(vec![topic.clone()])
+            .subscribe_topics(vec![topic.clone()])
             .await
             .expect("subscribe should succeed");
 
@@ -389,7 +392,10 @@ async fn test_seek_to_beginning_re_reads_records() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // First poll: wait for assignment to land, then drain at least one
     // batch to establish position.
@@ -444,14 +450,14 @@ struct FailOnceAssignedListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for FailOnceAssignedListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
         if n == 1 {
-            return Err(KafkaError::illegal_state("temporary error"));
+            return Err(Error::local_illegal_state("temporary error"));
         }
         Ok(())
     }
@@ -464,12 +470,12 @@ struct AlwaysFailAssignedListener;
 
 #[async_trait]
 impl ConsumerRebalanceListener for AlwaysFailAssignedListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-        Err(KafkaError::illegal_state("always failed"))
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        Err(Error::local_illegal_state("always failed"))
     }
 }
 
@@ -499,9 +505,9 @@ async fn test_fetch_partitions_after_failed_listener() {
     let count = Arc::new(AtomicUsize::new(0));
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailOnceAssignedListener { count: Arc::clone(&count) });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Java: `waitForCondition(() -> consumer.poll(1s).count() == 1, 5000)`.
     // The first poll may surface the failed-callback error; tolerate it and
@@ -516,7 +522,7 @@ async fn test_fetch_partitions_after_failed_listener() {
             Err(err) => {
                 // The temporary listener error must not be fatal; keep polling.
                 assert!(
-                    !err.is_fatal(),
+                    !confluent_kafka::common::requests::request_utils::is_fatal_error(&err),
                     "first-listener failure should be recoverable, got fatal: {err}"
                 );
             },
@@ -573,9 +579,9 @@ async fn test_fetch_partitions_with_always_failed_listener() {
 
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(AlwaysFailAssignedListener);
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Java loops for 3s asserting `poll().count() == 0` (or catching the
     // callback KafkaException). Mirror that window.
@@ -598,7 +604,7 @@ async fn test_fetch_partitions_with_always_failed_listener() {
                 // exactly — a regression that masked the callback path with
                 // an unrelated error (timeout, connection) would now fail.
                 assert_eq!(
-                    err.to_string(),
+                    err.message(),
                     "User rebalance callback throws an error",
                     "a surfaced poll error must be the wrapped rebalance-callback error, got: {err}"
                 );

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::{kafka_debug, kafka_error};
 
 use super::admin_api_future::{AdminApiFuture, UNKNOWN_BROKER_ID};
@@ -61,16 +61,21 @@ impl PartitionLeaderStrategy {
         topic: &str,
         topic_error: Errors,
         request_partitions: &HashSet<TopicPartition>,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
     ) {
         match topic_error {
             Errors::UnknownTopicOrPartition if !self.tolerate_unknown_topics => {
                 kafka_error!(self.log_context, "Received unknown topic error for topic {}", topic);
-                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
-                    KafkaError::with_message(
+                // Java's closure parameter is `tp` and it fills the *partition*
+                // slot; the topic appears only inside the backticks
+                // (`PartitionLeaderStrategy.java:88-90`). Printing the topic in
+                // both slots left every per-partition future with the same message
+                // (finding 244).
+                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
+                    Error::with_message(
                         topic_error,
                         format!(
-                            "Failed to fetch metadata for partition {topic} because metadata for topic `{topic}` \
+                            "Failed to fetch metadata for partition {tp} because metadata for topic `{topic}` \
                              could not be found"
                         ),
                     )
@@ -91,19 +96,25 @@ impl PartitionLeaderStrategy {
                     topic
                 );
                 let topic_owned = topic.to_string();
-                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
-                    KafkaError::topic_authorization(HashSet::from([topic_owned.clone()]))
+                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
+                    Error::topic_authorization_message(
+                        HashSet::from([topic_owned.clone()]),
+                        format!("Failed to fetch metadata for partition {tp} due to topic authorization failure"),
+                    )
                 });
             },
-            Errors::InvalidTopicException => {
+            Errors::InvalidTopicError => {
                 kafka_error!(
                     self.log_context,
                     "Received invalid topic error for topic {} in `Metadata` response",
                     topic
                 );
                 let topic_owned = topic.to_string();
-                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
-                    KafkaError::invalid_topics(HashSet::from([topic_owned.clone()]))
+                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
+                    Error::invalid_topics_message(
+                        HashSet::from([topic_owned.clone()]),
+                        format!("Failed to fetch metadata for partition {tp} due to invalid topic `{topic_owned}`"),
+                    )
                 });
             },
             _ => {
@@ -113,7 +124,7 @@ impl PartitionLeaderStrategy {
                     topic
                 );
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
-                    KafkaError::with_message(
+                    Error::with_message(
                         topic_error,
                         format!(
                             "Failed to fetch metadata for partition {tp} due to unexpected error for topic `{topic}`"
@@ -125,19 +136,19 @@ impl PartitionLeaderStrategy {
     }
 
     /// Fails every requested partition for the given topic using
-    /// `exception_generator`.
+    /// `error_generator`.
     ///
     /// Mirrors `failAllPartitionsForTopic`.
     fn fail_all_partitions_for_topic(
         &self,
         topic: &str,
         partitions: &HashSet<TopicPartition>,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
-        exception_generator: impl Fn(&TopicPartition) -> KafkaError,
+        failed: &mut HashMap<TopicPartition, Error>,
+        error_generator: impl Fn(&TopicPartition) -> Error,
     ) {
         for tp in partitions {
             if tp.topic() == topic {
-                failed.insert(tp.clone(), exception_generator(tp));
+                failed.insert(tp.clone(), error_generator(tp));
             }
         }
     }
@@ -150,7 +161,7 @@ impl PartitionLeaderStrategy {
         &self,
         topic_partition: &TopicPartition,
         partition_error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
     ) {
         match partition_error {
             Errors::NotLeaderOrFollower
@@ -174,7 +185,7 @@ impl PartitionLeaderStrategy {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         partition_error,
                         format!("Unexpected error during metadata lookup for {topic_partition}"),
                     ),
@@ -198,7 +209,10 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
                 topics.push(tp.topic());
             }
         }
-        Box::new(MetadataRequestBuilder::new(Some(&topics), false))
+        Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(
+            Some(&topics),
+            false,
+        ))
     }
 
     fn handle_response(
@@ -207,9 +221,15 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
         response: &ConcreteResponse,
     ) -> LookupResult<TopicPartition> {
         let ConcreteResponse::Metadata(response) = response else {
-            return LookupResult::new(HashMap::new(), HashMap::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the lookup until the deadline. See
+            // `LookupResult::failed_all`.
+            return LookupResult::failed_all(
+                request_partitions,
+                Error::local_illegal_state("PartitionLeaderStrategy received an unexpected response type"),
+            );
         };
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut mapped: HashMap<TopicPartition, i32> = HashMap::new();
 
         for topic_metadata in &response.data().topics {
@@ -306,11 +326,11 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<TopicPartition, V> for Par
         self.partition_leader_cache.put(&broker_id_mapping);
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<TopicPartition, KafkaError>) {
+    fn complete_with_error(&self, errors: HashMap<TopicPartition, Error>) {
         self.partition_leader_cache.remove(errors.keys());
         for (key, error) in errors {
             if let Some(future) = self.futures.get(&key) {
-                future.complete_exceptionally(error);
+                future.complete_with_error(error);
             }
         }
     }
@@ -364,7 +384,7 @@ mod tests {
             }
         }
         data.set_topics(topics);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn response_with_topic_error(topic: &str, error: Errors) -> ConcreteResponse {
@@ -373,7 +393,7 @@ mod tests {
         t.set_name(Some(topic.to_string()));
         t.set_error_code(error.code());
         data.set_topics(vec![t]);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn handle(keys: &[TopicPartition], response: &ConcreteResponse) -> LookupResult<TopicPartition> {
@@ -428,9 +448,13 @@ mod tests {
             HashSet::from([tp("foo", 0)])
         );
         let err = result.failed_keys.get(&tp("foo", 0)).unwrap();
+        assert_eq!(
+            err.message(),
+            "Failed to fetch metadata for partition foo-0 due to topic authorization failure"
+        );
         match err {
-            KafkaError::TopicAuthorization(e) => {
-                assert_eq!(e.unauthorized_topics, HashSet::from(["foo".to_string()]));
+            Error::TopicAuthorization(e) => {
+                assert_eq!(e.unauthorized_topics(), &HashSet::from(["foo".to_string()]));
             },
             other => panic!("expected TopicAuthorization, got {other:?}"),
         }
@@ -438,14 +462,15 @@ mod tests {
 
     #[test]
     fn invalid_topic_error() {
-        let result = handle(
-            &[tp("foo", 0)],
-            &response_with_topic_error("foo", Errors::InvalidTopicException),
-        );
+        let result = handle(&[tp("foo", 0)], &response_with_topic_error("foo", Errors::InvalidTopicError));
         let err = result.failed_keys.get(&tp("foo", 0)).unwrap();
+        assert_eq!(
+            err.message(),
+            "Failed to fetch metadata for partition foo-0 due to invalid topic `foo`"
+        );
         match err {
-            KafkaError::InvalidTopic(e) => {
-                assert_eq!(e.invalid_topics, HashSet::from(["foo".to_string()]));
+            Error::InvalidTopic(e) => {
+                assert_eq!(e.invalid_topics(), &HashSet::from(["foo".to_string()]));
             },
             other => panic!("expected InvalidTopic, got {other:?}"),
         }
@@ -521,6 +546,32 @@ mod tests {
             HashSet::from([tp("foo", 0)])
         );
         assert_eq!(result.mapped_keys.get(&tp("foo", 0)), Some(&5));
+    }
+
+    /// Regression for finding 244: Java's closure parameter is `tp` and it fills
+    /// the *partition* slot, while the topic appears only inside the backticks:
+    /// `topicError.exception("Failed to fetch metadata for partition " + tp + " because metadata for topic \`" + topic + "\` could not be found")`
+    /// (`PartitionLeaderStrategy.java:88-90`). Printing the topic in both slots
+    /// left every per-partition future with an indistinguishable message.
+    #[test]
+    fn intolerant_unknown_topic_names_the_partition() {
+        let strategy = PartitionLeaderStrategy::with_tolerate_unknown_topics(LogContext::new("[test] "), false);
+        let keys: HashSet<TopicPartition> = [tp("foo", 0), tp("foo", 1)].into_iter().collect();
+        let result =
+            strategy.handle_response(&keys, &response_with_topic_error("foo", Errors::UnknownTopicOrPartition));
+
+        assert_eq!(result.failed_keys.keys().cloned().collect::<HashSet<_>>(), keys);
+        for partition in [0, 1] {
+            let err = result.failed_keys.get(&tp("foo", partition)).unwrap();
+            assert_eq!(
+                err.message(),
+                format!(
+                    "Failed to fetch metadata for partition foo-{partition} because metadata for topic `foo` \
+                     could not be found"
+                )
+            );
+            assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
+        }
     }
 
     #[test]

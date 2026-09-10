@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::stats::WindowedCount;
 use crate::common::metrics::{ClosureGauge, MetricValue, MetricValueProvider, Metrics, RecordingLevel, Sensor};
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
 use crate::consumer::internals::sensor_builder::SensorBuilder;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -79,20 +79,20 @@ impl FetchMetricsManager {
         // registration error). Sensor registration only fails on a duplicate
         // metric name (a construction-time programming error here), so the
         // `.expect`s are unreachable in practice.
-        let build_throttle = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_throttle = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "fetch-throttle-time", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.fetch_throttle_time_avg)?
                 .with_max(&metrics_registry.fetch_throttle_time_max)?
                 .build())
         };
-        let build_bytes = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_bytes = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "bytes-fetched", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.fetch_size_avg)?
                 .with_max(&metrics_registry.fetch_size_max)?
                 .with_meter(&metrics_registry.bytes_consumed_rate, &metrics_registry.bytes_consumed_total)?
                 .build())
         };
-        let build_records = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_records = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "records-fetched", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.records_per_request_avg)?
                 .with_meter(
@@ -101,7 +101,7 @@ impl FetchMetricsManager {
                 )?
                 .build())
         };
-        let build_latency = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_latency = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "fetch-latency", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.fetch_latency_avg)?
                 .with_max(&metrics_registry.fetch_latency_max)?
@@ -115,12 +115,12 @@ impl FetchMetricsManager {
         // INFO, matching Java: the client-level `records-lag-max` /
         // `records-lead-min` are on by default, as are the per-partition DETAIL
         // sensors (full Java parity, see ctor doc + `record_partition_lag/lead`).
-        let build_lag = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_lag = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "records-lag", RecordingLevel::Info)?
                 .with_max(&metrics_registry.records_lag_max)?
                 .build())
         };
-        let build_lead = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_lead = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "records-lead", RecordingLevel::Info)?
                 .with_min(&metrics_registry.records_lead_min)?
                 .build())
@@ -192,23 +192,23 @@ impl FetchMetricsManager {
     /// Records the latency of a fetch request against the client-level sensor
     /// and, if present, the per-node latency sensor.
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
-        self.fetch_latency.record(request_latency_ms as f64);
+        self.fetch_latency.record_value(request_latency_ms as f64);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
-                node_request_time.record(request_latency_ms as f64);
+                node_request_time.record_value(request_latency_ms as f64);
             }
         }
     }
 
     /// Records the number of bytes fetched at the client level.
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
-        self.bytes_fetched.record(bytes as f64);
+        self.bytes_fetched.record_value(bytes as f64);
     }
 
     /// Records the number of records fetched at the client level.
     pub(crate) fn record_records_fetched(&self, records: i32) {
-        self.records_fetched.record(records as f64);
+        self.records_fetched.record_value(records as f64);
     }
 
     /// Records the number of bytes fetched for a single topic.
@@ -216,7 +216,7 @@ impl FetchMetricsManager {
         let name = topic_bytes_fetched_metric_name(topic);
         self.maybe_record_deprecated_bytes_fetched(&name, topic, bytes);
 
-        let bytes_fetched = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let bytes_fetched = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
                     .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
@@ -231,7 +231,7 @@ impl FetchMetricsManager {
         let Some(bytes_fetched) = resolve_sensor(bytes_fetched, "topic bytes-fetched sensor") else {
             return;
         };
-        bytes_fetched.record(bytes as f64);
+        bytes_fetched.record_value(bytes as f64);
     }
 
     /// Records the number of records fetched for a single topic.
@@ -239,7 +239,7 @@ impl FetchMetricsManager {
         let name = topic_records_fetched_metric_name(topic);
         self.maybe_record_deprecated_records_fetched(&name, topic, records);
 
-        let records_fetched = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let records_fetched = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
                     .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
@@ -253,7 +253,7 @@ impl FetchMetricsManager {
         let Some(records_fetched) = resolve_sensor(records_fetched, "topic records-fetched sensor") else {
             return;
         };
-        records_fetched.record(records as f64);
+        records_fetched.record_value(records as f64);
     }
 
     /// Records the lag for a single partition.
@@ -264,12 +264,12 @@ impl FetchMetricsManager {
     /// DEBUG gating: a default (INFO) consumer records the full per-partition
     /// metric set per partition per poll — the accepted Java-parity cost.
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
-        self.records_lag.record(lag as f64);
+        self.records_lag.record_value(lag as f64);
 
         let name = partition_records_lag_metric_name(tp);
         self.maybe_record_deprecated_partition_lag(&name, tp, lag);
 
-        let records_lag = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let records_lag = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
                     .with_value(&self.metrics_registry.partition_records_lag)?
@@ -281,7 +281,7 @@ impl FetchMetricsManager {
         let Some(records_lag) = resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
         };
-        records_lag.record(lag as f64);
+        records_lag.record_value(lag as f64);
     }
 
     /// Records the lead for a single partition.
@@ -290,12 +290,12 @@ impl FetchMetricsManager {
     /// per-partition lead sensors are INFO and recorded unconditionally, exactly
     /// as Java does (see [`Self::record_partition_lag`]).
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
-        self.records_lead.record(lead as f64);
+        self.records_lead.record_value(lead as f64);
 
         let name = partition_records_lead_metric_name(tp);
         self.maybe_record_deprecated_partition_lead(&name, tp, lead as f64);
 
-        let records_lead = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let records_lead = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
                     .with_value(&self.metrics_registry.partition_records_lead)?
@@ -307,7 +307,7 @@ impl FetchMetricsManager {
         let Some(records_lead) = resolve_sensor(records_lead, "partition records-lead sensor") else {
             return;
         };
-        records_lead.record(lead as f64);
+        records_lead.record_value(lead as f64);
     }
 
     /// Called before requesting fetches to update the set of per-partition
@@ -390,7 +390,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(topic) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_tags(topic)
@@ -407,7 +407,7 @@ impl FetchMetricsManager {
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated topic bytes-fetched sensor") else {
             return;
         };
-        deprecated.record(bytes as f64);
+        deprecated.record_value(bytes as f64);
     }
 
     // To be removed in Kafka 5.0 release.
@@ -415,7 +415,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(topic) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_tags(topic)
@@ -431,7 +431,7 @@ impl FetchMetricsManager {
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated topic records-fetched sensor") else {
             return;
         };
-        deprecated.record(records as f64);
+        deprecated.record_value(records as f64);
     }
 
     // To be removed in Kafka 5.0 release.
@@ -439,7 +439,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(tp.topic()) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_partition_tags(tp)
@@ -453,7 +453,7 @@ impl FetchMetricsManager {
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated partition records-lag sensor") else {
             return;
         };
-        deprecated.record(lag as f64);
+        deprecated.record_value(lag as f64);
     }
 
     // To be removed in Kafka 5.0 release.
@@ -461,7 +461,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(tp.topic()) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_partition_tags(tp)
@@ -475,7 +475,7 @@ impl FetchMetricsManager {
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated partition records-lead sensor") else {
             return;
         };
-        deprecated.record(lead);
+        deprecated.record_value(lead);
     }
 
     // To be removed in Kafka 5.0 release.
@@ -508,7 +508,7 @@ impl FetchMetricsManager {
     fn partition_preferred_read_replica_metric_name(&self, tp: &TopicPartition) -> Option<crate::common::MetricName> {
         let tags = topic_partition_tags_raw(tp);
         self.metrics
-            .metric_instance_with_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
+            .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
             .ok()
     }
 
@@ -518,7 +518,7 @@ impl FetchMetricsManager {
     ) -> Option<crate::common::MetricName> {
         let tags = topic_partition_tags(tp);
         self.metrics
-            .metric_instance_with_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
+            .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
             .ok()
     }
 }
@@ -570,7 +570,7 @@ fn should_report_deprecated_metric(topic: &str) -> bool {
 ///
 /// Note the log fires per record while the collision persists. That is intended:
 /// it is a genuine misconfiguration, and the volume is the signal.
-fn resolve_sensor(built: Result<Arc<Sensor>, KafkaError>, what: &str) -> Option<Arc<Sensor>> {
+fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
     match built {
         Ok(sensor) => Some(sensor),
         Err(err) => {
@@ -639,8 +639,12 @@ mod tests {
 
     fn setup() -> Fixture {
         let time = Arc::new(MockTime::new());
-        let config = Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info));
-        let metrics = Arc::new(Metrics::with_config_reporters_time(config, Vec::new(), time.clone() as Arc<_>));
+        let config = Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info));
+        let metrics = Arc::new(Metrics::new_default_config_reporters_time(
+            config,
+            Vec::new(),
+            time.clone() as Arc<_>,
+        ));
         // Java: `new FetchMetricsRegistry(metrics.config().tags().keySet(), "test")`.
         // Default config has no tags, so the registry tag set is empty.
         let registry = FetchMetricsRegistry::new(indexmap::IndexSet::new(), "test");
@@ -653,12 +657,12 @@ mod tests {
     }
 
     fn metric_value_template(f: &Fixture, template: &MetricNameTemplate) -> f64 {
-        let name = f.metrics.metric_instance(template, &[]).expect("metric instance");
+        let name = f.metrics.metric_instance_key_value(template, &[]).expect("metric instance");
         metric_value(f, &name)
     }
 
     fn metric_value_tags(f: &Fixture, template: &MetricNameTemplate, tags: &[&str]) -> f64 {
-        let name = f.metrics.metric_instance(template, tags).expect("metric instance");
+        let name = f.metrics.metric_instance_key_value(template, tags).expect("metric instance");
         metric_value(f, &name)
     }
 
@@ -671,7 +675,7 @@ mod tests {
     }
 
     fn read_replica_metric_value(f: &Fixture, template: &MetricNameTemplate, tags: &[&str]) -> i32 {
-        let name = f.metrics.metric_instance(template, tags).expect("metric instance");
+        let name = f.metrics.metric_instance_key_value(template, tags).expect("metric instance");
         let metric = f.metrics.metric(&name).expect("metric registered");
         match metric.metric_value() {
             MetricValue::Int(v) => v,
@@ -682,8 +686,12 @@ mod tests {
     fn register_node_latency_metric(f: &Fixture, connection_id: &str, avg: &MetricName, max: &MetricName) {
         let node_time_name = format!("node-{connection_id}.latency");
         let node_request_time = f.metrics.sensor(&node_time_name).expect("sensor");
-        node_request_time.add(avg.clone(), Box::new(Avg::new())).expect("add avg");
-        node_request_time.add(max.clone(), Box::new(Max::new())).expect("add max");
+        node_request_time
+            .add_metric_name(avg.clone(), Box::new(Avg::new()))
+            .expect("add avg");
+        node_request_time
+            .add_metric_name(max.clone(), Box::new(Max::new()))
+            .expect("add max");
     }
 
     /// `FetchMetricsManagerTest.testLatency`
@@ -703,8 +711,8 @@ mod tests {
     fn test_node_latency() {
         let f = setup();
         let connection_id = "0";
-        let node_latency_avg = f.metrics.metric_name_group("request-latency-avg", "group");
-        let node_latency_max = f.metrics.metric_name_group("request-latency-max", "group");
+        let node_latency_avg = f.metrics.metric_name("request-latency-avg", "group");
+        let node_latency_max = f.metrics.metric_name("request-latency-max", "group");
         register_node_latency_metric(&f, connection_id, &node_latency_avg, &node_latency_max);
 
         f.manager.record_latency(connection_id, 123);
@@ -1142,9 +1150,9 @@ mod tests {
     fn test_throttle_time_sensor_records() {
         let f = setup();
         let sensor = f.manager.throttle_time_sensor();
-        sensor.record(100.0);
+        sensor.record_value(100.0);
         f.time.sleep(time_window_ms(&f) + 1);
-        sensor.record(200.0);
+        sensor.record_value(200.0);
 
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_avg) - 150.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_max) - 200.0).abs() < EPSILON);

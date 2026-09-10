@@ -120,7 +120,7 @@ pub struct DeleteRecordsRequestBuilder {
 
 impl DeleteRecordsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DeleteRecordsRequestData) -> Self {
+    pub fn new(data: DeleteRecordsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DELETE_RECORDS.oldest_version(),

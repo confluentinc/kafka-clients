@@ -78,7 +78,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -157,7 +157,7 @@ fn cluster_config_with_kip848_3brokers_30parts() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -241,14 +241,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64 * inc;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -420,13 +420,11 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 /// surfaces `NoOffsetForPartition`; after `seek(tp, outOfRangePos)`,
 /// the next `poll()` surfaces `OffsetOutOfRange`.
 ///
-/// `ConsumerError::OffsetOutOfRange { offset_out_of_range_partitions }`
-/// carries the structured payload that Java asserts on
-/// (`OffsetOutOfRangeException.offsetOutOfRangePartitions()`); the
-/// Rust translation matches the error's `Display` form because the
-/// `From<ConsumerError> for KafkaError` flattens the variant through
-/// `KafkaError::IllegalState` (intentional Phase-1 design, see
-/// `src/consumer/errors.rs:237-265`).
+/// `Error::ConsumerOffsetOutOfRange` carries the structured payload that Java
+/// asserts on (`OffsetOutOfRangeException.offsetOutOfRangePartitions()`). It is
+/// its own class now, so the payload survives propagation — it used to be
+/// flattened into `Error::LocalIllegalState` by the removed consumer-error enum,
+/// leaving only the `Display` string to assert against.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_fetch_invalid_offset() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -461,17 +459,20 @@ async fn test_async_consumer_fetch_invalid_offset() {
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
-    consumer.seek(tp.clone(), out_of_range_pos).await.expect("seek should succeed");
+    consumer
+        .seek_offset(tp.clone(), out_of_range_pos)
+        .await
+        .expect("seek should succeed");
     let err = consumer
         .poll(Duration::from_millis(20_000))
         .await
         .expect_err("poll should fail with OffsetOutOfRange");
     let err_msg = err.to_string();
     // Java asserts `OffsetOutOfRangeException` and inspects
-    // `offsetOutOfRangePartitions()`. The Rust translation flattens
-    // `ConsumerError::OffsetOutOfRange` through `KafkaError::IllegalState`
-    // (Phase-1 design, see `src/consumer/errors.rs:237-265`), so we assert
-    // against the actual error string. The message format is:
+    // `offsetOutOfRangePartitions()`. The Rust error is now
+    // `Error::ConsumerOffsetOutOfRange`, which carries that map, but this test
+    // asserts on the message so it keeps working against a remote broker
+    // regardless of which partition reports first. The message format is:
     // `Fetch position FetchPosition{offset=N, ...} is out of range for partition {tp}`.
     assert!(
         err_msg.contains("out of range for partition") && err_msg.contains(tp.topic()),
@@ -518,7 +519,10 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
-    consumer.seek(tp.clone(), out_of_range_pos).await.expect("seek should succeed");
+    consumer
+        .seek_offset(tp.clone(), out_of_range_pos)
+        .await
+        .expect("seek should succeed");
     // assert that poll resets to the beginning position — only one
     // record needed to prove the reset (Java line 148).
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp, -1).await;
@@ -561,14 +565,17 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     let starting_timestamp: i64 = 0;
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp, -1).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
 
     // consume some, but not all the records
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records / 2, 0, 0, starting_timestamp, -1).await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 17; // arbitrary, much higher offset
-    consumer.seek(tp.clone(), out_of_range_pos).await.expect("seek should succeed");
+    consumer
+        .seek_offset(tp.clone(), out_of_range_pos)
+        .await
+        .expect("seek should succeed");
 
     // assert that poll resets to the ending position. Java uses a 50ms
     // timeout — we use the same. The reset issues an OffsetReset to
@@ -655,7 +662,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
     consumer1
-        .seek(tp.clone(), out_of_range_pos)
+        .seek_offset(tp.clone(), out_of_range_pos)
         .await
         .expect("consumer1 seek should succeed");
     // assert that poll resets to the beginning position (everything is
@@ -704,7 +711,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     // seek to out of range position
     let out_of_range_pos_2: i64 = total_records_2 as i64 + 1;
     consumer2
-        .seek(tp2.clone(), out_of_range_pos_2)
+        .seek_offset(tp2.clone(), out_of_range_pos_2)
         .await
         .expect("consumer2 seek should succeed");
     // assert that poll resets to the duration offset. consumer should
@@ -773,13 +780,13 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
     // produce a record that is larger than the configured fetch size
     let expected_key = b"key".to_vec();
     let expected_value = vec![0u8; producer_record_size];
-    let record = ProducerRecord::with_partition(
+    let record = ProducerRecord::new_partition_key(
         tp.topic().to_string(),
         Some(tp.partition()),
         Some(expected_key.clone()),
         Some(expected_value.clone()),
     )
-    .expect("ProducerRecord::with_partition should succeed");
+    .expect("ProducerRecord::new_partition_key should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
         .await
         .expect("send should not fail");
@@ -855,7 +862,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 
     let small_key = b"small".to_vec();
     let small_value = b"value".to_vec();
-    let small_record = ProducerRecord::with_partition(
+    let small_record = ProducerRecord::new_partition_key(
         tp.topic().to_string(),
         Some(tp.partition()),
         Some(small_key.clone()),
@@ -865,7 +872,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 
     let large_key = b"large".to_vec();
     let large_value = vec![0u8; large_producer_record_size];
-    let large_record = ProducerRecord::with_partition(
+    let large_record = ProducerRecord::new_partition_key(
         tp.topic().to_string(),
         Some(tp.partition()),
         Some(large_key),
@@ -972,7 +979,10 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     .expect("new_consumer should succeed");
 
     assert_eq!(consumer.assignment().len(), 0, "initial assignment should be empty");
-    consumer.subscribe(topics.clone()).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(topics.clone())
+        .await
+        .expect("subscribe should succeed");
     await_assignment(consumer.as_mut(), &partitions).await;
 
     // Produce `partition_count` records per partition.

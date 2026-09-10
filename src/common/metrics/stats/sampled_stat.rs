@@ -131,7 +131,7 @@ impl SampledStat {
 
     fn new_sample(initial_value: f64, time_window_ms: i64, time_ms: i64) -> Sample {
         if time_window_ms > 0 {
-            Sample::with_time_window(initial_value, time_ms, time_window_ms)
+            Sample::new_time_window_ms(initial_value, time_ms, time_window_ms)
         } else {
             Sample::new(initial_value, time_ms)
         }
@@ -260,7 +260,7 @@ impl Sample {
     }
 
     /// Create a sample with an explicit time window.
-    pub fn with_time_window(initial_value: f64, now: i64, time_window_ms: i64) -> Self {
+    pub fn new_time_window_ms(initial_value: f64, now: i64, time_window_ms: i64) -> Self {
         Self {
             initial_value,
             event_count: 0,
@@ -337,7 +337,7 @@ mod tests {
     // SampledStatTest.testSampleIsPurgedIfDoesntOverlap
     #[test]
     fn test_sample_is_purged_if_doesnt_overlap() {
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Seconds).with_samples(2);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
         let time = MockTime::new();
 
@@ -351,7 +351,7 @@ mod tests {
     // SampledStatTest.testSampleIsKeptIfOverlaps
     #[test]
     fn test_sample_is_kept_if_overlaps() {
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Seconds).with_samples(2);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
         let time = MockTime::new();
 
@@ -365,7 +365,7 @@ mod tests {
     // SampledStatTest.testSampleIsKeptIfOverlapsAndExtra
     #[test]
     fn test_sample_is_kept_if_overlaps_and_extra() {
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Seconds).with_samples(2);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let stat = sample_count();
         let time = MockTime::new();
 
@@ -388,8 +388,8 @@ mod tests {
         let window_ms = 100i64;
         let samples = 2;
         let config = MetricConfig::new()
-            .with_time_window(window_ms, TimeUnit::Milliseconds)
-            .with_samples(samples);
+            .set_time_window(window_ms, TimeUnit::Milliseconds)
+            .set_samples(samples);
         let time = MockTime::new();
 
         max.record(&config, 50.0, time.milliseconds());
@@ -411,8 +411,8 @@ mod tests {
         let window_ms = 100i64;
         let samples = 2;
         let config = MetricConfig::new()
-            .with_time_window(window_ms, TimeUnit::Milliseconds)
-            .with_samples(samples);
+            .set_time_window(window_ms, TimeUnit::Milliseconds)
+            .set_samples(samples);
         let time = MockTime::new();
 
         count.record(&config, 50.0, time.milliseconds());

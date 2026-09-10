@@ -116,7 +116,7 @@ pub struct ExpireDelegationTokenRequestBuilder {
 
 impl ExpireDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: ExpireDelegationTokenRequestData) -> Self {
+    pub fn new(data: ExpireDelegationTokenRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::EXPIRE_DELEGATION_TOKEN.oldest_version(),

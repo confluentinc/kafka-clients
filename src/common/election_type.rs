@@ -16,7 +16,7 @@
 //!
 //! Translated from `org.apache.kafka.common.ElectionType`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Options for `Admin::elect_leaders`.
 ///
@@ -46,15 +46,15 @@ impl ElectionType {
     ///
     /// # Errors
     ///
-    /// Returns an [`KafkaError`] (invalid argument) if `value` is not a valid
+    /// Returns an [`Error`] (invalid argument) if `value` is not a valid
     /// election type, mirroring Java's `IllegalArgumentException`.
-    pub fn value_of(value: i8) -> Result<Self, KafkaError> {
+    pub fn value_of(value: i8) -> Result<Self, Error> {
         if value == Self::Preferred.value() {
             Ok(Self::Preferred)
         } else if value == Self::Unclean.value() {
             Ok(Self::Unclean)
         } else {
-            Err(KafkaError::illegal_argument(format!(
+            Err(Error::local_illegal_argument(format!(
                 "Value {value} must be one of [PREFERRED, UNCLEAN]"
             )))
         }

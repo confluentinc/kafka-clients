@@ -28,7 +28,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{ConsumerConfig, new_consumer};
 
@@ -44,7 +44,7 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(1000);
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         Ok(String::from_utf8_lossy(data).into_owned())
     }
 }
@@ -58,7 +58,7 @@ fn now_millis() -> u128 {
 /// Wraps `poll()` to also report how long the call took.
 async fn poll_with_timing(
     consumer: &mut Box<dyn confluent_kafka::consumer::Consumer<String, String>>,
-) -> Result<(confluent_kafka::consumer::ConsumerRecords<String, String>, Duration), KafkaError> {
+) -> Result<(confluent_kafka::consumer::ConsumerRecords<String, String>, Duration), Error> {
     let started = Instant::now();
     let records = consumer.poll(POLL_TIMEOUT).await?;
     Ok((records, started.elapsed()))
@@ -69,17 +69,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // KIP-848 ("consumer") group protocol — the only protocol this client
     // supports today. The default ("classic") is rejected by the factory.
     let config = ConsumerConfig::new(vec![BOOTSTRAP_SERVERS.to_string()])
-        .with_client_id("consumer-test")
-        .with_group_id(GROUP_ID)
-        .with_group_protocol("consumer")
-        .with_auto_offset_reset("earliest")
+        .set_client_id("consumer-test")
+        .set_group_id(GROUP_ID)
+        .set_group_protocol("consumer")
+        .set_auto_offset_reset("earliest")
         // Commit explicitly after each batch instead of on a timer.
-        .with_enable_auto_commit(false);
+        .set_enable_auto_commit(false);
 
     let mut consumer =
         new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
 
-    consumer.subscribe(vec![TOPIC.to_string()]).await?;
+    consumer.subscribe_topics(vec![TOPIC.to_string()]).await?;
     println!("Subscribed to '{TOPIC}' on {BOOTSTRAP_SERVERS}. Press Ctrl-C to stop.");
 
     loop {

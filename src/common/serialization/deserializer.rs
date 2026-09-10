@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::header::Headers;
 
 /// An interface for converting bytes to objects.
@@ -62,7 +62,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// The deserialized typed object, or a [`KafkaError`] if deserialization
+    /// The deserialized typed object, or a [`Error`] if deserialization
     /// fails.
     ///
     /// Java returns `T` directly and accepts a null `byte[]` returning a
@@ -70,14 +70,22 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// passes an empty slice or skips the call entirely — so the trait
     /// surface only models the happy path. Deserialization errors are
     /// reported via the `Result`.
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, KafkaError>;
+    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
 
     /// Deserialize a record value with access to its headers.
     ///
     /// Corresponds to Java's
-    /// `default T deserialize(String topic, Headers headers, byte[] data)`.
-    /// The default implementation ignores the headers and delegates to
-    /// [`deserialize`](Deserializer::deserialize).
+    /// `default T deserialize(String topic, Headers headers, byte[] data)`
+    /// (`Deserializer.java:84`). The default implementation ignores the headers
+    /// and delegates to [`deserialize`](Deserializer::deserialize).
+    ///
+    /// The translated Java overloads intersect on `{topic, data}`, which is
+    /// exactly `deserialize(String, byte[])` (`:64`) — so that one keeps the
+    /// plain name and this one is suffixed with the parameter that distinguishes
+    /// it (CLAUDE.md §2). Java's third overload, `deserialize(String, Headers,
+    /// ByteBuffer)` (`:113`), is conversion sugar over this one and has no Rust
+    /// counterpart: Rust has no `ByteBuffer`, and both forms would translate to
+    /// the same `&[u8]` signature.
     ///
     /// Override this method in custom deserializer implementations that need
     /// to inspect headers during deserialization (for example, schema
@@ -87,7 +95,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// struct) to mirror Java's signature exactly — Java's parameter type
     /// is the `Headers` interface, which lets test doubles and alternative
     /// `Headers` implementations interoperate with custom deserializers.
-    fn deserialize_with_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, KafkaError> {
+    fn deserialize_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
 
@@ -103,7 +111,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// of an owned copy (consumer-threading.md §27).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, KafkaError> {
+    fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
 
@@ -111,22 +119,22 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// [`deserialize_from_shared`](Deserializer::deserialize_from_shared).
     ///
     /// The default implementation delegates to
-    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers),
+    /// [`deserialize_headers`](Deserializer::deserialize_headers),
     /// ignoring `source`. This preserves the header-inspection behavior of any
-    /// deserializer that overrides `deserialize_with_headers` (e.g. schema
+    /// deserializer that overrides `deserialize_headers` (e.g. schema
     /// registry) even when called on the shared-buffer receive path — at the
     /// cost of the copy fallback. Byte-typed deserializers that want zero-copy
     /// override this method directly (see [`BytesDeserializer`]).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    fn deserialize_from_shared_with_headers(
+    fn deserialize_from_shared_headers(
         &self,
         topic: &str,
         headers: &dyn Headers,
         _source: &bytes::Bytes,
         data: &[u8],
-    ) -> Result<T, KafkaError> {
-        self.deserialize_with_headers(topic, headers, data)
+    ) -> Result<T, Error> {
+        self.deserialize_headers(topic, headers, data)
     }
 
     /// Configure this deserializer. The default implementation is a no-op.

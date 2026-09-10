@@ -25,7 +25,7 @@ use crate::admin::abort_transaction_spec::AbortTransactionSpec;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, WriteTxnMarkersRequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_error;
 use crate::write_txn_markers_request_data::{WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequestData};
 
@@ -99,7 +99,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed due to cluster authorization error",
@@ -116,7 +116,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed due an invalid producer epoch",
@@ -133,7 +133,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed since the provided coordinator epoch {} has been fenced by the active coordinator",
@@ -164,7 +164,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed due to unexpected error: {}",
@@ -190,7 +190,7 @@ impl AbortTransactionHandler {
 }
 
 /// Mirrors `ApiResult.failed(key, error)`.
-fn failed(tp: TopicPartition, error: KafkaError) -> ApiResult<TopicPartition, ()> {
+fn failed(tp: TopicPartition, error: Error) -> ApiResult<TopicPartition, ()> {
     ApiResult::new(HashMap::new(), HashMap::from([(tp, error)]), Vec::new())
 }
 
@@ -204,11 +204,11 @@ fn completed(tp: TopicPartition) -> ApiResult<TopicPartition, ()> {
     ApiResult::new(HashMap::from([(tp, ())]), HashMap::new(), Vec::new())
 }
 
-/// A bare Java `KafkaException` (no error code). Rust's [`KafkaError`] always
+/// A bare Java `KafkaException` (no error code). Rust's [`Error`] always
 /// carries an [`Errors`] code, so the neutral `UnknownServerError` code is used
 /// while the message preserves the Java text.
-fn kafka_exception(message: String) -> KafkaError {
-    KafkaError::with_message(Errors::UnknownServerError, message)
+fn bare_kafka_error(message: String) -> Error {
+    Error::kafka_message(message)
 }
 
 impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
@@ -235,7 +235,7 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
         let ConcreteResponse::WriteTxnMarkers(response) = response else {
             return failed(
                 self.abort_spec.topic_partition().clone(),
-                kafka_exception("WriteTxnMarkers response was of an unexpected type".to_string()),
+                bare_kafka_error("WriteTxnMarkers response was of an unexpected type".to_string()),
             );
         };
         let marker_responses = &response.data().markers;
@@ -243,7 +243,7 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
         if marker_responses.len() != 1 || marker_responses[0].producer_id != self.abort_spec.producer_id() {
             return failed(
                 self.abort_spec.topic_partition().clone(),
-                kafka_exception(format!(
+                bare_kafka_error(format!(
                     "WriteTxnMarkers response included unexpected marker entries: {marker_responses:?}(expected to find exactly one entry with producerId {})",
                     self.abort_spec.producer_id()
                 )),
@@ -256,7 +256,7 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
         if topic_responses.len() != 1 || topic_responses[0].name != self.abort_spec.topic_partition().topic() {
             return failed(
                 self.abort_spec.topic_partition().clone(),
-                kafka_exception(format!(
+                bare_kafka_error(format!(
                     "WriteTxnMarkers response included unexpected topic entries: {marker_responses:?}(expected to find exactly one entry with topic partition {})",
                     self.abort_spec.topic_partition()
                 )),
@@ -271,7 +271,7 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
         {
             return failed(
                 self.abort_spec.topic_partition().clone(),
-                kafka_exception(format!(
+                bare_kafka_error(format!(
                     "WriteTxnMarkers response included unexpected partition entries for topic {}: {marker_responses:?}(expected to find exactly one entry with partition {})",
                     self.abort_spec.topic_partition().topic(),
                     self.abort_spec.topic_partition().partition()
@@ -334,7 +334,8 @@ mod tests {
         ] {
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.build_batched_request(&keys)));
-            assert!(result.is_err(), "expected panic (IllegalArgumentException) for keys {keys:?}");
+            // Java throws `IllegalArgumentException` here.
+            assert!(result.is_err(), "expected an illegal-argument error for keys {keys:?}");
         }
     }
 
@@ -369,7 +370,8 @@ mod tests {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 handler.handle_response(&node(), &keys, &response)
             }));
-            assert!(result.is_err(), "expected panic (IllegalArgumentException) for keys {keys:?}");
+            // Java throws `IllegalArgumentException` here.
+            assert!(result.is_err(), "expected an illegal-argument error for keys {keys:?}");
         }
     }
 

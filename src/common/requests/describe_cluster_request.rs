@@ -105,7 +105,7 @@ pub struct DescribeClusterRequestBuilder {
 
 impl DescribeClusterRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DescribeClusterRequestData) -> Self {
+    pub fn new(data: DescribeClusterRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_CLUSTER.oldest_version(),

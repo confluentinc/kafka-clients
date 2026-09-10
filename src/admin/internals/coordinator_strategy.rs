@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
@@ -82,7 +82,7 @@ impl CoordinatorStrategy {
     pub(crate) fn build_lookup_request(
         &self,
         keys: &HashSet<CoordinatorKey>,
-    ) -> Result<FindCoordinatorRequestBuilder, KafkaError> {
+    ) -> Result<FindCoordinatorRequestBuilder, Error> {
         if self.batch() {
             self.ensure_same_type(keys)?;
             let mut data = FindCoordinatorRequestData::new();
@@ -107,7 +107,7 @@ impl CoordinatorStrategy {
         &self,
         keys: &HashSet<CoordinatorKey>,
         response: &FindCoordinatorResponse,
-    ) -> Result<LookupResult<CoordinatorKey>, KafkaError> {
+    ) -> Result<LookupResult<CoordinatorKey>, Error> {
         let mut mapped_keys = std::collections::HashMap::new();
         let mut failed_keys = std::collections::HashMap::new();
 
@@ -134,19 +134,16 @@ impl CoordinatorStrategy {
         Ok(LookupResult::new(failed_keys, mapped_keys))
     }
 
-    fn require_singleton_and_type<'a>(
-        &self,
-        keys: &'a HashSet<CoordinatorKey>,
-    ) -> Result<&'a CoordinatorKey, KafkaError> {
+    fn require_singleton_and_type<'a>(&self, keys: &'a HashSet<CoordinatorKey>) -> Result<&'a CoordinatorKey, Error> {
         if keys.len() != 1 {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected size of key set: expected 1, but got {}",
                 keys.len()
             )));
         }
         let key = keys.iter().next().expect("len checked to be 1");
         if key.coordinator_type != self.coordinator_type {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected key type: expected key to be of type {}, but got {}",
                 type_name(self.coordinator_type),
                 type_name(key.coordinator_type)
@@ -155,14 +152,14 @@ impl CoordinatorStrategy {
         Ok(key)
     }
 
-    fn ensure_same_type(&self, keys: &HashSet<CoordinatorKey>) -> Result<(), KafkaError> {
+    fn ensure_same_type(&self, keys: &HashSet<CoordinatorKey>) -> Result<(), Error> {
         if keys.is_empty() {
-            return Err(KafkaError::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "Unexpected size of key set: expected >= 1, but got 0",
             ));
         }
         if keys.iter().any(|k| k.coordinator_type != self.coordinator_type) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected key set: expected all key to be of type {}, but some key were not",
                 type_name(self.coordinator_type)
             )));
@@ -176,7 +173,7 @@ impl CoordinatorStrategy {
         key: CoordinatorKey,
         node_id: i32,
         mapped_keys: &mut std::collections::HashMap<CoordinatorKey, i32>,
-        failed_keys: &mut std::collections::HashMap<CoordinatorKey, KafkaError>,
+        failed_keys: &mut std::collections::HashMap<CoordinatorKey, Error>,
     ) {
         match error {
             Errors::None => {
@@ -194,7 +191,7 @@ impl CoordinatorStrategy {
                 let id_value = key.id_value.clone();
                 failed_keys.insert(
                     key.clone(),
-                    KafkaError::group_authorization_with_message(
+                    Error::group_authorization_with_message(
                         id_value,
                         format!("FindCoordinator request for groupId `{key}` failed due to authorization failure"),
                     ),
@@ -203,7 +200,7 @@ impl CoordinatorStrategy {
             Errors::TransactionalIdAuthorizationFailed => {
                 failed_keys.insert(
                     key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         Errors::TransactionalIdAuthorizationFailed,
                         format!(
                             "FindCoordinator request for transactionalId `{key}` failed due to authorization failure"
@@ -214,7 +211,7 @@ impl CoordinatorStrategy {
             other => {
                 failed_keys.insert(
                     key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         other,
                         format!("FindCoordinator request for key `{key}` failed due to an unexpected error"),
                     ),
@@ -267,17 +264,29 @@ impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
         response: &ConcreteResponse,
     ) -> LookupResult<CoordinatorKey> {
         let ConcreteResponse::FindCoordinator(resp) = response else {
-            panic!("CoordinatorStrategy received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `LookupResult::failed_all`.
+            return LookupResult::failed_all(
+                keys,
+                Error::local_illegal_state("CoordinatorStrategy received an unexpected response type"),
+            );
         };
         match self.handle_lookup_response(keys, resp) {
             Ok(result) => result,
             Err(e) => {
+                // Java's `requireSingletonAndType` throws `IllegalArgumentException`
+                // for a malformed old-version response
+                // (`CoordinatorStrategy.java:118-127`), and that throw sits inside
+                // `KafkaAdminClient.java:1387`'s `catch (Throwable t)` — so the
+                // affected lookup fails and the client keeps running. Panicking
+                // instead killed the admin background task on a broker's malformed
+                // reply, which is not even a client-side programming error.
                 kafka_error!(
                     self.log_context,
                     "CoordinatorStrategy.handle_response precondition violated: {}",
                     e
                 );
-                panic!("CoordinatorStrategy.handle_response precondition violated: {e}");
+                LookupResult::failed_all(keys, e)
             },
         }
     }
@@ -296,6 +305,35 @@ mod tests {
 
     fn keys(items: &[CoordinatorKey]) -> HashSet<CoordinatorKey> {
         items.iter().cloned().collect()
+    }
+
+    /// The `panic!` variant of the same defect as
+    /// `delete_records_handler::tests::an_unexpected_response_type_fails_every_key_of_the_request`.
+    ///
+    /// `handle_response` runs on the admin background task under
+    /// `driver.lock().unwrap()`, so a panic there (i) killed the whole task rather
+    /// than one RPC and (ii) **poisoned the driver mutex**, making every later
+    /// `lock().unwrap()` panic too. Java's `catch (Throwable t)` at
+    /// `KafkaAdminClient.java:1387-1391` is positive proof the Java client treats
+    /// this as recoverable, and CLAUDE.md §10.1 forbids the panic outright.
+    #[test]
+    fn an_unexpected_response_type_fails_every_lookup_key() {
+        let s = strategy(CoordinatorType::Group);
+        let requested = keys(&[CoordinatorKey::by_group_id("foo"), CoordinatorKey::by_group_id("bar")]);
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new_version(
+            crate::metadata_response_data::MetadataResponseData::new(),
+            0,
+        ));
+
+        let result = s.handle_response(&requested, &wrong);
+
+        assert!(result.completed_keys.is_empty());
+        assert!(result.mapped_keys.is_empty());
+        assert_eq!(result.failed_keys.keys().cloned().collect::<HashSet<_>>(), requested);
+        for error in result.failed_keys.values() {
+            assert_eq!(error.message(), "CoordinatorStrategy received an unexpected response type");
+            assert!(!error.is_retriable_error(), "got {error:?}");
+        }
     }
 
     /// Translated from `testBuildOldLookupRequest`.
@@ -464,7 +502,7 @@ mod tests {
         }
     }
 
-    fn assert_fatal_old_lookup(key: CoordinatorKey, error: Errors) -> KafkaError {
+    fn assert_fatal_old_lookup(key: CoordinatorKey, error: Errors) -> Error {
         let mut data = FindCoordinatorResponseData::new();
         data.set_error_code(error.code());
         let result = run_old_lookup(key.clone(), data);
@@ -490,12 +528,12 @@ mod tests {
         );
         let throwable = assert_fatal_old_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            KafkaError::GroupAuthorization(e) => assert_eq!(e.group_id, "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }
 
-    fn assert_fatal_lookup(key: CoordinatorKey, error: Errors) -> KafkaError {
+    fn assert_fatal_lookup(key: CoordinatorKey, error: Errors) -> Error {
         let mut c = Coordinator::new();
         c.set_key(key.id_value.clone()).set_error_code(error.code());
         let mut data = FindCoordinatorResponseData::new();
@@ -523,7 +561,7 @@ mod tests {
         );
         let throwable = assert_fatal_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            KafkaError::GroupAuthorization(e) => assert_eq!(e.group_id, "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }

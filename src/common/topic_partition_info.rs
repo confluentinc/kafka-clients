@@ -46,7 +46,7 @@ impl TopicPartitionInfo {
     /// * `isr` - the in-sync replicas
     /// * `elr` - the eligible leader replicas
     /// * `last_known_elr` - the last known eligible leader replicas
-    pub fn new(
+    pub fn new_elr_last_known_elr(
         partition: i32,
         leader: Option<Node>,
         replicas: Vec<Node>,
@@ -66,7 +66,7 @@ impl TopicPartitionInfo {
 
     /// Create an instance without eligible-leader-replica information (the Java
     /// four-argument constructor, which leaves `elr`/`last_known_elr` `null`).
-    pub fn with_leader_replicas_isr(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> Self {
+    pub fn new(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> Self {
         Self { partition, leader, replicas, isr, elr: None, last_known_elr: None }
     }
 
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn accessors_full_constructor() {
-        let info = TopicPartitionInfo::new(
+        let info = TopicPartitionInfo::new_elr_last_known_elr(
             0,
             Some(node(1)),
             vec![node(1), node(2)],
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn short_constructor_leaves_elr_none() {
-        let info = TopicPartitionInfo::with_leader_replicas_isr(1, None, vec![node(1)], vec![node(1)]);
+        let info = TopicPartitionInfo::new(1, None, vec![node(1)], vec![node(1)]);
         assert_eq!(info.leader(), None);
         assert_eq!(info.elr(), None);
         assert_eq!(info.last_known_elr(), None);
@@ -165,16 +165,16 @@ mod tests {
 
     #[test]
     fn equality() {
-        let a = TopicPartitionInfo::with_leader_replicas_isr(0, Some(node(1)), vec![], vec![]);
-        let b = TopicPartitionInfo::with_leader_replicas_isr(0, Some(node(1)), vec![], vec![]);
-        let c = TopicPartitionInfo::with_leader_replicas_isr(1, Some(node(1)), vec![], vec![]);
+        let a = TopicPartitionInfo::new(0, Some(node(1)), vec![], vec![]);
+        let b = TopicPartitionInfo::new(0, Some(node(1)), vec![], vec![]);
+        let c = TopicPartitionInfo::new(1, Some(node(1)), vec![], vec![]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
 
     #[test]
     fn display_uses_na_when_elr_absent() {
-        let info = TopicPartitionInfo::with_leader_replicas_isr(0, None, vec![], vec![]);
+        let info = TopicPartitionInfo::new(0, None, vec![], vec![]);
         let s = info.to_string();
         assert!(s.contains("elr=N/A"), "{s}");
         assert!(s.contains("lastKnownElr=N/A"), "{s}");

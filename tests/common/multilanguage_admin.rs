@@ -27,10 +27,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
+use confluent_kafka::admin::ConfigEntryOptionsBuilder;
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
     AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
-    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
+    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource,
     ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
     CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
     DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
@@ -64,7 +65,7 @@ use confluent_kafka::common::security::auth::KafkaPrincipal;
 use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
 use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
-    ClassicGroupState, ElectionType, GroupState, GroupType, KafkaError, Node, TopicPartition, TopicPartitionInfo,
+    ClassicGroupState, ElectionType, Error, GroupState, GroupType, Node, TopicPartition, TopicPartitionInfo,
     TopicPartitionReplica, Uuid,
 };
 use confluent_kafka::consumer::OffsetAndMetadata;
@@ -89,18 +90,14 @@ pub struct MultilanguageAdmin {
 impl MultilanguageAdmin {
     /// Connect to `channel` and create a server-side admin client from
     /// `config`.
-    pub async fn new(
-        channel: Channel,
-        config: HashMap<String, String>,
-        backend: &'static str,
-    ) -> Result<Self, KafkaError> {
+    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
         Self::create(channel, proto::CreateAdminRequest { config, num_brokers: None }, backend).await
     }
 
     /// Connect to `channel` and create a server-side *mock* admin client with
     /// `num_brokers` brokers. An empty config is what selects the mock, matching
     /// the producer / consumer backends.
-    pub async fn new_mock(channel: Channel, num_brokers: i32, backend: &'static str) -> Result<Self, KafkaError> {
+    pub async fn new_mock(channel: Channel, num_brokers: i32, backend: &'static str) -> Result<Self, Error> {
         let request = proto::CreateAdminRequest { config: HashMap::new(), num_brokers: Some(num_brokers) };
         Self::create(channel, request, backend).await
     }
@@ -109,7 +106,7 @@ impl MultilanguageAdmin {
         channel: Channel,
         request: proto::CreateAdminRequest,
         backend: &'static str,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
         let mut client = AdminServiceClient::new(channel);
         let response = client
             .create_admin(request)
@@ -128,13 +125,13 @@ impl MultilanguageAdmin {
     }
 
     /// Issues one unary RPC on a cloned client, mapping a transport failure to a
-    /// `KafkaError` that names the backend.
+    /// `Error` that names the backend.
     ///
     /// The clone is what lets the RPC methods take `&self`: tonic's generated
     /// client needs `&mut self`, and `AdminBackend` is `&self` because Java's
     /// `Admin` methods are (a `&mut self` trait would forbid the perfectly legal
     /// concurrent use a later slice may want).
-    async fn call<T, F, Fut>(&self, rpc: F) -> Result<T, KafkaError>
+    async fn call<T, F, Fut>(&self, rpc: F) -> Result<T, Error>
     where
         F: FnOnce(AdminServiceClient<Channel>) -> Fut,
         Fut: Future<Output = Result<tonic::Response<T>, tonic::Status>>,
@@ -147,13 +144,13 @@ impl MultilanguageAdmin {
 
     /// A failure of the harness itself rather than of Kafka: the server sent a
     /// response the wire contract forbids.
-    fn protocol_error(&self, what: impl std::fmt::Display) -> KafkaError {
-        KafkaError::illegal_state(format!("{} backend: {what}", self.backend))
+    fn protocol_error(&self, what: impl std::fmt::Display) -> Error {
+        Error::local_illegal_state(format!("{} backend: {what}", self.backend))
     }
 
     /// Reads the `name` variant of a [`proto::ResultKey`], which is the only
     /// variant `rpc` is allowed to answer with.
-    fn name_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<String, KafkaError> {
+    fn name_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<String, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::Name(name)) => Ok(name),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a topic name"))),
@@ -161,7 +158,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `topic_id` variant of a [`proto::ResultKey`].
-    fn topic_id_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<Uuid, KafkaError> {
+    fn topic_id_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<Uuid, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::TopicId(id)) => self.parse_uuid(&id, "ResultKey.topic_id"),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a topic id"))),
@@ -169,7 +166,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `partition` variant of a [`proto::ResultKey`].
-    fn partition_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<TopicPartition, KafkaError> {
+    fn partition_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<TopicPartition, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::Partition(tp)) => Ok(TopicPartition::new(tp.topic, tp.partition)),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a TopicPartition"))),
@@ -177,7 +174,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `config_resource` variant of a [`proto::ResultKey`].
-    fn config_resource_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<ConfigResource, KafkaError> {
+    fn config_resource_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<ConfigResource, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::ConfigResource(resource)) => self.config_resource(resource),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a ConfigResource"))),
@@ -185,7 +182,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `replica` variant of a [`proto::ResultKey`].
-    fn replica_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<TopicPartitionReplica, KafkaError> {
+    fn replica_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<TopicPartitionReplica, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::Replica(replica)) => Ok(replica_from_proto(replica)),
             other => {
@@ -200,12 +197,12 @@ impl MultilanguageAdmin {
     /// does not even fit Java's `byte` is rejected here rather than silently
     /// truncating into a valid-looking constant — the same rule the
     /// [`Self::config_resource`] narrowing applies.
-    fn enum_code(&self, code: i32, what: &str) -> Result<i8, KafkaError> {
+    fn enum_code(&self, code: i32, what: &str) -> Result<i8, Error> {
         i8::try_from(code).map_err(|_| self.protocol_error(format!("{what} {code} is not a Java byte")))
     }
 
     /// Narrows a wire `int32` to the Java `short` it stands for.
-    fn short(&self, value: i32, what: &str) -> Result<i16, KafkaError> {
+    fn short(&self, value: i32, what: &str) -> Result<i16, Error> {
         i16::try_from(value).map_err(|_| self.protocol_error(format!("{what} {value} is not a Java short")))
     }
 
@@ -216,7 +213,7 @@ impl MultilanguageAdmin {
     /// a valid value, so a code that decodes to `Unknown` without *being* the
     /// `Unknown` code is a protocol error. Same rule as the group-enum names in
     /// [`Self::group_state`].
-    fn acl_operation(&self, code: i32) -> Result<AclOperation, KafkaError> {
+    fn acl_operation(&self, code: i32) -> Result<AclOperation, Error> {
         let code = self.enum_code(code, "AclOperation.code")?;
         let operation = AclOperation::from_code(code);
         if operation.is_unknown() && code != AclOperation::Unknown.code() {
@@ -227,7 +224,7 @@ impl MultilanguageAdmin {
 
     /// Rebuilds an [`AclPermissionType`] from its `code()`. See
     /// [`Self::acl_operation`].
-    fn acl_permission_type(&self, code: i32) -> Result<AclPermissionType, KafkaError> {
+    fn acl_permission_type(&self, code: i32) -> Result<AclPermissionType, Error> {
         let code = self.enum_code(code, "AclPermissionType.code")?;
         let permission = AclPermissionType::from_code(code);
         if permission.is_unknown() && code != AclPermissionType::Unknown.code() {
@@ -237,7 +234,7 @@ impl MultilanguageAdmin {
     }
 
     /// Rebuilds a [`ResourceType`] from its `code()`. See [`Self::acl_operation`].
-    fn resource_type(&self, code: i32) -> Result<ResourceType, KafkaError> {
+    fn resource_type(&self, code: i32) -> Result<ResourceType, Error> {
         let code = self.enum_code(code, "ResourceType.code")?;
         let resource_type = ResourceType::from_code(code);
         if resource_type.is_unknown() && code != ResourceType::Unknown.code() {
@@ -247,7 +244,7 @@ impl MultilanguageAdmin {
     }
 
     /// Rebuilds a [`PatternType`] from its `code()`. See [`Self::acl_operation`].
-    fn pattern_type(&self, code: i32) -> Result<PatternType, KafkaError> {
+    fn pattern_type(&self, code: i32) -> Result<PatternType, Error> {
         let code = self.enum_code(code, "PatternType.code")?;
         let pattern_type = PatternType::from_code(code);
         if pattern_type.is_unknown() && code != PatternType::Unknown.code() {
@@ -259,7 +256,7 @@ impl MultilanguageAdmin {
     /// Rebuilds a [`ScramMechanism`] from its `type()` indicator. See
     /// [`Self::acl_operation`]; `ScramMechanism::from_type` likewise falls through
     /// to `Unknown`.
-    fn scram_mechanism(&self, mechanism: i32) -> Result<ScramMechanism, KafkaError> {
+    fn scram_mechanism(&self, mechanism: i32) -> Result<ScramMechanism, Error> {
         let mechanism = self.enum_code(mechanism, "ScramMechanism.type")?;
         let parsed = ScramMechanism::from_type(mechanism);
         if parsed == ScramMechanism::Unknown && mechanism != ScramMechanism::Unknown.r#type() {
@@ -274,7 +271,7 @@ impl MultilanguageAdmin {
     /// constructors Java also has (they reject the match-any states an ACL to be
     /// created cannot hold), so their rejection surfaces as a protocol error
     /// rather than being papered over.
-    fn acl_binding(&self, binding: proto::AclBinding) -> Result<AclBinding, KafkaError> {
+    fn acl_binding(&self, binding: proto::AclBinding) -> Result<AclBinding, Error> {
         let pattern = ResourcePattern::new(
             self.resource_type(binding.resource_type)?,
             binding.resource_name,
@@ -299,7 +296,7 @@ impl MultilanguageAdmin {
     /// principal or host literally named the empty string. Both filter
     /// constructors are infallible in Java and in Rust, since a filter may legally
     /// hold every match-any state.
-    fn acl_binding_filter(&self, filter: proto::AclBindingFilter) -> Result<AclBindingFilter, KafkaError> {
+    fn acl_binding_filter(&self, filter: proto::AclBindingFilter) -> Result<AclBindingFilter, Error> {
         Ok(AclBindingFilter::new(
             ResourcePatternFilter::new(
                 self.resource_type(filter.resource_type)?,
@@ -321,7 +318,7 @@ impl MultilanguageAdmin {
     /// `oneof` (the enclosing per-filter future already resolved), so both are
     /// carried through unchanged; a backend that set neither or both is visible to
     /// the scenario rather than normalised here.
-    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResults, KafkaError> {
+    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResults, Error> {
         let mut values = Vec::with_capacity(results.values.len());
         for deleted in results.values {
             let binding = match deleted.binding {
@@ -353,26 +350,22 @@ impl MultilanguageAdmin {
     /// hand-written `PartialEq` for `KafkaPrincipal` ignores it (as Java's
     /// `equals` does), so a comparison of whole principals could not see it.
     fn kafka_principal(&self, principal: proto::KafkaPrincipal) -> KafkaPrincipal {
-        KafkaPrincipal::with_token_authenticated(
-            principal.principal_type,
-            principal.name,
-            principal.token_authenticated,
-        )
+        KafkaPrincipal::new_token_authenticated(principal.principal_type, principal.name, principal.token_authenticated)
     }
 
     /// Rebuilds a [`TokenInformation`].
     ///
-    /// `with_requester` rather than `new`: `new` sets the requester equal to the
+    /// `new_token_requester` rather than `new`: `new` sets the requester equal to the
     /// owner, which would silently repair a backend that dropped or transposed the
     /// requester.
-    fn token_information(&self, info: proto::TokenInformation) -> Result<TokenInformation, KafkaError> {
+    fn token_information(&self, info: proto::TokenInformation) -> Result<TokenInformation, Error> {
         let owner = info
             .owner
             .ok_or_else(|| self.protocol_error("TokenInformation with no owner"))?;
         let requester = info
             .token_requester
             .ok_or_else(|| self.protocol_error("TokenInformation with no token_requester"))?;
-        Ok(TokenInformation::with_requester(
+        Ok(TokenInformation::new_token_requester(
             info.token_id,
             self.kafka_principal(owner),
             self.kafka_principal(requester),
@@ -391,7 +384,7 @@ impl MultilanguageAdmin {
     /// said. Comparing the two here is what turns a carried derived field into
     /// real coverage (the rule slice G4 established for the derived group-state and
     /// `isSimpleConsumerGroup` fields).
-    fn delegation_token(&self, token: proto::DelegationToken) -> Result<DelegationToken, KafkaError> {
+    fn delegation_token(&self, token: proto::DelegationToken) -> Result<DelegationToken, Error> {
         let info = token
             .token_information
             .ok_or_else(|| self.protocol_error("DelegationToken with no token_information"))?;
@@ -410,7 +403,7 @@ impl MultilanguageAdmin {
     fn scram_description(
         &self,
         description: proto::UserScramCredentialsDescription,
-    ) -> Result<UserScramCredentialsDescription, KafkaError> {
+    ) -> Result<UserScramCredentialsDescription, Error> {
         let mut infos = Vec::with_capacity(description.credential_infos.len());
         for info in description.credential_infos {
             infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
@@ -424,7 +417,7 @@ impl MultilanguageAdmin {
     /// empty `Optional<Long>`, not epoch 0. The two range constructors are
     /// fallible in Java and in Rust (they reject a negative or inverted range), so
     /// a rejection is a protocol error.
-    fn feature_metadata(&self, metadata: proto::FeatureMetadata) -> Result<FeatureMetadataView, KafkaError> {
+    fn feature_metadata(&self, metadata: proto::FeatureMetadata) -> Result<FeatureMetadataView, Error> {
         let mut finalized_features = HashMap::with_capacity(metadata.finalized_features.len());
         for (feature, range) in metadata.finalized_features {
             let built = FinalizedVersionRange::new(
@@ -451,7 +444,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `acl_binding` variant of a [`proto::ResultKey`].
-    fn acl_binding_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<AclBinding, KafkaError> {
+    fn acl_binding_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<AclBinding, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::AclBinding(binding)) => self.acl_binding(binding),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected an AclBinding"))),
@@ -459,7 +452,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `acl_binding_filter` variant of a [`proto::ResultKey`].
-    fn acl_binding_filter_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<AclBindingFilter, KafkaError> {
+    fn acl_binding_filter_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<AclBindingFilter, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::AclBindingFilter(filter)) => self.acl_binding_filter(filter),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected an AclBindingFilter"))),
@@ -467,11 +460,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `client_quota_entity` variant of a [`proto::ResultKey`].
-    fn client_quota_entity_key(
-        &self,
-        key: Option<proto::ResultKey>,
-        rpc: &str,
-    ) -> Result<ClientQuotaEntity, KafkaError> {
+    fn client_quota_entity_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<ClientQuotaEntity, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::ClientQuotaEntity(entity)) => Ok(self.client_quota_entity(entity)),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a ClientQuotaEntity"))),
@@ -483,7 +472,7 @@ impl MultilanguageAdmin {
     /// `ConfigResourceType::for_id` maps an unrecognized id to `Unknown` rather
     /// than failing, so an id that does not even fit Java's `byte` is rejected
     /// here instead of silently truncating into a valid-looking type.
-    fn config_resource(&self, resource: proto::ConfigResource) -> Result<ConfigResource, KafkaError> {
+    fn config_resource(&self, resource: proto::ConfigResource) -> Result<ConfigResource, Error> {
         let id = i8::try_from(resource.resource_type).map_err(|_| {
             self.protocol_error(format!(
                 "ConfigResource.resource_type {} is not a ConfigResource.Type id",
@@ -495,7 +484,7 @@ impl MultilanguageAdmin {
 
     /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
     /// the two `OptionalLong` volume sizes.
-    fn log_dir_description(&self, description: proto::LogDirDescription) -> Result<LogDirDescription, KafkaError> {
+    fn log_dir_description(&self, description: proto::LogDirDescription) -> Result<LogDirDescription, Error> {
         let mut replica_infos = HashMap::with_capacity(description.replica_infos.len());
         for replica in description.replica_infos {
             let tp = replica
@@ -507,7 +496,7 @@ impl MultilanguageAdmin {
             );
         }
         // `LogDirDescription::new` is the two-argument Java constructor, which
-        // records both volume sizes as absent; `with_volume_bytes` is the
+        // records both volume sizes as absent; `new_total_bytes_usable_bytes` is the
         // four-argument one. Java has no constructor for one present and the
         // other absent, and no broker sends that, so the mixed case is a
         // protocol error rather than a guess.
@@ -516,7 +505,7 @@ impl MultilanguageAdmin {
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::with_volume_bytes(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::new_total_bytes_usable_bytes(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
@@ -538,7 +527,7 @@ impl MultilanguageAdmin {
     /// dropped or garbled field into a valid-looking value. So a name that parses
     /// to `Unknown` without *being* "Unknown" is rejected as a protocol error
     /// instead.
-    fn group_state(&self, name: &str, what: &str) -> Result<GroupState, KafkaError> {
+    fn group_state(&self, name: &str, what: &str) -> Result<GroupState, Error> {
         let parsed = GroupState::parse(name);
         if parsed == GroupState::Unknown && !name.eq_ignore_ascii_case("Unknown") {
             return Err(self.protocol_error(format!("{what} {name:?} is not a GroupState constant name")));
@@ -548,7 +537,7 @@ impl MultilanguageAdmin {
 
     /// Rebuilds a [`GroupType`] from its enum constant name. See
     /// [`Self::group_state`] for why an unrecognised name is an error.
-    fn group_type(&self, name: &str, what: &str) -> Result<GroupType, KafkaError> {
+    fn group_type(&self, name: &str, what: &str) -> Result<GroupType, Error> {
         let parsed = GroupType::parse(name);
         if parsed == GroupType::Unknown && !name.eq_ignore_ascii_case("Unknown") {
             return Err(self.protocol_error(format!("{what} {name:?} is not a GroupType constant name")));
@@ -558,7 +547,7 @@ impl MultilanguageAdmin {
 
     /// Rebuilds a [`ClassicGroupState`] from its enum constant name. See
     /// [`Self::group_state`].
-    fn classic_group_state(&self, name: &str, what: &str) -> Result<ClassicGroupState, KafkaError> {
+    fn classic_group_state(&self, name: &str, what: &str) -> Result<ClassicGroupState, Error> {
         let parsed = ClassicGroupState::parse(name);
         if parsed == ClassicGroupState::Unknown && !name.eq_ignore_ascii_case("Unknown") {
             return Err(self.protocol_error(format!("{what} {name:?} is not a ClassicGroupState constant name")));
@@ -575,7 +564,7 @@ impl MultilanguageAdmin {
     /// derived value here — otherwise a backend that reported it wrongly would be
     /// invisible, since the reconstructed value would come from the other two
     /// fields regardless.
-    fn group_listing(&self, listing: proto::GroupListing) -> Result<GroupListing, KafkaError> {
+    fn group_listing(&self, listing: proto::GroupListing) -> Result<GroupListing, Error> {
         let group_type = match &listing.group_type {
             Some(name) => Some(self.group_type(name, "GroupListing.group_type")?),
             None => None,
@@ -604,7 +593,7 @@ impl MultilanguageAdmin {
     /// carried rather than checked; the deprecated `state` is the derived one and
     /// is checked instead (see [`Self::check_derived_state`]).
     #[allow(deprecated)]
-    fn consumer_group_listing(&self, listing: proto::ConsumerGroupListing) -> Result<ConsumerGroupListing, KafkaError> {
+    fn consumer_group_listing(&self, listing: proto::ConsumerGroupListing) -> Result<ConsumerGroupListing, Error> {
         let group_state = match &listing.group_state {
             Some(name) => Some(self.group_state(name, "ConsumerGroupListing.group_state")?),
             None => None,
@@ -613,7 +602,7 @@ impl MultilanguageAdmin {
             Some(name) => Some(self.group_type(name, "ConsumerGroupListing.group_type")?),
             None => None,
         };
-        let rebuilt = ConsumerGroupListing::new(
+        let rebuilt = ConsumerGroupListing::new_group_state_group_type(
             listing.group_id.clone(),
             group_state,
             group_type,
@@ -644,7 +633,7 @@ impl MultilanguageAdmin {
         what: &str,
         reported: Option<&str>,
         derived: Option<&str>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if reported != derived {
             return Err(self.protocol_error(format!(
                 "{what} for {group_id:?} reported the deprecated state {reported:?}, but Java derives {derived:?} \
@@ -670,7 +659,7 @@ impl MultilanguageAdmin {
     /// `assignment` is never null in Java, so an absent one is a protocol error
     /// rather than an empty assignment; `target_assignment` *is* nullable and an
     /// absent one must stay `None` rather than becoming an empty assignment.
-    fn member_description(&self, member: proto::MemberDescription) -> Result<MemberDescription, KafkaError> {
+    fn member_description(&self, member: proto::MemberDescription) -> Result<MemberDescription, Error> {
         let assignment = member
             .assignment
             .ok_or_else(|| self.protocol_error("MemberDescription with no assignment"))?;
@@ -688,10 +677,7 @@ impl MultilanguageAdmin {
     }
 
     /// Rebuilds the members of a described group.
-    fn member_descriptions(
-        &self,
-        members: Vec<proto::MemberDescription>,
-    ) -> Result<Vec<MemberDescription>, KafkaError> {
+    fn member_descriptions(&self, members: Vec<proto::MemberDescription>) -> Result<Vec<MemberDescription>, Error> {
         members.into_iter().map(|member| self.member_description(member)).collect()
     }
 
@@ -699,12 +685,12 @@ impl MultilanguageAdmin {
     /// endpoint.
     ///
     /// The coordinator is why this harness exists: it used to be a fabricated
-    /// `Node` with an empty host and port -1. `Node::with_rack` keeps whatever the
+    /// `Node` with an empty host and port -1. `Node::new_rack` keeps whatever the
     /// wire carried, and the scenarios cross-check it against `describeCluster`.
     fn consumer_group_description(
         &self,
         description: proto::ConsumerGroupDescription,
-    ) -> Result<ConsumerGroupDescription, KafkaError> {
+    ) -> Result<ConsumerGroupDescription, Error> {
         let group_type = self.group_type(&description.group_type, "ConsumerGroupDescription.group_type")?;
         let group_state = self.group_state(&description.group_state, "ConsumerGroupDescription.group_state")?;
         let rebuilt = ConsumerGroupDescription::new(
@@ -735,7 +721,7 @@ impl MultilanguageAdmin {
     fn classic_group_description(
         &self,
         description: proto::ClassicGroupDescription,
-    ) -> Result<ClassicGroupDescription, KafkaError> {
+    ) -> Result<ClassicGroupDescription, Error> {
         let state = self.classic_group_state(&description.state, "ClassicGroupDescription.state")?;
         let rebuilt = ClassicGroupDescription::new(
             description.group_id.clone(),
@@ -764,7 +750,7 @@ impl MultilanguageAdmin {
     /// An absent `offset` is Java's **null map value**: the group has no committed
     /// offset for that partition, which is not a committed offset of 0. It stays
     /// `None`.
-    fn group_offsets(&self, offsets: proto::GroupOffsets) -> Result<GroupOffsets, KafkaError> {
+    fn group_offsets(&self, offsets: proto::GroupOffsets) -> Result<GroupOffsets, Error> {
         let mut map = GroupOffsets::with_capacity(offsets.offsets.len());
         for entry in offsets.offsets {
             let tp = entry
@@ -781,14 +767,14 @@ impl MultilanguageAdmin {
 
     /// Rebuilds an [`OffsetAndMetadata`].
     ///
-    /// `OffsetAndMetadata::with_leader_epoch` rejects a negative offset (Java's
+    /// `OffsetAndMetadata::new_leader_epoch_metadata` rejects a negative offset (Java's
     /// `IllegalArgumentException("Invalid negative offset")`), so a backend that
     /// reported one is a protocol error rather than a panic.
-    fn offset_and_metadata(&self, offset: proto::OffsetAndMetadata) -> Result<OffsetAndMetadata, KafkaError> {
+    fn offset_and_metadata(&self, offset: proto::OffsetAndMetadata) -> Result<OffsetAndMetadata, Error> {
         // Java's `metadata` is never null (its constructor maps a null to ""),
         // hence a plain string on the wire. `leader_epoch` absent is Java's
         // `Optional.empty()`, which is not epoch 0.
-        OffsetAndMetadata::with_leader_epoch(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
+        OffsetAndMetadata::new_leader_epoch_metadata(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
             self.protocol_error(format!(
                 "OffsetAndMetadata with offset {} is not constructible: {e}",
                 offset.offset
@@ -797,7 +783,7 @@ impl MultilanguageAdmin {
     }
 
     /// Reads the `broker_id` variant of a [`proto::ResultKey`].
-    fn broker_id_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<i32, KafkaError> {
+    fn broker_id_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<i32, Error> {
         match key.and_then(|k| k.key) {
             Some(proto::result_key::Key::BrokerId(broker)) => Ok(broker),
             other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a broker id"))),
@@ -811,7 +797,7 @@ impl MultilanguageAdmin {
     /// field into a valid value, so a name that parses to `Unknown` without
     /// spelling `"Unknown"` is a protocol error. Same rule the three group enums
     /// use. Matching is case-sensitive on both sides, unlike `GroupState::parse`.
-    fn transaction_state(&self, name: &str, what: &str) -> Result<TransactionState, KafkaError> {
+    fn transaction_state(&self, name: &str, what: &str) -> Result<TransactionState, Error> {
         let state = TransactionState::parse(name);
         if state == TransactionState::Unknown && name != "Unknown" {
             return Err(self.protocol_error(format!("{what} {name:?} is not a TransactionState name")));
@@ -824,10 +810,7 @@ impl MultilanguageAdmin {
     /// The two `Optional` columns stay `None` when absent: every `long` / `int`,
     /// 0 and -1 included, is a legal `coordinatorEpoch` /
     /// `currentTransactionStartOffset`, so absence cannot be a sentinel.
-    fn partition_producer_state(
-        &self,
-        value: proto::PartitionProducerState,
-    ) -> Result<PartitionProducerState, KafkaError> {
+    fn partition_producer_state(&self, value: proto::PartitionProducerState) -> Result<PartitionProducerState, Error> {
         let mut producers = Vec::with_capacity(value.active_producers.len());
         for producer in value.active_producers {
             producers.push(ProducerState::new(
@@ -843,10 +826,7 @@ impl MultilanguageAdmin {
     }
 
     /// Rebuilds a [`TransactionDescription`].
-    fn transaction_description(
-        &self,
-        value: proto::TransactionDescription,
-    ) -> Result<TransactionDescription, KafkaError> {
+    fn transaction_description(&self, value: proto::TransactionDescription) -> Result<TransactionDescription, Error> {
         let state = self.transaction_state(&value.state, "TransactionDescription.state")?;
         Ok(TransactionDescription::new(
             value.coordinator_id,
@@ -866,19 +846,19 @@ impl MultilanguageAdmin {
     }
 
     /// Rebuilds a [`TransactionListing`].
-    fn transaction_listing(&self, listing: proto::TransactionListing) -> Result<TransactionListing, KafkaError> {
+    fn transaction_listing(&self, listing: proto::TransactionListing) -> Result<TransactionListing, Error> {
         let state = self.transaction_state(&listing.state, "TransactionListing.state")?;
         Ok(TransactionListing::new(listing.transactional_id, listing.producer_id, state))
     }
 
     /// Rebuilds a [`ProducerIdAndEpoch`], narrowing the epoch to Java's `short`.
-    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<ProducerIdAndEpoch, KafkaError> {
+    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<ProducerIdAndEpoch, Error> {
         let epoch = self.short(value.epoch, "ProducerIdAndEpoch.epoch")?;
         Ok(ProducerIdAndEpoch::new(value.producer_id, epoch))
     }
 
     /// Parses a canonical (base64) topic id, the form both bindings expose.
-    fn parse_uuid(&self, text: &str, what: &str) -> Result<Uuid, KafkaError> {
+    fn parse_uuid(&self, text: &str, what: &str) -> Result<Uuid, Error> {
         Uuid::from_string(text).map_err(|e| self.protocol_error(format!("{what} {text:?} is not a topic id: {e}")))
     }
 
@@ -891,9 +871,9 @@ impl MultilanguageAdmin {
         proto::DescribeTopicsRequest {
             admin_id: self.admin_id,
             topics: Some(topics),
-            timeout_ms: options.timeout(),
-            include_authorized_operations: options.should_include_authorized_operations(),
-            partition_size_limit_per_response: Some(options.partition_size_limit()),
+            timeout_ms: options.timeout_ms(),
+            include_authorized_operations: options.include_authorized_operations(),
+            partition_size_limit_per_response: Some(options.partition_size_limit_per_response()),
         }
     }
 
@@ -902,7 +882,7 @@ impl MultilanguageAdmin {
     fn describe_outcome(
         &self,
         outcome: Option<proto::describe_topics_entry::Outcome>,
-    ) -> Result<Result<TopicDescription, KafkaError>, KafkaError> {
+    ) -> Result<Result<TopicDescription, Error>, Error> {
         match outcome {
             Some(proto::describe_topics_entry::Outcome::Error(e)) => Ok(Err(kafka_error_from_proto(e))),
             Some(proto::describe_topics_entry::Outcome::Value(v)) => Ok(Ok(self.topic_description(v)?)),
@@ -910,7 +890,7 @@ impl MultilanguageAdmin {
         }
     }
 
-    fn topic_description(&self, description: proto::TopicDescription) -> Result<TopicDescription, KafkaError> {
+    fn topic_description(&self, description: proto::TopicDescription) -> Result<TopicDescription, Error> {
         let topic_id = self.parse_uuid(&description.topic_id, "TopicDescription.topic_id")?;
         // Java's nullable Set<AclOperation>: absent means the broker did not
         // report the operations, which is not the same as reporting none.
@@ -920,7 +900,7 @@ impl MultilanguageAdmin {
             .into_iter()
             .map(|info| partition_info_from_proto(self.backend, info))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(TopicDescription::with_authorized_operations(
+        Ok(TopicDescription::new_authorized_operations_topic_id(
             description.name,
             description.is_internal,
             partitions,
@@ -932,13 +912,10 @@ impl MultilanguageAdmin {
     /// Decodes `createTopics`' per-key value, which carries an error of its own
     /// when the topic was created but its metadata was not reported (see the
     /// envelope commentary in `admin_service.proto`).
-    fn topic_metadata_and_config(
-        &self,
-        value: proto::TopicMetadataAndConfig,
-    ) -> Result<TopicMetadataAndConfig, KafkaError> {
+    fn topic_metadata_and_config(&self, value: proto::TopicMetadataAndConfig) -> Result<TopicMetadataAndConfig, Error> {
         match value.result {
             Some(proto::topic_metadata_and_config::Result::Error(e)) => {
-                Ok(TopicMetadataAndConfig::with_error(kafka_error_from_proto(e)))
+                Ok(TopicMetadataAndConfig::new_error(kafka_error_from_proto(e)))
             },
             Some(proto::topic_metadata_and_config::Result::Metadata(m)) => {
                 let topic_id = self.parse_uuid(&m.topic_id, "TopicMetadata.topic_id")?;
@@ -968,8 +945,8 @@ impl MultilanguageAdmin {
 fn keyed<E, K, V>(
     error: Option<proto::KafkaError>,
     entries: Vec<E>,
-    mut decode: impl FnMut(E) -> Result<(K, Result<V, KafkaError>), KafkaError>,
-) -> Result<Outcomes<K, V>, KafkaError>
+    mut decode: impl FnMut(E) -> Result<(K, Result<V, Error>), Error>,
+) -> Result<Outcomes<K, V>, Error>
 where
     K: std::hash::Hash + Eq,
 {
@@ -986,7 +963,7 @@ where
 
 /// A [`proto::VoidResultEntry`]'s outcome: for a `KafkaFuture<Void>` there is no
 /// value, so an absent error *is* the success signal.
-fn void_outcome(error: Option<proto::KafkaError>) -> Result<(), KafkaError> {
+fn void_outcome(error: Option<proto::KafkaError>) -> Result<(), Error> {
     match error {
         Some(err) => Err(kafka_error_from_proto(err)),
         None => Ok(()),
@@ -1020,7 +997,7 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        configs: topic.config_map().cloned().unwrap_or_default().into_iter().collect(),
+        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {
@@ -1052,7 +1029,7 @@ fn new_partitions_to_proto(topic: &str, new_partitions: &NewPartitions) -> proto
 }
 
 fn node_from_proto(node: proto::Node) -> Node {
-    Node::with_rack(node.id, node.host, node.port, node.rack)
+    Node::new_rack(node.id, node.host, node.port, node.rack)
 }
 
 /// Rebuilds a [`TopicPartitionInfo`], preserving whether the broker reported
@@ -1072,15 +1049,15 @@ fn node_from_proto(node: proto::Node) -> Node {
 fn partition_info_from_proto(
     backend: &'static str,
     info: proto::TopicPartitionInfo,
-) -> Result<TopicPartitionInfo, KafkaError> {
+) -> Result<TopicPartitionInfo, Error> {
     let partition = info.partition;
     let leader = info.leader.map(node_from_proto);
     let replicas = info.replicas.into_iter().map(node_from_proto).collect();
     let isr = info.isr.into_iter().map(node_from_proto).collect();
     let nodes = |list: proto::NodeList| list.nodes.into_iter().map(node_from_proto).collect::<Vec<_>>();
     match (info.elr, info.last_known_elr) {
-        (None, None) => Ok(TopicPartitionInfo::with_leader_replicas_isr(partition, leader, replicas, isr)),
-        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::new(
+        (None, None) => Ok(TopicPartitionInfo::new(partition, leader, replicas, isr)),
+        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::new_elr_last_known_elr(
             partition,
             leader,
             replicas,
@@ -1088,7 +1065,7 @@ fn partition_info_from_proto(
             nodes(elr),
             nodes(last_known_elr),
         )),
-        (elr, last_known_elr) => Err(KafkaError::illegal_state(format!(
+        (elr, last_known_elr) => Err(Error::local_illegal_state(format!(
             "{backend} backend: TopicPartitionInfo reported elr={} and lastKnownElr={}; Java has no \
              constructor for one without the other",
             elr.is_some(),
@@ -1293,7 +1270,7 @@ fn quota_alteration_to_proto(alteration: &ClientQuotaAlteration) -> proto::Clien
 ///
 /// The salt is always sent, because a Rust `UserScramCredentialUpsertion` has
 /// always materialised one by the time the harness holds it (`new` and
-/// `with_password_bytes` generate a random salt in the constructor). So the wire
+/// `new_bytes` generate a random salt in the constructor). So the wire
 /// field's *absent* state — Java's salt-generating three-argument constructor — is
 /// not reachable from a scenario, exactly as `removeMembersFromConsumerGroup`'s
 /// present-but-empty member list is not: the harness's own input type has no such
@@ -1356,20 +1333,18 @@ fn feature_update_to_proto(update: &FeatureUpdate) -> proto::FeatureUpdate {
 }
 
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
-    ConfigEntry::with_metadata(
-        entry.name,
-        entry.value,
-        if entry.is_default {
+    let options = ConfigEntryOptionsBuilder::new()
+        .set_name(entry.name)
+        .set_value(entry.value)
+        .set_source(if entry.is_default {
             ConfigSource::DefaultConfig
         } else {
             ConfigSource::Unknown
-        },
-        entry.is_sensitive,
-        entry.is_read_only,
-        Vec::new(),
-        ConfigType::Unknown,
-        None,
-    )
+        })
+        .set_is_sensitive(entry.is_sensitive)
+        .set_is_read_only(entry.is_read_only)
+        .build();
+    ConfigEntry::new_options(options)
 }
 
 impl AdminBackend for MultilanguageAdmin {
@@ -1377,11 +1352,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         new_topics: &[NewTopic],
         options: CreateTopicsOptions,
-    ) -> Result<Outcomes<String, TopicMetadataAndConfig>, KafkaError> {
+    ) -> Result<Outcomes<String, TopicMetadataAndConfig>, Error> {
         let request = proto::CreateTopicsRequest {
             admin_id: self.admin_id,
             topics: new_topics.iter().map(new_topic_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             validate_only: options.should_validate_only(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
@@ -1401,13 +1376,13 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         names: &[String],
         options: DeleteTopicsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let request = proto::DeleteTopicsRequest {
             admin_id: self.admin_id,
             topics: Some(proto::delete_topics_request::Topics::Names(proto::StringList {
                 values: names.to_vec(),
             })),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
         let response = self.call(|mut c| async move { c.delete_topics(request).await }).await?;
@@ -1420,13 +1395,13 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         topic_ids: &[Uuid],
         options: DeleteTopicsOptions,
-    ) -> Result<Outcomes<Uuid, ()>, KafkaError> {
+    ) -> Result<Outcomes<Uuid, ()>, Error> {
         let request = proto::DeleteTopicsRequest {
             admin_id: self.admin_id,
             topics: Some(proto::delete_topics_request::Topics::TopicIds(proto::StringList {
                 values: topic_ids.iter().map(Uuid::to_string).collect(),
             })),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
         let response = self.call(|mut c| async move { c.delete_topics(request).await }).await?;
@@ -1435,10 +1410,10 @@ impl AdminBackend for MultilanguageAdmin {
         })
     }
 
-    async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, KafkaError> {
+    async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, Error> {
         let request = proto::AdminListTopicsRequest {
             admin_id: self.admin_id,
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             list_internal: options.should_list_internal(),
         };
         let response = self.call(|mut c| async move { c.list_topics(request).await }).await?;
@@ -1462,7 +1437,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         names: &[String],
         options: DescribeTopicsOptions,
-    ) -> Result<Outcomes<String, TopicDescription>, KafkaError> {
+    ) -> Result<Outcomes<String, TopicDescription>, Error> {
         let request = self.describe_request(
             proto::describe_topics_request::Topics::Names(proto::StringList { values: names.to_vec() }),
             options,
@@ -1478,7 +1453,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         topic_ids: &[Uuid],
         options: DescribeTopicsOptions,
-    ) -> Result<Outcomes<Uuid, TopicDescription>, KafkaError> {
+    ) -> Result<Outcomes<Uuid, TopicDescription>, Error> {
         let request = self.describe_request(
             proto::describe_topics_request::Topics::TopicIds(proto::StringList {
                 values: topic_ids.iter().map(Uuid::to_string).collect(),
@@ -1496,15 +1471,15 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
         options: CreatePartitionsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let request = proto::CreatePartitionsRequest {
             admin_id: self.admin_id,
             partitions: new_partitions
                 .iter()
                 .map(|(topic, np)| new_partitions_to_proto(topic, np))
                 .collect(),
-            timeout_ms: options.timeout(),
-            validate_only: options.should_validate_only(),
+            timeout_ms: options.timeout_ms(),
+            validate_only: options.validate_only(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
         };
         let response = self.call(|mut c| async move { c.create_partitions(request).await }).await?;
@@ -1517,17 +1492,17 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
-    ) -> Result<Outcomes<TopicPartition, DeletedRecords>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, DeletedRecords>, Error> {
         let request = proto::DeleteRecordsRequest {
             admin_id: self.admin_id,
             records: records_to_delete
                 .iter()
                 .map(|(tp, records)| proto::RecordsToDelete {
                     partition: Some(tp_to_proto(tp)),
-                    before_offset: records.before_offset_value(),
+                    before_offset: records.before_offset(),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.delete_records(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -1541,12 +1516,12 @@ impl AdminBackend for MultilanguageAdmin {
         })
     }
 
-    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, KafkaError> {
+    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, Error> {
         let request = proto::DescribeClusterRequest {
             admin_id: self.admin_id,
-            timeout_ms: options.timeout(),
-            include_authorized_operations: options.should_include_authorized_operations(),
-            include_fenced_brokers: options.should_include_fenced_brokers(),
+            timeout_ms: options.timeout_ms(),
+            include_authorized_operations: options.include_authorized_operations(),
+            include_fenced_brokers: options.include_fenced_brokers(),
         };
         let response = self.call(|mut c| async move { c.describe_cluster(request).await }).await?;
         if let Some(err) = response.error {
@@ -1569,13 +1544,13 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         resources: &[ConfigResource],
         options: DescribeConfigsOptions,
-    ) -> Result<Outcomes<ConfigResource, ConfigView>, KafkaError> {
+    ) -> Result<Outcomes<ConfigResource, ConfigView>, Error> {
         let request = proto::DescribeConfigsRequest {
             admin_id: self.admin_id,
             resources: resources.iter().map(config_resource_to_proto).collect(),
-            timeout_ms: options.timeout(),
-            include_synonyms: options.should_include_synonyms(),
-            include_documentation: options.should_include_documentation(),
+            timeout_ms: options.timeout_ms(),
+            include_synonyms: options.include_synonyms(),
+            include_documentation: options.include_documentation(),
         };
         let response = self.call(|mut c| async move { c.describe_configs(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -1595,7 +1570,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         options: AlterConfigsOptions,
-    ) -> Result<Outcomes<ConfigResource, ()>, KafkaError> {
+    ) -> Result<Outcomes<ConfigResource, ()>, Error> {
         let request = proto::IncrementalAlterConfigsRequest {
             admin_id: self.admin_id,
             configs: configs
@@ -1613,7 +1588,7 @@ impl AdminBackend for MultilanguageAdmin {
                         .collect(),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             validate_only: options.should_validate_only(),
         };
         let response = self
@@ -1631,11 +1606,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
         options: ListConfigResourcesOptions,
-    ) -> Result<Vec<ConfigResource>, KafkaError> {
+    ) -> Result<Vec<ConfigResource>, Error> {
         let request = proto::ListConfigResourcesRequest {
             admin_id: self.admin_id,
             resource_types: config_resource_types.iter().map(|t| i32::from(t.id())).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_config_resources(request).await }).await?;
         if let Some(err) = response.error {
@@ -1652,9 +1627,9 @@ impl AdminBackend for MultilanguageAdmin {
     async fn list_client_metrics_resources(
         &self,
         options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError> {
+    ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
         let request =
-            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout() };
+            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout_ms() };
         let response = self
             .call(|mut c| async move { c.list_client_metrics_resources(request).await })
             .await?;
@@ -1672,11 +1647,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         brokers: &[i32],
         options: DescribeLogDirsOptions,
-    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, KafkaError> {
+    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, Error> {
         let request = proto::DescribeLogDirsRequest {
             admin_id: self.admin_id,
             brokers: brokers.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_log_dirs(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -1709,7 +1684,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         options: AlterReplicaLogDirsOptions,
-    ) -> Result<Outcomes<TopicPartitionReplica, ()>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartitionReplica, ()>, Error> {
         let request = proto::AlterReplicaLogDirsRequest {
             admin_id: self.admin_id,
             assignments: replica_assignment
@@ -1719,7 +1694,7 @@ impl AdminBackend for MultilanguageAdmin {
                     log_dir: log_dir.clone(),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.alter_replica_log_dirs(request).await })
@@ -1733,11 +1708,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
-    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, Error> {
         let request = proto::DescribeReplicaLogDirsRequest {
             admin_id: self.admin_id,
             replicas: replicas.iter().map(replica_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_replica_log_dirs(request).await })
@@ -1763,13 +1738,13 @@ impl AdminBackend for MultilanguageAdmin {
         election_type: ElectionType,
         partitions: Option<HashSet<TopicPartition>>,
         options: ElectLeadersOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
         let request = proto::ElectLeadersRequest {
             admin_id: self.admin_id,
             // Java's public `byte value` field, which is what both bindings take.
             election_type: i32::from(election_type.value()),
             partitions: optional_partitions_to_proto(partitions),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.elect_leaders(request).await }).await?;
         // A VoidKeyedResponse, but note what its two error levels mean here: the
@@ -1785,7 +1760,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         options: AlterPartitionReassignmentsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
         let request = proto::AlterPartitionReassignmentsRequest {
             admin_id: self.admin_id,
             reassignments: reassignments
@@ -1803,9 +1778,9 @@ impl AdminBackend for MultilanguageAdmin {
                         .map(|r| proto::NewPartitionReassignment { target_replicas: r.target_replicas().to_vec() }),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             // Java's default is true, so this is optional on the wire.
-            allow_replication_factor_change: Some(options.should_allow_replication_factor_change()),
+            allow_replication_factor_change: Some(options.allow_replication_factor_change()),
         };
         let response = self
             .call(|mut c| async move { c.alter_partition_reassignments(request).await })
@@ -1822,11 +1797,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         partitions: Option<HashSet<TopicPartition>>,
         options: ListPartitionReassignmentsOptions,
-    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, Error> {
         let request = proto::ListPartitionReassignmentsRequest {
             admin_id: self.admin_id,
             partitions: optional_partitions_to_proto(partitions),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.list_partition_reassignments(request).await })
@@ -1860,7 +1835,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         options: ListOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
         let request = proto::ListOffsetsRequest {
             admin_id: self.admin_id,
             specs: topic_partition_offsets
@@ -1870,7 +1845,7 @@ impl AdminBackend for MultilanguageAdmin {
                     spec: Some(offset_spec_to_proto(*spec)),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
             // Java's `IsolationLevel.id()` wire code.
             isolation_level: i32::from(options.isolation_level().id()),
         };
@@ -1890,7 +1865,7 @@ impl AdminBackend for MultilanguageAdmin {
         })
     }
 
-    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, KafkaError> {
+    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error> {
         let request = proto::ListGroupsRequest {
             admin_id: self.admin_id,
             // Enum filters cross as the constant names, so each server reaches
@@ -1899,7 +1874,7 @@ impl AdminBackend for MultilanguageAdmin {
             group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
             protocol_types: options.protocol_types().iter().cloned().collect(),
             types: options.types().iter().map(|t| t.name().to_string()).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_groups(request).await }).await?;
         // A whole-value response whose value is Java's valid()/errors() split.
@@ -1920,7 +1895,7 @@ impl AdminBackend for MultilanguageAdmin {
     async fn list_consumer_groups(
         &self,
         options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, KafkaError> {
+    ) -> Result<Listings<ConsumerGroupListing>, Error> {
         let request = proto::ListConsumerGroupsRequest {
             admin_id: self.admin_id,
             // Java's deprecated `inStates(Set<ConsumerGroupState>)` is defined as
@@ -1928,7 +1903,7 @@ impl AdminBackend for MultilanguageAdmin {
             // single `group_states` field serves both spellings.
             group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
             types: options.types().iter().map(|t| t.name().to_string()).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_consumer_groups(request).await }).await?;
         if let Some(err) = response.error {
@@ -1948,12 +1923,12 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         group_ids: &[String],
         options: DescribeConsumerGroupsOptions,
-    ) -> Result<Outcomes<String, ConsumerGroupDescription>, KafkaError> {
+    ) -> Result<Outcomes<String, ConsumerGroupDescription>, Error> {
         let request = proto::DescribeConsumerGroupsRequest {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
-            timeout_ms: options.timeout(),
-            include_authorized_operations: options.should_include_authorized_operations(),
+            timeout_ms: options.timeout_ms(),
+            include_authorized_operations: options.include_authorized_operations(),
         };
         let response = self
             .call(|mut c| async move { c.describe_consumer_groups(request).await })
@@ -1975,12 +1950,12 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
-    ) -> Result<Outcomes<String, ClassicGroupDescription>, KafkaError> {
+    ) -> Result<Outcomes<String, ClassicGroupDescription>, Error> {
         let request = proto::DescribeClassicGroupsRequest {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
-            timeout_ms: options.timeout(),
-            include_authorized_operations: options.should_include_authorized_operations(),
+            timeout_ms: options.timeout_ms(),
+            include_authorized_operations: options.include_authorized_operations(),
         };
         let response = self
             .call(|mut c| async move { c.describe_classic_groups(request).await })
@@ -2000,7 +1975,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         options: ListConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<String, GroupOffsets>, KafkaError> {
+    ) -> Result<Outcomes<String, GroupOffsets>, Error> {
         let request = proto::ListConsumerGroupOffsetsRequest {
             admin_id: self.admin_id,
             group_specs: group_specs
@@ -2013,13 +1988,13 @@ impl AdminBackend for MultilanguageAdmin {
                     // the two apart with an explicit discriminant (the C entry
                     // point's `all_partitions[i]`, `admin.py`'s
                     // `partitions is None` column).
-                    topic_partitions: spec.get_topic_partitions().map(|partitions| proto::TopicPartitionList {
+                    topic_partitions: spec.topic_partitions().map(|partitions| proto::TopicPartitionList {
                         partitions: partitions.iter().map(tp_to_proto).collect(),
                     }),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
-            require_stable: options.should_require_stable(),
+            timeout_ms: options.timeout_ms(),
+            require_stable: options.require_stable(),
         };
         let response = self
             .call(|mut c| async move { c.list_consumer_group_offsets(request).await })
@@ -2040,7 +2015,7 @@ impl AdminBackend for MultilanguageAdmin {
         group_id: &str,
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
         options: AlterConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
         let request = proto::AlterConsumerGroupOffsetsRequest {
             admin_id: self.admin_id,
             group_id: group_id.to_string(),
@@ -2051,7 +2026,7 @@ impl AdminBackend for MultilanguageAdmin {
                     offset: Some(offset_and_metadata_to_proto(offset)),
                 })
                 .collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.alter_consumer_group_offsets(request).await })
@@ -2072,12 +2047,12 @@ impl AdminBackend for MultilanguageAdmin {
         group_id: &str,
         partitions: &HashSet<TopicPartition>,
         options: DeleteConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
         let request = proto::DeleteConsumerGroupOffsetsRequest {
             admin_id: self.admin_id,
             group_id: group_id.to_string(),
             partitions: partitions.iter().map(tp_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.delete_consumer_group_offsets(request).await })
@@ -2094,11 +2069,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         group_ids: &[String],
         options: DeleteConsumerGroupsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let request = proto::DeleteConsumerGroupsRequest {
             admin_id: self.admin_id,
             group_ids: group_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.delete_consumer_groups(request).await })
@@ -2112,7 +2087,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let request = proto::RemoveMembersFromConsumerGroupRequest {
             admin_id: self.admin_id,
             group_id: group_id.to_string(),
@@ -2138,8 +2113,8 @@ impl AdminBackend for MultilanguageAdmin {
                         .collect(),
                 })
             },
-            reason: options.reason_value().map(str::to_string),
-            timeout_ms: options.timeout(),
+            reason: options.reason().map(str::to_string),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.remove_members_from_consumer_group(request).await })
@@ -2158,11 +2133,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         acls: &[AclBinding],
         options: CreateAclsOptions,
-    ) -> Result<Outcomes<AclBinding, ()>, KafkaError> {
+    ) -> Result<Outcomes<AclBinding, ()>, Error> {
         let request = proto::CreateAclsRequest {
             admin_id: self.admin_id,
             acls: acls.iter().map(acl_binding_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.create_acls(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2175,11 +2150,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         filter: &AclBindingFilter,
         options: DescribeAclsOptions,
-    ) -> Result<Vec<AclBinding>, KafkaError> {
+    ) -> Result<Vec<AclBinding>, Error> {
         let request = proto::DescribeAclsRequest {
             admin_id: self.admin_id,
             filter: Some(acl_binding_filter_to_proto(filter)),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_acls(request).await }).await?;
         // Whole-value: one future for the whole call, so a failure is the outer
@@ -2194,11 +2169,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, KafkaError> {
+    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
         let request = proto::DeleteAclsRequest {
             admin_id: self.admin_id,
             filters: filters.iter().map(acl_binding_filter_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.delete_acls(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2218,12 +2193,12 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         filter: &ClientQuotaFilter,
         options: DescribeClientQuotasOptions,
-    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError> {
+    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, Error> {
         let request = proto::DescribeClientQuotasRequest {
             admin_id: self.admin_id,
             components: filter.components().iter().map(quota_filter_component_to_proto).collect(),
             strict: filter.strict(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_client_quotas(request).await })
@@ -2246,12 +2221,12 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
-    ) -> Result<Outcomes<ClientQuotaEntity, ()>, KafkaError> {
+    ) -> Result<Outcomes<ClientQuotaEntity, ()>, Error> {
         let request = proto::AlterClientQuotasRequest {
             admin_id: self.admin_id,
             entries: entries.iter().map(quota_alteration_to_proto).collect(),
-            validate_only: options.is_validate_only(),
-            timeout_ms: options.timeout(),
+            validate_only: options.validate_only(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.alter_client_quotas(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2264,11 +2239,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, KafkaError> {
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
         let request = proto::DescribeUserScramCredentialsRequest {
             admin_id: self.admin_id,
             users: users.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
@@ -2288,11 +2263,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         alterations: &[UserScramCredentialAlteration],
         options: AlterUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let request = proto::AlterUserScramCredentialsRequest {
             admin_id: self.admin_id,
             alterations: alterations.iter().map(scram_alteration_to_proto).collect(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.alter_user_scram_credentials(request).await })
@@ -2303,18 +2278,15 @@ impl AdminBackend for MultilanguageAdmin {
         })
     }
 
-    async fn create_delegation_token(
-        &self,
-        options: CreateDelegationTokenOptions,
-    ) -> Result<DelegationToken, KafkaError> {
+    async fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> Result<DelegationToken, Error> {
         let request = proto::CreateDelegationTokenRequest {
             admin_id: self.admin_id,
-            renewers: options.get_renewers().iter().map(kafka_principal_to_proto).collect(),
+            renewers: options.renewers().iter().map(kafka_principal_to_proto).collect(),
             // Absent is Java's unset owner, which makes the requesting principal
             // the owner; both halves of the principal are absent together.
-            owner: options.get_owner().map(kafka_principal_to_proto),
-            max_lifetime_ms: options.get_max_lifetime_ms(),
-            timeout_ms: options.timeout(),
+            owner: options.owner().map(kafka_principal_to_proto),
+            max_lifetime_ms: options.max_lifetime_ms(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.create_delegation_token(request).await })
@@ -2328,16 +2300,12 @@ impl AdminBackend for MultilanguageAdmin {
         self.delegation_token(token)
     }
 
-    async fn renew_delegation_token(
-        &self,
-        hmac: &[u8],
-        options: RenewDelegationTokenOptions,
-    ) -> Result<i64, KafkaError> {
+    async fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> Result<i64, Error> {
         let request = proto::RenewDelegationTokenRequest {
             admin_id: self.admin_id,
             hmac: hmac.to_vec(),
-            renew_time_period_ms: options.get_renew_time_period_ms(),
-            timeout_ms: options.timeout(),
+            renew_time_period_ms: options.renew_time_period_ms(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.renew_delegation_token(request).await })
@@ -2348,16 +2316,12 @@ impl AdminBackend for MultilanguageAdmin {
         }
     }
 
-    async fn expire_delegation_token(
-        &self,
-        hmac: &[u8],
-        options: ExpireDelegationTokenOptions,
-    ) -> Result<i64, KafkaError> {
+    async fn expire_delegation_token(&self, hmac: &[u8], options: ExpireDelegationTokenOptions) -> Result<i64, Error> {
         let request = proto::ExpireDelegationTokenRequest {
             admin_id: self.admin_id,
             hmac: hmac.to_vec(),
-            expiry_time_period_ms: options.get_expiry_time_period_ms(),
-            timeout_ms: options.timeout(),
+            expiry_time_period_ms: options.expiry_time_period_ms(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.expire_delegation_token(request).await })
@@ -2371,16 +2335,16 @@ impl AdminBackend for MultilanguageAdmin {
     async fn describe_delegation_token(
         &self,
         options: DescribeDelegationTokenOptions,
-    ) -> Result<Vec<DelegationToken>, KafkaError> {
+    ) -> Result<Vec<DelegationToken>, Error> {
         let request = proto::DescribeDelegationTokenRequest {
             admin_id: self.admin_id,
             // Absent is Java's unset filter ("every token I may see"), which must
             // stay distinct from an explicitly empty one — the wrapper message is
             // what keeps them apart, never emptiness.
-            owners: options.get_owners().map(|owners| proto::KafkaPrincipalList {
+            owners: options.owners().map(|owners| proto::KafkaPrincipalList {
                 principals: owners.iter().map(kafka_principal_to_proto).collect(),
             }),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.describe_delegation_token(request).await })
@@ -2391,13 +2355,13 @@ impl AdminBackend for MultilanguageAdmin {
         response.tokens.into_iter().map(|token| self.delegation_token(token)).collect()
     }
 
-    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError> {
+    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, Error> {
         let request = proto::DescribeFeaturesRequest {
             admin_id: self.admin_id,
             // Absent is Java's empty `OptionalInt`; node id 0 is a legal broker,
             // so the absence cannot be encoded as a value.
-            node_id: options.get_node_id(),
-            timeout_ms: options.timeout(),
+            node_id: options.node_id(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_features(request).await }).await?;
         if let Some(err) = response.error {
@@ -2413,15 +2377,15 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let request = proto::UpdateFeaturesRequest {
             admin_id: self.admin_id,
             feature_updates: feature_updates
                 .iter()
                 .map(|(feature, update)| (feature.clone(), feature_update_to_proto(update)))
                 .collect(),
-            validate_only: options.get_validate_only(),
-            timeout_ms: options.timeout(),
+            validate_only: options.validate_only(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.update_features(request).await }).await?;
         // The top-level error also carries the *synchronous* rejection Java throws
@@ -2436,14 +2400,14 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         partitions: &[TopicPartition],
         options: DescribeProducersOptions,
-    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, Error> {
         let request = proto::DescribeProducersRequest {
             admin_id: self.admin_id,
             partitions: partitions.iter().map(tp_to_proto).collect(),
             // Absent is Java's empty `OptionalInt` (query each partition's
             // leader); broker id 0 is legal, so the absence is its own state.
-            broker_id: options.broker_id_opt(),
-            timeout_ms: options.timeout(),
+            broker_id: options.broker_id(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_producers(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2461,11 +2425,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         transactional_ids: &[String],
         options: DescribeTransactionsOptions,
-    ) -> Result<Outcomes<String, TransactionDescription>, KafkaError> {
+    ) -> Result<Outcomes<String, TransactionDescription>, Error> {
         let request = proto::DescribeTransactionsRequest {
             admin_id: self.admin_id,
             transactional_ids: transactional_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.describe_transactions(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2483,14 +2447,14 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         spec: AbortTransactionSpec,
         options: AbortTransactionOptions,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let request = proto::AbortTransactionRequest {
             admin_id: self.admin_id,
             topic_partition: Some(tp_to_proto(spec.topic_partition())),
             producer_id: spec.producer_id(),
             producer_epoch: spec.producer_epoch() as i32,
             coordinator_epoch: spec.coordinator_epoch(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.abort_transaction(request).await }).await?;
         void_outcome(response.error)
@@ -2500,11 +2464,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let request = proto::ForceTerminateTransactionRequest {
             admin_id: self.admin_id,
             transactional_id: transactional_id.to_string(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self
             .call(|mut c| async move { c.force_terminate_transaction(request).await })
@@ -2515,7 +2479,7 @@ impl AdminBackend for MultilanguageAdmin {
     async fn list_transactions(
         &self,
         options: ListTransactionsOptions,
-    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, KafkaError> {
+    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, Error> {
         let request = proto::ListTransactionsRequest {
             admin_id: self.admin_id,
             // Java's own default for both collections is an empty set meaning "no
@@ -2525,7 +2489,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Java's own -1 sentinel: negative means no duration filter.
             duration_ms: options.filtered_duration(),
             transactional_id_pattern: options.filtered_transactional_id_pattern().map(str::to_string),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_transactions(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2548,11 +2512,11 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, KafkaError> {
+    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
         let request = proto::FenceProducersRequest {
             admin_id: self.admin_id,
             transactional_ids: transactional_ids.to_vec(),
-            timeout_ms: options.timeout(),
+            timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.fence_producers(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
@@ -2566,7 +2530,7 @@ impl AdminBackend for MultilanguageAdmin {
         })
     }
 
-    async fn close(&self, timeout: Option<Duration>) -> Result<(), KafkaError> {
+    async fn close(&self, timeout: Option<Duration>) -> Result<(), Error> {
         let mut client = self.client.clone();
         let request =
             proto::AdminCloseRequest { admin_id: self.admin_id, timeout_ms: timeout.map(|t| t.as_millis() as i64) };

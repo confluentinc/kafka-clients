@@ -36,12 +36,13 @@
 //! 3. Returns `Ok(())` if I/O would block (partial read/write)
 //! 4. Stores partial reads in `net_in_buffer` for the next call
 
+use crate::common::Error;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
 use crate::common::network::KafkaSend;
 use crate::common::network::NetworkReceive;
 use crate::common::network::Receive;
-use crate::common::network::authentication_error::auth_io_error;
+use crate::common::network::authentication_error::{auth_io_error, auth_io_error_with_source};
 use crate::common::network::{InterestOps, TransportLayer};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::ApiVersionsRequestBuilder;
@@ -49,10 +50,10 @@ use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
-use crate::common::requests::RequestHeader;
 use crate::common::requests::SaslAuthenticateRequest;
 use crate::common::requests::SaslHandshakeRequest;
 use crate::common::requests::SaslHandshakeResponse;
+use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
@@ -233,7 +234,14 @@ impl SaslClientAuthenticator {
     /// Creates the next request header for the given API key and version.
     fn next_request_header(&mut self, api_key: &'static ApiKeys, version: i16) -> io::Result<RequestHeader> {
         let correlation_id = self.next_correlation_id();
-        let header = RequestHeader::new(api_key, version, &self.client_id, correlation_id)?;
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(api_key)
+                .set_request_version(version)
+                .set_client_id(&self.client_id)
+                .set_correlation_id(correlation_id)
+                .build(),
+        )?;
         self.current_request_header = Some(header.clone());
         Ok(header)
     }
@@ -343,7 +351,7 @@ impl SaslClientAuthenticator {
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<Vec<u8>>> {
         if self.net_in_buffer.is_none() {
-            self.net_in_buffer = Some(NetworkReceive::with_source(&self.node));
+            self.net_in_buffer = Some(NetworkReceive::new_source(&self.node));
         }
         let net_in = self.net_in_buffer.as_mut().unwrap();
         net_in.read_from(transport).await?;
@@ -364,21 +372,15 @@ impl SaslClientAuthenticator {
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<ConcreteResponse>> {
-        let response_bytes = match self.receive_response_or_token(transport).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                kafka_debug!(
-                    self.log_context,
-                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-                );
-                self.set_sasl_state(SaslState::Failed);
-                // Java throws IllegalSaslStateException (an AuthenticationException)
-                // here — a genuine authentication failure, fatal and not retried.
-                return Err(auth_io_error(format!(
-                    "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-                )));
-            },
+        // Java's `catch (BufferUnderflowException | SchemaException |
+        // IllegalArgumentException e)` covers only the *parse* of the response
+        // (handled on the `parse_response` call below). `receiveResponseOrToken()`
+        // throws `IOException`, which that clause does NOT catch, so a transient
+        // read failure propagates as a network disconnect — retriable, reconnect
+        // with backoff — rather than becoming a fatal authentication failure.
+        let response_bytes = match self.receive_response_or_token(transport).await? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         };
 
         let request_header = self
@@ -386,17 +388,46 @@ impl SaslClientAuthenticator {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
         let mut buffer = ByteBufferAccessor::from_bytes(response_bytes);
-        let response = ConcreteResponse::parse_response(&mut buffer, request_header).map_err(|e| {
-            kafka_debug!(
-                self.log_context,
-                "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-            );
-            self.set_sasl_state(SaslState::Failed);
-            // Java throws IllegalSaslStateException (an AuthenticationException).
-            auth_io_error(format!(
-                "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-            ))
-        })?;
+        // Java routes through `NetworkClient.parseResponse` (`:824-840`), not the
+        // raw parse, so a correlation-id mismatch is converted to a
+        // `SchemaException` **only** when the request used a reserved SASL
+        // correlation id and the response did not; otherwise it is rethrown.
+        //
+        // Java then catches exactly three classes here:
+        // `BufferUnderflowException | SchemaException | IllegalArgumentException`
+        // (`SaslClientAuthenticator.java`). A rethrown
+        // `CorrelationIdMismatchException` is an `IllegalStateException` and is
+        // NOT among them, so it propagates out of `receiveKafkaResponse` without
+        // failing authentication. Catching everything here — as this did before —
+        // turned that case into a fatal authentication failure.
+        //
+        // Java's re-authentication branch (`reauthInfo.reauthenticating()`, which
+        // parks an unrelated in-flight receive in `pendingAuthenticatedReceives`
+        // and returns null) has no counterpart: KIP-368 client-side
+        // re-authentication is not wired in this client, so `reauthenticating()`
+        // is always false and the branch is unreachable. See COMMENTS finding 25.
+        let response = match crate::network_client::parse_response(&mut buffer, request_header) {
+            Ok(response) => response,
+            Err(error) if matches!(error, Error::Schema(_) | Error::LocalIllegalArgument(_)) => {
+                kafka_debug!(
+                    self.log_context,
+                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
+                );
+                self.set_sasl_state(SaslState::Failed);
+                // Java: `throw new IllegalSaslStateException(msg, e)` — the
+                // two-argument form, so the message is Java's literal text and the
+                // cause hangs off `getCause()` rather than being appended to it.
+                return Err(auth_io_error_with_source(
+                    "Invalid SASL mechanism response, server may be expecting a different protocol",
+                    error,
+                ));
+            },
+            Err(error) => {
+                // Outside Java's catch: propagate without touching the SASL state
+                // and without classifying it as an authentication failure.
+                return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()));
+            },
+        };
         self.current_request_header = None;
         Ok(Some(response))
     }
@@ -504,7 +535,7 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let mut builder = ApiVersionsRequestBuilder::for_version(0);
+                let mut builder = ApiVersionsRequestBuilder::new_version(0);
                 let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
@@ -787,7 +818,7 @@ mod tests {
         data.set_api_keys(vec![hs_version, auth_version]);
 
         // Serialize header + body
-        let mut response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
+        let mut response_header = ResponseHeader::new_correlation_id(correlation_id, 0); // v0 header for ApiVersions v0
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
@@ -814,7 +845,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_HANDSHAKE;
         let header_version = api_key.response_header_version(version);
-        let mut response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -844,7 +875,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_AUTHENTICATE;
         let header_version = api_key.response_header_version(version);
-        let mut response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -1190,7 +1221,8 @@ mod tests {
 
         data.set_api_keys(vec![hs_version]);
 
-        let mut response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
+        let mut response_header =
+            ResponseHeader::new_correlation_id(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();

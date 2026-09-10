@@ -18,7 +18,7 @@
 
 use std::io;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::acl::{AccessControlEntry, AclBinding, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePattern, ResourceType};
@@ -100,7 +100,7 @@ impl CreateAclsRequest {
     ///
     /// Returns an error if the creation carries invalid pattern/permission
     /// components (mirrors Java's constructor exceptions).
-    pub fn acl_binding(acl: &AclCreation) -> Result<AclBinding, KafkaError> {
+    pub fn acl_binding(acl: &AclCreation) -> Result<AclBinding, Error> {
         let pattern = ResourcePattern::new(
             ResourceType::from_code(acl.resource_type),
             acl.resource_name.clone(),
@@ -150,7 +150,7 @@ pub struct CreateAclsRequestBuilder {
 
 impl CreateAclsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateAclsRequestData) -> Self {
+    pub fn new(data: CreateAclsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_ACLS.oldest_version(),

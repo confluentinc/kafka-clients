@@ -251,7 +251,7 @@ impl TxnOffsetCommitRequest {
         response
             .set_throttle_time_ms(throttle_time_ms)
             .set_topics(Self::get_error_response_topics(&self.data.topics, error));
-        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new(response))
+        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new_data(response))
     }
 
     /// Parses a `TxnOffsetCommitRequest` from a readable buffer at the given
@@ -283,30 +283,213 @@ pub struct TxnOffsetCommitRequestBuilder {
     latest_allowed_version: i16,
 }
 
+/// The parameters of Java's nine-argument `TxnOffsetCommitRequest.Builder`
+/// constructor (`TxnOffsetCommitRequest.java:67`) that do not fit in the derived
+/// method name.
+///
+/// Java's three `Builder` constructors (`:50`, `:67`, `:89`) share no parameter
+/// name, so `:67`'s nine parameters all reach its derived name. CLAUDE.md §2 caps
+/// that at three parameters and moves the remainder here. This struct has no Java
+/// counterpart: it exists solely to satisfy that naming rule (DoD #7).
+///
+/// Because the cap applies to the *whole* group, Java's `:50` and `:67` forms
+/// derive the same name — `new_options` — so they collapse into the single
+/// constructor below, whose only parameter is this struct. `:50`'s three
+/// literals (`JoinGroupRequest.UNKNOWN_MEMBER_ID`, `UNKNOWN_GENERATION_ID`,
+/// `Optional.empty()`) become this struct's initial `member_id`,
+/// `generation_id` and `group_instance_id`, which is what its own body passes;
+/// overriding them gives `:67`'s behaviour.
+///
+/// It deliberately has **no** `Default`. Only those three of its nine fields
+/// are supplied by a narrower Java overload; the other six are what even `:50`
+/// takes from its caller, so they have no Java-derived default — and a
+/// synthesised `producer_epoch` of `0` is a *valid* epoch, so it would silently
+/// commit the transaction offsets under the wrong one. Construct it with
+/// [`TxnOffsetCommitRequestBuilderOptionsBuilder::new`] and set those six:
+/// [`TxnOffsetCommitRequestBuilderOptionsBuilder::build`] panics if any of `transactional_id`, `consumer_group_id`, `producer_id`, `producer_epoch`, `pending_txn_offset_commits`, `is_transaction_v2_enabled` was not set.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct TxnOffsetCommitRequestBuilderOptions<'a> {
+    /// Java's `transactionalId`.
+    pub transactional_id: String,
+    /// Java's `consumerGroupId`.
+    pub consumer_group_id: String,
+    /// Java's `producerId`.
+    pub producer_id: i64,
+    /// Java's `producerEpoch`.
+    pub producer_epoch: i16,
+    /// Java's `pendingTxnOffsetCommits`.
+    pub pending_txn_offset_commits: &'a HashMap<TopicPartition, CommittedOffset>,
+    /// Java's `memberId`. Starts as [`UNKNOWN_MEMBER_ID`], as in `:50`.
+    pub member_id: String,
+    /// Java's `generationId`. Starts as [`UNKNOWN_GENERATION_ID`], as in `:50`.
+    pub generation_id: i32,
+    /// Java's `groupInstanceId`. Starts as `None`, as in `:50`'s
+    /// `Optional.empty()`.
+    pub group_instance_id: Option<String>,
+    /// Java's `isTransactionV2Enabled`.
+    pub is_transaction_v2_enabled: bool,
+}
+
+/// Fluent builder for [`TxnOffsetCommitRequestBuilderOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`TxnOffsetCommitRequestBuilderOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct TxnOffsetCommitRequestBuilderOptionsBuilder<'a> {
+    transactional_id: Option<String>,
+    consumer_group_id: Option<String>,
+    producer_id: Option<i64>,
+    producer_epoch: Option<i16>,
+    pending_txn_offset_commits: Option<&'a HashMap<TopicPartition, CommittedOffset>>,
+    member_id: String,
+    generation_id: i32,
+    group_instance_id: Option<String>,
+    is_transaction_v2_enabled: Option<bool>,
+}
+
+impl<'a> Default for TxnOffsetCommitRequestBuilderOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> TxnOffsetCommitRequestBuilderOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            transactional_id: None,
+            consumer_group_id: None,
+            producer_id: None,
+            producer_epoch: None,
+            pending_txn_offset_commits: None,
+            member_id: UNKNOWN_MEMBER_ID.to_string(),
+            generation_id: UNKNOWN_GENERATION_ID,
+            group_instance_id: None,
+            is_transaction_v2_enabled: None,
+        }
+    }
+
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::transactional_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_transactional_id(mut self, transactional_id: impl Into<String>) -> Self {
+        self.transactional_id = Some(transactional_id.into());
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::consumer_group_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_consumer_group_id(mut self, consumer_group_id: impl Into<String>) -> Self {
+        self.consumer_group_id = Some(consumer_group_id.into());
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::producer_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_producer_id(mut self, producer_id: i64) -> Self {
+        self.producer_id = Some(producer_id);
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::producer_epoch`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_producer_epoch(mut self, producer_epoch: i16) -> Self {
+        self.producer_epoch = Some(producer_epoch);
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::pending_txn_offset_commits`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_pending_txn_offset_commits(
+        mut self,
+        pending_txn_offset_commits: &'a HashMap<TopicPartition, CommittedOffset>,
+    ) -> Self {
+        self.pending_txn_offset_commits = Some(pending_txn_offset_commits);
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::member_id`].
+    pub fn set_member_id(mut self, member_id: String) -> Self {
+        self.member_id = member_id;
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::generation_id`].
+    pub fn set_generation_id(mut self, generation_id: i32) -> Self {
+        self.generation_id = generation_id;
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::group_instance_id`].
+    pub fn set_group_instance_id(mut self, group_instance_id: Option<String>) -> Self {
+        self.group_instance_id = group_instance_id;
+        self
+    }
+    /// Sets [`TxnOffsetCommitRequestBuilderOptions::is_transaction_v2_enabled`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_is_transaction_v2_enabled(mut self, is_transaction_v2_enabled: bool) -> Self {
+        self.is_transaction_v2_enabled = Some(is_transaction_v2_enabled);
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `transactional_id`, `consumer_group_id`, `producer_id`, `producer_epoch`, `pending_txn_offset_commits`, `is_transaction_v2_enabled`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
+    pub fn build(self) -> TxnOffsetCommitRequestBuilderOptions<'a> {
+        TxnOffsetCommitRequestBuilderOptions {
+            transactional_id: self.transactional_id.unwrap_or_else(|| Self::missing("transactional_id")),
+            consumer_group_id: self.consumer_group_id.unwrap_or_else(|| Self::missing("consumer_group_id")),
+            producer_id: self.producer_id.unwrap_or_else(|| Self::missing("producer_id")),
+            producer_epoch: self.producer_epoch.unwrap_or_else(|| Self::missing("producer_epoch")),
+            pending_txn_offset_commits: self
+                .pending_txn_offset_commits
+                .unwrap_or_else(|| Self::missing("pending_txn_offset_commits")),
+            member_id: self.member_id,
+            generation_id: self.generation_id,
+            group_instance_id: self.group_instance_id,
+            is_transaction_v2_enabled: self
+                .is_transaction_v2_enabled
+                .unwrap_or_else(|| Self::missing("is_transaction_v2_enabled")),
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("TxnOffsetCommitRequestBuilderOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
+    }
+}
+
 impl TxnOffsetCommitRequestBuilder {
     /// Creates a builder carrying consumer-group metadata.
     ///
     /// This is the form the producer uses (`TransactionManager.java:1232`).
-    /// Corresponds to Java's nine-argument `Builder`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        transactional_id: impl Into<String>,
-        consumer_group_id: impl Into<String>,
-        producer_id: i64,
-        producer_epoch: i16,
-        pending_txn_offset_commits: &HashMap<TopicPartition, CommittedOffset>,
-        member_id: impl Into<String>,
-        generation_id: i32,
-        group_instance_id: Option<String>,
-        is_transaction_v2_enabled: bool,
-    ) -> Self {
+    /// Corresponds to Java's nine-argument `Builder`
+    /// (`TxnOffsetCommitRequest.java:67`) **and** its six-argument form (`:50`),
+    /// which derive the same name under CLAUDE.md §2 and so collapse here. For
+    /// `:50`'s behaviour leave the options' `member_id`, `generation_id` and
+    /// `group_instance_id` at their initial values — exactly what its Java body
+    /// forwards.
+    pub fn new_options(options: TxnOffsetCommitRequestBuilderOptions<'_>) -> Self {
+        let TxnOffsetCommitRequestBuilderOptions {
+            transactional_id,
+            consumer_group_id,
+            producer_id,
+            producer_epoch,
+            pending_txn_offset_commits,
+            member_id,
+            generation_id,
+            group_instance_id,
+            is_transaction_v2_enabled,
+        } = options;
         let mut data = TxnOffsetCommitRequestData::new();
-        data.set_transactional_id(transactional_id.into())
-            .set_group_id(consumer_group_id.into())
+        data.set_transactional_id(transactional_id)
+            .set_group_id(consumer_group_id)
             .set_producer_id(producer_id)
             .set_producer_epoch(producer_epoch)
             .set_topics(TxnOffsetCommitRequest::get_topics(pending_txn_offset_commits))
-            .set_member_id(member_id.into())
+            .set_member_id(member_id)
             .set_generation_id(generation_id)
             .set_group_instance_id(group_instance_id);
 
@@ -316,48 +499,23 @@ impl TxnOffsetCommitRequestBuilder {
             oldest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.oldest_version(),
             // Mirrors Java's `super(ApiKeys)` → `Builder(apiKey, false)` →
             // `latestVersion(false)`: released versions only. Rules §12.
-            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_enable_unstable_last_version(false),
         }
-    }
-
-    /// Creates a builder without consumer-group metadata.
-    ///
-    /// Corresponds to Java's six-argument `Builder`, which delegates to the
-    /// nine-argument form with the unknown-member/generation sentinels and no
-    /// group instance id.
-    pub fn without_group_metadata(
-        transactional_id: impl Into<String>,
-        consumer_group_id: impl Into<String>,
-        producer_id: i64,
-        producer_epoch: i16,
-        pending_txn_offset_commits: &HashMap<TopicPartition, CommittedOffset>,
-        is_transaction_v2_enabled: bool,
-    ) -> Self {
-        Self::new(
-            transactional_id,
-            consumer_group_id,
-            producer_id,
-            producer_epoch,
-            pending_txn_offset_commits,
-            UNKNOWN_MEMBER_ID,
-            UNKNOWN_GENERATION_ID,
-            None,
-            is_transaction_v2_enabled,
-        )
     }
 
     /// Creates a builder from pre-built wire data.
     ///
-    /// Corresponds to Java's single-argument `Builder(TxnOffsetCommitRequestData)`,
-    /// which hardcodes `isTransactionV2Enabled = true`.
-    pub fn from_data(data: TxnOffsetCommitRequestData) -> Self {
+    /// Corresponds to Java's single-argument `Builder(TxnOffsetCommitRequestData)`
+    /// (`TxnOffsetCommitRequest.java:89`), which hardcodes
+    /// `isTransactionV2Enabled = true`.
+    pub fn new_data(data: TxnOffsetCommitRequestData) -> Self {
         Self {
             data,
             is_transaction_v2_enabled: true,
             oldest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.oldest_version(),
             // Mirrors Java's `super(ApiKeys)` → `Builder(apiKey, false)` →
             // `latestVersion(false)`: released versions only. Rules §12.
-            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_enable_unstable_last_version(false),
         }
     }
 
@@ -444,16 +602,18 @@ mod tests {
     }
 
     fn builder_with_metadata() -> TxnOffsetCommitRequestBuilder {
-        TxnOffsetCommitRequestBuilder::new(
-            "txn-1",
-            "group-1",
-            42,
-            7,
-            &offsets(),
-            "member-1",
-            3,
-            Some("instance-1".to_string()),
-            true,
+        TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("txn-1")
+                .set_consumer_group_id("group-1")
+                .set_producer_id(42)
+                .set_producer_epoch(7)
+                .set_pending_txn_offset_commits(&offsets())
+                .set_is_transaction_v2_enabled(true)
+                .set_member_id(("member-1").to_string())
+                .set_generation_id(3)
+                .set_group_instance_id(Some("instance-1".to_string()))
+                .build(),
         )
     }
 
@@ -472,8 +632,16 @@ mod tests {
 
     #[test]
     fn test_without_group_metadata_uses_sentinels() {
-        let builder =
-            TxnOffsetCommitRequestBuilder::without_group_metadata("txn-1", "group-1", 42, 7, &offsets(), true);
+        let builder = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("txn-1")
+                .set_consumer_group_id("group-1")
+                .set_producer_id(42)
+                .set_producer_epoch(7)
+                .set_pending_txn_offset_commits(&offsets())
+                .set_is_transaction_v2_enabled(true)
+                .build(),
+        );
         assert_eq!(builder.data().member_id, UNKNOWN_MEMBER_ID);
         assert_eq!(builder.data().generation_id, UNKNOWN_GENERATION_ID);
         assert_eq!(builder.data().group_instance_id, None);
@@ -483,27 +651,54 @@ mod tests {
     /// `group_metadata_set` is an OR: **any** of the three fields triggers it.
     #[test]
     fn test_group_metadata_set_is_an_or_across_all_three_fields() {
-        let none = TxnOffsetCommitRequestBuilder::without_group_metadata("t", "g", 1, 0, &HashMap::new(), true);
+        let none = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("t")
+                .set_consumer_group_id("g")
+                .set_producer_id(1)
+                .set_producer_epoch(0)
+                .set_pending_txn_offset_commits(&HashMap::new())
+                .set_is_transaction_v2_enabled(true)
+                .build(),
+        );
         assert!(!none.group_metadata_set());
 
-        let member_only =
-            TxnOffsetCommitRequestBuilder::new("t", "g", 1, 0, &HashMap::new(), "m", UNKNOWN_GENERATION_ID, None, true);
+        let member_only = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("t")
+                .set_consumer_group_id("g")
+                .set_producer_id(1)
+                .set_producer_epoch(0)
+                .set_pending_txn_offset_commits(&HashMap::new())
+                .set_is_transaction_v2_enabled(true)
+                .set_member_id(("m").to_string())
+                .build(),
+        );
         assert!(member_only.group_metadata_set(), "member id alone must count");
 
-        let generation_only =
-            TxnOffsetCommitRequestBuilder::new("t", "g", 1, 0, &HashMap::new(), UNKNOWN_MEMBER_ID, 0, None, true);
+        let generation_only = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("t")
+                .set_consumer_group_id("g")
+                .set_producer_id(1)
+                .set_producer_epoch(0)
+                .set_pending_txn_offset_commits(&HashMap::new())
+                .set_is_transaction_v2_enabled(true)
+                .set_generation_id(0)
+                .build(),
+        );
         assert!(generation_only.group_metadata_set(), "generation id alone must count");
 
-        let instance_only = TxnOffsetCommitRequestBuilder::new(
-            "t",
-            "g",
-            1,
-            0,
-            &HashMap::new(),
-            UNKNOWN_MEMBER_ID,
-            UNKNOWN_GENERATION_ID,
-            Some("i".to_string()),
-            true,
+        let instance_only = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("t")
+                .set_consumer_group_id("g")
+                .set_producer_id(1)
+                .set_producer_epoch(0)
+                .set_pending_txn_offset_commits(&HashMap::new())
+                .set_is_transaction_v2_enabled(true)
+                .set_group_instance_id(Some("i".to_string()))
+                .build(),
         );
         assert!(instance_only.group_metadata_set(), "group instance id alone must count");
     }
@@ -530,8 +725,16 @@ mod tests {
     #[test]
     fn test_build_allows_low_versions_without_group_metadata() {
         for version in 0..3 {
-            let mut builder =
-                TxnOffsetCommitRequestBuilder::without_group_metadata("txn-1", "group-1", 42, 7, &offsets(), true);
+            let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+                TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                    .set_transactional_id("txn-1")
+                    .set_consumer_group_id("group-1")
+                    .set_producer_id(42)
+                    .set_producer_epoch(7)
+                    .set_pending_txn_offset_commits(&offsets())
+                    .set_is_transaction_v2_enabled(true)
+                    .build(),
+            );
             builder
                 .build_version(version)
                 .unwrap_or_else(|error| panic!("v{version} without group metadata must build, got {error}"));
@@ -542,16 +745,18 @@ mod tests {
     /// Transaction V2 clamp — so a clamp cannot mask the error.
     #[test]
     fn test_group_metadata_check_precedes_the_version_clamp() {
-        let mut builder = TxnOffsetCommitRequestBuilder::new(
-            "txn-1",
-            "group-1",
-            42,
-            7,
-            &offsets(),
-            "member-1",
-            3,
-            None,
-            false, // no TV2 → clamping active
+        // `is_transaction_v2_enabled` is false, so clamping stays active.
+        let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("txn-1")
+                .set_consumer_group_id("group-1")
+                .set_producer_id(42)
+                .set_producer_epoch(7)
+                .set_pending_txn_offset_commits(&offsets())
+                .set_is_transaction_v2_enabled(false)
+                .set_member_id(("member-1").to_string())
+                .set_generation_id(3)
+                .build(),
         );
         // v2 is below 3 and also below the clamp ceiling, so the error must win.
         assert!(builder.build_version(2).is_err());
@@ -565,8 +770,18 @@ mod tests {
             "the clamp is only meaningful if the API supports higher versions"
         );
 
-        let mut builder =
-            TxnOffsetCommitRequestBuilder::new("txn-1", "group-1", 42, 7, &offsets(), "member-1", 3, None, false);
+        let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id("txn-1")
+                .set_consumer_group_id("group-1")
+                .set_producer_id(42)
+                .set_producer_epoch(7)
+                .set_pending_txn_offset_commits(&offsets())
+                .set_is_transaction_v2_enabled(false)
+                .set_member_id(("member-1").to_string())
+                .set_generation_id(3)
+                .build(),
+        );
         match builder.build_version(latest).expect("build") {
             ConcreteRequest::TxnOffsetCommit(request) => {
                 assert_eq!(request.version(), LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2)
@@ -684,7 +899,7 @@ mod tests {
 
     #[test]
     fn test_from_data_defaults_transaction_v2_to_enabled() {
-        let builder = TxnOffsetCommitRequestBuilder::from_data(TxnOffsetCommitRequestData::new());
+        let builder = TxnOffsetCommitRequestBuilder::new_data(TxnOffsetCommitRequestData::new());
         assert!(builder.is_transaction_v2_enabled(), "Java hardcodes true in this constructor");
     }
 
@@ -692,8 +907,16 @@ mod tests {
     fn test_serialization_round_trip_all_versions() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             // No group metadata, so every version including 0-2 is legal.
-            let mut builder =
-                TxnOffsetCommitRequestBuilder::without_group_metadata("txn-1", "group-1", 42, 7, &offsets(), true);
+            let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+                TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                    .set_transactional_id("txn-1")
+                    .set_consumer_group_id("group-1")
+                    .set_producer_id(42)
+                    .set_producer_epoch(7)
+                    .set_pending_txn_offset_commits(&offsets())
+                    .set_is_transaction_v2_enabled(true)
+                    .build(),
+            );
             let mut built = builder.build_version(version).expect("build");
             let mut buffer = built.serialize().expect("serialize");
             buffer.flip();
@@ -754,25 +977,29 @@ mod tests {
 
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             let mut builder = if version < 3 {
-                TxnOffsetCommitRequestBuilder::without_group_metadata(
-                    "transactionalId",
-                    "group-1",
-                    10,
-                    1,
-                    &offsets_map,
-                    true,
+                TxnOffsetCommitRequestBuilder::new_options(
+                    TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                        .set_transactional_id("transactionalId")
+                        .set_consumer_group_id("group-1")
+                        .set_producer_id(10)
+                        .set_producer_epoch(1)
+                        .set_pending_txn_offset_commits(&offsets_map)
+                        .set_is_transaction_v2_enabled(true)
+                        .build(),
                 )
             } else {
-                TxnOffsetCommitRequestBuilder::new(
-                    "transactionalId",
-                    "group-1",
-                    10,
-                    1,
-                    &offsets_map,
-                    "member-1",
-                    5,
-                    Some("instance-1".to_string()),
-                    true,
+                TxnOffsetCommitRequestBuilder::new_options(
+                    TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                        .set_transactional_id("transactionalId")
+                        .set_consumer_group_id("group-1")
+                        .set_producer_id(10)
+                        .set_producer_epoch(1)
+                        .set_pending_txn_offset_commits(&offsets_map)
+                        .set_is_transaction_v2_enabled(true)
+                        .set_member_id(("member-1").to_string())
+                        .set_generation_id(5)
+                        .set_group_instance_id(Some("instance-1".to_string()))
+                        .build(),
                 )
             };
             let request = match builder.build_version(version).expect("build") {
@@ -809,9 +1036,18 @@ mod tests {
     #[test]
     fn test_version_support_for_group_metadata() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
-            TxnOffsetCommitRequestBuilder::without_group_metadata("txn-1", "group-1", 10, 1, &offsets(), true)
-                .build_version(version)
-                .unwrap_or_else(|error| panic!("v{version} without metadata must build: {error}"));
+            TxnOffsetCommitRequestBuilder::new_options(
+                TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                    .set_transactional_id("txn-1")
+                    .set_consumer_group_id("group-1")
+                    .set_producer_id(10)
+                    .set_producer_epoch(1)
+                    .set_pending_txn_offset_commits(&offsets())
+                    .set_is_transaction_v2_enabled(true)
+                    .build(),
+            )
+            .build_version(version)
+            .unwrap_or_else(|error| panic!("v{version} without metadata must build: {error}"));
 
             let mut with_metadata = builder_with_metadata();
             if version >= 3 {
@@ -845,4 +1081,15 @@ mod tests {
     // asserted by `test_get_error_response_is_per_partition` above and by
     // `test_constructor`. The only difference in the static overload is that it
     // omits the throttle time.
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`TxnOffsetCommitRequestBuilderOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(
+        expected = "TxnOffsetCommitRequestBuilderOptionsBuilder::build: mandatory parameter `transactional_id` was not set"
+    )]
+    fn txn_offset_commit_request_builder_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = TxnOffsetCommitRequestBuilderOptionsBuilder::new().build();
+    }
 }

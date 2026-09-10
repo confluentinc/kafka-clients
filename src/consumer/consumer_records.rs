@@ -18,6 +18,8 @@
 
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::common::TopicPartition;
 use crate::consumer::ConsumerRecord;
@@ -64,16 +66,54 @@ pub struct ConsumerRecords<K, V> {
     /// in a user-observable way (it is an internal bookkeeping flag, but is
     /// included in the derived `PartialEq`/`Eq` for completeness).
     position_advanced: bool,
+    /// Flag to detect if the legacy [`Self::new`] constructor is used. See
+    /// KAFKA-20660 for more details.
+    ///
+    /// Translates Java's `ConsumerRecords.tainted` (`ConsumerRecords.java:47`).
+    /// Like `position_advanced` it is internal bookkeeping, and is included in
+    /// the derived `PartialEq`/`Eq` for completeness.
+    tainted: bool,
 }
 
+/// Java's `ConsumerRecords.TAINT_LOG_INTERVAL_NS` (`ConsumerRecords.java:50`).
+const TAINT_LOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// The process start instant, so the tainted-log timestamps below can be a
+/// plain `AtomicI64` of nanoseconds since that point. Java uses
+/// `System.nanoTime()`, whose origin is likewise arbitrary but fixed.
+static PROCESS_START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+/// Java's `ConsumerRecords.TAINTED_NEXT_OFFSETS_LAST_LOG_NS`
+/// (`ConsumerRecords.java:52`), initialised one interval in the past so the
+/// first tainted call logs immediately.
+static TAINTED_NEXT_OFFSETS_LAST_LOG_NS: AtomicI64 = AtomicI64::new(-(TAINT_LOG_INTERVAL.as_nanos() as i64));
+
 impl<K, V> ConsumerRecords<K, V> {
+    /// Create a new `ConsumerRecords` from per-partition record lists only.
+    ///
+    /// Corresponds to Java's deprecated `ConsumerRecords(Map)`
+    /// (`ConsumerRecords.java:57-60`), whose body is
+    /// `this(records, Map.of(), true)` — the next-offsets map is empty and the
+    /// instance is marked *tainted*, so [`Self::next_offsets`] logs a
+    /// rate-limited error explaining why it returned empty (KAFKA-20660).
+    #[deprecated(
+        since = "4.0.0",
+        note = "mirroring Java's `@Deprecated`; use `new_next_offsets` instead, which supplies next offsets"
+    )]
+    pub fn new(records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>) -> Self {
+        Self { records, next_offsets: HashMap::new(), position_advanced: false, tainted: true }
+    }
+
     /// Create a new `ConsumerRecords` from per-partition record lists and a
     /// next-offsets map.
-    pub fn new(
+    ///
+    /// Corresponds to Java's `ConsumerRecords(Map, Map)`
+    /// (`ConsumerRecords.java:62`).
+    pub fn new_next_offsets(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Self {
-        Self { records, next_offsets, position_advanced: false }
+        Self { records, next_offsets, position_advanced: false, tainted: false }
     }
 
     /// Like [`Self::new`] but also records whether the consumed position
@@ -85,7 +125,7 @@ impl<K, V> ConsumerRecords<K, V> {
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         position_advanced: bool,
     ) -> Self {
-        Self { records, next_offsets, position_advanced }
+        Self { records, next_offsets, position_advanced, tainted: false }
     }
 
     /// Returns an empty `ConsumerRecords`.
@@ -93,7 +133,12 @@ impl<K, V> ConsumerRecords<K, V> {
     /// Corresponds to Java's static `ConsumerRecords.empty()` /
     /// `ConsumerRecords.EMPTY`.
     pub fn empty() -> Self {
-        Self { records: IndexMap::new(), next_offsets: HashMap::new(), position_advanced: false }
+        Self {
+            records: IndexMap::new(),
+            next_offsets: HashMap::new(),
+            position_advanced: false,
+            tainted: false,
+        }
     }
 
     /// Java's internal `Fetch.isEmpty()`: `numRecords == 0 &&
@@ -102,7 +147,32 @@ impl<K, V> ConsumerRecords<K, V> {
     /// advances the position with zero records returns promptly instead of
     /// blocking until the poll timeout, matching `AsyncKafkaConsumer.poll`.
     pub(crate) fn is_fetch_empty(&self) -> bool {
-        self.records.is_empty() && !self.position_advanced
+        Self::fetch_is_empty(&self.records, self.position_advanced)
+    }
+
+    /// Java's internal `Fetch.isEmpty()` (`Fetch.java:116-118`) evaluated over
+    /// the two accumulators that build a `Fetch`, for callers that do not have
+    /// a `ConsumerRecords` yet.
+    ///
+    /// `FetchCollector::collect_fetch` mirrors Java's
+    /// `final Fetch<K, V> fetch = Fetch.empty()` with a plain
+    /// records-map + `position_advanced` pair (it only materialises the
+    /// `ConsumerRecords` on the way out), yet Java tests `fetch.isEmpty()`
+    /// three times *during* the loop to decide whether to swallow an error and
+    /// whether to leave the offending entry queued. This associated function
+    /// exists so both callers answer the question from one place: the
+    /// records-only spelling was wrong at all three collector sites, and a
+    /// second inline copy of the predicate is exactly how that drifted.
+    ///
+    /// Note `records.is_empty()` is the faithful reading of Java's
+    /// `numRecords == 0`: the collector inserts a partition entry only when it
+    /// decoded at least one record for it, so an empty map and a zero record
+    /// count are the same condition.
+    pub(crate) fn fetch_is_empty(
+        records: &IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
+        position_advanced: bool,
+    ) -> bool {
+        records.is_empty() && !position_advanced
     }
 
     /// Get the records for the given partition.
@@ -110,7 +180,7 @@ impl<K, V> ConsumerRecords<K, V> {
     /// Returns an empty slice if no records are present for that partition.
     ///
     /// Corresponds to Java's `ConsumerRecords.records(TopicPartition)`.
-    pub fn records_for_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>] {
+    pub fn records_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>] {
         self.records.get(partition).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -121,7 +191,7 @@ impl<K, V> ConsumerRecords<K, V> {
     /// partition-insertion order.
     ///
     /// Corresponds to Java's `ConsumerRecords.records(String)`.
-    pub fn records_for_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a {
+    pub fn records_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a {
         self.records
             .iter()
             .filter(move |(tp, _)| tp.topic() == topic)
@@ -156,6 +226,27 @@ impl<K, V> ConsumerRecords<K, V> {
     ///
     /// Corresponds to Java's `ConsumerRecords.nextOffsets()`.
     pub fn next_offsets(&self) -> &HashMap<TopicPartition, OffsetAndMetadata> {
+        if self.tainted {
+            let now = PROCESS_START.elapsed().as_nanos() as i64;
+            let last_log = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);
+            // `next_offsets()` is called on every poll, so a tainted instance
+            // would otherwise log the deprecation error on every call. A time
+            // based approach is used to avoid this. See KAFKA-20660.
+            if now - last_log >= TAINT_LOG_INTERVAL.as_nanos() as i64
+                && TAINTED_NEXT_OFFSETS_LAST_LOG_NS
+                    .compare_exchange(last_log, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                log::error!(
+                    "ConsumerRecords#next_offsets() returned empty because this instance was built with the \
+                     deprecated ConsumerRecords(Map) constructor (see KIP-1094), which does not supply next offsets. \
+                     Downstream logic that relies on these offsets to advance the consumer's committed position \
+                     (for example, Kafka Streams under exactly-once semantics) will be unable to commit, leading to \
+                     reprocessing. Update the interceptor or wrapper that constructed it to use the \
+                     ConsumerRecords(Map, Map) constructor that supplies next offsets."
+                );
+            }
+        }
         &self.next_offsets
     }
 }
@@ -206,5 +297,118 @@ impl<K, V> IntoIterator for ConsumerRecords<K, V> {
             v.into_iter()
         }
         self.records.into_values().flat_map(iter_vec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::record::TimestampType;
+    use crate::consumer::ConsumerRecordOptionsBuilder;
+    use std::sync::Mutex;
+
+    /// `TAINTED_NEXT_OFFSETS_LAST_LOG_NS` is process-global (as in Java), so the
+    /// tests that drive the rate limiter must not run concurrently. Java relies
+    /// on JUnit's default single-threaded execution plus a `finally` that
+    /// restores the previous value; Rust's test harness is multi-threaded, so
+    /// the lock supplies the serialization the restore alone cannot.
+    static RATE_LIMIT_LOCK: Mutex<()> = Mutex::new(());
+
+    fn one_record() -> IndexMap<TopicPartition, Vec<ConsumerRecord<i32, String>>> {
+        let tp = TopicPartition::new("topic".to_string(), 0);
+        let record = ConsumerRecord::new_options(
+            ConsumerRecordOptionsBuilder::new()
+                .set_topic("topic")
+                .set_partition(0)
+                .set_offset(0)
+                .set_key(Some(0))
+                .set_value(Some("value".to_string()))
+                .set_timestamp(0)
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_serialized_key_size(0)
+                .set_serialized_value_size(0)
+                .build(),
+        );
+        let mut records = IndexMap::new();
+        records.insert(tp, vec![record]);
+        records
+    }
+
+    /// Translated from
+    /// `ConsumerRecordsTest.testNextOffsetsLogsErrorPeriodicallyWhenConstructedWithDeprecatedConstructor`.
+    ///
+    /// Java asserts on the captured `ERROR` log lines via `LogCaptureAppender`.
+    /// This crate has no log-capture facility (the `log` crate's global logger
+    /// is process-wide and installable only once), so the assertions here are
+    /// made against the rate limiter's own state instead: the timestamp static
+    /// advances exactly when Java would emit a line, and stays put when Java
+    /// would suppress one. That is the mechanism the Java test is really
+    /// exercising — the log text itself is asserted by the `contains(..)` check
+    /// Java makes, which is preserved as a comment on the `log::error!` call.
+    #[test]
+    #[allow(deprecated)]
+    fn test_next_offsets_logs_error_periodically_when_constructed_with_deprecated_constructor() {
+        let _guard = RATE_LIMIT_LOCK.lock().unwrap();
+        // Capture the global throttle state so it can be restored, to avoid
+        // leaking into other tests.
+        let previous_last_log_ns = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);
+
+        // Force the rate-limit window to have elapsed so the next tainted call logs.
+        let elapsed_window = PROCESS_START.elapsed().as_nanos() as i64 - TAINT_LOG_INTERVAL.as_nanos() as i64 - 1;
+        TAINTED_NEXT_OFFSETS_LAST_LOG_NS.store(elapsed_window, Ordering::Relaxed);
+
+        let consumer_records = ConsumerRecords::new(one_record());
+
+        // The deprecated constructor does not supply next offsets, so the map is empty.
+        assert!(consumer_records.next_offsets().is_empty());
+
+        // The window had elapsed, so that call logged and advanced the timestamp.
+        let after_first = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);
+        assert!(after_first > elapsed_window);
+
+        // Within the rate-limit window, neither repeated calls nor new tainted
+        // instances log again.
+        assert!(consumer_records.next_offsets().is_empty());
+        // `ConsumerRecord` is not `Clone`, so this rebuilds the same map Java
+        // reuses; the value is identical and only taintedness matters here.
+        assert!(ConsumerRecords::new(one_record()).next_offsets().is_empty());
+        assert_eq!(after_first, TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed));
+
+        // Once the window has elapsed, the error is logged again.
+        TAINTED_NEXT_OFFSETS_LAST_LOG_NS.store(elapsed_window, Ordering::Relaxed);
+        assert!(consumer_records.next_offsets().is_empty());
+        assert!(TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed) > elapsed_window);
+
+        TAINTED_NEXT_OFFSETS_LAST_LOG_NS.store(previous_last_log_ns, Ordering::Relaxed);
+    }
+
+    /// Translated from
+    /// `ConsumerRecordsTest.testNextOffsetsDoesNotLogErrorWhenConstructedWithNextOffsets`.
+    #[test]
+    fn test_next_offsets_does_not_log_error_when_constructed_with_next_offsets() {
+        let _guard = RATE_LIMIT_LOCK.lock().unwrap();
+        let records = one_record();
+        let tp = TopicPartition::new("topic".to_string(), 0);
+        let mut next_offsets = HashMap::new();
+        next_offsets.insert(tp, OffsetAndMetadata::new(1).unwrap());
+
+        let before = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);
+        let consumer_records = ConsumerRecords::new_next_offsets(records, next_offsets.clone());
+
+        assert!(!consumer_records.next_offsets().is_empty());
+        assert_eq!(&next_offsets, consumer_records.next_offsets());
+        // Not tainted, so the rate limiter was never consulted.
+        assert_eq!(before, TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed));
+    }
+
+    /// Translated from
+    /// `ConsumerRecordsTest.testNextOffsetsDoesNotLogErrorForEmptyRecords`.
+    #[test]
+    fn test_next_offsets_does_not_log_error_for_empty_records() {
+        let _guard = RATE_LIMIT_LOCK.lock().unwrap();
+        let before = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);
+        let empty: ConsumerRecords<i32, String> = ConsumerRecords::empty();
+        assert!(empty.next_offsets().is_empty());
+        assert_eq!(before, TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed));
     }
 }

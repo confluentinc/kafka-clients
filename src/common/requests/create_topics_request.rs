@@ -119,7 +119,7 @@ pub struct CreateTopicsRequestBuilder {
 
 impl CreateTopicsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateTopicsRequestData) -> Self {
+    pub fn new(data: CreateTopicsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_TOPICS.oldest_version(),
@@ -191,7 +191,7 @@ mod tests {
     fn build_rejects_validate_only_v0() {
         let mut data = CreateTopicsRequestData::new();
         data.set_validate_only(true);
-        let mut builder = CreateTopicsRequestBuilder::from_data(data);
+        let mut builder = CreateTopicsRequestBuilder::new(data);
         assert!(builder.build_version(0).is_err());
     }
 
@@ -199,7 +199,7 @@ mod tests {
     fn build_rejects_defaults_below_v4() {
         let mut data = CreateTopicsRequestData::new();
         data.set_topics(vec![topic("t", NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR)]);
-        let mut builder = CreateTopicsRequestBuilder::from_data(data);
+        let mut builder = CreateTopicsRequestBuilder::new(data);
         let err = builder.build_version(3).unwrap_err();
         assert!(err.to_string().contains("version 4+"), "{err}");
         // v4 accepts defaults.
@@ -211,12 +211,12 @@ mod tests {
         let mut data = CreateTopicsRequestData::new();
         data.set_topics(vec![topic("a", 1, 1), topic("b", 1, 1)]);
         let request = CreateTopicsRequest::new(data, 7);
-        let response = request.get_error_response(100, &Errors::InvalidTopicException);
+        let response = request.get_error_response(100, &Errors::InvalidTopicError);
         if let ConcreteResponse::CreateTopics(r) = response {
             assert_eq!(r.data().topics.len(), 2);
             assert_eq!(r.data().throttle_time_ms, 100);
             for t in &r.data().topics {
-                assert_eq!(t.error_code, Errors::InvalidTopicException.code());
+                assert_eq!(t.error_code, Errors::InvalidTopicError.code());
             }
         } else {
             panic!("expected CreateTopics response");

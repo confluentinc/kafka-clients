@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, KafkaFuture, TopicPartition};
+use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition delete errors carried by the underlying future.
 type PartitionErrors = HashMap<TopicPartition, Errors>;
@@ -51,9 +51,9 @@ impl DeleteConsumerGroupOffsetsResult {
     /// partition was not included in the original request. The returned future
     /// fails if the deletion for the partition failed (or the partition is
     /// missing from the response).
-    pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<()>, KafkaError> {
+    pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<()>, Error> {
         if !self.partitions.contains(partition) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Partition {partition} was not included in the original request"
             )));
         }
@@ -90,13 +90,13 @@ impl DeleteConsumerGroupOffsetsResult {
 /// result: an absent partition yields the "not included in the response"
 /// `IllegalArgumentException`, a present partition yields its error (or `None`
 /// when the error is `NONE`).
-fn sub_level_error(partition_level_errors: &PartitionErrors, partition: &TopicPartition) -> Option<KafkaError> {
+fn sub_level_error(partition_level_errors: &PartitionErrors, partition: &TopicPartition) -> Option<Error> {
     match partition_level_errors.get(partition) {
-        None => Some(KafkaError::illegal_argument(format!(
+        None => Some(Error::local_illegal_argument(format!(
             "Offset deletion result for partition \"{partition}\" was not included in the response"
         ))),
         Some(&Errors::None) => None,
-        Some(&error) => Some(KafkaError::new(error)),
+        Some(&error) => Some(Error::new(error)),
     }
 }
 
@@ -121,12 +121,9 @@ mod tests {
     #[tokio::test]
     async fn top_level_error_constructor() {
         let handle: KafkaFutureImpl<PartitionErrors> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::group_authorization("group"));
+        handle.complete_with_error(Error::group_authorization("group"));
         let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
-        assert!(matches!(
-            result.all().get().await.unwrap_err(),
-            KafkaError::GroupAuthorization(_)
-        ));
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::GroupAuthorization(_)));
     }
 
     /// Translated from `testPartitionLevelErrorConstructor`.
@@ -152,11 +149,11 @@ mod tests {
         let handle: KafkaFutureImpl<PartitionErrors> = KafkaFutureImpl::new();
         handle.complete(HashMap::from([(tp_zero(), Errors::None)]));
         let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
-        assert!(matches!(result.all().get().await.unwrap_err(), KafkaError::IllegalArgument(_)));
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
         assert_eq!(result.partition_result(&tp_zero()).unwrap().get().await.unwrap(), ());
         assert!(matches!(
             result.partition_result(&tp_one()).unwrap().get().await.unwrap_err(),
-            KafkaError::IllegalArgument(_)
+            Error::LocalIllegalArgument(_)
         ));
     }
 
@@ -173,7 +170,7 @@ mod tests {
         let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
         assert!(matches!(
             result.partition_result(&TopicPartition::new("invalid-topic", 0)),
-            Err(KafkaError::IllegalArgument(_))
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 

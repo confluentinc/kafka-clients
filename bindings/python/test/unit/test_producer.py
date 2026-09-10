@@ -157,7 +157,6 @@ def test_manual_error_next():
     assert err.code == 2
     assert err.message == "test error"
     assert isinstance(err.is_retriable, bool)
-    assert isinstance(err.is_fatal, bool)
     p.close()
 
 
@@ -348,7 +347,6 @@ def test_kafka_error_properties():
     assert err.code == 2
     assert err.message == "corrupt message"
     assert isinstance(err.is_retriable, bool)
-    assert isinstance(err.is_fatal, bool)
     p.close()
 
 
@@ -583,7 +581,6 @@ async def test_async_manual_error_next():
     assert err.code == 2
     assert err.message == "test error"
     assert isinstance(err.is_retriable, bool)
-    assert isinstance(err.is_fatal, bool)
     await p.close()
 
 

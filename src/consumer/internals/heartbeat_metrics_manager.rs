@@ -64,24 +64,24 @@ impl HeartbeatMetricsManager {
         let metric_group_name = format!("{metric_group_prefix}{COORDINATOR_METRICS_SUFFIX}");
         let heartbeat_sensor = metrics.sensor("heartbeat-latency").expect("creating heartbeat-latency sensor");
 
-        let heartbeat_response_time_max = metrics.metric_name(
+        let heartbeat_response_time_max = metrics.metric_name_description_tags(
             "heartbeat-response-time-max",
             &metric_group_name,
             "The max time taken to receive a response to a heartbeat request",
             BTreeMap::new(),
         );
         heartbeat_sensor
-            .add(heartbeat_response_time_max.clone(), Box::new(Max::new()))
+            .add_metric_name(heartbeat_response_time_max.clone(), Box::new(Max::new()))
             .expect("adding heartbeat-response-time-max");
 
         // windowed meters
-        let heartbeat_rate = metrics.metric_name(
+        let heartbeat_rate = metrics.metric_name_description_tags(
             "heartbeat-rate",
             &metric_group_name,
             "The number of heartbeats per second",
             BTreeMap::new(),
         );
-        let heartbeat_total = metrics.metric_name(
+        let heartbeat_total = metrics.metric_name_description_tags(
             "heartbeat-total",
             &metric_group_name,
             "The total number of heartbeats",
@@ -89,7 +89,7 @@ impl HeartbeatMetricsManager {
         );
         // Java: `new Meter(new WindowedCount(), heartbeatRate, heartbeatTotal)`.
         heartbeat_sensor
-            .add_compound(Box::new(Meter::with_stat(
+            .add(Box::new(Meter::new_rate_stat(
                 Arc::new(WindowedCount::new().into_sampled_stat()),
                 heartbeat_rate.clone(),
                 heartbeat_total.clone(),
@@ -109,14 +109,14 @@ impl HeartbeatMetricsManager {
                 ((now - last_heartbeat_send) / 1000) as f64
             }
         });
-        let last_heartbeat_seconds_ago = metrics.metric_name(
+        let last_heartbeat_seconds_ago = metrics.metric_name_description_tags(
             "last-heartbeat-seconds-ago",
             &metric_group_name,
             "The number of seconds since the last coordinator heartbeat was sent",
             BTreeMap::new(),
         );
         metrics
-            .add_metric(last_heartbeat_seconds_ago.clone(), Box::new(last_heartbeat))
+            .add_metric_measurable(last_heartbeat_seconds_ago.clone(), Box::new(last_heartbeat))
             .expect("registering last-heartbeat-seconds-ago metric");
 
         Self {
@@ -140,7 +140,7 @@ impl HeartbeatMetricsManager {
 
     /// Java: `recordRequestLatency(long requestLatencyMs)`.
     pub(crate) fn record_request_latency(&self, request_latency_ms: i64) {
-        self.heartbeat_sensor.record(request_latency_ms as f64);
+        self.heartbeat_sensor.record_value(request_latency_ms as f64);
     }
 
     /// Test-only: read back the raw `last-heartbeat-sent` timestamp the
@@ -171,7 +171,7 @@ mod tests {
     fn test_heartbeat_metrics() {
         for random_sleep_s in 1..=10i64 {
             let time = Arc::new(MockTime::new());
-            let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn crate::common::metrics::Time>));
+            let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn crate::common::metrics::Time>));
             let manager = HeartbeatMetricsManager::new(&metrics);
 
             // Assert the existence of metrics.

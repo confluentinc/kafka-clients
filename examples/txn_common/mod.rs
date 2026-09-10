@@ -26,7 +26,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::serialization::StringSerializer;
@@ -37,8 +37,8 @@ use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
-use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::RecordMetadata;
+use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 /// Every manual-test producer sends `String` keys and values.
 pub type StringProducer = KafkaProducer<String, String>;
@@ -146,15 +146,13 @@ pub fn build_consumer_with(
 
 /// Builds a record for partition 0 with key `key-{value}`.
 pub fn string_record(topic: &str, value: &str) -> Result<ProducerRecord<String, String>, String> {
-    ProducerRecord::new(
-        topic.to_string(),
-        Some(0),
-        None,
-        Some(format!("key-{value}")),
-        Some(value.to_string()),
-        None,
-    )
-    .map_err(|e| format!("building the record {value}: {e}"))
+    let options = ProducerRecordOptionsBuilder::new()
+        .set_topic(topic.to_string())
+        .set_value(Some(value.to_string()))
+        .set_partition(Some(0))
+        .set_key(Some(format!("key-{value}")))
+        .build();
+    ProducerRecord::new_options(options).map_err(|e| format!("building the record {value}: {e}"))
 }
 
 /// Sends one record to partition 0 and awaits its broker ack.
@@ -190,16 +188,16 @@ pub async fn send_value_printed(producer: &StringProducer, topic: &str, value: &
 pub enum SendFailure {
     /// `send()` itself returned `Err` — Java's rethrowing catch blocks. This is
     /// how a misuse of the transactional API surfaces.
-    Synchronous(KafkaError),
+    Synchronous(Error),
     /// `send()` returned a future that then resolved to an error — Java's
     /// `catch (ApiException e)`, or a broker-side rejection of a record the
     /// client accepted.
-    ViaFuture(KafkaError),
+    ViaFuture(Error),
 }
 
 impl SendFailure {
     /// The error, whichever path carried it.
-    pub fn error(&self) -> &KafkaError {
+    pub fn error(&self) -> &Error {
         match self {
             Self::Synchronous(error) | Self::ViaFuture(error) => error,
         }
@@ -210,7 +208,7 @@ impl SendFailure {
     /// `Err(..)` — reported as a ❌ by the caller — when the error arrived through
     /// the future instead, because that means the client routed a
     /// non-`ApiException` into Java's `ApiException` block.
-    pub fn expect_synchronous(self, what: &str) -> Result<KafkaError, String> {
+    pub fn expect_synchronous(self, what: &str) -> Result<Error, String> {
         match self {
             Self::Synchronous(error) => Ok(error),
             Self::ViaFuture(error) => Err(format!(
@@ -224,7 +222,7 @@ impl SendFailure {
     ///
     /// `Err(..)` when `send()` returned it synchronously instead — for a record
     /// the client accepted, that would mean it never reached the broker.
-    pub fn expect_via_future(self, what: &str) -> Result<KafkaError, String> {
+    pub fn expect_via_future(self, what: &str) -> Result<Error, String> {
         match self {
             Self::ViaFuture(error) => Ok(error),
             Self::Synchronous(error) => Err(format!(

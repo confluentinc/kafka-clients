@@ -306,7 +306,7 @@ impl MetadataSnapshot {
             .map(|metadata| MetadataResponse::to_partition_info(metadata, nodes))
             .collect();
 
-        Cluster::new(
+        Cluster::new_invalid_topics_controller_topic_ids(
             cluster_id.clone(),
             nodes.values().cloned().collect(),
             partition_infos,

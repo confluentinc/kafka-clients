@@ -94,7 +94,7 @@ impl PartitionData {
     /// Constructs a partition entry with all fields explicit.
     ///
     /// Translates the 6-arg Java constructor.
-    pub fn new_with_last_fetched_epoch(
+    pub fn new_last_fetched_epoch(
         topic_id: Uuid,
         fetch_offset: i64,
         log_start_offset: i64,
@@ -189,7 +189,7 @@ impl FetchRequest {
     /// # Errors
     ///
     /// Returns an error if the encoded isolation level is unknown.
-    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::KafkaError> {
+    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 
@@ -287,24 +287,24 @@ impl FetchRequestBuilder {
     }
 
     /// Sets the isolation level.
-    pub fn isolation_level(mut self, level: IsolationLevel) -> Self {
+    pub fn set_isolation_level(mut self, level: IsolationLevel) -> Self {
         self.isolation_level = level;
         self
     }
 
     /// Returns the current metadata. Visible for testing.
-    pub fn metadata_value(&self) -> FetchMetadata {
+    pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
 
     /// Sets the fetch session metadata.
-    pub fn metadata(mut self, metadata: FetchMetadata) -> Self {
+    pub fn set_metadata(mut self, metadata: FetchMetadata) -> Self {
         self.metadata = metadata;
         self
     }
 
     /// Sets the rack id.
-    pub fn rack_id(mut self, rack_id: impl Into<String>) -> Self {
+    pub fn set_rack_id(mut self, rack_id: impl Into<String>) -> Self {
         self.rack_id = rack_id.into();
         self
     }
@@ -320,14 +320,28 @@ impl FetchRequestBuilder {
         self
     }
 
+    /// Returns the removed-partitions list.
+    ///
+    /// Translates `FetchRequest.Builder.removed()`.
+    pub fn removed(&self) -> &[TopicIdPartition] {
+        &self.removed
+    }
+
     /// Sets the removed-partitions list.
-    pub fn removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
+    pub fn set_removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
         self.removed = removed;
         self
     }
 
+    /// Returns the replaced-partitions list.
+    ///
+    /// Translates `FetchRequest.Builder.replaced()`.
+    pub fn replaced(&self) -> &[TopicIdPartition] {
+        &self.replaced
+    }
+
     /// Sets the replaced-partitions list.
-    pub fn replaced(mut self, replaced: Vec<TopicIdPartition>) -> Self {
+    pub fn set_replaced(mut self, replaced: Vec<TopicIdPartition>) -> Self {
         self.replaced = replaced;
         self
     }
@@ -496,7 +510,7 @@ pub fn fetch_data_from(
         };
         for fp in &topic.partitions {
             let tip = TopicIdPartition::from_parts(topic.topic_id, fp.partition, name.clone());
-            let pd = PartitionData::new_with_last_fetched_epoch(
+            let pd = PartitionData::new_last_fetched_epoch(
                 topic.topic_id,
                 fp.fetch_offset,
                 fp.log_start_offset,
@@ -634,8 +648,8 @@ mod tests {
         let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
         let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .removed(removed)
-            .replaced(replaced);
+            .set_removed(removed)
+            .set_replaced(replaced);
         let req = builder.build_version(12);
         // v12 only includes removed; replaced is dropped.
         let forgotten = &req.data().forgotten_topics_data;
@@ -649,17 +663,32 @@ mod tests {
         let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
         let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .removed(removed)
-            .replaced(replaced);
+            .set_removed(removed)
+            .set_replaced(replaced);
         let req = builder.build_version(13);
         let forgotten = &req.data().forgotten_topics_data;
         assert_eq!(2, forgotten.len());
     }
 
     #[test]
+    fn test_removed_and_replaced_round_trip() {
+        let id = Uuid::random_uuid();
+        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        // Java's Builder defaults both to `Collections.emptyList()`.
+        assert!(builder.removed().is_empty());
+        assert!(builder.replaced().is_empty());
+
+        let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
+        let builder = builder.set_removed(removed.clone()).set_replaced(replaced.clone());
+        assert_eq!(removed.as_slice(), builder.removed());
+        assert_eq!(replaced.as_slice(), builder.replaced());
+    }
+
+    #[test]
     fn test_isolation_level_round_trip() {
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .isolation_level(IsolationLevel::ReadCommitted);
+            .set_isolation_level(IsolationLevel::ReadCommitted);
         let req = builder.build_version(15);
         assert_eq!(IsolationLevel::ReadCommitted, req.isolation_level().unwrap());
     }
@@ -667,7 +696,7 @@ mod tests {
     #[test]
     fn test_metadata_round_trip() {
         let builder =
-            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).metadata(FetchMetadata::new(42, 7));
+            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
         let req = builder.build_version(15);
         assert_eq!(FetchMetadata::new(42, 7), req.metadata());
     }

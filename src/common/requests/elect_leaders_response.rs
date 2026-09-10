@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::elect_leaders_response_data::{ElectLeadersResponseData, ReplicaElectionResult};
 
 use super::abstract_response::update_error_counts;
@@ -33,23 +33,126 @@ pub struct ElectLeadersResponse {
     data: ElectLeadersResponseData,
 }
 
+/// The parameters of Java's four-argument `ElectLeadersResponse` constructor
+/// (`ElectLeadersResponse.java:42`) that do not fit in the derived method name.
+///
+/// Java's two constructors (`:37`, `:42`) share no parameter name, so all four
+/// of `:42`'s parameters reach its derived name. CLAUDE.md §2 caps that at three
+/// and makes this struct the method's *only* parameter, so every Java parameter
+/// lives here. This struct has no Java counterpart: it exists solely to satisfy
+/// that naming rule (DoD #7).
+///
+/// It deliberately has **no** `Default`. Java declares no `ElectLeadersResponse`
+/// overload that omits any of these four, so none has a Java-derived default —
+/// for `version` in particular a synthesised `0` would silently drop the
+/// top-level error code (`:49` encodes it only for v1+). Construct it with
+/// [`ElectLeadersResponseOptionsBuilder::new`] and set all four: [`ElectLeadersResponseOptionsBuilder::build`] panics if any of `throttle_time_ms`, `error_code`, `election_results`, `version` was not set.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ElectLeadersResponseOptions {
+    /// Java's `throttleTimeMs`.
+    pub throttle_time_ms: i32,
+    /// Java's `errorCode`.
+    pub error_code: i16,
+    /// Java's `electionResults`.
+    pub election_results: Vec<ReplicaElectionResult>,
+    /// Java's `version`.
+    pub version: i16,
+}
+
+/// Fluent builder for [`ElectLeadersResponseOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`ElectLeadersResponseOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct ElectLeadersResponseOptionsBuilder {
+    throttle_time_ms: Option<i32>,
+    error_code: Option<i16>,
+    election_results: Option<Vec<ReplicaElectionResult>>,
+    version: Option<i16>,
+}
+
+impl Default for ElectLeadersResponseOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ElectLeadersResponseOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self { throttle_time_ms: None, error_code: None, election_results: None, version: None }
+    }
+
+    /// Sets [`ElectLeadersResponseOptions::throttle_time_ms`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_throttle_time_ms(mut self, throttle_time_ms: i32) -> Self {
+        self.throttle_time_ms = Some(throttle_time_ms);
+        self
+    }
+    /// Sets [`ElectLeadersResponseOptions::error_code`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_error_code(mut self, error_code: i16) -> Self {
+        self.error_code = Some(error_code);
+        self
+    }
+    /// Sets [`ElectLeadersResponseOptions::election_results`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_election_results(mut self, election_results: Vec<ReplicaElectionResult>) -> Self {
+        self.election_results = Some(election_results);
+        self
+    }
+    /// Sets [`ElectLeadersResponseOptions::version`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_version(mut self, version: i16) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `throttle_time_ms`, `error_code`, `election_results`, `version`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
+    pub fn build(self) -> ElectLeadersResponseOptions {
+        ElectLeadersResponseOptions {
+            throttle_time_ms: self.throttle_time_ms.unwrap_or_else(|| Self::missing("throttle_time_ms")),
+            error_code: self.error_code.unwrap_or_else(|| Self::missing("error_code")),
+            election_results: self.election_results.unwrap_or_else(|| Self::missing("election_results")),
+            version: self.version.unwrap_or_else(|| Self::missing("version")),
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("ElectLeadersResponseOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
+    }
+}
+
 impl ElectLeadersResponse {
     /// Creates a new `ElectLeadersResponse` from the underlying data.
-    pub fn new(data: ElectLeadersResponseData) -> Self {
+    ///
+    /// Corresponds to Java's `ElectLeadersResponse(ElectLeadersResponseData)`
+    /// (`ElectLeadersResponse.java:37`).
+    pub fn new_data(data: ElectLeadersResponseData) -> Self {
         Self { data }
     }
 
     /// Creates a response from throttle time, top-level error code and per-topic
     /// results.
     ///
-    /// Mirrors the four-argument `ElectLeadersResponse` constructor (the error
-    /// code is only encoded for v1+).
-    pub fn from_results(
-        throttle_time_ms: i32,
-        error_code: i16,
-        election_results: Vec<ReplicaElectionResult>,
-        version: i16,
-    ) -> Self {
+    /// Corresponds to Java's
+    /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)`
+    /// (`ElectLeadersResponse.java:42`) — the error code is only encoded for v1+.
+    pub fn new_options(options: ElectLeadersResponseOptions) -> Self {
+        let ElectLeadersResponseOptions { throttle_time_ms, error_code, election_results, version } = options;
         let mut data = ElectLeadersResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
         if version >= 1 {
@@ -105,7 +208,7 @@ impl ElectLeadersResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ElectLeadersResponseData::read(readable, version)?;
-        Ok(Self::new(data))
+        Ok(Self::new_data(data))
     }
 
     /// Whether the client should throttle on this response (always true).
@@ -119,7 +222,7 @@ impl ElectLeadersResponse {
     /// error otherwise.
     ///
     /// Mirrors `ElectLeadersResponse.electLeadersResult(ElectLeadersResponseData)`.
-    pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<KafkaError>> {
+    pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<Error>> {
         let mut map = HashMap::new();
         for topic_results in &data.replica_election_results {
             for partition_result in &topic_results.partition_result {
@@ -130,7 +233,7 @@ impl ElectLeadersResponse {
                     // Java: `error.exception(partitionResult.errorMessage())`. A null
                     // message must leave the code's own text in place, which
                     // `unwrap_or_default()` would shadow with an empty string.
-                    Some(error.exception(partition_result.error_message.as_deref()))
+                    Some(error.error_with_optional_message(partition_result.error_message.as_deref()))
                 };
                 map.insert(
                     TopicPartition::new(topic_results.topic.clone(), partition_result.partition_id),
@@ -166,9 +269,23 @@ mod tests {
 
     #[test]
     fn from_results_encodes_error_code_only_for_v1_plus() {
-        let v0 = ElectLeadersResponse::from_results(0, Errors::NotController.code(), Vec::new(), 0);
+        let v0 = ElectLeadersResponse::new_options(
+            ElectLeadersResponseOptionsBuilder::new()
+                .set_throttle_time_ms(0)
+                .set_error_code(Errors::NotController.code())
+                .set_election_results(Vec::new())
+                .set_version(0)
+                .build(),
+        );
         assert_eq!(v0.data().error_code, Errors::None.code());
-        let v1 = ElectLeadersResponse::from_results(0, Errors::NotController.code(), Vec::new(), 1);
+        let v1 = ElectLeadersResponse::new_options(
+            ElectLeadersResponseOptionsBuilder::new()
+                .set_throttle_time_ms(0)
+                .set_error_code(Errors::NotController.code())
+                .set_election_results(Vec::new())
+                .set_version(1)
+                .build(),
+        );
         assert_eq!(v1.data().error_code, Errors::NotController.code());
     }
 
@@ -211,9 +328,20 @@ mod tests {
         let mut data = ElectLeadersResponseData::new();
         data.set_error_code(Errors::None.code());
         data.set_replica_election_results(vec![result("t", 0, Errors::ClusterAuthorizationFailed, None)]);
-        let response = ElectLeadersResponse::new(data);
+        let response = ElectLeadersResponse::new_data(data);
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::None), Some(&1));
         assert_eq!(counts.get(&Errors::ClusterAuthorizationFailed), Some(&1));
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ElectLeadersResponseOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(
+        expected = "ElectLeadersResponseOptionsBuilder::build: mandatory parameter `throttle_time_ms` was not set"
+    )]
+    fn elect_leaders_response_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = ElectLeadersResponseOptionsBuilder::new().build();
     }
 }

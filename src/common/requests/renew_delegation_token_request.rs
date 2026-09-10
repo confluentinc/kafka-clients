@@ -99,7 +99,7 @@ pub struct RenewDelegationTokenRequestBuilder {
 
 impl RenewDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: RenewDelegationTokenRequestData) -> Self {
+    pub fn new(data: RenewDelegationTokenRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::RENEW_DELEGATION_TOKEN.oldest_version(),

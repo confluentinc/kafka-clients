@@ -38,6 +38,7 @@ pub mod consumer_group_describe_request;
 pub mod consumer_group_describe_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
+pub mod correlation_id_mismatch_error;
 pub mod create_acls_request;
 pub mod create_acls_response;
 pub mod create_delegation_token_request;
@@ -119,7 +120,7 @@ pub mod renew_delegation_token_response;
 pub mod request_and_size;
 pub mod request_header;
 pub(crate) mod request_test_utils;
-pub(crate) mod request_utils;
+pub mod request_utils;
 pub mod response_header;
 pub mod sasl_authenticate_request;
 pub mod sasl_authenticate_response;
@@ -165,10 +166,13 @@ pub use consumer_group_heartbeat_request::{
     REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
 };
 pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use correlation_id_mismatch_error::CorrelationIdMismatchError;
 pub use create_acls_request::{CreateAclsRequest, CreateAclsRequestBuilder};
 pub use create_acls_response::CreateAclsResponse;
 pub use create_delegation_token_request::{CreateDelegationTokenRequest, CreateDelegationTokenRequestBuilder};
-pub use create_delegation_token_response::CreateDelegationTokenResponse;
+pub use create_delegation_token_response::{
+    CreateDelegationTokenResponse, CreateDelegationTokenResponseOptions, CreateDelegationTokenResponseOptionsBuilder,
+};
 pub use create_partitions_request::{CreatePartitionsRequest, CreatePartitionsRequestBuilder};
 pub use create_partitions_response::CreatePartitionsResponse;
 pub use create_topics_request::{
@@ -197,7 +201,10 @@ pub use describe_cluster_response::DescribeClusterResponse;
 pub use describe_configs_request::{DescribeConfigsRequest, DescribeConfigsRequestBuilder};
 pub use describe_configs_response::DescribeConfigsResponse;
 pub use describe_delegation_token_request::{DescribeDelegationTokenRequest, DescribeDelegationTokenRequestBuilder};
-pub use describe_delegation_token_response::DescribeDelegationTokenResponse;
+pub use describe_delegation_token_response::{
+    DescribeDelegationTokenResponse, DescribeDelegationTokenResponseOptions,
+    DescribeDelegationTokenResponseOptionsBuilder,
+};
 pub use describe_groups_request::{DescribeGroupsRequest, DescribeGroupsRequestBuilder};
 pub use describe_groups_response::DescribeGroupsResponse;
 pub use describe_log_dirs_request::{DescribeLogDirsRequest, DescribeLogDirsRequestBuilder};
@@ -211,7 +218,9 @@ pub use describe_user_scram_credentials_request::{
 };
 pub use describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse;
 pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
-pub use elect_leaders_response::ElectLeadersResponse;
+pub use elect_leaders_response::{
+    ElectLeadersResponse, ElectLeadersResponseOptions, ElectLeadersResponseOptionsBuilder,
+};
 pub use end_txn_request::{EndTxnRequest, EndTxnRequestBuilder, LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2};
 pub use end_txn_response::EndTxnResponse;
 pub use expire_delegation_token_request::{ExpireDelegationTokenRequest, ExpireDelegationTokenRequestBuilder};
@@ -233,7 +242,10 @@ pub use list_config_resources_request::{ListConfigResourcesRequest, ListConfigRe
 pub use list_config_resources_response::ListConfigResourcesResponse;
 pub use list_groups_request::{ListGroupsRequest, ListGroupsRequestBuilder};
 pub use list_groups_response::ListGroupsResponse;
-pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
+pub use list_offsets_request::{
+    ListOffsetsRequest, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptions,
+    ListOffsetsRequestBuilderOptionsBuilder,
+};
 pub use list_offsets_response::ListOffsetsResponse;
 pub use list_partition_reassignments_request::{
     ListPartitionReassignmentsRequest, ListPartitionReassignmentsRequestBuilder,
@@ -241,7 +253,9 @@ pub use list_partition_reassignments_request::{
 pub use list_partition_reassignments_response::ListPartitionReassignmentsResponse;
 pub use list_transactions_request::{ListTransactionsRequest, ListTransactionsRequestBuilder};
 pub use list_transactions_response::ListTransactionsResponse;
-pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
+pub use metadata_request::{
+    MetadataRequest, MetadataRequestBuilder, MetadataRequestBuilderOptions, MetadataRequestBuilderOptionsBuilder,
+};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
 pub use offset_commit_request::{OffsetCommitRequest, OffsetCommitRequestBuilder};
 pub use offset_commit_response::OffsetCommitResponse;
@@ -252,11 +266,13 @@ pub use offset_fetch_response::{OffsetFetchResponse, OffsetFetchResponseBuilder}
 pub use offsets_for_leader_epoch_request::{OffsetsForLeaderEpochRequest, OffsetsForLeaderEpochRequestBuilder};
 pub use offsets_for_leader_epoch_response::OffsetsForLeaderEpochResponse;
 pub use produce_request::{ProduceRequest, ProduceRequestBuilder};
-pub use produce_response::{PartitionResponse, ProduceResponse, RecordError};
+pub use produce_response::{
+    PartitionResponse, PartitionResponseOptions, PartitionResponseOptionsBuilder, ProduceResponse, RecordError,
+};
 pub use renew_delegation_token_request::{RenewDelegationTokenRequest, RenewDelegationTokenRequestBuilder};
 pub use renew_delegation_token_response::RenewDelegationTokenResponse;
 pub use request_and_size::RequestAndSize;
-pub use request_header::RequestHeader;
+pub use request_header::{RequestHeader, RequestHeaderOptions, RequestHeaderOptionsBuilder};
 pub use response_header::ResponseHeader;
 pub use sasl_authenticate_request::{SaslAuthenticateRequest, SaslAuthenticateRequestBuilder};
 pub use sasl_authenticate_response::SaslAuthenticateResponse;
@@ -265,7 +281,8 @@ pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 pub use transaction_result::TransactionResult;
 pub use txn_offset_commit_request::{
-    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilder, UNKNOWN_GENERATION_ID,
+    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilder, TxnOffsetCommitRequestBuilderOptions,
+    TxnOffsetCommitRequestBuilderOptionsBuilder, UNKNOWN_GENERATION_ID,
 };
 pub use txn_offset_commit_response::TxnOffsetCommitResponse;
 pub use update_features_request::{FeatureUpdateItem, UpdateFeaturesRequest, UpdateFeaturesRequestBuilder};

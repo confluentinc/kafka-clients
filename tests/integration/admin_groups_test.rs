@@ -109,7 +109,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::common::{ClassicGroupState, GroupState, GroupType, KafkaError, Node, TopicPartition};
+use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
 
 use crate::common::admin_backend::{
@@ -146,7 +146,7 @@ fn kip848_partitioned_offsets(num_partitions: u16) -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -205,7 +205,7 @@ fn new_static_bytes_consumer(bootstrap: &str, group_id: &str, instance_id: &str)
 /// Returns the assigned partition count.
 async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) -> usize {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     for _ in 0..60 {
@@ -612,7 +612,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
         let outcomes = admin
             .describe_consumer_groups(
                 std::slice::from_ref(&group_id),
-                DescribeConsumerGroupsOptions::new().include_authorized_operations(true),
+                DescribeConsumerGroupsOptions::new().set_include_authorized_operations(true),
             )
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe consumer groups: {e}"));
@@ -1111,7 +1111,7 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
         "{backend} backend: deleting a non-empty group should fail with NON_EMPTY_GROUP, got: {non_empty_err}"
     );
     assert!(
-        !non_empty_err.is_retriable(),
+        !non_empty_err.is_retriable_error(),
         "{backend} backend: NON_EMPTY_GROUP is a non-retriable error"
     );
 
@@ -1174,8 +1174,8 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
     // Two static members share the topic's partitions.
     let mut member_one = new_static_bytes_consumer(&bootstrap, &group_id, "instance-1");
     let mut member_two = new_static_bytes_consumer(&bootstrap, &group_id, "instance-2");
-    member_one.subscribe(vec![topic.clone()]).await.expect("subscribe m1");
-    member_two.subscribe(vec![topic.clone()]).await.expect("subscribe m2");
+    member_one.subscribe_topics(vec![topic.clone()]).await.expect("subscribe m1");
+    member_two.subscribe_topics(vec![topic.clone()]).await.expect("subscribe m2");
     // Drive both members until the group reconciles to two members.
     for _ in 0..60 {
         let _ = member_one.poll(Duration::from_millis(300)).await;
@@ -1347,7 +1347,7 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
         "{backend} backend: an empty member collection must be rejected, not silently treated as removeAll"
     ));
     assert!(
-        matches!(err, KafkaError::IllegalArgument(_)),
+        matches!(err, Error::LocalIllegalArgument(_)),
         "{backend} backend: Java throws IllegalArgumentException here, got {err:?}"
     );
     assert_eq!(
@@ -1375,7 +1375,7 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
         // Discriminated by *message*, not by variant, and deliberately so.
         //
         // The variant test that used to stand here (`!matches!(err,
-        // KafkaError::IllegalArgument(_))`) passes only *because* of an open
+        // Error::LocalIllegalArgument(_))`) passes only *because* of an open
         // deferred defect. Java's outcome for the branch this call can land in
         // **is** an `IllegalArgumentException`: `removeAll` resolves its member
         // list through `getMembersFromGroup`
@@ -1389,7 +1389,7 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
         // an `io::Error` and `src/network_client.rs:507` stamps every such
         // failure `UnsupportedVersionError` — which is DEFERRED 3 in
         // `COMMENTS.DONE.1.md`. The moment DEFERRED 3 is fixed to
-        // `KafkaError::illegal_argument`, a variant test here would start failing
+        // `Error::local_illegal_argument`, a variant test here would start failing
         // on all four backends for a *correct* client.
         //
         // What this scenario actually means is "not the options-constructor

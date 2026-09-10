@@ -123,7 +123,7 @@ pub struct DescribeUserScramCredentialsRequestBuilder {
 
 impl DescribeUserScramCredentialsRequestBuilder {
     /// Creates a builder wrapping the given request data.
-    pub fn from_data(data: DescribeUserScramCredentialsRequestData) -> Self {
+    pub fn new(data: DescribeUserScramCredentialsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS.oldest_version(),
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn serialize_parse_round_trip() {
         let version = ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS.latest_version();
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::from_data({
+        let mut builder = DescribeUserScramCredentialsRequestBuilder::new({
             let mut data = DescribeUserScramCredentialsRequestData::new();
             data.set_users(Some(vec![{
                 let mut n = UserName::new();
@@ -232,7 +232,7 @@ mod tests {
             n.set_name("u0".to_string());
             n
         }]));
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::from_data(data);
+        let mut builder = DescribeUserScramCredentialsRequestBuilder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

@@ -108,7 +108,7 @@ pub struct DescribeLogDirsRequestBuilder {
 
 impl DescribeLogDirsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DescribeLogDirsRequestData) -> Self {
+    pub fn new(data: DescribeLogDirsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_LOG_DIRS.oldest_version(),

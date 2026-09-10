@@ -38,17 +38,125 @@ pub struct DescribeDelegationTokenResponse {
     data: DescribeDelegationTokenResponseData,
 }
 
+/// The parameters of Java's four-argument `DescribeDelegationTokenResponse`
+/// constructor (`DescribeDelegationTokenResponse.java:38`).
+///
+/// Java's three constructors (`:38`, `:69`, `:73`) share no parameter name, so
+/// all four of `:38`'s parameters reach its derived name. CLAUDE.md §2 caps that
+/// at three and makes this struct the method's *only* parameter, so every Java
+/// parameter lives here. This struct has no Java counterpart: it exists solely
+/// to satisfy that naming rule (DoD #7).
+///
+/// It has **no** `Default`: `version`, `throttle_time_ms` and `error` come from
+/// the caller in every Java overload, so [`DescribeDelegationTokenResponseOptionsBuilder::build`] panics if any of `version`, `throttle_time_ms`, `error` was not set.
+/// Build it from [`DescribeDelegationTokenResponseOptionsBuilder::new`], whose `tokens` starts empty
+/// exactly as Java's `DescribeDelegationTokenResponse(int, int, Errors)` (`:69`)
+/// passes `new ArrayList<>()` on the caller's behalf.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct DescribeDelegationTokenResponseOptions<'a> {
+    /// Java's `version`.
+    pub version: i16,
+    /// Java's `throttleTimeMs`.
+    pub throttle_time_ms: i32,
+    /// Java's `error`.
+    pub error: Errors,
+    /// Java's `tokens`. Starts empty, as in `:69`.
+    pub tokens: &'a [DelegationToken],
+}
+
+/// Fluent builder for [`DescribeDelegationTokenResponseOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — panicking
+/// if they were not set. Like [`DescribeDelegationTokenResponseOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct DescribeDelegationTokenResponseOptionsBuilder<'a> {
+    version: Option<i16>,
+    throttle_time_ms: Option<i32>,
+    error: Option<Errors>,
+    tokens: &'a [DelegationToken],
+}
+
+impl<'a> Default for DescribeDelegationTokenResponseOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> DescribeDelegationTokenResponseOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self { version: None, throttle_time_ms: None, error: None, tokens: &[] }
+    }
+
+    /// Sets [`DescribeDelegationTokenResponseOptions::version`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_version(mut self, version: i16) -> Self {
+        self.version = Some(version);
+        self
+    }
+    /// Sets [`DescribeDelegationTokenResponseOptions::throttle_time_ms`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_throttle_time_ms(mut self, throttle_time_ms: i32) -> Self {
+        self.throttle_time_ms = Some(throttle_time_ms);
+        self
+    }
+    /// Sets [`DescribeDelegationTokenResponseOptions::error`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_error(mut self, error: Errors) -> Self {
+        self.error = Some(error);
+        self
+    }
+    /// Sets [`DescribeDelegationTokenResponseOptions::tokens`].
+    pub fn set_tokens(mut self, tokens: &'a [DelegationToken]) -> Self {
+        self.tokens = tokens;
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `version`, `throttle_time_ms`, `error`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any parameter of that set was not given a setter call.
+    pub fn build(self) -> DescribeDelegationTokenResponseOptions<'a> {
+        DescribeDelegationTokenResponseOptions {
+            version: self.version.unwrap_or_else(|| Self::missing("version")),
+            throttle_time_ms: self.throttle_time_ms.unwrap_or_else(|| Self::missing("throttle_time_ms")),
+            error: self.error.unwrap_or_else(|| Self::missing("error")),
+            tokens: self.tokens,
+        }
+    }
+
+    /// Panics naming a mandatory parameter [`Self::build`] found unset.
+    fn missing(parameter: &str) -> ! {
+        panic!("DescribeDelegationTokenResponseOptionsBuilder::build: mandatory parameter `{parameter}` was not set");
+    }
+}
+
 impl DescribeDelegationTokenResponse {
     /// Creates a new `DescribeDelegationTokenResponse` from the underlying data.
-    pub fn new(data: DescribeDelegationTokenResponseData) -> Self {
+    ///
+    /// Corresponds to Java's
+    /// `DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData)`
+    /// (`DescribeDelegationTokenResponse.java:73`).
+    pub fn new_data(data: DescribeDelegationTokenResponseData) -> Self {
         Self { data }
     }
 
     /// Builds a response from a list of delegation tokens.
     ///
-    /// Mirrors `DescribeDelegationTokenResponse(version, throttleTimeMs, error,
-    /// tokens)`. The token requester is only encoded on v3+.
-    pub fn from_tokens(version: i16, throttle_time_ms: i32, error: Errors, tokens: &[DelegationToken]) -> Self {
+    /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors,
+    /// List<DelegationToken>)` (`DescribeDelegationTokenResponse.java:38`). The
+    /// token requester is only encoded on v3+.
+    pub fn new_options(options: DescribeDelegationTokenResponseOptions<'_>) -> Self {
+        let DescribeDelegationTokenResponseOptions { version, throttle_time_ms, error, tokens } = options;
         let described: Vec<DescribedDelegationToken> = tokens
             .iter()
             .map(|dt| {
@@ -83,15 +191,21 @@ impl DescribeDelegationTokenResponse {
         data.throttle_time_ms = throttle_time_ms;
         data.error_code = error.code();
         data.tokens = described;
-        Self::new(data)
+        Self::new_data(data)
     }
 
     /// Builds an error response with no tokens.
     ///
-    /// Mirrors `DescribeDelegationTokenResponse(version, throttleTimeMs,
-    /// error)`.
-    pub fn error_only(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
-        Self::from_tokens(version, throttle_time_ms, error, &[])
+    /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`
+    /// (`DescribeDelegationTokenResponse.java:69`).
+    pub fn new_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
+        Self::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new()
+                .set_version(version)
+                .set_throttle_time_ms(throttle_time_ms)
+                .set_error(error)
+                .build(),
+        )
     }
 
     /// Returns the API key for this response.
@@ -136,7 +250,7 @@ impl DescribeDelegationTokenResponse {
                     .iter()
                     .map(|r| KafkaPrincipal::new(r.principal_type.clone(), r.principal_name.clone()))
                     .collect();
-                let info = TokenInformation::with_requester(
+                let info = TokenInformation::new_token_requester(
                     ddt.token_id.clone(),
                     KafkaPrincipal::new(ddt.principal_type.clone(), ddt.principal_name.clone()),
                     KafkaPrincipal::new(
@@ -175,7 +289,7 @@ impl DescribeDelegationTokenResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeDelegationTokenResponseData::read(readable, version)?;
-        Ok(Self::new(data))
+        Ok(Self::new_data(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
@@ -201,7 +315,7 @@ mod tests {
     use super::*;
 
     fn token(id: &str) -> DelegationToken {
-        let info = TokenInformation::with_requester(
+        let info = TokenInformation::new_token_requester(
             id,
             KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice"),
             KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "requester"),
@@ -217,7 +331,14 @@ mod tests {
     fn tokens_round_trip_through_response_v3() {
         let version = 3;
         let tokens = vec![token("id-1"), token("id-2")];
-        let response = DescribeDelegationTokenResponse::from_tokens(version, 0, Errors::None, &tokens);
+        let response = DescribeDelegationTokenResponse::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new()
+                .set_version(version)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_tokens(&tokens)
+                .build(),
+        );
         assert!(!response.has_error());
         let reconstructed = response.tokens();
         assert_eq!(reconstructed, tokens);
@@ -227,14 +348,25 @@ mod tests {
     #[test]
     fn requester_not_encoded_below_v3() {
         let tokens = vec![token("id-1")];
-        let response = DescribeDelegationTokenResponse::from_tokens(2, 0, Errors::None, &tokens);
+        let response = DescribeDelegationTokenResponse::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new()
+                .set_version(2)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_tokens(&tokens)
+                .build(),
+        );
         // On v2 the requester principal is not encoded; it decodes to empty.
         assert_eq!(response.data().tokens[0].token_requester_principal_name, "");
     }
 
     #[test]
     fn error_only_has_no_tokens() {
-        let response = DescribeDelegationTokenResponse::error_only(3, 25, Errors::DelegationTokenAuthDisabled);
+        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(
+            3,
+            25,
+            Errors::DelegationTokenAuthDisabled,
+        );
         assert!(response.has_error());
         assert_eq!(response.error(), Errors::DelegationTokenAuthDisabled);
         assert_eq!(response.throttle_time_ms(), 25);
@@ -243,7 +375,14 @@ mod tests {
 
     #[test]
     fn display_redacts_token_id_and_hmac() {
-        let response = DescribeDelegationTokenResponse::from_tokens(3, 0, Errors::None, &[token("secret-id")]);
+        let response = DescribeDelegationTokenResponse::new_options(
+            DescribeDelegationTokenResponseOptionsBuilder::new()
+                .set_version(3)
+                .set_throttle_time_ms(0)
+                .set_error(Errors::None)
+                .set_tokens(&[token("secret-id")])
+                .build(),
+        );
         let rendered = response.to_string();
         assert!(rendered.contains("REDACTED"), "{rendered}");
         assert!(!rendered.contains("secret-id"), "{rendered}");
@@ -254,7 +393,8 @@ mod tests {
     #[test]
     fn known_wire_vector_v3_error_only() {
         use crate::common::requests::ConcreteResponse;
-        let response = DescribeDelegationTokenResponse::error_only(3, 9, Errors::DelegationTokenNotFound);
+        let response =
+            DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(3, 9, Errors::DelegationTokenNotFound);
         let mut response = ConcreteResponse::DescribeDelegationToken(response);
         let bytes = response.serialize(3).unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -264,5 +404,16 @@ mod tests {
             0x00, // response tagged fields
         ];
         assert_eq!(bytes.as_slice(), expected.as_slice());
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`DescribeDelegationTokenResponseOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    #[should_panic(
+        expected = "DescribeDelegationTokenResponseOptionsBuilder::build: mandatory parameter `version` was not set"
+    )]
+    fn describe_delegation_token_response_options_builder_build_panics_when_no_mandatory_parameter_is_set() {
+        let _ = DescribeDelegationTokenResponseOptionsBuilder::new().build();
     }
 }

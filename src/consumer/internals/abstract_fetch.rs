@@ -315,12 +315,12 @@ impl AbstractFetch {
             self.fetch_config.min_bytes,
             to_fetch,
         )
-        .isolation_level(self.fetch_config.isolation_level)
+        .set_isolation_level(self.fetch_config.isolation_level)
         .set_max_bytes(self.fetch_config.max_bytes)
-        .metadata(request_data.metadata)
-        .removed(request_data.to_forget.clone())
-        .replaced(request_data.to_replace.clone())
-        .rack_id(self.fetch_config.client_rack_id.clone());
+        .set_metadata(request_data.metadata)
+        .set_removed(request_data.to_forget.clone())
+        .set_replaced(request_data.to_replace.clone())
+        .set_rack_id(self.fetch_config.client_rack_id.clone());
 
         debug!("Sending fetch request to broker {}", fetch_target.id());
         debug!("Adding pending request for node {}", fetch_target.id());
@@ -346,16 +346,24 @@ impl AbstractFetch {
         request_latency_ms: i64,
     ) {
         let session_id = request_data.metadata.session_id();
-        let handler = match self.session_handlers.get_mut(&fetch_target.id()) {
-            Some(h) => h,
-            None => {
-                log::error!(
-                    "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
-                    fetch_target.id()
-                );
-                return;
-            },
-        };
+        // Java's `handler == null` `return` sits INSIDE the `try`, so the
+        // `finally { removePendingFetchRequest(...) }` (`AbstractFetch.java:253-255`)
+        // still runs. Leaking the node id here would be permanent, not a
+        // delay: `prepare_fetch_requests` skips every node in
+        // `nodes_with_pending_fetch_requests`, so that broker's partitions
+        // would never be fetched again.
+        if !self.session_handlers.contains_key(&fetch_target.id()) {
+            log::error!(
+                "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
+                fetch_target.id()
+            );
+            self.remove_pending_fetch_request(fetch_target, session_id);
+            return;
+        }
+        let handler = self
+            .session_handlers
+            .get_mut(&fetch_target.id())
+            .expect("presence checked above");
 
         if !handler.handle_response(&response, request_version) {
             // FETCH_SESSION_TOPIC_ID_ERROR drives a metadata refresh per
@@ -435,16 +443,47 @@ impl AbstractFetch {
             }) {
                 Some(p) => p,
                 None => {
-                    // "Received fetch response for missing session partition" —
-                    // Java throws IllegalStateException. We log and drop
-                    // the partition entry; the response handler returning
-                    // true would have caught this earlier in well-formed
-                    // sessions.
-                    log::error!(
-                        "Response for missing session request partition: partition={} metadata={}",
-                        partition,
-                        request_data.metadata
-                    );
+                    // "Received fetch response for missing session partition".
+                    //
+                    // DELIBERATE DIVERGENCE, recorded rather than assumed
+                    // (definition-of-done.md §7). Java throws
+                    // `IllegalStateException` (`AbstractFetch.java:184-199`),
+                    // which aborts the whole response: no `CompletedFetch` is
+                    // added for this partition OR any partition after it, and
+                    // `fetchBuffer.wakeup()` (`:232`) is skipped because it
+                    // sits outside the `finally`. So one malformed entry
+                    // discards every well-formed entry beside it and leaves a
+                    // `poll()` blocking until its timeout. Rust skips only the
+                    // offending partition, keeping the rest of the response and
+                    // the wakeup. The condition means the broker echoed a
+                    // partition the client never asked for, which is a
+                    // protocol-level fault this client cannot act on either
+                    // way, so the narrower blast radius is preferred.
+                    //
+                    // The two message variants follow Java's, including the
+                    // `data.metadata().isFull()` split, so the diagnostic a
+                    // user reports is comparable with the Java client's.
+                    // `toSend` is rendered as its partition keys rather than
+                    // the whole map: Java's `PartitionData.toString()` adds
+                    // fetch offsets and sizes that are noise for this fault,
+                    // and the keys are what identifies the mismatch.
+                    if request_data.metadata.is_full() {
+                        log::error!(
+                            "Response for missing full request partition: partition={}; metadata={}",
+                            partition,
+                            request_data.metadata
+                        );
+                    } else {
+                        log::error!(
+                            "Response for missing session request partition: partition={}; metadata={}; \
+                             toSend={:?}; toForget={:?}; toReplace={:?}",
+                            partition,
+                            request_data.metadata,
+                            request_data.to_send.keys().collect::<Vec<_>>(),
+                            request_data.to_forget,
+                            request_data.to_replace
+                        );
+                    }
                     continue;
                 },
             };
@@ -507,7 +546,7 @@ impl AbstractFetch {
             let mut leader_nodes: Vec<Node> = Vec::new();
             for endpoint in &response_node_endpoints {
                 if endpoint.node_id != -1 {
-                    leader_nodes.push(Node::with_rack(
+                    leader_nodes.push(Node::new_rack(
                         endpoint.node_id,
                         endpoint.host.clone(),
                         endpoint.port,
@@ -562,12 +601,12 @@ impl AbstractFetch {
     /// Translates `public void handleCloseFetchSessionFailure(Node,
     /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
     /// from the pending-fetch set and logs at debug (Java logs the
-    /// throwable; we log the `KafkaError` message).
+    /// throwable; we log the `Error` message).
     pub(crate) fn handle_close_fetch_session_failure(
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         self.remove_pending_fetch_request(fetch_target, session_id);
@@ -587,7 +626,7 @@ impl AbstractFetch {
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         if let Some(handler) = self.session_handlers.get_mut(&fetch_target.id()) {
@@ -657,8 +696,8 @@ impl AbstractFetch {
         &mut self,
         current_time_ms: i64,
         is_unavailable: impl Fn(&Node) -> bool,
-        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
-    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
+        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::Error>,
+    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::Error> {
         // Update metrics in case there was an assignment change. Java does this
         // first thing in `prepareFetchRequests`. The manager is `Arc`-shared
         // (per-response aggregators hold clones), so its assignment-tracking
@@ -1124,7 +1163,7 @@ mod tests {
         let request_data = handler.build_request(builder);
 
         let node = Node::new(6, "host".to_string(), 9092);
-        let err = crate::common::KafkaError::illegal_state("simulated");
+        let err = crate::common::Error::local_illegal_state("simulated");
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
     }
@@ -1339,7 +1378,7 @@ mod tests {
     /// Minimal UTF-8 string deserializer for this test module.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
             Ok(String::from_utf8_lossy(data).into_owned())
         }
     }
@@ -1448,7 +1487,7 @@ mod tests {
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
 
-        let recs = fetch.records_for_partition(&partition);
+        let recs = fetch.records_partition(&partition);
         assert_eq!(COUNT as usize, recs.len());
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(i as i64, rec.offset(), "offset ordering preserved");

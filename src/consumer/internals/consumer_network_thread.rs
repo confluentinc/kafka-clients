@@ -733,7 +733,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         };
 
-        // Step 3: notify every live handle. KafkaError is Clone so we
+        // Step 3: notify every live handle. Error is Clone so we
         // can fan it out faithfully (Java passes the same exception
         // instance to each `onMetadataError` call).
         for handle in &self.notifiable_handles {
@@ -744,7 +744,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // `tx.send(Err(err))` on the inner oneshot — identical
             // semantics. The method is misnamed in Rust for historical
             // reasons (it was originally only used by the reaper); the
-            // generic implementation accepts any `KafkaError`.
+            // generic implementation accepts any `Error`.
             handle.fail_with_timeout(err.clone());
         }
         // The handles will be pruned on the next iteration's
@@ -1084,8 +1084,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::api_versions::ApiVersions;
+    use crate::common::Error;
     use crate::common::IsolationLevel;
-    use crate::common::KafkaError;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::ConsumerConfig;
@@ -1253,7 +1253,7 @@ mod tests {
         fn connection_failed(&self, node: &Node) -> bool {
             self.inner.connection_failed(node)
         }
-        fn authentication_error(&self, node: &Node) -> Option<String> {
+        fn authentication_error(&self, node: &Node) -> Option<Error> {
             self.inner.authentication_error(node)
         }
         fn send(&mut self, request: crate::ClientRequest, now: i64) {
@@ -1364,7 +1364,7 @@ mod tests {
 
     fn make_delegate(config: &ConsumerConfig, metadata: Arc<ConsumerMetadata>) -> NetworkClientDelegate<MockClient> {
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = MockClient::new(Vec::<Node>::new(), time_provider);
+        let client = MockClient::new_nodes(Vec::<Node>::new(), time_provider);
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1376,7 +1376,7 @@ mod tests {
         metadata: Arc<ConsumerMetadata>,
     ) -> NetworkClientDelegate<CountingClient> {
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = CountingClient::new(MockClient::new(Vec::<Node>::new(), time_provider));
+        let client = CountingClient::new(MockClient::new_nodes(Vec::<Node>::new(), time_provider));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1829,7 +1829,7 @@ mod tests {
         // The reaper observed the tracked event and timed it out —
         // proves `reap_on_close(...)` was called inside `cleanup()`.
         assert!(
-            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "reaper.reap(...) must complete tracked event with Timeout"
         );
     }
@@ -1852,7 +1852,7 @@ mod tests {
         thread.run_once().await;
 
         assert!(
-            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "runOnce must call reaper.reap(now) and expire the past-due event"
         );
     }
@@ -2086,9 +2086,7 @@ mod tests {
         // 2. Plant the metadata error on the cluster.
         metadata
             .metadata_arc()
-            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
-                "t".to_string()
-            ])));
+            .fatal_error(Error::topic_authorization(std::collections::HashSet::from(["t".to_string()])));
 
         // 3. Drive one runOnce iteration.
         thread.run_once().await;
@@ -2098,7 +2096,7 @@ mod tests {
         let received = event_rx.try_recv().expect("sender used");
         let err = received.expect_err("post-poll arm must fail the handle");
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got: {err:?}"
         );
     }
@@ -2146,9 +2144,7 @@ mod tests {
         // Plant the metadata error.
         metadata
             .metadata_arc()
-            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
-                "t".to_string()
-            ])));
+            .fatal_error(Error::topic_authorization(std::collections::HashSet::from(["t".to_string()])));
 
         // No notifiable handles tracked. run_once must NOT consume the
         // delegate's metadata_error.
@@ -2195,7 +2191,7 @@ mod tests {
 
     /// Read a registered metric's value as `f64`.
     fn read_metric(metrics: &Metrics, name: &str, group: &str) -> f64 {
-        let mn = metrics.metric_name_group(name, group);
+        let mn = metrics.metric_name(name, group);
         metrics
             .metric(&mn)
             .expect("metric present")
@@ -2210,7 +2206,7 @@ mod tests {
     /// `@ParameterizedTest` over the two metric groups is unrolled into a
     /// loop (DoD §3). No public `metrics()` accessor is needed: the test
     /// constructs the `Metrics` registry directly and reads via
-    /// `metrics.metric(metrics.metric_name_group(...))`, exactly like Java.
+    /// `metrics.metric(metrics.metric_name(...))`, exactly like Java.
     #[tokio::test]
     async fn run_once_records_time_between_network_thread_poll() {
         for group_name in metric_group_name_provider() {

@@ -38,11 +38,11 @@ impl PartitionInfo {
         replicas: Vec<Node>,
         in_sync_replicas: Vec<Node>,
     ) -> Self {
-        Self::with_offline_replicas(topic, partition, leader, replicas, in_sync_replicas, vec![])
+        Self::new_offline_replicas(topic, partition, leader, replicas, in_sync_replicas, vec![])
     }
 
     /// Creates a new `PartitionInfo` with offline replicas.
-    pub fn with_offline_replicas(
+    pub fn new_offline_replicas(
         topic: String,
         partition: i32,
         leader: Option<Node>,

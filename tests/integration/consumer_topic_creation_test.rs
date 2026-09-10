@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
@@ -59,7 +59,7 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -102,7 +102,7 @@ fn make_consumer(bootstrap: &str, group_id: &str, allow_auto_create: bool) -> Bo
 /// Java's `subscribeAndPoll`: subscribe to the topic, poll once (1000ms).
 async fn subscribe_and_poll(consumer: &mut BytesConsumer, topic: &str) {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     let _ = consumer.poll(Duration::from_millis(1000)).await;

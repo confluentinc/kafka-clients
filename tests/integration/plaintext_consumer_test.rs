@@ -99,7 +99,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::header::Headers;
@@ -158,7 +158,7 @@ fn cluster_config_log_append_time() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -243,14 +243,14 @@ async fn send_records(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -433,9 +433,14 @@ async fn test_async_consumer_headers() {
     headers.add_key_value("headerKey", Some(b"headerValue")).expect("add header");
     headers.add_key_value("headerKey2", Some(b"headerValue2")).expect("add header");
     headers.add_key_value("headerKey3", Some(b"headerValue3")).expect("add header");
-    let record =
-        ProducerRecord::with_headers(topic.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()), headers)
-            .expect("ProducerRecord::with_headers should succeed");
+    let record = ProducerRecord::new_partition_key_headers(
+        topic.clone(),
+        Some(0),
+        Some(b"key".to_vec()),
+        Some(b"value".to_vec()),
+        headers,
+    )
+    .expect("ProducerRecord::new_partition_key_headers should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
         .await
         .expect("send should succeed");
@@ -446,7 +451,7 @@ async fn test_async_consumer_headers() {
     assert_eq!(consumer.assignment().len(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(consumer.assignment().len(), 1);
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
 
     let records = consume_records(consumer.as_mut(), 1).await;
     assert_eq!(records.len(), 1);
@@ -527,7 +532,7 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     send_records(&producer, &tp, 5, starting_timestamp).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe");
     consume_and_verify_records(consumer.as_mut(), &tp, 5, 0, 0, starting_timestamp).await;
     consumer.pause(std::slice::from_ref(&tp)).await.expect("pause");
 
@@ -538,7 +543,7 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     // which `waitForCondition`-polls exactly once and verifies that 0 records
     // come back from the now-revoked partition. `consume_records` mirrors that
     // single poll for `num_records == 0` (see its comment).
-    consumer.subscribe(vec![topic2.clone()]).await.expect("subscribe topic2");
+    consumer.subscribe_topics(vec![topic2.clone()]).await.expect("subscribe topic2");
     consume_and_verify_records(consumer.as_mut(), &tp, 0, 5, 0, starting_timestamp).await;
 
     consumer.close().await.expect("consumer close");
@@ -606,7 +611,7 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .expect_err("partitions_for on an invalid topic should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicException,
+        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicError,
         "expected InvalidTopic error, got: {msg}"
     );
 
@@ -630,7 +635,7 @@ async fn test_async_consumer_list_topics() {
     send_records(&producer, &TopicPartition::new(topic1.clone(), 0), 1, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic1.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic1.clone()]).await.expect("subscribe");
     let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll");
 
     // Retry list_topics until all three named topics are visible (metadata
@@ -701,7 +706,7 @@ async fn test_async_consumer_seek() {
     assert_eq!(consumer.position(&tp).await.expect("position"), 0);
     consume_and_verify_records(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp).await;
 
-    consumer.seek(tp.clone(), mid as i64).await.expect("seek mid");
+    consumer.seek_offset(tp.clone(), mid as i64).await.expect("seek mid");
     assert_eq!(consumer.position(&tp).await.expect("position"), mid as i64);
     // Record at offset mid has key/value index mid and timestamp mid.
     consume_and_verify_records(consumer.as_mut(), &tp, 1, mid as i64, mid, mid as i64).await;
@@ -727,9 +732,9 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
         .await
         .expect_err("seek_to_end unassigned should fail");
     match err {
-        KafkaError::IllegalState(msg) => {
+        Error::LocalIllegalState(msg) => {
             // Java: `"No current assignment for partition " + TP`.
-            assert_eq!(msg, format!("No current assignment for partition {tp}"));
+            assert_eq!(msg.message(), format!("No current assignment for partition {tp}"));
         },
         other => panic!("expected IllegalState, got {other:?}"),
     }
@@ -814,7 +819,7 @@ async fn test_async_consumer_end_offsets() {
     send_records(&producer, &tp, num_records, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe");
     await_assignment(
         consumer.as_mut(),
         &HashSet::from([tp.clone(), tp2.clone()]),
@@ -873,7 +878,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
         .await
         .expect_err("negative target time should fail");
     assert!(
-        matches!(neg_err, KafkaError::IllegalArgument(_)),
+        matches!(neg_err, Error::LocalIllegalArgument(_)),
         "expected IllegalArgument for negative target time, got {neg_err:?}"
     );
 
@@ -937,7 +942,7 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     // gives 2 partitions; only partition 0 is used).
     create_topic(consumer1.as_mut(), &topic, 1).await;
     for i in 1..=3 {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.clone(),
             Some(0),
             Some(format!("k{i}").into_bytes()),
@@ -954,9 +959,9 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     consumer1.assign(vec![tp.clone()]).await.expect("assign c1");
     consumer2.assign(vec![tp.clone()]).await.expect("assign c2");
     consumer3.assign(vec![tp.clone()]).await.expect("assign c3");
-    // Java: `consumer3.seek(TP, 1)` — a literal offset, skipping the first of
+    // Java: `consumer3.seek_offset(TP, 1)` — a literal offset, skipping the first of
     // the 3 records (offsets 0, 1, 2).
-    consumer3.seek(tp.clone(), 1).await.expect("seek c3");
+    consumer3.seek_offset(tp.clone(), 1).await.expect("seek c3");
 
     let num_records1 = poll_count(consumer1.as_mut(), 3, Duration::from_secs(15)).await;
     // Java: commitSync / committed raise InvalidGroupId for groupless.
@@ -1037,7 +1042,7 @@ async fn test_async_consumer_position_respects_timeout() {
         .position_timeout(&tp, Duration::from_secs(3))
         .await
         .expect_err("position on a nonexistent partition should time out");
-    assert!(matches!(err, KafkaError::Timeout(_)), "expected Timeout, got {err:?}");
+    assert!(matches!(err, Error::Timeout(_)), "expected Timeout, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1070,7 +1075,7 @@ async fn test_async_consumer_position_respects_wakeup() {
     let result = consumer.position_timeout(&tp, Duration::from_secs(3)).await;
     let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup");
-    assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+    assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1104,7 +1109,7 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     let result = consumer.position_timeout(&tp, Duration::from_secs(100)).await;
     let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup despite connection error");
-    assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+    assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }

@@ -25,18 +25,36 @@ return a result struct holding one `KafkaFuture<T>` handle per key.
 
 The one exception is `close()`: Java's `close(Duration timeout)` blocks
 joining the background thread (CLAUDE.md §9.4: `thread.join()` → must
-actually `.await` in Rust), so `close()` is the only `async fn` on the
-`Admin` trait.
+actually `.await` in Rust), so `close()` / `close_timeout()` are the only
+`async fn`s on the `Admin` trait.
+
+Java declares each RPC as a pair — a `default xxx(args)` forwarding to
+`xxx(args, new XxxOptions())` — so each Rust RPC is a pair too, named per
+CLAUDE.md §2: the no-options form owns the plain name and the options-taking
+form carries the `_options` suffix. The no-options form is a **trait default
+method** whose body passes `XxxOptions::default()`, exactly as Java's
+`default` body passes a fresh options instance, so an implementor writes only
+the `_options` form.
 
 ```rust
 pub trait Admin: Send + Sync + 'static {
-    fn create_topics(&self, topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
-    fn delete_topics(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
-    fn list_topics(&self, options: ListTopicsOptions) -> ListTopicsResult;
-    fn describe_topics(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
+    fn create_topics(&self, new_topics: &[NewTopic]) -> CreateTopicsResult {
+        self.create_topics_options(new_topics, CreateTopicsOptions::default())
+    }
+    fn create_topics_options(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
+
+    fn delete_topics(&self, topics: TopicCollection) -> DeleteTopicsResult { /* forwards */ }
+    fn delete_topics_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
+
+    fn list_topics(&self) -> ListTopicsResult { /* forwards */ }
+    fn list_topics_options(&self, options: ListTopicsOptions) -> ListTopicsResult;
+
+    fn describe_topics(&self, topics: TopicCollection) -> DescribeTopicsResult { /* forwards */ }
+    fn describe_topics_options(&self, topics: TopicCollection, options: DescribeTopicsOptions) -> DescribeTopicsResult;
     // ... all other RPCs: sync, return a *Result holding KafkaFuture<T> per key ...
 
-    async fn close(&self, timeout: Duration);   // blocks in Java -> must await in Rust
+    async fn close(&self) { /* forwards to close_timeout(Long.MAX_VALUE ms) */ }
+    async fn close_timeout(&self, timeout: Duration);   // blocks in Java -> must await in Rust
 }
 ```
 
@@ -50,10 +68,11 @@ not "the method is `async`."
 **How to apply:**
 
   - Do NOT copy the consumer's `#[async_trait]`-everything shape (§2 of
-    `consumer-threading.md`). Only `close()` is `async fn` on `Admin`.
+    `consumer-threading.md`). Only `close()` / `close_timeout()` are
+    `async fn` on `Admin`.
   - The `#[async_trait]` attribute is acceptable on the trait solely to
-    make `close()` dispatchable through `Box<dyn Admin>`; it must NOT turn
-    the per-RPC methods into `async fn`.
+    make the two `close` methods dispatchable through `Box<dyn Admin>`; it
+    must NOT turn the per-RPC methods into `async fn`.
 
 ## 2. Dispatch engine: preserve Java's two-pattern split
 
@@ -245,7 +264,7 @@ does for that same method** — not by which tier/phase the method belongs to:
   - **Only** for the methods Java's own `MockAdminClient` leaves as
     `throw new UnsupportedOperationException("Not implemented yet")` (e.g.
     `createPartitions`, and the non-empty `deleteRecords` path) may the Rust
-    mock return a `KafkaError::unsupported_version("Not implemented yet")`
+    mock return an `Error::unsupported_version("Not implemented yet")`
     (NOT a `panic!` — CLAUDE.md §10.1). This is a faithful translation of the
     Java behavior, not a scope deferral, and every such site MUST cite the
     exact Java line that throws so the claim is verifiable. Do NOT attach a
@@ -265,8 +284,8 @@ trait.
     skipping silently.
   - **DoD #11 (consumer trait surface check): does not apply** to Admin's
     trait, but its *spirit* does — verify per-RPC methods stay plain `fn`,
-    only `close()` is `async fn`, and no `#[async_trait]` bleeds into the
-    internal `Call`/driver types (§1, §2).
+    only `close()` / `close_timeout()` are `async fn`, and no
+    `#[async_trait]` bleeds into the internal `Call`/driver types (§1, §2).
   - All other DoD items apply in full: exact error-message assertions,
     byte-level wire encoding tests for the net-new request/response types,
     `@RepeatedTest`/`@ParameterizedTest` → loops with the exact Java bounds,

@@ -51,7 +51,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
-use confluent_kafka::common::{KafkaError, TopicPartition};
+use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
@@ -68,7 +68,7 @@ const NUM_PARTITIONS: i32 = 2;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -100,7 +100,7 @@ fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
 /// assigned).
 async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     for _ in 0..60 {
@@ -127,7 +127,7 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
     .expect("build producer");
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(1_700_000_000_000 + i as i64),
@@ -332,7 +332,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let only_zero = with_spec(
         &admin,
         &group_id,
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![tp0.clone()])),
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![tp0.clone()])),
         ListConsumerGroupOffsetsOptions::new(),
         "explicit selection of partition 0",
     )
@@ -358,7 +358,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let none_selected = with_spec(
         &admin,
         &group_id,
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(Vec::new())),
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(Vec::new())),
         ListConsumerGroupOffsetsOptions::new(),
         "explicitly empty partition selection",
     )
@@ -375,7 +375,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
         &admin,
         &group_id,
         ListConsumerGroupOffsetsSpec::new(),
-        ListConsumerGroupOffsetsOptions::new().require_stable(true),
+        ListConsumerGroupOffsetsOptions::new().set_require_stable(true),
         "require_stable=true",
     )
     .await;
@@ -427,7 +427,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     let altered = admin
         .alter_consumer_group_offsets(
             &group_id,
-            &HashMap::from([(tp0.clone(), OffsetAndMetadata::with_metadata(5, "rewound by admin").unwrap())]),
+            &HashMap::from([(tp0.clone(), OffsetAndMetadata::new_metadata(5, "rewound by admin").unwrap())]),
             AlterConsumerGroupOffsetsOptions::new(),
         )
         .await
@@ -455,7 +455,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     // Subscribe and poll in one loop so the very first partition-0 record is
     // captured (the join itself drives fetching).
     let mut consumer_b = new_bytes_consumer(&bootstrap, &group_id);
-    consumer_b.subscribe(vec![topic.clone()]).await.expect("subscribe B");
+    consumer_b.subscribe_topics(vec![topic.clone()]).await.expect("subscribe B");
     let mut first_offset = None;
     for _ in 0..60 {
         let records = consumer_b.poll(Duration::from_millis(500)).await.expect("poll B");

@@ -19,7 +19,7 @@
 use super::FeatureMetadata;
 use crate::common::KafkaFuture;
 
-/// The result of the [`describe_features`](crate::admin::Admin::describe_features)
+/// The result of the [`describe_features_options`](crate::admin::Admin::describe_features_options)
 /// call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesResult`.

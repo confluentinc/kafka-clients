@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 use log::warn;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::config::sasl_configs;
 use crate::common::config::ssl_configs;
 use crate::common::config::{SaslConfig, SslConfig};
@@ -521,54 +521,54 @@ impl ConsumerConfig {
     // -------- Fluent setters --------
 
     /// Set `bootstrap.servers`.
-    pub fn with_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
+    pub fn set_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
         self.bootstrap_servers = bootstrap_servers;
         self
     }
     /// Set `client.id`.
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+    pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = client_id.into();
         self
     }
     /// Set `group.id`.
-    pub fn with_group_id(mut self, group_id: impl Into<String>) -> Self {
+    pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
         self.group_id = Some(group_id.into());
         self
     }
     /// Set `group.protocol`.
-    pub fn with_group_protocol(mut self, protocol: impl Into<String>) -> Self {
+    pub fn set_group_protocol(mut self, protocol: impl Into<String>) -> Self {
         self.group_protocol = protocol.into();
         self
     }
     /// Set `auto.offset.reset`.
-    pub fn with_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
+    pub fn set_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
         self.auto_offset_reset = value.into();
         self
     }
     /// Set `enable.auto.commit`.
-    pub fn with_enable_auto_commit(mut self, value: bool) -> Self {
+    pub fn set_enable_auto_commit(mut self, value: bool) -> Self {
         self.enable_auto_commit = value;
         self
     }
     /// Set `key.deserializer`.
-    pub fn with_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
+    pub fn set_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.key_deserializer_class = Some(class.into());
         self
     }
     /// Set `value.deserializer`.
-    pub fn with_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
+    pub fn set_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.value_deserializer_class = Some(class.into());
         self
     }
 
     /// Set `request.timeout.ms`.
-    pub fn with_request_timeout_ms(mut self, value: i32) -> Self {
+    pub fn set_request_timeout_ms(mut self, value: i32) -> Self {
         self.request_timeout_ms = value;
         self
     }
 
     /// Set `retry.backoff.ms`.
-    pub fn with_retry_backoff_ms(mut self, value: i64) -> Self {
+    pub fn set_retry_backoff_ms(mut self, value: i64) -> Self {
         self.retry_backoff_ms = value;
         self
     }
@@ -586,9 +586,9 @@ impl ConsumerConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed
+    /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
+    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
@@ -633,14 +633,27 @@ impl ConsumerConfig {
                     config.client_rack = value.clone();
                 },
                 Self::GROUP_ID_CONFIG => {
-                    config.group_id = if value.is_empty() { None } else { Some(value.clone()) };
+                    // Kept verbatim, INCLUDING the empty string. Java's
+                    // `ConfigDef` defines `group.id` as `Type.STRING` with a
+                    // `null` default and does not coerce `""` to null, so
+                    // `config.getString(GROUP_ID_CONFIG)` returns `""` and
+                    // `AsyncKafkaConsumer.initializeGroupMetadata` is what
+                    // rejects it — `throw new InvalidGroupIdException("The
+                    // configured group.id should not be an empty string or
+                    // whitespace.")` (`AsyncKafkaConsumer.java:747-757`).
+                    // Coercing to `None` here silently turned that hard
+                    // configuration error into "no group", so a consumer
+                    // configured with an empty `group.id` became a groupless
+                    // consumer instead of failing fast.
+                    config.group_id = Some(value.clone());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
                     if value.is_empty() {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': must be non-empty",
-                            Self::GROUP_INSTANCE_ID_CONFIG
-                        )));
+                        return Err(Error::config_name_value_message(
+                            Self::GROUP_INSTANCE_ID_CONFIG,
+                            value,
+                            "must be non-empty",
+                        ));
                     }
                     config.group_instance_id = Some(value.clone());
                 },
@@ -648,11 +661,7 @@ impl ConsumerConfig {
                     // Case-insensitive validation against the enum's lower-case names.
                     let lc = value.to_ascii_lowercase();
                     if lc != "classic" && lc != "consumer" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::GROUP_PROTOCOL_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_name_value(Self::GROUP_PROTOCOL_CONFIG, value));
                     }
                     // Java's `getString` returns the original-case value; preserve it.
                     config.group_protocol = value.clone();
@@ -663,9 +672,7 @@ impl ConsumerConfig {
                 Self::MAX_POLL_RECORDS_CONFIG => {
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {v} for configuration {key}: Value must be at least 1"
-                        )));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.max_poll_records = v;
                 },
@@ -689,8 +696,12 @@ impl ConsumerConfig {
                     config.partition_assignment_strategy = split_csv(value);
                 },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
-                    // Java validator delegates to AutoOffsetResetStrategy.fromString.
-                    AutoOffsetResetStrategy::from_string(value)?;
+                    // Java attaches `new AutoOffsetResetStrategy.Validator()` to
+                    // this key's `ConfigDef` entry, so an invalid value is
+                    // rejected here with a `ConfigException` naming the key and
+                    // listing the legal values — NOT with the bare
+                    // `IllegalArgumentException` that `fromString` raises.
+                    AutoOffsetResetStrategy::ensure_valid(Self::AUTO_OFFSET_RESET_CONFIG, value)?;
                     config.auto_offset_reset = value.clone();
                 },
                 Self::FETCH_MIN_BYTES_CONFIG => {
@@ -747,11 +758,7 @@ impl ConsumerConfig {
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "none" && lc != "rebootstrap" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::METADATA_RECOVERY_STRATEGY_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_name_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
                     }
                     config.metadata_recovery_strategy = value.clone();
                 },
@@ -767,11 +774,7 @@ impl ConsumerConfig {
                 Self::ISOLATION_LEVEL_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "read_committed" && lc != "read_uncommitted" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::ISOLATION_LEVEL_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_name_value(Self::ISOLATION_LEVEL_CONFIG, value));
                     }
                     config.isolation_level = value.clone();
                 },
@@ -786,9 +789,7 @@ impl ConsumerConfig {
                     // `metrics.sample.window.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
                     if v < 0 {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {v} for configuration {key}: Value must be at least 0"
-                        )));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metrics_sample_window_ms = v;
                 },
@@ -797,9 +798,7 @@ impl ConsumerConfig {
                     // `metrics.num.samples` is `atLeast(1)`.
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {v} for configuration {key}: Value must be at least 1"
-                        )));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.metrics_num_samples = v;
                 },
@@ -810,10 +809,11 @@ impl ConsumerConfig {
                     // membership check, throwing `ConfigException` for any other value
                     // (including lower/mixed case such as `debug`).
                     if value != "INFO" && value != "DEBUG" && value != "TRACE" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {value} for configuration {}: String must be one of: INFO, DEBUG, TRACE",
+                        return Err(Error::config_name_value_message(
                             Self::METRICS_RECORDING_LEVEL_CONFIG,
-                        )));
+                            value,
+                            "String must be one of: INFO, DEBUG, TRACE",
+                        ));
                     }
                     config.metrics_recording_level = value.clone();
                 },
@@ -843,12 +843,11 @@ impl ConsumerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}. Valid values are: {:?}",
+                        Error::config_name_value_message(
                             Self::SECURITY_PROTOCOL_CONFIG,
                             value,
-                            SecurityProtocol::names()
-                        ))
+                            format!("Valid values are: {:?}", SecurityProtocol::names()),
+                        )
                     })?;
                 },
                 Self::SASL_MECHANISM_CONFIG => {
@@ -883,25 +882,19 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_i32(key: &str, value: &str) -> Result<i32, KafkaError> {
-    value
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
+    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
 }
 
-fn parse_i64(key: &str, value: &str) -> Result<i64, KafkaError> {
-    value
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
+    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
-fn parse_bool(key: &str, value: &str) -> Result<bool, KafkaError> {
+fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value))),
+        _ => Err(Error::config_name_value(key, value)),
     }
 }
 
@@ -1168,5 +1161,28 @@ mod tests {
         };
         let msg = format!("{}", err);
         assert!(msg.contains("ssl_config"), "error should mention ssl_config, got: {msg}");
+    }
+
+    /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays
+    /// `""` and `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
+    /// (`AsyncKafkaConsumer.java:747-757`). Coercing it to `None` here would
+    /// turn a hard configuration error into a groupless consumer, which then
+    /// fails much later and much less legibly.
+    #[test]
+    fn test_from_properties_keeps_an_empty_group_id() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
+        props.insert("group.id".to_string(), String::new());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.group_id(), Some(""), "the empty string must survive to the constructor");
+    }
+
+    /// An absent `group.id` is still `None` — the two cases stay distinct.
+    #[test]
+    fn test_from_properties_absent_group_id_is_none() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.group_id(), None);
     }
 }

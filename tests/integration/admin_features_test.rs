@@ -161,7 +161,7 @@ async fn update_features_above_max_is_rejected<F: AdminBackendFactory>(ctx: &mut
         FeatureUpdate::new(9999, UpgradeType::Upgrade).expect("valid feature update"),
     )]);
     let outcomes = admin
-        .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+        .update_features(&updates, UpdateFeaturesOptions::new().set_validate_only(true))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: update_features should enqueue the call: {e}"));
 
@@ -181,7 +181,7 @@ async fn update_features_above_max_is_rejected<F: AdminBackendFactory>(ctx: &mut
         .expect_err("upgrading metadata.version beyond its supported max should be rejected");
     // The message names the feature and the rejected level; asserting on it rather
     // than on the variant keeps the assertion identical across all four backends,
-    // since the C FFI drops the `KafkaError` discriminator.
+    // since the C FFI drops the `Error` discriminator.
     let message = error.message();
     assert!(
         message.contains(METADATA_VERSION_FEATURE),
@@ -206,7 +206,7 @@ async fn update_features_above_max_is_rejected<F: AdminBackendFactory>(ctx: &mut
 /// *synchronous* throw rather than for a transport or submission failure.
 ///
 /// The message is asserted rather than the variant: the C FFI does not surface the
-/// `KafkaError` discriminator, so `KafkaError::IllegalArgument` is not
+/// `Error` discriminator, so `Error::LocalIllegalArgument` is not
 /// reconstructable on the gRPC backends from anything but the message — which is
 /// exactly why both servers' `guess_variant` has an arm keyed to these two Java
 /// strings. Asserting the message makes the scenario independent of that guess.
@@ -275,7 +275,7 @@ async fn update_features_on_the_mock_client<F: AdminBackendFactory>(_ctx: &mut T
         FeatureUpdate::new(0, UpgradeType::SafeDowngrade).expect("valid feature update"),
     )]);
     let outcomes = admin
-        .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+        .update_features(&updates, UpdateFeaturesOptions::new().set_validate_only(true))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: update features on the mock: {e}"));
     let outcome = outcomes.get(METADATA_VERSION_FEATURE).unwrap_or_else(|| {

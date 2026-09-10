@@ -20,11 +20,13 @@ use std::collections::HashSet;
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::{ElectionType, KafkaError, TopicPartition};
+use crate::common::{ElectionType, Error, TopicPartition};
 use crate::elect_leaders_request_data::{ElectLeadersRequestData, TopicPartitions};
 use crate::elect_leaders_response_data::{PartitionResult, ReplicaElectionResult};
 
-use super::{ConcreteRequest, ConcreteResponse, ElectLeadersResponse, RequestBuilder};
+use super::{
+    ConcreteRequest, ConcreteResponse, ElectLeadersResponse, ElectLeadersResponseOptionsBuilder, RequestBuilder,
+};
 
 /// An ElectLeaders request.
 ///
@@ -94,11 +96,13 @@ impl ElectLeadersRequest {
                 election_results.push(election_result);
             }
         }
-        ConcreteResponse::ElectLeaders(ElectLeadersResponse::from_results(
-            throttle_time_ms,
-            error.code(),
-            election_results,
-            self.version,
+        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new_options(
+            ElectLeadersResponseOptionsBuilder::new()
+                .set_throttle_time_ms(throttle_time_ms)
+                .set_error_code(error.code())
+                .set_election_results(election_results)
+                .set_version(self.version)
+                .build(),
         ))
     }
 
@@ -156,9 +160,9 @@ impl ElectLeadersRequestBuilder {
     ///
     /// Returns an error if a non-`PREFERRED` election type is requested at
     /// version 0, mirroring Java's `UnsupportedVersionException`.
-    fn to_request_data(&self, version: i16) -> Result<ElectLeadersRequestData, KafkaError> {
+    fn to_request_data(&self, version: i16) -> Result<ElectLeadersRequestData, Error> {
         if self.election_type != ElectionType::Preferred && version == 0 {
-            return Err(KafkaError::unsupported_version(
+            return Err(Error::unsupported_version(
                 "API Version 0 only supports PREFERRED election type",
             ));
         }

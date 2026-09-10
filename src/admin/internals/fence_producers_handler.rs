@@ -24,7 +24,7 @@ use crate::admin::options::FenceProducersOptions;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, InitProducerIdRequestBuilder, RequestBuilder};
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::kafka_debug;
 
@@ -58,7 +58,7 @@ impl FenceProducersHandler {
     /// Creates a handler. The transaction timeout is the option's timeout when
     /// set, otherwise the client's request timeout.
     pub(crate) fn new(options: &FenceProducersOptions, log_context: LogContext, request_timeout_ms: i32) -> Self {
-        let txn_timeout_ms = options.timeout().unwrap_or(request_timeout_ms);
+        let txn_timeout_ms = options.timeout_ms().unwrap_or(request_timeout_ms);
         Self {
             lookup_strategy: CoordinatorStrategy::new(CoordinatorType::Transaction, log_context.clone()),
             log_context,
@@ -106,7 +106,7 @@ impl FenceProducersHandler {
         match error {
             Errors::ClusterAuthorizationFailed => failed(
                 key.clone(),
-                KafkaError::with_message(
+                Error::with_message(
                     error,
                     format!(
                         "InitProducerId request for transactionalId `{}` failed due to cluster authorization failure",
@@ -116,7 +116,7 @@ impl FenceProducersHandler {
             ),
             Errors::TransactionalIdAuthorizationFailed => failed(
                 key.clone(),
-                KafkaError::with_message(
+                Error::with_message(
                     error,
                     format!(
                         "InitProducerId request for transactionalId `{}` failed due to transactional ID authorization failure",
@@ -158,7 +158,7 @@ impl FenceProducersHandler {
             // fall under the "unexpected error" catch-all case below.
             _ => failed(
                 key.clone(),
-                KafkaError::with_message(
+                Error::with_message(
                     error,
                     format!(
                         "InitProducerId request for transactionalId `{}` failed due to unexpected error",
@@ -171,7 +171,7 @@ impl FenceProducersHandler {
 }
 
 /// Mirrors `ApiResult.failed(key, error)`.
-fn failed(key: CoordinatorKey, error: KafkaError) -> ApiResult<CoordinatorKey, ProducerIdAndEpoch> {
+fn failed(key: CoordinatorKey, error: Error) -> ApiResult<CoordinatorKey, ProducerIdAndEpoch> {
     ApiResult::new(HashMap::new(), HashMap::from([(key, error)]), Vec::new())
 }
 
@@ -216,7 +216,16 @@ impl AdminApiHandler<CoordinatorKey, ProducerIdAndEpoch> for FenceProducersHandl
             .expect("fenceProducers response must carry exactly one key")
             .clone();
         let ConcreteResponse::InitProducerId(response) = response else {
-            return empty();
+            // NOT `ApiResult.empty()`: Java reaches `empty()` only from the
+            // per-partition loop, never for a response-type mismatch. That case is
+            // `KafkaAdminClient.java:1387-1391`'s `catch (Throwable t)` →
+            // `call.fail(now, t)`, which fails the call once instead of leaving the
+            // driver to re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::local_illegal_state("FenceProducersHandler received an unexpected response type"),
+            );
         };
 
         let error = Errors::for_code(response.data().error_code);
@@ -276,7 +285,7 @@ mod tests {
     #[test]
     fn build_request_options_timeout() {
         let options_timeout_ms = 50000;
-        let h = handler(FenceProducersOptions::new().timeout_ms(Some(options_timeout_ms)));
+        let h = handler(FenceProducersOptions::new().set_timeout_ms(Some(options_timeout_ms)));
         for id in ["foo", "bar", "baz"] {
             let data = h.build_single_request(&key(id));
             assert_eq!(data.transactional_id.as_deref(), Some(id));
