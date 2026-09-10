@@ -1,13 +1,20 @@
 # Python binding: send-path batching and its latency profile
 
-> Status: analysis only — no code change proposed here. Documents how the Python
-> binding's C extension batches records in front of the Rust accumulator, the
-> resulting latency profile, two open observations, and what it implies for the
-> .NET binding.
+> Status: analysis only — no code change is proposed here. Documents how the
+> Python binding's C extension batches records in front of the Rust accumulator,
+> the resulting latency profile, and two open observations.
+>
+> ⚠ **The ".NET binding" parts are no longer a prediction.** This began as an
+> analysis of what stage 1 would *imply* for .NET; the async half of it then
+> **shipped** in M11/P3.1. Every .NET claim was re-verified against the tree on
+> 2026-09-10 (M11/P3.2 S0, N=71) — the Summary below and "Implications for the
+> .NET binding" state what is shipped, not what was proposed. The **Python**
+> analysis is unchanged and is still the parity anchor both .NET plans cite.
 >
 > Corpus: `bindings/python/_confluentkafka.c`, `bindings/python/producer.py`,
 > `src/ffi/producer.rs`, `src/producer/internals/record_accumulator.rs` as of
-> branch `prashah_dev_dotnet_binding_producer`.
+> branch `prashah_dev_dotnet_binding_producer`; the .NET claims as of
+> `prashah_dev_producer_python_alignment`.
 
 ## Summary
 
@@ -29,12 +36,28 @@ Stage 1 exists to amortise the Python↔C boundary cost (GIL acquire/release plu
 the call itself) across ~1000 records instead of paying it per record. That is a
 real and significant win in Python.
 
-The cost is that **stage 1 adds 0–10 ms of delay that no configuration can
-influence**, and at low-to-moderate throughput this dominates `linger.ms`.
+The cost is that **stage 1 adds 0–10 ms of delay that no Python-side
+configuration can influence**, and at low-to-moderate throughput this dominates
+`linger.ms`.
 
-Stage 1 is **Python-specific**. The .NET binding has no equivalent: it calls the
-singular `Producer_send` inline on the caller's thread, so `linger.ms` is its
-only delay.
+⚠ **Stage 1 was Python-specific when this was written. It is no longer** (updated
+by M11/P3.2 S0; the original claim — *"the .NET binding has no equivalent: it
+calls the singular `Producer_send` inline on the caller's thread, so `linger.ms`
+is its only delay"* — is kept here because it is what the rest of this document
+was written against). The .NET binding's **async** producer adopted the same
+shape in **M11/P3.1**: a binding-side `SendAccumulator`, a batch thread, and
+`send_batch`. So the 0–10 ms stage-1 window applies there too, on top of
+`linger.ms`. Its **sync** producer still calls the singular `Producer_send`
+inline on the caller's thread, where `linger.ms` remains the only delay — a
+deliberate, twice-decided asymmetry (M11/P3.2 **DV-6**).
+
+**One difference carries through this whole document: "untunable" is Python's
+property, not .NET's.** Where stage 1 is called hardcoded or untunable below (the
+diagram above, "The headline", and Observation 2), that is true of the anchor —
+its 10 ms is a bare literal at `_confluentkafka.c:535`. .NET's port named the
+constant and made it env-overridable (M11/P3.1 §3.2/§3.3), so the magnitude
+carried across but the untunability did not. See "Implications for the .NET
+binding" below for the full shipped split.
 
 ## Stage 1: the binding accumulator
 
@@ -432,9 +455,11 @@ The decision record in
 split — it opens *"⚠ SUPERSEDED IN PART by M11/P3.1"* — together with three
 sibling records
 (`bindings/dotnet/design/current/STATUS.md`,
-`design/history/M11/P3-producer-send/PLAN.md` §3.3, and the Option A section of
-`design/current/producer-send-completion-approaches.html`). This file was the
-**fifth** such record and was missed at the time.
+`bindings/dotnet/design/history/M11/P3-producer-send/PLAN.md` §3.3, and the
+Option A section of
+`bindings/dotnet/design/current/producer-send-completion-approaches.html` — all
+three are under `bindings/dotnet/`, none under the repo-root `design/` this file
+lives in). This file was the **fifth** such record and was missed at the time.
 
 ### What the port needed, piece by piece
 
@@ -467,7 +492,7 @@ decision **D2**, 2026-09-10), after which the row becomes true of the grouping
 too — and the ≤1100 bound follows from the unit instead of from a hand-picked
 constant.
 
-### The `Py_INCREF` blocker: resolved, not worked around
+### The `Py_INCREF` blocker: the *lifetime* problem is resolved
 
 Python keeps the record alive with `Py_INCREF` and hands Rust a raw pointer into
 the live `PyBytes`; CPython never moves heap objects, so this is free. The .NET
@@ -480,11 +505,18 @@ that gets missed, since a call-scoped topic pointer becomes a use-after-free the
 moment the send is deferred. .NET covers it by interning one permanently-pinned
 buffer per distinct topic, i.e. **O(distinct topics) permanent pins instead of
 O(records) transient ones**, which drops the per-record pin count from 3 to ≤2
-and removes the fragmentation the earlier analysis charged against the port. The
-pin window ends when `send_batch` **returns** (the core serializes each record's
-bytes into the batch buffer synchronously inside the call), not when the returned
-`Task` completes. No per-record copy was introduced, so root `CLAUDE.md` §12
-still holds. Full design: P3.1 §4.1/§4.2/§4.4.
+and removes **a whole class of** the fragmentation the earlier analysis charged
+against the port — the *topic's* class (P3.1 §4.1, whose hedge that is; the
+per-record third pin returns for records beyond the cache's 1024-topic cap, which
+falls back to a per-record pinned topic buffer rather than evicting, P3.1 §4.1's
+D5). The pin window ends when `send_batch` **returns** (the core serializes each
+record's bytes into the batch buffer synchronously inside the call), not when the
+returned `Task` completes. No per-record copy was introduced, so root
+`CLAUDE.md` §12 still holds. Full design: P3.1 §4.1/§4.2/§4.4.
+
+**What is resolved is *lifetime*, which is what the blocker was about.** The
+key/value **pin pressure** the same objection named is a separate half, and it is
+an accepted cost rather than a removed one — see argument 2 below.
 
 ### The two arguments against it: accepted costs, not open objections
 
@@ -505,11 +537,34 @@ user-directed port** rather than reasons not to do it.
    since at max rate the window is noise against a p50 ≈ 96 ms deep-pipeline
    latency).
 
-2. **The lifetime problem — resolved**, as above. The specific objection was
-   *"either one `GCHandle.Alloc(..., Pinned)` per in-flight record (up to 2000
-   pins, fragmenting the GC heap) or a per-record copy into a pooled buffer"*.
-   Neither was taken: the primitive is `MemoryHandle` rather than `GCHandle`, and
-   the third buffer — the topic — is interned rather than pinned per record.
+2. **The lifetime problem is resolved (above); the pin-pressure half is an
+   accepted cost.** The objection was *"either one
+   `GCHandle.Alloc(..., Pinned)` per in-flight record (up to 2000 pins,
+   fragmenting the GC heap) or a per-record copy into a pooled buffer"* — two
+   alternatives, and they were **not** dispatched together:
+
+   - **The pooled-buffer copy was not taken**, and will not be: it is the copy
+     root `CLAUDE.md` §12 forbids.
+   - **The per-in-flight-record pin *was* taken**, in substance. `Submit` pins
+     key and value per record (`SendAccumulator.cs:269-270` →
+     `ProducerSendBatchMarshal.PinIfNeeded`, `:98`, which is
+     `ReadOnlyMemory<byte>.Pin()`) and releases them only **after** `send_batch`
+     returns (`SendAccumulator.cs:907`, in the `finally`). Meanwhile the
+     backpressure permits are released at **take** time, ahead of the send
+     (`:716` `ReleaseSpace(freed)`, before `SendChain()` at `:722`), so new
+     senders can refill the accumulator to the full `MaxAccumulatedRecords`
+     bound while the taken chain is still pinned — the live pinned-buffer count
+     therefore reaches the same order as the "up to 2000" the objection named.
+     `MemoryHandle` rather than `GCHandle.Alloc(..., Pinned)` changes the API,
+     not the effect on the GC heap (for an array-backed `ReadOnlyMemory<byte>`
+     that handle *is* a pinning handle). Absent and empty buffers are not pinned
+     at all (`PinIfNeeded` returns `default`, using the static sentinel), so the
+     ≤2 is a ceiling — a record with neither key nor value pays none of it.
+
+   So what interning removed is the **third** pin per record, not the charge.
+   This is the one cost of the port that no other document records, and like
+   argument 1 it is **unmeasured** — the P3.1 §8.2 follow-up is where a GC /
+   fragmentation number would come from.
 
 **The sync path stays inline** (P3.1 §3.1, re-affirmed as M11/P3.2 decision
 **D4** on 2026-09-10, recorded as **DV-6**). Python has no sync/async split at
