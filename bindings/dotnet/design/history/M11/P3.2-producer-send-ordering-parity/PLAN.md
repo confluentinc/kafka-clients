@@ -86,22 +86,38 @@ the corrected ones and nobody "fails to find" the quoted code:
 
 Python's "a record already accumulated is still sent on close" is **almost** unconditional, not
 unconditional. `Producer_send_thread`'s outer loop tests `!producer->closed` at `:529`
-**outside** `record_batches_mutex`. The overwhelmingly common path is safe: the thread spends its
-time parked in `cnd_timedwait` at `:548`, which **atomically releases** `record_batches_mutex` for
-the duration of the wait and reacquires it on wake — that release is precisely how
-`py_Producer_shutdown` acquires the lock at `:961` to set `closed` at `:962`. The thread then wakes
-holding the mutex again, falls out of the inner wait (`:539`'s `&& !producer->closed`), and performs
-one final take-and-send before the outer test ends it. (⚠ **Corrected 2026-09-10.** This paragraph
-first said the thread parks *holding* the mutex, which inverts the mechanism and makes its own
-conclusion unreachable — shutdown could never have taken the lock. The conclusion is unchanged: the
-thread holds the mutex whenever it is *not* parked, so shutdown can only win the lock while it is
-parked, which is the case the final drain covers. Critic 71 finding 71.10 caught this in the text
-the S2 Actor had copied from here.) But a record appended in the narrow gap between the thread's `mtx_unlock` (`:577` / `:638`) and
-its re-test at `:529` is never sent and never completed. So where this plan says ".NET should
-complete, as Python does", the accurate statement is **".NET should complete, as Python does on
-every path except one narrow race Python leaves open"** — i.e. the proposed .NET behaviour is
+**outside** `record_batches_mutex`.
+
+**Why the common path is safe — a TIMING argument, not a structural one.** The thread spends
+almost all of its time parked in `cnd_timedwait` at `:548`, which **atomically releases**
+`record_batches_mutex` for the duration of the wait and reacquires it on wake — that release is
+precisely how `py_Producer_shutdown` acquires the lock at `:961` to set `closed` at `:962`. When
+shutdown wins the lock *there*, the thread wakes holding the mutex again, falls out of the inner
+wait (`:539`'s `&& !producer->closed`), and performs one final take-and-send before the outer test
+ends it. That is the overwhelmingly likely interleaving simply because the park is where the thread
+almost always is.
+
+**But the unlocked window is the whole send loop, and it is not narrow.** The thread releases
+`record_batches_mutex` at `:556`, `:563` and `:577`, and runs the entire send loop `:581-638` —
+every `send_batch` call plus its GIL acquisition — holding **none** of it. So shutdown can set
+`closed` at any point in there, and the outer `:529` test then ends the thread. Records appended
+*during* that window went into a fresh chain that is **never taken, never sent, and never
+completed**. For a full `SLOT_CAPACITY` batch that window is as long as a `send_batch` call takes.
+
+So where this plan says ".NET should complete, as Python does", the accurate statement is
+**".NET should complete, as Python does whenever close lands while its send thread is parked — and
+unlike Python it also completes when close lands mid-send"** — i.e. the proposed .NET behaviour is
 Python-aligned *and* strictly better. Say it that way at the site; do not claim Python is airtight
 here.
+
+⚠ **This paragraph has been corrected TWICE (2026-09-10) and both errors reached code.** First it
+said the thread parks *holding* the mutex, which inverts `cnd_timedwait` and made its own conclusion
+unreachable (Critic 71 finding **71.10**). The correction then claimed the thread "holds the mutex
+whenever it is not parked", so "the park is the only window shutdown can win the lock" — also false,
+per the three unlock sites and the unlocked send loop above (finding **71.11**). The surviving
+argument is **timing** ("the thread spends its time parked"), never structure. It also mispaired the
+unlock cites: `:638` is a `pending_batches_mutex` unlock, not a `record_batches_mutex` one. A Critic
+re-deriving this from the C source rather than from this paragraph is what caught both.
 
 ---
 
