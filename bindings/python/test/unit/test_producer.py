@@ -366,6 +366,51 @@ def test_metrics_after_close_raises():
         p.metrics()
 
 
+def _c_entered_after_close(*_args):
+    # Stub swapped in for an FFI entry point AFTER close(): close() frees the C
+    # producer struct, so any FFI call reaching it would read freed memory. A
+    # method must raise the Python "closed" RuntimeError before getting here.
+    # (Raising AssertionError, not RuntimeError, so pytest.raises(RuntimeError)
+    # cannot mistake an FFI entry for the expected guard.)
+    raise AssertionError("FFI entered after close()")
+
+
+def test_flush_after_close_raises(monkeypatch):
+    # A bare pytest.raises(RuntimeError) has no teeth here: flush() also
+    # re-checks closed AFTER the drain wait. The stub proves the guard fires
+    # BEFORE the drain wait touches the (freed) C producer.
+    p = MockProducer(auto_complete=True)
+    p.close()
+    monkeypatch.setattr(_lib, "Producer_on_drained", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.flush()
+
+
+def test_partitions_for_after_close_raises(monkeypatch):
+    p = MockProducer(auto_complete=True)
+    p.close()
+    monkeypatch.setattr(_lib, "Producer_partitions_for_async", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.partitions_for("test-topic")
+
+
+def test_mock_helpers_after_close_raise(monkeypatch):
+    # The MockProducer test helpers hand the C pointer to the FFI too.
+    p = MockProducer(auto_complete=True)
+    p.close()
+    for symbol in ("MockProducer_complete_next", "MockProducer_error_next",
+                   "MockProducer_history_count", "MockProducer_clear"):
+        monkeypatch.setattr(_lib, symbol, _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.complete_next()
+    with pytest.raises(RuntimeError, match="closed"):
+        p.error_next(1)
+    with pytest.raises(RuntimeError, match="closed"):
+        p.history_count()
+    with pytest.raises(RuntimeError, match="closed"):
+        p.clear()
+
+
 # -- Context manager ----------------------------------------------------------
 
 def test_context_manager():
@@ -780,6 +825,24 @@ async def test_async_kafka_producer_metrics_after_close_raises():
     await p.close()
     with pytest.raises(RuntimeError):
         p.metrics()
+
+
+async def test_async_flush_after_close_raises(monkeypatch):
+    # See test_flush_after_close_raises: the stub proves the guard fires before
+    # the drain wait touches the freed C producer.
+    p = AsyncMockProducer(auto_complete=True)
+    await p.close()
+    monkeypatch.setattr(_lib, "Producer_on_drained", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        await p.flush()
+
+
+async def test_async_partitions_for_after_close_raises(monkeypatch):
+    p = AsyncMockProducer(auto_complete=True)
+    await p.close()
+    monkeypatch.setattr(_lib, "Producer_partitions_for_async", _c_entered_after_close)
+    with pytest.raises(RuntimeError, match="closed"):
+        await p.partitions_for("test-topic")
 
 
 async def test_async_kafka_producer_invalid_config():

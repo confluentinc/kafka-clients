@@ -315,12 +315,17 @@ class _MockProducerMixin:
     """Mock-only operations shared by :class:`MockProducer` and
     :class:`AsyncMockProducer`."""
 
+    # Each helper checks the Python closed flag before handing the C pointer to
+    # the FFI: close() frees the native producer, so touching it afterwards
+    # would read freed memory (same guard as send()/flush()/partitions_for()).
+
     def complete_next(self):
         """Complete the next pending send successfully.
 
         Returns:
             True if there was a pending completion, False otherwise.
         """
+        self._check_closed()
         return _lib.MockProducer_complete_next(self.c_producer)
 
     def error_next(self, error_code, error_message=None):
@@ -333,15 +338,18 @@ class _MockProducerMixin:
         Returns:
             True if there was a pending completion, False otherwise.
         """
+        self._check_closed()
         return _lib.MockProducer_error_next(
             self.c_producer, error_code, error_message)
 
     def history_count(self):
         """Returns the number of successfully sent records."""
+        self._check_closed()
         return _lib.MockProducer_history_count(self.c_producer)
 
     def clear(self):
         """Clear the sent history and pending completions."""
+        self._check_closed()
         _lib.MockProducer_clear(self.c_producer)
 
 
@@ -461,7 +469,13 @@ class Producer(_ProducerBase):
 
         Records accepted by :meth:`send` before this call are handed to the
         producer first (via :meth:`_wait_drained`), so a returned (un-awaited)
-        send is completed by the flush, matching Java."""
+        send is completed by the flush, matching Java.
+
+        Raises ``RuntimeError`` if the producer is closed. Java's ``flush()``
+        has no such check; this binding's :meth:`close` frees the native
+        producer, so the guard is a Python-level safety measure that must run
+        before the C producer is touched (including by the drain wait)."""
+        self._check_closed()
         self._wait_drained()
         # A waiter released by close() (the send task fires all drain callbacks
         # on exit) must not submit into a producer being torn down: re-check the
@@ -476,7 +490,9 @@ class Producer(_ProducerBase):
         """Return partition metadata for ``topic`` as a list of PartitionInfo.
 
         Reuses the consumer binding's PartitionInfoList drain + conversion
-        (the FFI returns the same shared handle type)."""
+        (the FFI returns the same shared handle type). Raises ``RuntimeError``
+        if the producer is closed (Python-level guard, see :meth:`flush`)."""
+        self._check_closed()
         return self._run_sync(
             lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
             self._resolve_partitions,
@@ -865,7 +881,13 @@ class AsyncProducer(_ProducerBase):
 
         Records accepted by :meth:`send` before this call are handed to the
         producer first (via :meth:`_wait_drained`), so a returned (un-awaited)
-        send is completed by the flush, matching Java."""
+        send is completed by the flush, matching Java.
+
+        Raises ``RuntimeError`` if the producer is closed. Java's ``flush()``
+        has no such check; this binding's :meth:`close` frees the native
+        producer, so the guard is a Python-level safety measure that must run
+        before the C producer is touched (including by the drain wait)."""
+        self._check_closed()
         await self._wait_drained()
         # A waiter released by close() (the send task fires all drain callbacks
         # on exit) must not submit into a producer being torn down: re-check the
@@ -878,7 +900,11 @@ class AsyncProducer(_ProducerBase):
         )
 
     async def partitions_for(self, topic):
-        """Return partition metadata for ``topic`` as a list of PartitionInfo."""
+        """Return partition metadata for ``topic`` as a list of PartitionInfo.
+
+        Raises ``RuntimeError`` if the producer is closed (Python-level guard,
+        see :meth:`flush`)."""
+        self._check_closed()
         return await self._run_async(
             lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
             self._resolve_partitions,
