@@ -28,11 +28,14 @@ name: build-test-release
 #   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
 #   2. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python.
-#   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
-#      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
-#      up Docker via Colima; the C/Python gRPC images build the Rust library
-#      in-container (see Dockerfile.grpc.macos).
+#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
+#      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
+#   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
+#      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
+#      for the broker the integration/perf tests need.
+#   5. "Verify language bindings unit tests (macOS arm64)" -- verify-c (ctest)
+#      and verify-python (pytest test/unit). No container is used, so the block
+#      sets MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -148,7 +151,10 @@ blocks:
           commands:
             - make verify-rust-macos-docker
 
-  - name: "Verify language bindings (macOS arm64)"
+  - name: "Verify language bindings unit tests (macOS arm64)"
+    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. No
+    # container is used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh
+    # to skip Colima. The gRPC multilanguage arm runs on Linux only.
     dependencies: []
     task:
       agent:
@@ -157,13 +163,11 @@ blocks:
       env_vars:
         - name: RUST_BACKTRACE
           value: full
+        - name: MACOS_SKIP_COLIMA
+          value: "true"
       prologue:
         commands:
           - source ./.semaphore/dependencies-macos.sh
-      epilogue:
-        always:
-          commands:
-            - colima stop || true
       jobs:
         - name: "verify-c"
           commands:
