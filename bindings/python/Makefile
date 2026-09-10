@@ -4,8 +4,7 @@ CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test test-soak test-performance grpc-image grpc-image-async \
-	grpc-image-macos grpc-image-async-macos clean
+.PHONY: build test test-soak test-performance grpc-image grpc-image-async clean
 
 build:
 	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
