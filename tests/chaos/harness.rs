@@ -576,7 +576,23 @@ impl ChaosHarness {
     }
 
     /// Tear down the cluster's containers. Call at the end of every scenario.
+    ///
+    /// The teardown itself lives in [`Drop`], so it also runs when a scenario
+    /// **panics** (a broker that fails to recover, a failed verdict assertion,
+    /// a describe timeout, …). Without that, every panicking run leaked its whole
+    /// cluster, and the orphaned brokers starved the next run. Dropping `self`
+    /// here performs the teardown; kept as an explicit, readable end-of-scenario
+    /// call.
     pub fn shutdown(self) {
+        drop(self);
+    }
+}
+
+impl Drop for ChaosHarness {
+    /// Best-effort teardown of the dedicated cluster's containers and network.
+    /// Runs both on the success path (via [`ChaosHarness::shutdown`]) and on
+    /// panic unwind, so a failed run cannot leak its brokers into the next one.
+    fn drop(&mut self) {
         for id in self.cluster.container_ids() {
             let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
         }

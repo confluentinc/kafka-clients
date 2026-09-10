@@ -197,24 +197,13 @@ impl ChaosConfig {
             );
         }
 
-        // KNOWN LIMITATION: multi-topic + topic-recreate is not yet supported.
-        // A new-generation (new topic-id) recreate leaves the KIP-848 consumer
-        // positioned past the new generation's tail WITHOUT an offset reset, so
-        // that topic's post-recreate tail is genuinely unconsumed. This is a
-        // separate consumer offset-reset investigation, not a verifier
-        // relaxation. Reject the EXPLICIT combination up front (clean exit, not a
-        // mid-run panic). Single-topic recreate and multi-topic without recreate
-        // both work and are shipped. `--random` handles this by dropping
-        // TopicRecreate from its candidate set under multi-topic (see
-        // `random_plan`), so it is not rejected here.
-        if num_topics > 1 && !random && actions.iter().any(|a| a.kind == ActionKind::TopicRecreate) {
-            return Err("--num-topics > 1 together with topic-recreate is not yet supported: a \
-                 new-generation (new topic-id) recreate leaves the KIP-848 consumer positioned past \
-                 the new generation's tail without an offset reset, so its tail is genuinely \
-                 unconsumed. Tracked as a known limitation. Use --num-topics 1 with \
-                 --topic-recreate, or --num-topics N without recreate."
-                .to_string());
-        }
+        // Multi-topic + topic-recreate is supported: the consumer does read each
+        // recreated topic's post-recreate tail, given enough drain for it to
+        // re-discover the new generation under churn. It was previously rejected
+        // as a "known limitation" written before the wait-until-observed drain
+        // (`Verifier::outstanding`) existed; validated across many `--num-topics 2`
+        // recreate runs with `--drain-s 180`. Use a generous `--drain-s` (≥180)
+        // for recreate scenarios so the post-recreate tail is not cut off.
 
         let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
             "sync" => CommitMode::Sync,
