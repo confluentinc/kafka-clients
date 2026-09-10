@@ -151,6 +151,23 @@ internal sealed class SendAccumulator
     // makes the loop's exit re-check sound against store→load reordering (see RunSubmitterAsync).
     private int _submitterRunning;
 
+    // Teardown SEALED the submission queue (M11/P3.2 §F2 / slice S2). One flag, two jobs, both
+    // load-bearing:
+    //
+    //   * no NEW submission may join the queue — which is what makes Stop's flush wait MONOTONE,
+    //     and therefore bounded. Without it a caller hammering Send keeps _queued above zero and
+    //     the flush waits out its whole share of the teardown bound.
+    //   * every submission ALREADY queued is appended BYPASSING the bound instead of being
+    //     faulted, so a send whose caller already returned reaches the core rather than being
+    //     dropped — the anchor's outcome, since it appends before waiting.
+    //
+    // Set once by Stop under _gate and never cleared. Read under _gate by SubmitQueued (so the
+    // monotonicity is a guarantee rather than a likelihood) and lock-free by the submitter, which
+    // only needs the monotone direction: a stale `false` there just means it waits, and Stop
+    // cancels _spaceGate AFTER setting this, so the cancellation that wakes the waiter is ordered
+    // after the write and the re-read in AppendQueuedAsync's handler sees it.
+    private bool _queueSealed;
+
     private Node? _head;      // oldest node, the one the wait loop measures (anchor: next_batches_to_send)
     private Node? _tail;      // the node being filled (anchor: last_accumulating_batch)
     private Node? _spare;     // one fully-settled node kept for reuse (see RecycleNode)
@@ -385,6 +402,15 @@ internal sealed class SendAccumulator
     /// <em>other</em> callers' queued submissions. Ordering does not depend on when it starts: the
     /// queue position is fixed by the enqueue above.
     /// </para>
+    /// <para>
+    /// <b>A submission arriving after teardown sealed the queue is refused</b> (M11/P3.2 §F2 —
+    /// <see cref="_queueSealed"/>), and settled with the identical
+    /// <see cref="ObjectDisposedException"/> the submitter would have produced for it, so the
+    /// observable outcome for a <c>Send</c> racing <c>Close</c> is unchanged. The check is under
+    /// <see cref="_gate"/> — the same lock <see cref="Stop"/> takes to seal — which is what makes
+    /// <see cref="_queued"/> strictly decreasing from the seal onward and therefore makes
+    /// <see cref="Stop"/>'s flush wait terminate.
+    /// </para>
     /// </remarks>
     internal void SubmitQueued(
         in SerializedProducerRecord record,
@@ -392,8 +418,26 @@ internal sealed class SendAccumulator
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken)
     {
-        Interlocked.Increment(ref _queued);
-        _submissions.Enqueue(new QueuedSubmission(record, completion, delivery, cancellationToken));
+        bool sealedForTeardown;
+        lock (_gate)
+        {
+            sealedForTeardown = _queueSealed;
+            if (!sealedForTeardown)
+            {
+                Interlocked.Increment(ref _queued);
+                _submissions.Enqueue(
+                    new QueuedSubmission(record, completion, delivery, cancellationToken));
+            }
+        }
+
+        if (sealedForTeardown)
+        {
+            // Settled outside the lock: the accumulator's one call-out into user code runs from a
+            // completion, and nothing that can run user code belongs under _gate.
+            completion.TrySetException(ClosedDuringBackpressure());
+            return;
+        }
+
         EnsureSubmitterRunning();
     }
 
@@ -491,13 +535,62 @@ internal sealed class SendAccumulator
     /// successfully for a submission whose token has already fired, and that record must not reach
     /// the core. Cancellation carries the <em>caller's</em> token, so the idiomatic
     /// <c>catch (OperationCanceledException e) when (e.CancellationToken == ct)</c> matches.
+    /// <para>
+    /// <b>Teardown appends instead of faulting</b> (M11/P3.2 §F2 / slice S2). Once
+    /// <see cref="Stop"/> has sealed the queue, this submission is appended <b>bypassing the
+    /// bound</b> — no permit is taken and none is owed back — rather than faulted, because the
+    /// anchor appends before it waits and so a record whose <c>Send</c> already returned is
+    /// <em>already accumulated</em> when its close arrives: <c>py_Producer_send</c> writes the slot
+    /// unconditionally (<c>_confluentkafka.c:819-822</c>) and only then computes <c>full</c>
+    /// (<c>:830</c>), <c>py_Producer_shutdown</c> sets <c>closed</c>, signals the send thread and
+    /// joins it (<c>:962-969</c>), and <c>py_Producer_on_space_available</c> reports "available" the
+    /// moment <c>closed</c> is set (<c>:857-861</c>) so a waiter never parks through a close. The
+    /// send thread's final iteration then drains and sends the record. ⚠ Python's guarantee is
+    /// <em>almost</em> unconditional rather than unconditional: <c>Producer_send_thread</c> tests
+    /// <c>!closed</c> at <c>:529</c> <b>outside</b> <c>record_batches_mutex</c>, so a record
+    /// appended in the narrow gap between its <c>mtx_unlock</c> (<c>:577</c>/<c>:638</c>) and that
+    /// re-test is never sent and never completed. The common path is safe because the thread spends
+    /// its time in <c>cnd_timedwait</c> (<c>:548</c>) <em>holding</em> that mutex. So this is
+    /// Python-aligned <b>and</b> closes a window Python leaves open — not a claim that Python is
+    /// airtight.
+    /// </para>
+    /// <para>
+    /// Two things the bypass does <b>not</b> change. It ignores the <em>bound</em>, never
+    /// <c>_closed</c>: <see cref="Append"/>'s closed check still refuses, which is what keeps a
+    /// late append from being stranded in a chain whose batch thread has already taken its final
+    /// one (and is the degraded outcome when the flush wait expires). And a submission whose
+    /// caller token has already fired still cancels and is still <b>not</b> appended — today's
+    /// semantics for a cancelled parked send (§3.4 item 4), unchanged.
+    /// </para>
     /// </remarks>
     private async Task AppendQueuedAsync(QueuedSubmission submission)
     {
         CancellationToken cancellationToken = submission.CancellationToken;
         try
         {
-            await WaitForSpaceAsync(cancellationToken).ConfigureAwait(false);
+            bool holdsPermit;
+            if (Volatile.Read(ref _queueSealed))
+            {
+                // Sealed before this submission was even dequeued: skip the wait entirely. The
+                // gate is already cancelled at this point, so waiting could only throw.
+                holdsPermit = false;
+            }
+            else
+            {
+                try
+                {
+                    await WaitForSpaceAsync(cancellationToken).ConfigureAwait(false);
+                    holdsPermit = true;
+                }
+                catch (ObjectDisposedException) when (Volatile.Read(ref _queueSealed))
+                {
+                    // The common teardown shape: this submission was PARKED on the gate and Stop
+                    // cancelled it. Stop sets the seal before cancelling, so the flag write is
+                    // ordered before the cancellation that produced this throw and this re-read
+                    // observes it.
+                    holdsPermit = false;
+                }
+            }
 
             if (cancellationToken.IsCancellationRequested)
             {
@@ -511,12 +604,19 @@ internal sealed class SendAccumulator
                 // SemaphoreSlim.Release, which the primitive may resolve either way and which no
                 // broker-free test can schedule. Removing the whole cancellation handling IS
                 // covered (the record then reaches the core); removing only this branch is not.
-                ReleaseSpace(1);
+                //
+                // Nothing to give back on the teardown bypass — it took no permit.
+                if (holdsPermit)
+                {
+                    ReleaseSpace(1);
+                }
+
                 submission.Completion.TrySetCanceled(cancellationToken);
                 return;
             }
 
-            Submit(submission.Record, submission.Completion, submission.Delivery);
+            SubmitCore(
+                submission.Record, submission.Completion, submission.Delivery, holdsPermit);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -524,9 +624,11 @@ internal sealed class SendAccumulator
         }
         catch (Exception exception)
         {
-            // Teardown cancelled the backpressure gate, or the accumulator refused the append.
-            // Nothing reached the core either way, so no delivery callback fires (M11/P3.1 D5) —
-            // the same outcome, and the same exception, the pre-queue slow path produced.
+            // Teardown cancelled the backpressure gate before the queue was sealed, or the
+            // accumulator refused the append (`_closed` — including the teardown bypass arriving
+            // after Stop set it, which is the flush's defined degraded outcome). Nothing reached the
+            // core either way, so no delivery callback fires (M11/P3.1 D5) — the same outcome, and
+            // the same exception, the pre-queue slow path produced.
             submission.Completion.TrySetException(exception);
         }
     }
@@ -549,38 +651,41 @@ internal sealed class SendAccumulator
 
     /// <summary>
     /// Settles every submission still queued for capacity, faulting each exactly once. Called by
-    /// <see cref="Stop"/> after <c>_closed</c> is set, and by the batch thread's failure handler.
+    /// <see cref="Stop"/> after <c>_closed</c> is set — where it is the <b>terminal sweep</b> that
+    /// catches whatever the flush could not append — and by the batch thread's failure handler.
     /// </summary>
     /// <remarks>
     /// <b>Exactly once, even against a live submitter.</b> Both this and
     /// <see cref="RunSubmitterAsync"/> dequeue from the same <see cref="ConcurrentQueue{T}"/>, so
     /// each submission is taken by exactly one of them; whichever wins settles it with the same
-    /// outcome (this method's fault, or the submitter's — the cancelled gate makes
-    /// <see cref="WaitForSpaceAsync"/> throw the identical exception). The count is decremented by
-    /// the taker, so <see cref="ReleaseQueuedSlot"/> runs here too.
+    /// outcome (this method's fault, or the submitter's — after <c>_closed</c> the bypass append is
+    /// refused and <see cref="AppendQueuedAsync"/> faults it with the identical exception). The
+    /// count is decremented by the taker, so <see cref="ReleaseQueuedSlot"/> runs here too.
     /// <para>
     /// <b>Anything enqueued after this ran still settles</b>, without a second sweep — but the
     /// reason differs by caller, so it is stated per caller rather than once.
     /// <list type="bullet">
-    /// <item>From <see cref="Stop"/>: the gate is already cancelled (<c>Stop</c> cancels it before
-    /// anything else), so a late submission's wait faults immediately; and if it somehow reached a
-    /// permit, <c>_closed</c> makes <see cref="Append"/> refuse it.</item>
+    /// <item>From <see cref="Stop"/>: the queue is sealed, so <see cref="SubmitQueued"/> refuses a
+    /// late submission outright and settles it there; and anything already dequeued by the
+    /// submitter is refused by <c>_closed</c> inside <see cref="Append"/>.</item>
     /// <item>From <see cref="AbandonOnThreadFailure"/>: that path deliberately does <em>not</em>
-    /// cancel the gate, so the first clause does not hold there and the <c>_closed</c> refusal is
-    /// the whole guarantee — a late submission settles once a permit becomes free, which on that
-    /// path it does (the abandoned chain's permits are released immediately after this sweep).
-    /// Making the settlement independent of permit availability is exactly what M11/P3.2 §F5's
-    /// unconditional <c>_spaceGate.Cancel()</c> would do, and it is deliberately its own
-    /// slice.</item>
+    /// cancel the gate or seal the queue, so neither clause above holds there and the <c>_closed</c>
+    /// refusal is the whole guarantee — a late submission settles once a permit becomes free, which
+    /// on that path it does (the abandoned chain's permits are released immediately after this
+    /// sweep). Making the settlement independent of permit availability is exactly what
+    /// M11/P3.2 §F5's unconditional <c>_spaceGate.Cancel()</c> would do, and it is deliberately its
+    /// own slice.</item>
     /// </list>
     /// This sweep is what makes the queue <em>empty when <see cref="Stop"/> returns</em> rather
     /// than eventually.
     /// </para>
     /// <para>
-    /// <b>Faulting is this slice's semantics, deliberately.</b> The anchor still <em>sends</em> a
-    /// record whose caller is waiting for capacity, because it appended before waiting
-    /// (M11/P3.2 §F2); turning this fault into a send is an observable teardown change and is
-    /// therefore its own slice. No delivery callback fires — nothing reached the core (D5).
+    /// <b>Faulting is no longer the normal teardown outcome</b> (M11/P3.2 §F2 / slice S2).
+    /// <see cref="Stop"/> now flushes the queue into the node chain first, so a send whose caller
+    /// already returned is <em>sent</em>, as the anchor sends it. What still reaches this sweep is
+    /// the remainder: whatever the flush could not append before its share of the teardown bound
+    /// expired, and whatever the batch thread's failure handler was holding. Nothing reached the
+    /// core on either of those, so no delivery callback fires (M11/P3.1 D5).
     /// </para>
     /// </remarks>
     private void SettleQueuedSubmissions()
@@ -613,7 +718,33 @@ internal sealed class SendAccumulator
     internal void Submit(
         in SerializedProducerRecord record,
         TaskCompletionSource<RecordMetadata> completion,
-        DeliveryRegistration? delivery)
+        DeliveryRegistration? delivery) =>
+        SubmitCore(record, completion, delivery, holdsPermit: true);
+
+    /// <summary>
+    /// <see cref="Submit"/>'s body, parameterised by whether the caller is holding a backpressure
+    /// permit for this record.
+    /// </summary>
+    /// <remarks>
+    /// <b><paramref name="holdsPermit"/> is <see langword="false"/> only on the teardown bypass</b>
+    /// (M11/P3.2 §F2 — <see cref="AppendQueuedAsync"/> under a sealed queue), and it governs two
+    /// things that must move together or the bound's accounting breaks:
+    /// <list type="bullet">
+    /// <item>a refused submit gives a permit back only if one was taken — otherwise the release
+    /// would <em>create</em> a permit that no acquire matched;</item>
+    /// <item><see cref="Append"/> charges the record against <c>_accumulated</c> only if it is
+    /// permit-backed. <c>_accumulated</c> exists solely to tell the batch thread how many permits
+    /// to hand back when it takes the chain (<see cref="TakeChainLocked"/>), so counting a bypassed
+    /// record there would over-release the <see cref="SemaphoreSlim"/> —
+    /// a <see cref="SemaphoreFullException"/> on the batch thread, i.e. the very failure
+    /// <see cref="AbandonOnThreadFailure"/> exists to survive, triggered by teardown itself.</item>
+    /// </list>
+    /// </remarks>
+    private void SubmitCore(
+        in SerializedProducerRecord record,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery,
+        bool holdsPermit)
     {
         MemoryHandle keyPin = default;
         MemoryHandle valuePin = default;
@@ -629,7 +760,7 @@ internal sealed class SendAccumulator
             valuePin = ProducerSendBatchMarshal.PinIfNeeded(record.Value);
             topicPin = _topics.Rent(record.Topic);
 
-            Append(record, topicPin, keyPin, valuePin, completion, delivery);
+            Append(record, topicPin, keyPin, valuePin, completion, delivery, holdsPermit);
             appended = true;
         }
         finally
@@ -641,7 +772,10 @@ internal sealed class SendAccumulator
                 topicPin.Release();
                 valuePin.Dispose();
                 keyPin.Dispose();
-                ReleaseSpace(1);
+                if (holdsPermit)
+                {
+                    ReleaseSpace(1);
+                }
             }
         }
     }
@@ -652,6 +786,17 @@ internal sealed class SendAccumulator
     /// will release each exactly once after the record's <c>send_batch</c>; if this throws, it owns
     /// none of them and the caller must release them.
     /// </summary>
+    /// <param name="record">The record whose blittable slot is filled here.</param>
+    /// <param name="topicPin">The interned topic pin ownership transfers with.</param>
+    /// <param name="keyPin">The key buffer's pin ownership transfers with.</param>
+    /// <param name="valuePin">The value buffer's pin ownership transfers with.</param>
+    /// <param name="completion">The record's awaiter.</param>
+    /// <param name="delivery">The record's delivery-callback carrier, or <see langword="null"/>.</param>
+    /// <param name="chargedToBound">
+    /// Whether this record holds a backpressure permit, and so must be counted in
+    /// <c>_accumulated</c> for the batch thread to release. <see langword="false"/> only for the
+    /// teardown bypass — see <see cref="SubmitCore"/>.
+    /// </param>
     /// <exception cref="ObjectDisposedException">The producer is closing — nothing was appended.</exception>
     private void Append(
         in SerializedProducerRecord record,
@@ -659,7 +804,8 @@ internal sealed class SendAccumulator
         MemoryHandle keyPin,
         MemoryHandle valuePin,
         TaskCompletionSource<RecordMetadata> completion,
-        DeliveryRegistration? delivery)
+        DeliveryRegistration? delivery,
+        bool chargedToBound)
     {
         lock (_gate)
         {
@@ -714,7 +860,14 @@ internal sealed class SendAccumulator
             tail.Completions[slot] = completion;
             tail.Deliveries[slot] = delivery;
             tail.Count = slot + 1;
-            _accumulated++;
+
+            // Permit accounting only — see the chargedToBound parameter. A teardown-bypassed
+            // record is in the chain and will be sent, but it never took a permit, so counting it
+            // here would make TakeChainLocked over-release the bound.
+            if (chargedToBound)
+            {
+                _accumulated++;
+            }
 
             // Early wake at the threshold (anchor :825-827). Below it the batch thread is purely
             // timer-driven, which is what makes the sub-threshold delay 0..window uniform.
@@ -890,18 +1043,52 @@ internal sealed class SendAccumulator
     }
 
     /// <summary>
-    /// Teardown steps 2–4 of the §3.8 handshake: cancel the backpressure gate, close the
-    /// accumulator to new appends, settle every submission still queued for capacity, wake the
-    /// batch thread, and wait — <b>bounded</b> — for it to finish its final drain and exit.
-    /// Idempotent.
+    /// Teardown steps 2–4 of the §3.8 handshake: seal the submission queue and cancel the
+    /// backpressure gate, <b>flush every queued submission into the node chain</b>, close the
+    /// accumulator to new appends, settle whatever the flush could not take, wake the batch thread,
+    /// and wait — <b>bounded</b> — for it to finish its final drain and exit. Idempotent.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>The four steps, and why they are in this order</b> (M11/P3.2 §F2(c)). This sits inside
+    /// §3.8's handshake, between its step 2 and step 3, so the accumulator drain still completes
+    /// <em>before</em> <see cref="SendCompletionPump.CloseGate"/> — see
+    /// <c>NativeProducer.StopAccumulator</c>'s remarks for why that ordering is load-bearing; the
+    /// flush added below happens strictly inside this method and so cannot move it.
+    /// <list type="number">
+    /// <item><b>Seal the queue</b> (<see cref="_queueSealed"/>) and cancel the backpressure gate.
+    /// The seal stops new submissions, which is what makes step 2's wait monotone; the cancel
+    /// releases whichever submission is parked on a permit so it can take the bypass. The seal is
+    /// set <em>before</em> the cancel, so the waiter it wakes observes it.</item>
+    /// <item><b>Flush the queue into the chain</b>, bypassing the bound — the submitter appends
+    /// each queued submission with no permit (<see cref="AppendQueuedAsync"/>), and this waits for
+    /// <c>_queued</c> to reach zero. The <em>submitter</em> does the appending, not this thread:
+    /// keeping the single-appender invariant is what preserves S1's call-order property through
+    /// teardown, and it is also the only way the submission already dequeued and parked on the gate
+    /// is included.</item>
+    /// <item><b><c>_closed = true</c> + pulse.</b> Strictly after the flush, because <c>_closed</c>
+    /// is what tells the batch thread the chain it takes next is its <em>final</em> one — set it
+    /// first and the thread can take an empty chain and exit before the flush's appends land,
+    /// stranding them.</item>
+    /// <item><b>Bounded join</b> — unchanged, except that it shares one deadline with step 2 (see
+    /// below).</item>
+    /// </list>
+    /// </para>
     /// <para>
     /// <b>Why the wait is bounded, and what expiry means.</b> The batch thread can be stuck for a
     /// long time inside <c>send_batch</c>: that call takes the core's coarse producer mutex and can
     /// block on a full <c>buffer.memory</c> for up to <c>max.block.ms</c> (default 60 s), for a whole
     /// chunk of records rather than one (§3.6). An unbounded join would make <c>Dispose</c> inherit
     /// that, and the §6.3 re-enumeration asks for a defined outcome instead of a hang.
+    /// </para>
+    /// <para>
+    /// <b>The flush and the join share ONE deadline, deliberately.</b> <paramref name="timeout"/>
+    /// bounds <see cref="Stop"/> as a whole, not each stage, so adding the flush cannot push
+    /// teardown past the bound its caller already accepted. Its own expiry outcome is the
+    /// pre-S2 behaviour: <c>_closed</c> is set and <see cref="SettleQueuedSubmissions"/> faults
+    /// whatever is left, so the flush degrades to a fault rather than to a hang. In the steady
+    /// case the flush costs a single lock acquisition — the wait's predicate is already false —
+    /// so the join keeps effectively the whole bound.
     /// </para>
     /// <para>
     /// <b>On expiry this ABANDONS the batch thread rather than tearing its state down, deliberately.</b>
@@ -925,31 +1112,110 @@ internal sealed class SendAccumulator
     /// holds), which is why <see cref="PinnedTopicCache"/> keeps its finalizer as the fallback.
     /// </para>
     /// </remarks>
-    /// <param name="timeout">How long to wait for the batch thread's final drain.</param>
+    /// <param name="timeout">
+    /// How long to wait for the submission-queue flush and the batch thread's final drain,
+    /// <b>together</b>.
+    /// </param>
     /// <returns>
     /// <see langword="true"/> if the batch thread finished and exited; <see langword="false"/> if it
     /// was abandoned still running.
     /// </returns>
     internal bool Stop(TimeSpan timeout)
     {
-        // §3.8 step 2 BEFORE step 3: cancel the backpressure gate first, so a Send parked on a
-        // permit is released rather than holding teardown behind it. It is the one place this design
-        // is strictly better than the inline send it replaces, where a caller blocked in the core
-        // could not be woken by a concurrent close at all (§2.2 / §4.6).
+        long deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * timeout.TotalSeconds);
+
+        // Step 1. Seal the queue: no new submission joins it, and the ones in it are appended
+        // rather than faulted. Read _closed under the SAME acquisition, because an accumulator that
+        // is already closed has no chain to flush into — the batch thread's failure handler got
+        // there first, or a previous Stop did — and the flush would then just wait for the bypass
+        // appends to be refused one by one.
+        bool flush;
+        lock (_gate)
+        {
+            _queueSealed = true;
+            flush = !_closed;
+        }
+
+        // §3.8 step 2 BEFORE step 3: cancel the backpressure gate, so a Send parked on a permit is
+        // released rather than holding teardown behind it. It is the one place this design is
+        // strictly better than the inline send it replaces, where a caller blocked in the core
+        // could not be woken by a concurrent close at all (§2.2 / §4.6). AFTER the seal, so the
+        // submission it wakes takes the bypass instead of faulting.
+        //
+        // ⚠ This is the ONLY _spaceGate.Cancel() call site. AbandonOnThreadFailure deliberately
+        // does not cancel (M11/P3.2 §F5 is its own slice) — and it must not start, or a submission
+        // it releases would take the bypass into an accumulator whose thread is already gone.
         _spaceGate.Cancel();
 
+        if (flush)
+        {
+            // Step 2. The submitter appends everything queued, bypassing the bound; wait for it.
+            // EnsureSubmitterRunning covers the window where a caller had enqueued but not yet
+            // started the loop, so progress does not depend on that caller's next instruction.
+            EnsureSubmitterRunning();
+            FlushQueuedSubmissions(deadline);
+        }
+
+        // Step 3. Only now: the chain the batch thread takes next is its final one.
         lock (_gate)
         {
             _closed = true;
             Monitor.PulseAll(_gate);
         }
 
-        // Settle the submission queue AFTER _closed, so nothing this sweep misses can still be
-        // appended, and BEFORE the join, so Stop returns with the queue empty rather than relying
-        // on a thread-pool continuation to get there (M11/P3.2 §3.4 item 3).
+        // The terminal sweep, AFTER _closed so nothing it misses can still be appended, and BEFORE
+        // the join so Stop returns with the queue empty rather than relying on a thread-pool
+        // continuation to get there (M11/P3.2 §3.4 item 3). After a completed flush it is a no-op;
+        // it is what makes the flush's expiry a fault rather than a hang.
         SettleQueuedSubmissions();
 
-        return _thread.Join(timeout);
+        // Step 4. The bounded join, on whatever is left of the one shared deadline.
+        return _thread.Join(RemainingMilliseconds(deadline));
+    }
+
+    /// <summary>
+    /// Waits — bounded by <paramref name="deadline"/> — for every queued submission to be appended
+    /// (bypassing the bound) or otherwise settled, i.e. for <c>_queued</c> to reach zero.
+    /// </summary>
+    /// <remarks>
+    /// <b>It terminates for two independent reasons</b>, and both are needed. The count is
+    /// monotonically decreasing, because <see cref="Stop"/> sealed the queue under
+    /// <see cref="_gate"/> before calling this and <see cref="SubmitQueued"/> checks the seal under
+    /// the same lock — so a caller still hammering <c>Send</c> cannot keep the predicate false. And
+    /// the wait itself is bounded, so even a submitter that never gets scheduled costs at most the
+    /// remainder of <see cref="Stop"/>'s own budget.
+    /// <para>
+    /// The wake comes from <see cref="ReleaseQueuedSlot"/>'s pulse as each submission settles.
+    /// <see cref="Monitor.Wait(object, int)"/> releases <see cref="_gate"/> while it waits, so the
+    /// submitter can take it for its appends — this cannot deadlock against the submitter or the
+    /// batch thread.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>This is a blocking wait on work that runs on the thread pool</b> — the submitter is a
+    /// <see cref="Task.Run(Func{Task})"/> loop, not a thread (ffi §A1's two-thread cap) — so on a
+    /// saturated pool it can wait without the submitter being scheduled. The <b>bound is what makes
+    /// that safe</b>, and is the reason it is not optional here: the worst case degrades to the
+    /// pre-flush behaviour (the terminal sweep faults the remainder) rather than to a stalled
+    /// teardown. Draining the queue from <em>this</em> thread instead would remove the dependency
+    /// but break the single-appender invariant S1's call-order property rests on, and would still
+    /// not reach the submission already dequeued and parked on the gate.
+    /// </para>
+    /// </remarks>
+    private void FlushQueuedSubmissions(long deadline)
+    {
+        lock (_gate)
+        {
+            while (Volatile.Read(ref _queued) != 0)
+            {
+                int remainingMs = RemainingMilliseconds(deadline);
+                if (remainingMs <= 0)
+                {
+                    return;
+                }
+
+                Monitor.Wait(_gate, remainingMs);
+            }
+        }
     }
 
     private void RunLoop()
@@ -1011,6 +1277,11 @@ internal sealed class SendAccumulator
         // already parked in WaitForSpaceAsync is released by the ReleaseSpace below when the
         // abandoned chain frees capacity — the one path where that arithmetic is load-bearing
         // rather than incidental (M11/P3.2 §F5 makes it unconditional; that is its own slice).
+        //
+        // Faulting stays right even when this races Stop's teardown flush: _closed is set above,
+        // so a bypass append (M11/P3.2 §F2) is refused and AppendQueuedAsync faults the submission
+        // with the same exception. Appending here instead would strand the record — the thread that
+        // would have drained it is the one that just died.
         SettleQueuedSubmissions();
 
         try

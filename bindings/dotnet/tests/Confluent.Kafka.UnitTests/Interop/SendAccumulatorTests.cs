@@ -766,22 +766,31 @@ public sealed class SendAccumulatorTests
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000, maxAccumulatedRecords: 2, batchWindowMs: 60_000, batchChunk: 1100));
 
-        _ = harness.Append(2);
+        Task<RecordMetadata>[] filled = harness.Append(2);
         Task<RecordMetadata> blocked = harness.AppendOne(0xF2);
         Assert.False(blocked.IsCompleted);
 
         // Teardown must return rather than hang behind the parked sender...
-        TestTimeout.Run(harness.Dispose, TimeSpan.FromSeconds(10));
+        TestTimeout.Run(
+            () => Assert.True(
+                harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+                "the batch thread did not exit"),
+            TimeSpan.FromSeconds(20));
 
-        // ...and the parked send must SETTLE (faulted — it never reached the core), not hang.
+        // ...and since M11/P3.2 slice S2 the parked send is SENT, not faulted: the cancelled gate
+        // releases it into the teardown bypass, which appends it without a permit, and the batch
+        // thread's final drain hands it to the core. Whichever of the two racing paths released it
+        // (the cancel, or a final-drain permit release letting it through normally) the outcome is
+        // now the same one, which is why this no longer has to avoid asserting an outcome.
         //
-        // Either of two racing paths can settle it, and both are the same observable outcome: the
-        // cancelled gate releases the waiter directly, or the final drain's permit release lets it
-        // through and the now-closed accumulator refuses the append. Asserting one specific message
-        // would be asserting which side of that race won, which is not a contract.
-        ObjectDisposedException failure = await Assert.ThrowsAsync<ObjectDisposedException>(
-            () => TestTimeout.Run(() => blocked, TimeSpan.FromSeconds(10)));
-        Assert.Contains(nameof(NativeProducer), failure.Message, StringComparison.Ordinal);
+        // Awaited BEFORE the harness's own Dispose, which stops the completion pump — a future
+        // still queued there when it stops is faulted by the terminal drain (recorded residual 2).
+        await TestTimeout.Run(() => blocked, TimeSpan.FromSeconds(10));
+        await TestTimeout.Run(() => Task.WhenAll(filled), TimeSpan.FromSeconds(10));
+        Assert.Equal(3, harness.Accumulator.SendBatchRecordCount);
+        Assert.Equal(3, harness.HistoryCount);
+
+        TestTimeout.Run(harness.Dispose, TimeSpan.FromSeconds(10));
     }
 
     // ----------------------------------------------------- submission order (M11/P3.2 §F1) ----
@@ -826,11 +835,20 @@ public sealed class SendAccumulatorTests
         Assert.False(firstQueued.IsCompleted);
         Assert.False(secondQueued.IsCompleted);
 
+        // Teardown FLUSHES both into the chain rather than faulting them (M11/P3.2 §F2 / slice S2),
+        // bypassing the frozen bound exactly as the anchor's already-accumulated record bypasses
+        // it — so they are sent and complete successfully. Their order is asserted by the frozen
+        // half above (nothing appended while queued); that they arrive at all is asserted here.
+        //
+        // Stop rather than Dispose, and the awaits BEFORE Dispose: the accumulator's teardown is
+        // the step under test, and the records' futures resolve on a pump the harness's Dispose
+        // would stop, whose terminal drain faults whatever it still holds (recorded residual 2).
+        Assert.True(frozen.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+        Assert.Equal(2, frozen.Accumulator.SendBatchRecordCount);
+        Assert.Equal(2, frozen.HistoryCount);
+        await TestTimeout.Run(() => firstQueued, s_deadline);
+        await TestTimeout.Run(() => secondQueued, s_deadline);
         frozen.Dispose();
-        await Assert.ThrowsAsync<ObjectDisposedException>(
-            () => TestTimeout.Run(() => firstQueued, s_deadline));
-        await Assert.ThrowsAsync<ObjectDisposedException>(
-            () => TestTimeout.Run(() => secondQueued, s_deadline));
 
         // ---- part (ii): stress. The interleaving that produced the bug — a saturating burst on ONE
         // thread, with permits being freed underneath it — and the observed order must equal the
@@ -1028,35 +1046,46 @@ public sealed class SendAccumulatorTests
             drain.IsCompleted,
             "the async drain reported idle while three sends were still queued for capacity");
 
-        // Teardown settles the queue, which is also what releases the drain — it resolves rather
-        // than hanging forever once the second stage empties.
+        // Teardown empties the queue, which is also what releases the drain — it resolves rather
+        // than hanging forever once the second stage empties. Since M11/P3.2 slice S2 it empties by
+        // FLUSHING the three into the chain (bypassing the frozen bound) rather than by faulting
+        // them, so the drain now resolves on genuine idle: the flush appends, the final take sends,
+        // and only then is the chain empty with nothing queued.
         Assert.True(frozen.Accumulator.Stop(s_deadline), "the batch thread did not exit");
         await TestTimeout.Run(() => drain, s_deadline);
         Assert.Equal(0, frozen.Accumulator.QueuedSubmissionCount);
-        Assert.Equal(0, frozen.HistoryCount);
+        Assert.Equal(3, frozen.HistoryCount);
 
-        frozen.Dispose();
         foreach (Task<RecordMetadata> send in stuck)
         {
-            await Assert.ThrowsAsync<ObjectDisposedException>(
-                () => TestTimeout.Run(() => send, s_deadline));
+            await TestTimeout.Run(() => send, s_deadline);
         }
+
+        frozen.Dispose();
     }
 
     [Fact]
-    public async Task Teardown_SettlesEverySubmissionStillQueuedForSpace()
+    public async Task Teardown_WhoseQueueFlushExpires_StillSettlesEverySubmissionExactlyOnce()
     {
         // M11/P3.2 §3.4 item 3: nothing may be left holding an unsettled TaskCompletionSource.
-        // In THIS slice a queued submission is FAULTED at teardown — today's semantics, kept
-        // deliberately: the anchor still *sends* such a record because it appended before waiting
-        // (§F2), and turning this fault into a send is an observable teardown change, so it is its
-        // own slice and must stay separable from the ordering fix.
+        // Slice S2 made the NORMAL teardown outcome a send (see
+        // Close_CompletesASendThatWasQueuedForSpace_RatherThanFaultingIt), so what this test now
+        // guards is the flush's DEFINED DEGRADED OUTCOME: when the flush gets no budget, every
+        // queued submission is still settled exactly once — faulted, nothing reaching the core, no
+        // delivery notification owed — rather than stranded. That is the property the bound exists
+        // to buy, and without a test for it the expiry branch is unobserved.
+        //
+        // Both injections are needed to make it deterministic. The frozen bound (see part (i) of
+        // the ordering test) keeps the submissions queued rather than appended; the stalled
+        // submitter keeps them there THROUGH teardown, so the cancelled gate cannot let one slip
+        // into a bypass append before _closed is set. Without the stall the submission the
+        // submitter had already dequeued would be sent or faulted depending on that race, which is
+        // not a contract to assert either way.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
 
-        // Frozen bound (see part (i) of the ordering test): the submissions cannot be released by a
-        // drain, so teardown is the only thing that can settle them.
         harness.ConsumePermits(4);
+        harness.StallTheSubmitter();
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         Task<RecordMetadata>[] sends = new Task<RecordMetadata>[3];
@@ -1071,17 +1100,16 @@ public sealed class SendAccumulatorTests
         // Nothing is pinned while queued: pins live only in a node's slots, and there is no node.
         Assert.Equal(0, harness.PendingCount());
 
-        Assert.True(harness.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+        // A zero bound leaves the flush no budget at all, so it expires immediately. The return
+        // value is deliberately NOT asserted: the join also gets zero, and with an empty chain the
+        // batch thread can wake on the _closed pulse and exit while the terminal sweep is still
+        // running, so either answer is legitimate here. What the flush's expiry means is asserted
+        // below, on the submissions themselves.
+        _ = harness.Accumulator.Stop(TimeSpan.Zero);
 
-        // The accounting must return to zero. Not asserted synchronously: Stop's sweep empties the
-        // QUEUE, but one submission has already been dequeued by the submitter and is parked on the
-        // backpressure gate — Stop's cancel of that gate is what settles it, on the submitter's own
-        // task. Both are counted as "queued-or-appending", so the count reaching zero is the check
-        // that every submission was accounted out exactly once, by whichever side took it.
-        await PollUntil(
-            () => harness.Accumulator.QueuedSubmissionCount == 0,
-            TimeSpan.FromSeconds(10),
-            "a queued submission was never accounted out of the queued-or-appending count");
+        // Asserted synchronously: with the submitter stalled, Stop's own terminal sweep is the only
+        // thing that can settle these, so the count is zero by the time it returns.
+        Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
 
         foreach (Task<RecordMetadata> send in sends)
         {
@@ -1095,6 +1123,179 @@ public sealed class SendAccumulatorTests
         await Task.Delay(TimeSpan.FromMilliseconds(250));
         Assert.Equal(0, callback.Count);
         Assert.Equal(0, harness.HistoryCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchRecordCount);
+
+        // And the SEAL, which is what makes the flush wait terminate at all: a send arriving after
+        // teardown sealed the queue is refused by SubmitQueued and settled there. With the
+        // submitter stalled nothing else in the system can settle it, so this assertion is the
+        // seal's own witness — drop the seal check and the task below is never completed.
+        Task<RecordMetadata> afterTheSeal = harness.AppendOne(0xCF);
+        Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => afterTheSeal, TimeSpan.FromSeconds(10)));
+
+        harness.Dispose();
+    }
+
+    [Fact]
+    public async Task Close_CompletesASendThatWasQueuedForSpace_RatherThanFaultingIt()
+    {
+        // ⚠ THE F2 REGRESSION TEST (M11/P3.2 slice S2). Before this slice, Stop cancelled the
+        // backpressure gate and every submission still queued for capacity was FAULTED with an
+        // ObjectDisposedException — the record never reached the core at all, although its Send had
+        // already returned to the caller. The anchor keeps that record: py_Producer_send appends
+        // unconditionally BEFORE any waiting (_confluentkafka.c:819-822, counter :823, `full` only
+        // at :830), so on close it is already accumulated and py_Producer_shutdown's final
+        // take-and-send ships it (closed=1 at :962, waiters taken :966, send thread signalled :967,
+        // joined :969, waiters fired :972; py_Producer_on_space_available reports "available" the
+        // moment closed is set, :857-861, so a waiter never parks through a close).
+        //
+        // ⚠ Python's version of this guarantee is almost unconditional, not unconditional:
+        // Producer_send_thread re-tests !closed at :529 OUTSIDE record_batches_mutex, so a record
+        // appended in the narrow gap between its mtx_unlock (:577/:638) and that re-test is never
+        // sent and never completed. So .NET now completes it "as Python does on every path except
+        // one narrow race Python leaves open" — Python-aligned AND strictly better.
+        //
+        // Three assertions, because any one alone passes on a wrong implementation: the record
+        // reaches the core (a fault would not), its Task completes successfully (an appended record
+        // whose awaiter was already faulted would not), and its delivery callback fires EXACTLY
+        // once (a count, not "it ran" — exactly-once is what appending-after-faulting breaks).
+        //
+        // ⚠ No assertion on an exception message anywhere here: a faulted teardown send and an
+        // accepted-residual send carry the identical ObjectDisposedException text containing
+        // "closed", so no message can tell them apart (STATUS.md:20).
+        const int Queued = 3;
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+
+        // Frozen bound: the permits are consumed with nothing accumulated, so no drain can ever
+        // free capacity and these submissions stay queued until teardown. That also makes the
+        // bypass's permit accounting observable — a bypass append that charged itself against the
+        // bound would make the batch thread over-release and die with a SemaphoreFullException.
+        harness.ConsumePermits(4);
+
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Queued];
+        for (int i = 0; i < Queued; i++)
+        {
+            sends[i] = harness.AppendOne((byte)(0xE0 + i), callback);
+        }
+
+        Assert.Equal(Queued, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(0, harness.HistoryCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // Teardown flushes the queue into the chain, then closes, then joins — so the batch thread
+        // reports as drained rather than abandoned.
+        Assert.True(harness.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+
+        // (1) The records reached the core. Asserted SYNCHRONOUSLY after Stop returns: the flush
+        // and the final drain both completed inside it, which is the ordering under test.
+        Assert.Equal(Queued, harness.HistoryCount);
+        Assert.Equal(Queued, harness.Accumulator.SendBatchRecordCount);
+        Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
+
+        // (2) Every Task completed SUCCESSFULLY. This is the assertion the restored fault path
+        // fails on.
+        foreach (Task<RecordMetadata> send in sends)
+        {
+            // The guard first (so a never-settled send fails fast rather than hanging), then the
+            // already-resolved await for the value.
+            await TestTimeout.Run(() => send, s_deadline);
+            RecordMetadata metadata = await send;
+            Assert.Equal(Topic, metadata.Topic);
+        }
+
+        // (3) Exactly one delivery notification per record, and it came from the pump's success
+        // path rather than from a fault. Asserted after a settle window, since a first observation
+        // of three cannot rule out a fourth arriving late.
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.Equal(Queued, callback.Count);
+        Assert.Null(callback.LastException);
+        Assert.Equal(Queued, harness.DrainedSendCount);
+
+        harness.Dispose();
+    }
+
+    [Fact]
+    public async Task Close_WithQueuedSubmissions_DoesNotExceedTheBoundedTeardownWait()
+    {
+        // M11/P3.2 §F2(c) — the flush must not turn Stop's bounded wait into an unbounded one, and
+        // must not push the join past its bound either. The bound is ONE budget for both stages
+        // (P3.1 §6.3: bounded waits with a stated expiry outcome, never a hang), so this asserts
+        // the TOTAL, which is the only thing a caller can observe.
+        //
+        // Two injections, and each makes one stage consume its share:
+        //   * the stalled submitter means nothing can drain the submission queue, so the flush wait
+        //     runs to its deadline instead of returning at once;
+        //   * the parked batch thread (the delivery-callback park, the same lever
+        //     Flush_WhenTheAccumulatorDrainExpires_… uses) means the join cannot succeed either.
+        // With one shared deadline the total is ~Bound. Give each stage its own Bound instead and
+        // it becomes ~2x; make the flush wait unbounded and it never returns — which is why the
+        // whole call is run under a hard timeout that FAILS rather than hangs.
+        TimeSpan bound = TimeSpan.FromSeconds(2);
+
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+        Task<RecordMetadata>? parked = null;
+        Task<RecordMetadata>? queued = null;
+        try
+        {
+            // Closing the CORE producer makes send_batch reject every record per index, and
+            // CompleteNode fires the delivery callback for such a record ON THE BATCH THREAD — the
+            // accumulator's only call-out into user code, and so the only broker-free lever on that
+            // thread's progress.
+            harness.CloseCoreProducer();
+            parked = harness.AppendOne(0x01, new BlockingDeliveryCallback(entered, release));
+            harness.ForceDrainWithoutWaiting();
+            Assert.True(
+                entered.Wait(s_deadline), "the batch thread never entered the delivery callback");
+
+            // The drain above returned this record's permit before parking, so re-consume the
+            // whole bound: the submission below must have no permit and must therefore queue.
+            harness.ConsumePermits(4);
+            harness.StallTheSubmitter();
+
+            queued = harness.AppendOne(0x02);
+            Assert.Equal(1, harness.Accumulator.QueuedSubmissionCount);
+
+            bool drained = true;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            TestTimeout.Run(
+                () => drained = harness.Accumulator.Stop(bound), TimeSpan.FromSeconds(20));
+            elapsed.Stop();
+
+            Assert.False(drained, "the parked batch thread cannot have exited");
+            Assert.True(
+                elapsed.Elapsed < TimeSpan.FromSeconds(3),
+                $"teardown took {elapsed.Elapsed} against a {bound} bound — the flush and the " +
+                "join are not sharing one deadline");
+
+            // The degraded outcome, and the reason expiry is not a leak: the terminal sweep settled
+            // the submission the flush could not append, and nothing it settled reached the core.
+            Assert.Equal(0, harness.Accumulator.QueuedSubmissionCount);
+            Assert.True(queued.IsCompleted, "the queued submission was left unsettled");
+            Assert.Equal(0, harness.HistoryCount);
+        }
+        finally
+        {
+            // Always release: the parked batch thread would otherwise hold the harness's own
+            // teardown, and the event it waits on is disposed on the way out of this method.
+            release.Set();
+        }
+
+        // Observed out here rather than in the finally so they can be awaited (xUnit1031 forbids
+        // blocking on them). The parked record was rejected by the closed core; the queued one is
+        // the flush's degraded fault.
+        Assert.NotNull(parked);
+        await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => parked!, s_deadline));
+        Assert.NotNull(queued);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => queued!, s_deadline));
 
         harness.Dispose();
     }
@@ -1463,6 +1664,45 @@ public sealed class SendAccumulatorTests
             DeliveryRegistration?[] truncated = new DeliveryRegistration?[keep];
             Array.Copy(full, truncated, keep);
             deliveries.SetValue(node, truncated);
+        }
+
+        /// <summary>
+        /// <b>The injection for a submitter that cannot make progress</b> (M11/P3.2 slice S2):
+        /// takes the accumulator's exclusive submitter token without starting a loop, so
+        /// <c>EnsureSubmitterRunning</c>'s 0 → 1 CAS fails forever and nothing ever dequeues a
+        /// queued submission.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <b>Why it needs an injection at all.</b> The submitter is deliberately a thread-pool
+        /// loop rather than a thread (ffi §A1's two-thread cap), so there is no production state
+        /// that stalls it — starving it would mean starving the whole pool, which is process-wide
+        /// and would be observed by every concurrently-running test class. This is the same
+        /// warrant <see cref="TruncateDeliveriesOfPendingNode"/> has: the state is private to
+        /// <see cref="SendAccumulator"/>, no production path can produce it, and producing it
+        /// <em>is</em> the injected fault.
+        /// </para>
+        /// <para>
+        /// <b>What it buys.</b> It makes <see cref="Stop"/>'s queue-flush expiry deterministic —
+        /// both the expiry's own settlement contract and the fact that the flush and the join share
+        /// one deadline. Neither is observable while the submitter drains the queue in microseconds.
+        /// </para>
+        /// <para>
+        /// <b>Caller's contract:</b> call it before any submission is queued, so no loop is running
+        /// and the token is genuinely free. It is never released — the accumulator is torn down
+        /// with the harness.
+        /// </para>
+        /// </remarks>
+        internal void StallTheSubmitter()
+        {
+            FieldInfo running = typeof(SendAccumulator).GetField(
+                "_submitterRunning", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException(
+                    "SendAccumulator no longer exposes a _submitterRunning token — this injection " +
+                    "needs to be re-derived against the new shape rather than silently skipped.");
+
+            Assert.Equal(0, (int)running.GetValue(Accumulator)!);
+            running.SetValue(Accumulator, 1);
         }
 
         /// <summary>The single node the accumulator is currently filling.</summary>
