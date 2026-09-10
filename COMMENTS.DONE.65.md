@@ -24,7 +24,15 @@ tests green; timing-sensitive twins stable over repeated runs.
 
 Judged minor and done directly without an Actor/Critic pass; the Critic-style
 checks (sweep of every `self.c_producer` use, teeth check, full suite) were run by
-hand. Not covered, by design: the check-then-act window between the closed check
-and the C call when another thread closes concurrently (the same window Java has
-for every op; no assertable outcome), `flush()` from a delivery callback during
-`close()`, and `close()` failing midway.
+hand. Two more cases were added afterwards as tests: `flush()` from a delivery
+callback while `close()` runs (the callback fires during close with the closed
+flag already set, so the flush raises at once instead of re-entering the FFI), and
+`close()` failing midway (flag set first, guarded entry points still refuse; the
+never-freed struct is pre-existing `close()` behaviour, not asserted).
+
+Not covered, by design: the check-then-act window between the closed check and
+the C call when another thread closes concurrently. Java's version of that race is
+harmless (GC keeps the closed object alive); Python's frees the struct. Closing it
+needs a lock around check-plus-FFI-call in the threaded `Producer` (the async
+class is immune: check and call happen in one event-loop step) — a small design
+change to track separately, not a test.

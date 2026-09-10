@@ -313,6 +313,69 @@ def test_close_with_send_in_flight():
     assert p.closed
 
 
+def test_flush_from_delivery_callback_during_close_raises_closed():
+    # A delivery callback that fires while close() is running (the C close path
+    # completes in-flight records before joining) must see the closed flag
+    # already set -- close() sets it before shutdown -- so a flush() from inside
+    # the callback raises the closed RuntimeError at once instead of re-entering
+    # the FFI on a producer being torn down. close() runs on a helper thread so
+    # a regression (flag set too late -> reentrant flush -> hang) fails the join
+    # instead of hanging the run.
+    p = MockProducer(auto_complete=False)
+    seen = []
+    fired = threading.Event()
+
+    def on_delivery(_metadata, _exc):
+        was_closed = p.closed
+        try:
+            p.flush()
+            seen.append(("flush returned", was_closed))
+        except Exception as e:  # noqa: BLE001
+            seen.append((e, was_closed))
+        fired.set()
+
+    p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+    time.sleep(BATCH_DISPATCH)  # record is in flight at close time
+
+    closer = threading.Thread(target=p.close, daemon=True)
+    closer.start()
+    closer.join(timeout=FUTURE_TIMEOUT)
+    assert not closer.is_alive(), "close() must not hang on a callback that flushes"
+    assert fired.wait(timeout=FUTURE_TIMEOUT), "delivery callback must still fire"
+    assert len(seen) == 1, f"delivery callback must fire exactly once: {seen}"
+    outcome, was_closed = seen[0]
+    assert was_closed is True, "closed flag must be set before in-flight records complete"
+    assert isinstance(outcome, RuntimeError) and "closed" in str(outcome).lower(), seen
+
+
+def test_close_failure_midway_keeps_producer_closed(monkeypatch):
+    # If the Rust close step raises, close() propagates it after the C send
+    # threads were shut down but before the C struct is freed. The closed flag
+    # was set first, so every guarded entry point still refuses to touch the
+    # live-but-half-closed C producer. (The struct is then never freed through
+    # the API -- pre-existing close() behaviour, not asserted here; the test
+    # frees it by hand to stay tidy.)
+    p = MockProducer(auto_complete=True)
+    p.send(ProducerRecord("test-topic", b"v")).result(timeout=FUTURE_TIMEOUT)
+
+    def failing_close(_ptr, _cb):
+        raise RuntimeError("simulated close failure")
+
+    monkeypatch.setattr(_lib, "Producer_close_async", failing_close)
+    try:
+        with pytest.raises(RuntimeError, match="simulated close failure"):
+            p.close()
+        assert p.closed
+        with pytest.raises(RuntimeError, match="closed"):
+            p.flush()
+        with pytest.raises(RuntimeError, match="closed"):
+            p.partitions_for("test-topic")
+        with pytest.raises(RuntimeError, match="closed"):
+            p.history_count()
+    finally:
+        _lib.Producer_destroy(p.c_producer)  # shutdown already ran; free the struct
+
+
 # -- Mock operations ----------------------------------------------------------
 
 def test_history_count():
