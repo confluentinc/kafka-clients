@@ -52,12 +52,11 @@ inline on the caller's thread, where `linger.ms` remains the only delay — a
 deliberate, twice-decided asymmetry (M11/P3.2 **DV-6**).
 
 **One difference carries through this whole document: "untunable" is Python's
-property, not .NET's.** Where stage 1 is called hardcoded or untunable below (the
-diagram above, "The headline", and Observation 2), that is true of the anchor —
-its 10 ms is a bare literal at `_confluentkafka.c:535`. .NET's port named the
-constant and made it env-overridable (M11/P3.1 §3.2/§3.3), so the magnitude
-carried across but the untunability did not. See "Implications for the .NET
-binding" below for the full shipped split.
+property, not .NET's.** Wherever stage 1 is called hardcoded or untunable, that
+is true of the anchor — its 10 ms is a bare literal at `_confluentkafka.c:535`.
+.NET's port named the constant and made it env-overridable (M11/P3.1 §3.2/§3.3),
+so the magnitude carried across but the untunability did not. See "Implications
+for the .NET binding" below for the full shipped split.
 
 ## Stage 1: the binding accumulator
 
