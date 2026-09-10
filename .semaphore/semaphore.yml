@@ -33,8 +33,8 @@ name: build-test-release
 #   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   5. "Run bindings unit test (macOS)" -- verify-c (ctest) and verify-python
-#      (pytest test/unit). No container is used, so the block sets
+#   5. "Build + unit test bindings (macOS)" -- verify-c (ctest) and
+#      verify-python (pytest test/unit). No container is used, so the block sets
 #      MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
@@ -151,7 +151,7 @@ blocks:
           commands:
             - make verify-rust-macos-docker
 
-  - name: "Run bindings unit test (macOS)"
+  - name: "Build + unit test bindings (macOS)"
     # verify-c runs the C ctest suite; verify-python runs pytest test/unit. No
     # container is used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh
     # to skip Colima. The gRPC multilanguage arm runs on Linux only.
