@@ -1113,6 +1113,28 @@ D2 (2026-09-10) is the authority for the grouping half; D3 for the teardown half
 | A bounded, **non-draining** wait for the pump queue to reach empty, after `CloseGate` + flush, before `_stopping`; and its call site in `NativeProducer` teardown (S4) | The `_stopping` check's **position** in `RunLoop` — moving it after the drain is the N=51 hang (F4(c)); `Stop`'s / `CloseGate`'s own semantics |
 | — | A batch-object pool; a second pump; any push-completion engine; the `RunContinuationsAsynchronously` construction |
 
+### 8.3.1 Deferred rules deliverable — ffi §A6/§A7's residual-3(b) trigger list (raised in S3)
+
+`bindings/dotnet/.claude/rules/ffi-marshalling.md` §A6 (~`:860`) and §A7 (~`:1133`) both list
+*"the defensive bound check that precedes it"* — the `Array.Clear` — as a trigger for residual 3(b).
+**§3B.3's split makes that check unreachable by construction**, so the trigger list is one narrower.
+
+**Nothing false is asserted**: both passages state a disjunction whose first arm (a stale native
+surfacing e.g. `EntryPointNotFoundException` from the *first* batched read) still stands, and it is
+that arm they lean on for "not OOM-only". Residual 3(b) is unchanged **in kind**, and the public
+enumeration on `IDeliveryCallback` never named the bound check — so the axes needed no edit and
+S3's residual bookkeeping was complete as scoped.
+
+**Deliberately NOT fixed inside S3's fixup, on the Critic's recommendation and my agreement.** This
+phase's rule amendments go **through the plan**: §8.1 wrote the §A1 ordering amendment down as an S1
+*deliverable* before any Actor touched the file. An unplanned `.claude/rules/` edit smuggled into a
+fixup is precisely the quiet contradiction §8.3 exists to prevent, and it would be a second,
+unlegislated breach of a boundary this phase just spent a section superseding properly.
+
+**Deliverable:** one clause in each passage, mirroring the precedent sentence both already carry from
+P3.1 §12.3's removal of the *other* trigger. Schedule it with **S4/S5** or as its own docs commit.
+The only bad outcome is leaving it unrecorded — which this section prevents.
+
 ### 8.4 Provenance of the rules generally
 
 §A1/§A4/§A7 each carry a stated *Why* and a cited contract, which per the standing guidance makes
