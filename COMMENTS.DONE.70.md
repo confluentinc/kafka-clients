@@ -30,3 +30,31 @@ MockProducer / AsyncMockProducer ctors call Producer.__init__ / AsyncProducer.__
 gRPC note: the producer proto has no headers field, so the gRPC producer arm cannot
 forward headers (separate proto change); the stale grpc_translate.py comment was
 corrected. C45 records the header-value-copy boundary + the proto gap.
+
+## F1 — typed payload accessors on error classes missing — RESOLVED (8947d6c5; verified by Critic 70 round 2)
+Java's public exception getters are now exposed on 12 generated error classes via a
+`KafkaError_payload` C-ext native + `_payload.py` + a generator accessor table
+(`xtask/src/error_hierarchy.rs`). Verified present and Java-faithful:
+`NoOffsetForPartitionError.partitions()`,
+`OffsetOutOfRangeError.offset_out_of_range_partitions()` + `partitions()` (base),
+`TopicAuthorizationError.unauthorized_topics()`, `GroupAuthorizationError.group_id()`,
+`InvalidTopicError.invalid_topics()`, `ThrottlingQuotaExceededError.throttle_time_ms()`,
+`QuotaViolationError.{metric_name,metric_group,value,bound}()`,
+`RecordTooLargeError.record_too_large_partitions()`,
+`CorrelationIdMismatchError.{request,response}_correlation_id()`,
+`LogTruncationError.divergent_offsets()`, resource accessors, etc. The `.pyi` stubs
+(`common/errors/_generated.pyi`, `consumer/_generated_errors.pyi`) match the `.py`
+accessors one-for-one; `mypy --strict` clean (74 files). Tests: 16 accessor tests in
+`test_errors.py` incl. `test_no_offset_for_partition_partitions`,
+`test_offset_out_of_range_accessors`, negative-path
+`test_error_without_payload_has_no_attribute` /
+`test_real_native_plain_error_has_no_payload`. The FFI accessors were already present
+in the header; this closes the C4 deferral for the remaining payload types.
+
+## F2 — 26 consumer *_async FFI functions lacked a self-contained callback-thread rustdoc — RESOLVED (a7dea920; verified by Critic 70 round 2)
+28 of 29 consumer `*_async` rustdocs now state, self-contained, which thread the
+callback runs on (verified in `target/include/confluent_kafka.h`). The one remaining
+(`ConsumerHandle_commit_async`) is fire-and-forget with NO callback ("There is no
+callback-taking variant on the handle"), so rule 7's callback-thread requirement does
+not apply to it — a legitimate exception, not a gap. F2 is fully resolved for all
+callback-bearing async functions.
