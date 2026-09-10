@@ -56,10 +56,17 @@ namespace Confluent.Kafka.Internal;
 /// runtime's worker pool (ffi §A1), so a blocked pump delays result delivery but never sending.
 /// </para>
 /// <para>
-/// <b>Backpressure.</b> The queue is structurally unbounded but practically bounded by the core's
-/// <c>buffer.memory</c> backpressure: the inline <c>Producer_send</c> on the caller thread blocks
-/// up to <c>max.block.ms</c> when the core buffer is full, so callers cannot outrun the drain
-/// (PLAN §4 decision 4). No managed bound / hand-cap is added.
+/// <b>Backpressure — the conclusion holds, the mechanism changed (M11/P3.1 §12.4).</b> The queue is
+/// structurally unbounded but remains practically bounded by the core's <c>buffer.memory</c>
+/// backpressure, because <b>a future only enters this queue after the core has accepted its
+/// record</b> — so whatever bounds acceptance bounds the queue. What changed is <em>who</em> waits:
+/// this paragraph used to say the inline <c>Producer_send</c> blocks the <b>caller</b> thread up to
+/// <c>max.block.ms</c>, and on the async path that is no longer true. The caller now appends to the
+/// <see cref="SendAccumulator"/> and returns; it is the <b>send-batch thread</b> that calls
+/// <c>send_batch</c> and blocks on a full core buffer, while the caller is bounded by the
+/// accumulator instead. "No managed bound is added" is likewise no longer true — the accumulator has
+/// its own (Python's <c>PRODUCER_MAX_ACCUMULATED_RECORDS</c>). The <b>sync</b> send still blocks its
+/// own caller inline, exactly as described before.
 /// </para>
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the
@@ -94,7 +101,32 @@ namespace Confluent.Kafka.Internal;
 /// </remarks>
 internal sealed class SendCompletionPump
 {
+    /// <summary>
+    /// The maximum number of completions one <c>get_all</c> pass handles — Python's
+    /// <c>PRODUCER_RECORD_SLOT_CAPACITY</c> (1100), the size of the anchor's own <c>get_all</c>
+    /// output arrays (<c>_confluentkafka.c:429-430</c>) and of one <c>BatchNode</c>, which is what
+    /// its poll thread processes per iteration (<c>:480-513</c>).
+    /// </summary>
+    /// <remarks>
+    /// Derived from the <b>default</b> constants, not from a producer's (possibly overridden)
+    /// settings, exactly as the anchor's arrays are sized by a compile-time <c>#define</c>: this is a
+    /// bound on one marshalling pass, not a tuning knob, and the pump is shared machinery that
+    /// predates any per-producer settings.
+    /// </remarks>
+    internal const int DrainCap =
+        SendAccumulatorSettings.DefaultSlotThreshold + SendAccumulatorSettings.SlotCapacityHeadroom;
+
     private readonly ConcurrentQueue<PendingSend> _queue = new ConcurrentQueue<PendingSend>();
+
+    // The three marshalling arrays get_all reads and writes, allocated ONCE (§12.3) now that the
+    // drain is capped — the anchor allocates nothing per batch either (its equivalents are
+    // fixed-size stack arrays, _confluentkafka.c:429-430). Touched only by the pump thread inside
+    // ProcessBatch, so they need no synchronization. ⚠ They retain the previous pass's values past
+    // the current batch's count: see ProcessBatch's remarks for why every loop over them is bounded
+    // by that count and never by Length.
+    private readonly IntPtr[] _futures = new IntPtr[DrainCap];
+    private readonly IntPtr[] _metadata = new IntPtr[DrainCap];
+    private readonly IntPtr[] _errors = new IntPtr[DrainCap];
 
     // Signals "items may be available". Reset-before-drain (see RunLoop) avoids a lost wakeup.
     private readonly ManualResetEventSlim _signal = new ManualResetEventSlim(initialState: false);
@@ -104,6 +136,25 @@ internal sealed class SendCompletionPump
     private readonly object _stopLock = new object();
 
     private readonly Thread _thread;
+
+    // Instrumentation, written only by the pump thread: the number of ProcessBatch passes and the
+    // largest batch any pass carried. The cap (§12.2) is asserted by these — "the completions all
+    // resolved" would be satisfied by an uncapped drain too, so it cannot tell the cap is in force.
+    private long _processedBatches;
+    private int _largestProcessedBatch;
+
+    // Instrumentation: how many sends this pump has taken OFF its queue, counted in DrainAll and so
+    // covering both consumers — RunLoop's capped drain and Stop's terminal one.
+    //
+    // It exists for the M11/P3.1 §3.8 teardown-ordering guard, and it is counted here rather than in
+    // Enqueue or ProcessBatch because only this point is reached on EVERY path a queued send can
+    // take: a send that was enqueued is dequeued exactly once, by one of those two callers, whether
+    // or not the pump loop won the race against Stop's _stopping. So "the accumulator's final drain
+    // reached an OPEN gate" reads as "this equals the number of sends", with no dependence on that
+    // out-of-scope race — whereas ProcessedBatchCount is zero whenever Stop's terminal drain got
+    // there first, which would make the guard flaky in exactly the way it exists to stop being.
+    // Written by the pump thread and by the disposing thread (under _stopLock), hence Interlocked.
+    private long _drainedSends;
 
     // Set by Stop before waking the loop; read by the loop to break out of its wait.
     private volatile bool _stopping;
@@ -121,6 +172,19 @@ internal sealed class SendCompletionPump
         };
         _thread.Start();
     }
+
+    /// <summary>The number of <c>ProcessBatch</c> passes the pump thread has run.</summary>
+    internal long ProcessedBatchCount => Interlocked.Read(ref _processedBatches);
+
+    /// <summary>The record count of the largest batch any pass carried — never above <see cref="DrainCap"/>.</summary>
+    internal int LargestProcessedBatch => Volatile.Read(ref _largestProcessedBatch);
+
+    /// <summary>
+    /// The number of sends this pump has taken off its queue — i.e. the number that reached
+    /// <see cref="Enqueue"/> while the gate was still <b>open</b>. The witness for the M11/P3.1
+    /// §3.8 teardown ordering (see <c>_drainedSends</c>).
+    /// </summary>
+    internal long DrainedSendCount => Interlocked.Read(ref _drainedSends);
 
     /// <summary>
     /// Enqueues a resolved-later send. On the normal path the pump completes
@@ -234,6 +298,13 @@ internal sealed class SendCompletionPump
 
             // Reset BEFORE draining so an Enqueue during/after the drain re-sets the event (no lost
             // wakeup): a missed item's Set lands after this Reset, so the next Wait returns.
+            //
+            // ⚠ THIS ORDERING IS STILL LOAD-BEARING AND STILL DOES ITS OWN JOB, alongside the inner
+            // loop below. The two cover different things: the inner loop handles leftovers this
+            // thread already KNOWS about (the drain hit the cap), while the Reset ordering handles
+            // items arriving CONCURRENTLY — their Set lands after this Reset, so the next Wait
+            // returns. Neither subsumes the other; do not "simplify" the ordering away because the
+            // inner loop looks like it covers the same ground.
             _signal.Reset();
 
             if (_stopping)
@@ -242,9 +313,34 @@ internal sealed class SendCompletionPump
                 break;
             }
 
-            List<PendingSend> batch = DrainAll();
-            if (batch.Count > 0)
+            // ⚠ INNER DRAIN LOOP — THE HANG FIX (M11/P3.1 §12.2.1). DrainAll is now CAPPED, and the
+            // outer loop's correctness used to rest on it always emptying the queue. Capping without
+            // this loop is a DETERMINISTIC hang, not a race, and needs no concurrency to reproduce:
+            // a queue of 3000 leaves 1900 behind, the next iteration blocks on _signal.Wait() — reset
+            // above and only Set by a new Enqueue — and with no further sends those 1900 completions
+            // and every awaiting Task hang forever.
+            //
+            // Keep draining and processing capped batches until a drain comes back SHORT (fewer than
+            // the cap, i.e. the queue is empty), and only then fall through to the Wait. That is
+            // precisely the anchor's shape: its poll thread completes one node, advances to
+            // next_batch, and cnd_waits ONLY while that is NULL (_confluentkafka.c:504-506).
+            //
+            // Deliberately NOT "call _signal.Set() when items remain": the loop is clearer, is what
+            // the anchor does, and does not depend on reasoning about a self-signal racing a Reset.
+            while (true)
             {
+                List<PendingSend> batch = DrainAll(DrainCap);
+                if (batch.Count == 0)
+                {
+                    break;
+                }
+
+                Interlocked.Increment(ref _processedBatches);
+                if (batch.Count > _largestProcessedBatch)
+                {
+                    Volatile.Write(ref _largestProcessedBatch, batch.Count);
+                }
+
                 try
                 {
                     ProcessBatch(batch);
@@ -252,9 +348,9 @@ internal sealed class SendCompletionPump
                 catch (Exception exception)
                 {
                     // ProcessBatch already freed the batch's future handles on every one of its own
-                    // paths (its `finally`'s destroy_all, or — for a throw that precedes that try,
-                    // i.e. an allocation failure building its marshalling arrays — its allocation
-                    // `catch`), but a throw that escaped it — a native failure surfacing from
+                    // paths (its `finally`'s destroy_all — since M11/P3.1 §12.3 that is the ONLY
+                    // future-free site, because the marshalling arrays are reused fields and there
+                    // is no pre-`try` allocation left to fail), but a throw that escaped it — a native failure surfacing from
                     // get_all, or OOM either side of its per-index completion loop — left the
                     // batch's TCSes UNcompleted, so their awaiters would hang forever. Fault them
                     // here (TCS-only — the handles are already freed, so do NOT free them again).
@@ -267,17 +363,49 @@ internal sealed class SendCompletionPump
                     // marshalling throw that escapes ProcessBatch.)
                     FaultBatchCompletions(batch, exception);
                 }
+
+                if (batch.Count < DrainCap)
+                {
+                    // A SHORT drain means the queue ran out, so there is nothing known to be left —
+                    // fall through to the Wait. Exactly-at-the-cap loops again, because the queue may
+                    // hold more.
+                    break;
+                }
             }
         }
     }
 
-    /// <summary>Drains every currently-queued send into a batch (lock-free).</summary>
-    private List<PendingSend> DrainAll()
+    /// <summary>
+    /// Drains up to <paramref name="cap"/> queued sends into a batch (lock-free). Pass
+    /// <see cref="int.MaxValue"/> for "everything".
+    /// </summary>
+    /// <remarks>
+    /// <b>The cap is Python parity</b> (M11/P3.1 §12.2). The anchor's poll-futures thread processes
+    /// <b>one <c>BatchNode</c> at a time</b> (<c>_confluentkafka.c:480-513</c>) and sizes its
+    /// <c>get_all</c> output arrays at <c>PRODUCER_RECORD_SLOT_CAPACITY</c> (<c>:429-430</c>), so its
+    /// per-call completion batch is at most 1100. This drain used to empty the whole
+    /// <see cref="ConcurrentQueue{T}"/> and allocate three <c>IntPtr[count]</c> over whatever it
+    /// found — unbounded by construction, and the one place the two bindings' constants diverged.
+    /// <para>
+    /// ⚠ <b>Capping this made <see cref="RunLoop"/>'s inner drain loop mandatory</b> — see the hang
+    /// analysis there. And the cap belongs <b>here only</b>: see
+    /// <see cref="DrainAndFaultRemaining"/> for why capping the terminal drain would be a defect
+    /// rather than a symmetry.
+    /// </para>
+    /// </remarks>
+    private List<PendingSend> DrainAll(int cap)
     {
         List<PendingSend> batch = new List<PendingSend>();
-        while (_queue.TryDequeue(out PendingSend pending))
+        while (batch.Count < cap && _queue.TryDequeue(out PendingSend pending))
         {
             batch.Add(pending);
+        }
+
+        if (batch.Count > 0)
+        {
+            // Instrumentation only (see _drainedSends) — the single point every queued send passes
+            // through exactly once, whichever of the two callers takes it.
+            Interlocked.Add(ref _drainedSends, batch.Count);
         }
 
         return batch;
@@ -289,13 +417,34 @@ internal sealed class SendCompletionPump
     /// native handle on every path — each consumed index's metadata/error as it is read, all
     /// future handles via <c>destroy_all</c> in the <c>finally</c>, plus a <c>finally</c> sweep of
     /// any metadata/error handles for indices left unconsumed by a partway throw (e.g. an OOM in
-    /// the error branch). Consumed slots are nulled so the sweep never double-frees. A throw that
-    /// precedes that <c>try</c> altogether — an allocation failure building the three marshalling
-    /// arrays — frees the batch's future handles from <paramref name="batch"/> itself, in the
-    /// allocation <c>catch</c>; exactly one of those two future-free sites can ever run, because
-    /// that <c>catch</c> rethrows and so the <c>try</c>/<c>finally</c> below is never entered.
+    /// the error branch). Consumed slots are nulled so the sweep never double-frees.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>The three marshalling arrays are REUSED FIELDS, not per-batch allocations</b> (M11/P3.1
+    /// §12.3), which is what the drain cap makes possible and is strictly more faithful: the anchor
+    /// uses fixed-size <b>stack</b> arrays (<c>_confluentkafka.c:429-430</c>) and allocates nothing
+    /// per batch. It also removes a per-drain allocation from the DoD §10 gate — and it removed a
+    /// failure mode outright: this method used to allocate them <em>outside</em> its
+    /// <c>try</c>/<c>finally</c> and needed an allocation <c>catch</c> to free the batch's futures on
+    /// that one path. With no allocation left to fail, that <c>catch</c> is gone rather than left as
+    /// misleading dead code, and the <c>finally</c> below is now the <em>only</em> future-free site.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Reuse means stale values live past the batch count — so every loop is bounded by the
+    /// batch's count, NEVER by <c>Length</c>.</b> A reused array still holds the previous pass's
+    /// handle values beyond this pass's count; reading <c>Length</c> anywhere would treat those as
+    /// live and free them a SECOND time. The <c>0..count</c> range is additionally cleared on entry,
+    /// so a partially-filled batch cannot read a stale slot either. Both properties are covered by a
+    /// large-drain-then-small-drain test, which is the only shape that can catch a <c>Length</c>
+    /// bound.
+    /// </para>
+    /// <para>
+    /// <b><see cref="RunLoop"/> is the only caller</b>, and its drain is capped at
+    /// <see cref="DrainCap"/>, so <c>count</c> can never exceed the arrays' length. Were that ever
+    /// to change, the <c>Array.Clear</c> below throws rather than overrunning, and
+    /// <see cref="RunLoop"/>'s <c>catch</c> faults the batch — loud, not silent.
+    /// </para>
     /// <b>This is the async surface's delivery-callback firing site (M14/P1).</b> Where an index
     /// carries a <see cref="DeliveryRegistration"/>, it is invoked <b>immediately before</b> that
     /// index's <c>TrySetResult</c> / <c>TrySetException</c> — Java's ordering exactly
@@ -309,41 +458,22 @@ internal sealed class SendCompletionPump
     /// Do not wrap the <c>Fire</c> calls in a second <c>try</c>/<c>catch</c> — it would shadow the
     /// real guard without adding anything.
     /// </remarks>
-    private static void ProcessBatch(List<PendingSend> batch)
+    private void ProcessBatch(List<PendingSend> batch)
     {
         int count = batch.Count;
-        IntPtr[] futures;
-        IntPtr[] metadata;
-        IntPtr[] errors;
-        try
-        {
-            futures = new IntPtr[count];
-            metadata = new IntPtr[count];
-            errors = new IntPtr[count];
-        }
-        catch
-        {
-            // These three arrays are allocated OUTSIDE the try/finally below, so a failure here
-            // (OOM) used to skip that finally and leak the whole batch's future handles — the one
-            // hole in the "free every handle on every path" pattern (ffi §A2) this method otherwise
-            // completes. Free them from `batch`, the one source that is valid before anything is
-            // allocated, using the SINGULAR destroy per element: building the array `destroy_all`
-            // requires is exactly what just failed, so the recovery path must not allocate.
-            //
-            // Freed EXACTLY once, and never double-freed: reaching the try/finally below requires
-            // this try to complete normally, and this catch always rethrows — so of the two
-            // future-free sites precisely one ever runs. No metadata/error handle exists yet either
-            // (get_all has not been called), so there is nothing else to release here.
-            for (int i = 0; i < count; i++)
-            {
-                NativeMethods.FutureRecordMetadataDestroy(batch[i].Future);
-            }
+        IntPtr[] futures = _futures;
+        IntPtr[] metadata = _metadata;
+        IntPtr[] errors = _errors;
 
-            throw;
-        }
+        // Wipe this pass's range in all three before anything reads it, so no slot can carry a
+        // previous pass's handle into this one. Bounded by `count`, not Length: the slots past it
+        // are stale by design and are never read (see the remarks).
+        Array.Clear(futures, 0, count);
+        Array.Clear(metadata, 0, count);
+        Array.Clear(errors, 0, count);
 
         // Cannot throw: a List<T> indexer read below its own Count plus a readonly-struct property
-        // read, with no allocation. So `futures` is either fully populated or never allocated.
+        // read, with no allocation.
         for (int i = 0; i < count; i++)
         {
             futures[i] = batch[i].Future;
@@ -432,9 +562,9 @@ internal sealed class SendCompletionPump
             // already-freed handle (no double-free). Both destroys are null-safe; the != Zero
             // guard skips needless P/Invokes on the normal path (every slot already nulled).
             // Completes the "free every handle on every path" pattern (ffi §A2) that the RunLoop
-            // catch (faults the TCSes) and Send's orphaned-future catch established — together with
-            // the allocation catch above, which covers the one window this finally cannot reach
-            // (a throw before the try was entered).
+            // catch (faults the TCSes) established. Since the marshalling arrays became reused
+            // fields (§12.3) there is no pre-`try` allocation left to fail, so this finally is now
+            // the ONLY future-free site and no companion allocation-catch is needed.
             for (int i = 0; i < count; i++)
             {
                 if (metadata[i] != IntPtr.Zero)
@@ -464,10 +594,18 @@ internal sealed class SendCompletionPump
     /// <c>close()</c> cancels the pending futures without invoking <c>on_delivery</c>). Firing a
     /// fabricated failure here would also reintroduce a double-fire hazard, since the core may still
     /// deliver these records.
+    /// <para>
+    /// ⚠ <b>This drain is deliberately UNCAPPED, and capping it would be a defect, not a symmetry</b>
+    /// (M11/P3.1 §12.2.2). Two reasons, either sufficient: it <b>faults</b> rather than calling
+    /// <c>get_all</c>, so it allocates <b>none</b> of the three marshalling arrays the cap exists to
+    /// bound; and it is the <b>last thing that ever touches the queue</b>, so a cap would strand
+    /// every send past it — their <see cref="TaskCompletionSource{TResult}"/>s never completed, their
+    /// awaiters hanging forever, and their future handles never destroyed.
+    /// </para>
     /// </remarks>
     private void DrainAndFaultRemaining()
     {
-        List<PendingSend> batch = DrainAll();
+        List<PendingSend> batch = DrainAll(int.MaxValue);
         if (batch.Count == 0)
         {
             return;
@@ -496,34 +634,26 @@ internal sealed class SendCompletionPump
     /// </summary>
     /// <remarks>
     /// <b>This path does NOT invoke the batch's <see cref="IDeliveryCallback"/>s</b> — recorded
-    /// residual 3 on <see cref="IDeliveryCallback"/>. This residual
-    /// spans <b>both sides of the completion's arrival</b>,
-    /// because <see cref="ProcessBatch"/> can throw on either side of its <c>get_all</c> and both
-    /// land here. <b>(a)</b> After <c>get_all</c> reported — it reported for the <em>whole</em>
-    /// batch, so the core <em>did</em> report these completions; the indices the per-index loop had
-    /// already reached fired normally and the rest are faulted here with none.
-    /// <b>(b)</b> Before it reported — the throw came from the batch setup (the marshalling-array
-    /// allocation) or out of the <c>get_all</c> P/Invoke itself, as <see cref="RunLoop"/>'s
-    /// <c>catch</c> spells out, so no completion was ever in hand and the whole batch is faulted
-    /// with none.
-    /// <b>Firing them here is deliberately NOT the fix</b>, and sub-case (a) alone is enough to
-    /// settle it: this method faults the batch <em>wholesale</em> (that is exactly why
-    /// <c>TrySetException</c>'s no-op-on-completed behavior is load-bearing above) and it has no
-    /// per-index record of which callbacks already fired, so firing would deliver a
-    /// <em>duplicate</em> notification for every index that completed before the throw — trading a
-    /// rare dropped notification for a rare double invocation, which the exactly-once-per-record
-    /// obligation (root <c>CLAUDE.md</c> §9.5) makes strictly worse. In sub-case (b) nothing was
-    /// reported at all, so anything fired would instead be an <em>invented</em> failure for a record
-    /// the core may still deliver. A per-index "already fired" latch would close sub-case (a), at
-    /// the cost of per-send state on a path reachable only under out-of-memory or an unexpected
-    /// managed or native failure in the batch read; the drop is recorded on the public surface
-    /// instead (ffi §A6 form C's at-most-once boundary).
+    /// residual 3 on <see cref="IDeliveryCallback"/>. <b>Firing them here is deliberately not the
+    /// fix</b>, and the local reason is this method's own shape: it faults the batch
+    /// <em>wholesale</em> (that is exactly why <c>TrySetException</c>'s no-op-on-completed behavior
+    /// is load-bearing above) and keeps no per-index record of which callbacks already fired, so
+    /// firing here would deliver a <em>duplicate</em> notification for every index that completed
+    /// before the throw — trading a rare dropped notification for a rare double invocation, which
+    /// the exactly-once-per-record obligation (root <c>CLAUDE.md</c> §9.5) makes strictly worse. A
+    /// per-index "already fired" latch is what would close that, at the cost of per-send state on a
+    /// path reachable only under an unexpected managed or native failure in the batch read; the drop
+    /// is recorded on the public surface instead (ffi §A6 form C's at-most-once boundary).
     /// <para>
-    /// How this residual compares with the others — teardown or not, completion arrived or not,
-    /// a throw versus a faulted <see cref="Task"/> — is stated <b>once</b>, under <b>the
-    /// distinguishing axes</b> in the remarks on <see cref="IDeliveryCallback"/>. Do not restate
-    /// those axes here, and do not re-scope one either: several review rounds went on paraphrases of
-    /// them that went stale one at a time, this note's own included.
+    /// The conditions this residual spans, how it compares with the others — teardown or not,
+    /// completion arrived or not, a throw versus a faulted <see cref="Task"/> — and why firing is
+    /// not the fix on the side where nothing had been reported either, are stated <b>once</b>, under
+    /// <b>the distinguishing axes</b> in the remarks on <see cref="IDeliveryCallback"/>. Do not
+    /// restate them here, and do not re-scope them either: several review rounds went on paraphrases
+    /// that went stale one at a time — this note's own included, which named the per-batch
+    /// marshalling-array allocation as a live trigger after §12.3 had removed it, and cited
+    /// <see cref="RunLoop"/>'s <c>catch</c> as spelling that out when the same slice had rewritten
+    /// it to say the opposite.
     /// </para>
     /// </remarks>
     private static void FaultBatchCompletions(List<PendingSend> batch, Exception cause)

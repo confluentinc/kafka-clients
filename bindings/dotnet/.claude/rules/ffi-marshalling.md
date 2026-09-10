@@ -239,18 +239,29 @@ disposer, §B1/§B7). ⚠ For the consumer's teardown routes see **§B2's author
 
 **Decision:** Per real `KafkaProducer`, the core owns a multi-thread tokio
 runtime + one Sender task over a single async Selector; the .NET side adds at most
-**one** completion pump (§A7), never a per-send thread or a poll loop.
+**two** background threads — one completion pump (§A7) and, on the **async path
+only**, one send-batch thread (§A7's send-batching tweak, taken in M11/P3.1) — never
+a per-send thread and never a poll loop.
 
 ```
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     Send → Producer_send ──────│──────►│     RecordAccumulator (enqueue, returns fast)
-   completion pump (1 bg thread):    │       │   Sender task (spawned once in _new):
-     get_all(futures) ─block_on─────►│──────►│     NetworkClient + ONE async Selector
-     ◄── per-message metadata/err ───│◄──────│       ↕ multiplexes ALL brokers (event-driven)
-   Dispose: join pump → flush/close  │       │   (created in KafkaProducer_new, dropped on _destroy)
+     SYNC  Send → Producer_send ───│──────►│     RecordAccumulator (enqueue, returns fast)
+     ASYNC Send → pin + append to  │       │   Sender task (spawned once in _new):
+             the send accumulator   │       │     NetworkClient + ONE async Selector
+   send-batch thread (1 bg, async): │       │       ↕ multiplexes ALL brokers (event-driven)
+     _send_batch(records[]) ───────│──────►│   (created in KafkaProducer_new, dropped on _destroy)
+     unpin, hand futures to the pump │     │
+   completion pump (1 bg thread):    │       │
+     get_all(futures) ─block_on─────►│──────►│
+     ◄── per-message metadata/err ───│◄──────│
+   Dispose: drain accumulator → join pump → flush/close
 ```
+
+⚠ **The "at most two" is a cap on *kinds*, not a licence for more.** The batch thread
+is one thread for **all** sends on a producer, it polls nothing, and the sync path
+starts neither thread. A per-send thread and a poll loop remain forbidden, verbatim.
 
 **Rule:**
 
@@ -258,9 +269,14 @@ runtime + one Sender task over a single async Selector; the .NET side adds at mo
     spawned Sender task doing all I/O over a **single async Selector** (all
     brokers multiplexed — NOT thread-per-broker), created in `KafkaProducer_new`,
     torn down by `Producer_destroy`.
-  - .NET side: caller thread(s) + **exactly one** completion pump (§A7); no
-    per-send threads. **No poll loop** — the core self-drives, so a stalled pump
+  - .NET side: caller thread(s) + **at most two** background threads — one completion
+    pump (§A7) and, on the **async path only**, one send-batch thread; **no per-send
+    threads**. **No poll loop** — the core self-drives, so a stalled pump
     delays result delivery but not sending.
+    ⚠ **Amended in M11/P3.1** — this read "exactly one completion pump". The
+    prohibitions it was really about are unchanged and still hold: the batch thread is
+    one thread for all of a producer's sends (not per-send), and it does not poll. The
+    **sync** path starts neither thread, so a sync-only producer still spins nothing.
   - FFI is callable from any .NET thread; the core serializes via the producer's
     internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
@@ -499,11 +515,34 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
 
 **Rule:**
 
-  - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; use
-    `GCHandle.Alloc(Pinned)` + `finally Free()` where `fixed` doesn't fit (the N
-    buffers of `_send_batch`, all pinned for the whole call). Unpin right after
-    the call — never hold a pin across the returned `Task` (per-message pinned
-    objects fragment the GC heap).
+  - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; where
+    `fixed` doesn't fit — the N buffers of `_send_batch`, all borrowed for the whole
+    call — pin them explicitly and release in a `finally`. Unpin right after the call —
+    **never hold a pin across the returned `Task`** (per-message pinned objects
+    fragment the GC heap).
+  - **The pinning primitive for key/value is `ReadOnlyMemory<byte>.Pin()` →
+    `MemoryHandle`, NOT `GCHandle.Alloc(Pinned)`** (amended M11/P3.1). `GCHandle` pins
+    *objects*, and a record's key/value is a `ReadOnlyMemory<byte>`, whose backing store
+    may be an array, a string, native memory or a custom `MemoryManager`; `Pin()`
+    handles all of them and exists on all three TFMs (`netstandard2.0` gets it from the
+    already-referenced `System.Memory`). `GCHandle.Alloc(Pinned)` remains correct for
+    buffers the binding *owns* and pins itself — the interned topic buffers and the
+    empty-sentinel byte below.
+  - **Deferred send: the pin spans `Send` → …accumulator… → `send_batch` returns.**
+    This call-scoped rule was written against §A7's inline send. The producer's **async**
+    path is now deferred (a send-batch thread, as in the Python binding), so a pin taken
+    in `Send` is held until the batch thread's `send_batch` **returns** — and released
+    there, in a `finally`, **before** the future reaches the completion pump. The
+    underlying fact is unchanged and is what keeps this inside the rule rather than
+    outside it: `send_batch_inner` runs `producer_send` — i.e.
+    `rt.block_on(producer.send(record, None))` — per record and copies the topic with
+    `to_string_lossy().into_owned()`, so the core's borrow still ends when the native
+    call returns. "Unpin right after the call" and "never across the `Task`" both still
+    hold; only *which* call moved. The **sync** path is unchanged and stays `fixed`.
+    ⚠ **Consequence on the public surface:** a deferred send **borrows** the caller's
+    buffers past `Send`'s return, so a mutation before the drain IS visible on the wire.
+    Document that on the **async** surface only — the sync send has no such window, and
+    telling sync users to defend against it states a constraint that does not exist.
   - Sentinels: absent → `IntPtr.Zero` + `len -1`; empty → valid pointer + `len 0`.
     A `fixed` over `null` yields a null pointer, so gate length on `null`:
     ```csharp
@@ -518,9 +557,23 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     (`GCHandle.AddrOfPinnedObject` returns non-null for empty arrays on current
     runtimes too, but that's **undocumented** — prefer the sentinel. Python is
     unaffected — an empty `bytes` is non-null.)
-  - This call-scoped rule depends on §A7's inline-send decision; a deferred-send
-    design (a background send thread, as in the Python binding) would have to hold
-    the buffer until the deferred send runs.
+    ⚠ **A STACK sentinel is correct only for a call-scoped send.** Once the send is
+    deferred, that address is dead by the time the batch thread reads it — a
+    use-after-free that "works" almost always and corrupts rarely, which is the worst
+    failure mode. The deferred path must use **one process-wide, permanently pinned
+    1-byte static** instead (M11/P3.1 §4.2). Test it as a *stability* property — the same
+    address for a record's key and value, and across separate calls at different stack
+    depths — because that is exactly what a stack sentinel cannot satisfy and an
+    "it sent successfully" assertion cannot detect.
+  - **The topic is the third buffer, and it is the one that gets missed.** While the send
+    is call-scoped it is just a scoped `Utf8Marshal.Pin`; deferred, a call-scoped topic
+    pointer is a use-after-free like the sentinel. Do not solve it with a per-record copy
+    (that is the allocation this section exists to prevent): intern **one permanently
+    pinned NUL-terminated buffer per distinct topic**, which is O(distinct topics)
+    permanent pins instead of O(records) transient ones. Bound the cache and **never
+    evict** — freeing a pinned buffer an in-flight record still points at is a
+    use-after-free — and free the whole cache only at a point where nothing can still
+    hold a pointer into it.
 
 **Why:** the borrow ends when the send call returns, so a call-scoped pin is
 exactly sufficient; Task-scoped pinning is unnecessary and fragments the heap.
@@ -536,11 +589,23 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 
 **Tests required:**
 
-  - **Mutation-after-send**: mutate the caller's `byte[]` right after `send`; the
-    produced record is unchanged (proves the copy happened during the call).
+  - **Mutation-after-send**, per surface: on a **call-scoped** send, mutate the caller's
+    `byte[]` right after `send` and the produced record is unchanged (proves the copy
+    happened during the call). On a **deferred** send that guarantee does not exist, so
+    the test asserts what must still hold — the mutation is *memory-safe* (the pin is
+    what makes it so) and the send still resolves — and the visibility window is
+    documented on the async surface instead.
   - **Allocation budget** (DoD §10): a large value adds no value-sized managed
-    allocation.
-  - Absent vs empty key/value each produce the correct record.
+    allocation. ⚠ Under a deferred send, whichever caller allocates or grows the
+    accumulator's node pays for it, which is noise on a per-send measurement; take the
+    **best of N matched attempts** rather than widening the budget, so a real per-send
+    regression (which raises every attempt) still fails.
+  - Absent vs empty key/value each produce the correct record — and, on a deferred send,
+    that the empty sentinel's address is **stable across calls and stack depths**.
+  - **Pin/unpin balance on every path**, including the failure paths (the append refused,
+    the native call throwing, a node abandoned at teardown). A pinned `GCHandle` is a
+    strong root, so a leak is observable without any pin-counting API: hand each send a
+    buffer nothing else references and assert it becomes collectable.
 
 ---
 
@@ -728,10 +793,11 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
         reported: `get_all` has already reported for the **whole** batch, so
         the core *did* report completions, yet the indices not yet reached are faulted
         with no callback — and the duplicate-risk argument applies to that half. The
-        *before* half (the batch **setup** — the marshalling arrays the
-        `get_all` needs, allocated outside the method's own `try` — or a throw out of
-        the `get_all` P/Invoke itself) does **not** need an allocation failure to be
-        reachable: a stale or
+        *before* half (a throw out of the `get_all` P/Invoke itself, or out of the
+        defensive bound check that precedes it — the per-batch allocation of the
+        marshalling arrays used to be a second trigger here and is **gone**, the arrays
+        being reused fields since M11/P3.1 §12.3) does **not** need an allocation
+        failure to be reachable: a stale or
         mismatched native surfaces an `EntryPointNotFoundException` from the pump's
         *first* batched read, so the "OOM-only, therefore theoretical" defence is
         unavailable for it. Neither half is a teardown path, so a residual clause that
@@ -910,6 +976,16 @@ Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pend
     `out_error`, enqueues `(future, tcs)`, returns `tcs.Task`. Inline send is fine
     because .NET has no GIL (a send-batching thread is an optional throughput
     tweak, not required).
+    ⚠ **That tweak has since been taken, on the ASYNC path only (M11/P3.1).** `Send`
+    now pins and appends to a binding-side accumulator, and a send-batch thread issues
+    `_send_batch`, mirroring the Python binding; the **sync** path keeps the inline
+    `Producer_send` verbatim. It changes only the send *submission* side — the
+    completion model below is untouched and Option A (this pull pump) remains the
+    engine. It was adopted on user direction and **not** for throughput: it converts the
+    caller's block from a native one inside the core's coarse mutex (which a concurrent
+    close cannot wake) into a managed, cancellable wait, closer to Java's `send`. ⚠
+    Lettering collision: "Option A" *here* is the pull pump, while M11/P3.1's PLAN calls
+    the send-batching design "Option A" — different letterings of different questions.
   - **Exactly one** pump thread does all waits via batched `get_all` — O(1)
     threads for unbounded in-flight sends. Per result: read fields + free handles
     on the pump (§A2), `SetResult`/`SetException`, `destroy_all` the futures.
@@ -989,10 +1065,12 @@ defers the consumer's copy-out-vs-keep-alive).
         is what makes this residual span the completion's arrival. If the throw
         came *after* `get_all` reported, completions had arrived for **every** index,
         so the indices the batch loop never reached lose their delivery notification
-        even though the core did report them. If it came *before* — from the batch
-        **setup** (the marshalling arrays, allocated outside the processing `try`) or
-        from the `get_all` P/Invoke itself against a stale native — nothing was
-        reported and the whole batch loses it. So, unlike the pre-enqueue window
+        even though the core did report them. If it came *before* — from the `get_all`
+        P/Invoke itself against a stale native, or from the defensive bound check that
+        precedes it — nothing was reported and the whole batch loses it. (The batch
+        **setup** used to belong on this side too, when the three marshalling arrays
+        were allocated per batch outside the processing `try`; M11/P3.1 §12.3 made them
+        reused fields, so that trigger is gone.) So, unlike the pre-enqueue window
         above, this residual is **not** OOM-only.
     These are *non-teardown* members of §A6 form C's at-most-once boundary, and must
     be enumerated on the public surface alongside the teardown paths — the enumeration

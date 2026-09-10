@@ -79,10 +79,21 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// Serializes and publishes <paramref name="record"/> to its topic, completing when the cluster
     /// acknowledges it (Java <c>Producer.send(record)</c> — which returns a
     /// <c>Future&lt;RecordMetadata&gt;</c>, so a <see cref="Task{TResult}"/> here, CLAUDE.md §4). The
-    /// key / value are serialized on the caller's thread <b>before</b> the send is enqueued; the
-    /// serialized bytes are copied into the send buffer during the native call, so the caller may
-    /// reuse or mutate them the moment this returns (ffi §A4).
+    /// key / value are serialized on the caller's thread <b>before</b> the send is enqueued.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Do not mutate the key / value buffers after this returns.</b> The send is deferred: the
+    /// binding <b>borrows</b> the serialized bytes — it does not copy them — until a background
+    /// batch thread hands the record to the core, which happens within milliseconds but not before
+    /// this method returns. A mutation in that window <b>is</b> visible on the wire. If you need to
+    /// reuse a buffer, either await this task first or hand each send its own array.
+    /// <para>
+    /// This is inherent to a zero-copy send path: the alternative is a per-record copy of every
+    /// value, which is exactly the allocation this binding exists to avoid. It matches the Python
+    /// binding, whose <c>send()</c> likewise borrows the buffer until its drain. The <b>synchronous</b>
+    /// <c>IProducer.Send</c> has no such window — it hands the record to the core inside the call.
+    /// </para>
+    /// </remarks>
     /// <param name="record">The record to publish.</param>
     /// <param name="cancellationToken">
     /// Best-effort cancellation of the .NET wait. An already-canceled token throws
@@ -124,6 +135,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// which outcomes fire it (a synchronous throw out of <c>Send</c> does not; a resolved-then-failed
     /// delivery does, and so does a send whose <see cref="Task{TResult}"/> was already canceled), and
     /// the swallow-and-trace policy for a throwing callback.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Do not mutate the key / value buffers after this returns</b> — the same borrow window as
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>, described in full there.
     /// </para>
     /// <para>
     /// <b>A null <paramref name="callback"/> is rejected (decision D8) — deliberately stricter than

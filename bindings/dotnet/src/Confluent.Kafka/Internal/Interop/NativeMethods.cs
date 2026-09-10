@@ -2233,17 +2233,74 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_partitions_for", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ProducerPartitionsFor(SafeProducerHandle producer, IntPtr topic, out IntPtr outList);
 
-    // ---- kafka_producer_Producer_t — the SEND path (M11/P3, ffi §A4/§A7 Option C) ----
+    // ---- kafka_producer_Producer_t — the SEND path (ffi §A4 + §A7's pull-pump completion) ----
     //
-    // Option C — inline pull-pump (PLAN §3): the SINGULAR Producer_send is called INLINE on
-    // the caller thread (the core copies key/value SYNCHRONOUSLY during the call — verified
-    // src/ffi/producer.rs L262-281 — so the k/v pin is call-scoped, ffi §A4); a single pump
-    // thread per NativeProducer drains a batched FutureRecordMetadata_get_all and destroys the
-    // futures with FutureRecordMetadata_destroy_all. No ProducerRecord_t mirror struct
-    // (that is send_batch / Option A), no per-send callback (that is send_async / Option B).
-    // The optional fast-path FutureRecordMetadata_is_done and the RecordMetadata_copy callback
-    // are deliberately NOT declared — the pump enqueues every send and reads the per-field
-    // metadata accessors (no dead/unused DllImport, PLAN §6.1).
+    // ⚠ SUPERSEDED IN PART by M11/P3.1 (user direction, 2026-09-07). This block previously
+    // recorded M11/P3's Option C as the one send model for BOTH producer flavors. The SEND
+    // side is now SPLIT by flavor; the COMPLETION side is not changed. Plan + full deviation
+    // list: design/history/M11/P3.1-producer-python-alignment/PLAN.md (§2 supersession,
+    // §3 deviations). The superseded text is kept below, marked, rather than deleted.
+    //
+    //   * SYNC path (IProducer / KafkaProducer / MockProducer) — Option C's SEND half,
+    //     UNCHANGED, and its original rationale still holds verbatim: the SINGULAR
+    //     Producer_send is called INLINE
+    //     on the caller thread, and the core copies key/value SYNCHRONOUSLY during the call
+    //     (verified src/ffi/producer.rs:347-368 — producer_send → rt.block_on(producer.send(
+    //     record, None)) at :366; the old "L262-281" cite in the superseded text is stale, that
+    //     range is now the ProducerRecord_t struct), so the k/v pin stays CALL-SCOPED (ffi §A4).
+    //     Deliberately kept inline: routing a blocking Send through the async path's 0-10 ms
+    //     accumulator window would add that window to every sync send (M11/P3.1 §3.1).
+    //   * ASYNC path (IAsyncProducer / AsyncKafkaProducer / AsyncMockProducer) — Option A
+    //     (Python-style pull; the anchor is bindings/python/_confluentkafka.c's send path,
+    //     Producer_send_thread at :523). Send pins the record's buffers, appends to a
+    //     binding-side accumulator and returns its Task; a dedicated batch thread drains N
+    //     records into a blittable ProducerRecord_t[] and calls the already-exported
+    //     kafka_producer_Producer_send_batch. The pin is DEFERRED — held from Send until
+    //     send_batch RETURNS, never across the returned Task, because send_batch copies
+    //     synchronously too (verified src/ffi/producer.rs:1557 — producer_send(&guard, record)
+    //     inside send_batch_inner; the topic is copied at :1515 via
+    //     to_string_lossy().into_owned()). That is ffi §A4's own deferred-send carve-out
+    //     ("a deferred-send design … would have to hold the buffer until the deferred send
+    //     runs"), not a violation of it.
+    //   * COMPLETION side (BOTH flavors) — UNCHANGED. On the ASYNC flavor that is ffi §A7's
+    //     pull pump: a single SendCompletionPump thread per NativeProducer drains a batched
+    //     FutureRecordMetadata_get_all and frees the futures with
+    //     FutureRecordMetadata_destroy_all. The SYNC flavor has NO pump at all (verified
+    //     NativeProducer.cs:504) — it completes on the caller's own thread via the blocking
+    //     FutureRecordMetadata_get (:603). Neither is touched: this phase does NOT reopen
+    //     pull-vs-push, and it moves only the SEND submission side of the async flavor.
+    //
+    // Why the reversal is on the record rather than silent: Option A was analysed and NOT
+    // recommended in M11/P3's PLAN §3.3 point 7 ("over-built unless a profile shows boundary
+    // crossings dominating"), whose headline con was "no upside over C on .NET" (M11/P3.1 §2.2,
+    // quoting the Option A cons in design/current/producer-send-completion-approaches.html — a
+    // deliberately LOCAL, untracked design note, so that quote is the tracked copy of it).
+    // That is still true FOR THROUGHPUT. What it never credited is the accepted Option-C
+    // residual this partially fixes: under Option C an inline Producer_send blocks the CALLER
+    // inside the coarse Mutex<ProducerKind> (src/ffi/producer.rs:840) for up to max.block.ms,
+    // and a concurrent close cannot wake it because close needs the same mutex. Option A turns
+    // that native block into a managed, cancellable wait — closer to Java's send. PARTIAL only:
+    // the batch thread still blocks in send_batch on the same mutex, and now holds it for a
+    // whole chunk (:1500) rather than one record (M11/P3.1 §3.6). The complete fix is
+    // finer-grained locking in src/ffi/producer.rs — Mode B, out of scope.
+    //
+    // ⚠ Lettering collision (M11/P3.1 §1.3): ffi §A7's "Option A / Option B" are pull-pump /
+    // push-callback, so §A7's "Option A" IS the PLAN's Option C. The PLAN's Option A (this
+    // phase's async send side) is not in §A7's lettering at all — §A7 names it only as "a
+    // send-batching thread is an optional throughput tweak, not required". The heading above
+    // previously read "§A7 Option C", which does not exist in §A7's lettering.
+    //
+    // ⚠ SUPERSEDED TEXT (M11/P3, kept for the record): "No ProducerRecord_t mirror struct
+    // (that is send_batch / Option A), no per-send callback (that is send_async / Option B)."
+    // The first clause is superseded above and, as of M11/P3.1 slice S1, no longer describes the
+    // code either: ProducerRecordNative (the mirror struct) and the ProducerSendBatch import below
+    // are declared, and the ASYNC send path goes through them. The second clause
+    // STANDS on both paths: Producer_send_async and any per-send Cdecl callback remain
+    // undeclared, because that is Option B, which this phase does NOT adopt (M11/P3.1 §1.5).
+    // Likewise unchanged: the optional fast-path FutureRecordMetadata_is_done and the
+    // RecordMetadata_copy callback are deliberately NOT declared — the pump enqueues every
+    // send and reads the per-field metadata accessors (no dead/unused DllImport, M11/P3
+    // PLAN §6.1).
 
     /// <summary>
     /// <c>kafka_producer_Producer_send</c> — sends a single record (sync enqueue), returning a
@@ -2281,6 +2338,41 @@ internal static class NativeMethods
         IntPtr value,
         int valueLen,
         out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_send_batch</c> — sends <paramref name="count"/> records in one
+    /// call, writing one result pair per index: <paramref name="outFutures"/><c>[i]</c> is a non-null
+    /// <c>FutureRecordMetadata_t</c> and <paramref name="outErrors"/><c>[i]</c> null on success, or
+    /// the reverse on a <b>per-record</b> failure. Returns the number of records that succeeded. The
+    /// callee writes <b>both</b> slots for every index (verified <c>send_batch_inner</c> — every
+    /// early-continue branch assigns both), so the caller reads all <paramref name="count"/> pairs
+    /// and frees every non-null handle (ffi §A2): the futures via
+    /// <see cref="FutureRecordMetadataDestroyAll"/> / <see cref="FutureRecordMetadataDestroy"/>, the
+    /// errors via <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// <para>
+    /// <b>The buffers are borrowed only for this call (ffi §A4).</b> The core copies every record's
+    /// key/value into the batch buffer <b>synchronously inside this call</b> — <c>send_batch_inner</c>
+    /// takes the producer mutex once and then runs <c>producer_send</c> (which is
+    /// <c>rt.block_on(producer.send(record, None))</c>) per record — and copies the topic with
+    /// <c>to_string_lossy().into_owned()</c>. So the pins the caller holds over the topic / key /
+    /// value end when this returns; nothing is held across the returned <see cref="System.Threading.Tasks.Task"/>
+    /// (M11/P3.1 §3.9). That is ffi §A4's own deferred-send carve-out applied to <c>send_batch</c>.
+    /// </para>
+    /// <para>
+    /// The three array parameters are raw pointers rather than managed arrays so the caller controls
+    /// the pinning: the batch marshaller fills long-lived accumulator arrays and pins them with
+    /// <c>fixed</c> for exactly the call's duration, which the array marshaller's own hidden pin
+    /// would duplicate. <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> — the
+    /// sync-op auto-ref (ffi §A2), since this call is synchronous.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_batch", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe int ProducerSendBatch(
+        SafeProducerHandle producer,
+        ProducerRecordNative* records,
+        int count,
+        IntPtr* outFutures,
+        IntPtr* outErrors);
 
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_get_all</c> — blocks until every future in

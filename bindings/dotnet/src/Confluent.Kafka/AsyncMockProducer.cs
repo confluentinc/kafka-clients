@@ -66,6 +66,13 @@ namespace Confluent.Kafka;
 /// over <see cref="NativeProducer"/> (which owns the graceful close→destroy + the one-shot latch,
 /// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
 /// </para>
+/// <para>
+/// ⚠ <b>Do not mutate a record's key / value buffers after <c>Send</c> returns</b> (M11/P3.1
+/// decision D6). The async send is deferred — the binding borrows the serialized bytes until a
+/// background batch thread hands the record to the core — so a mutation in that window is visible
+/// on the wire. See <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full note.
+/// The <b>synchronous</b> producer has no such window.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
@@ -232,6 +239,38 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// </summary>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
+
+    /// <summary>
+    /// <b>Internal test hook (M11/P3.1 §9), not public API.</b> Blocks until every <c>Send</c> made
+    /// so far has been handed to the core by the send-batch thread — the deterministic replacement
+    /// for a <c>Thread.Sleep</c> in the manual-completion tests.
+    /// </summary>
+    /// <remarks>
+    /// Since M11/P3.1 the async <c>Send</c> is <b>deferred</b>: it appends to a binding-side
+    /// accumulator and returns, and a batch thread hands the record to the core on a threshold or a
+    /// free-running window. A manual-mode test that calls <see cref="CompleteNext"/> immediately
+    /// after <c>Send</c> can therefore find no pending completion yet — a timing shift, not a defect.
+    /// <see cref="Flush"/> is not the answer for those tests: on a mock it <em>completes</em> the
+    /// pending sends, which is exactly what they are trying to drive by hand.
+    /// </remarks>
+    /// <param name="timeout">How long to wait for the accumulator to reach the core.</param>
+    /// <exception cref="TimeoutException">The pending sends did not reach the core in time.</exception>
+    internal void WaitForSendsToReachCore(TimeSpan timeout)
+    {
+        if (!_native.DrainPendingSends(timeout))
+        {
+            throw new TimeoutException(
+                $"Pending sends did not reach the core within {timeout}.");
+        }
+    }
+
+    /// <summary>
+    /// <b>Internal test observation point (M11/P3.1 §3.8), not public API.</b> The number of sends
+    /// the completion pump has taken off its queue — the witness for "the accumulator was drained
+    /// into a still-OPEN pump gate". See <c>NativeProducer.DrainedSendCount</c> for why the send
+    /// <see cref="Task"/>s cannot witness that ordering themselves.
+    /// </summary>
+    internal long DrainedSendCount => _native.DrainedSendCount;
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
