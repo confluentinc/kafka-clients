@@ -862,55 +862,86 @@ public sealed class SendAccumulatorTests
         // 5 ms window passes.) So the window is 60 s — nothing drains on its own — and a drainer
         // task forces a drain as fast as it can while the sender sends. Every send still comes from
         // ONE thread, which is what the per-caller ordering claim is about.
+        //
+        // ⚠ THE BURST IS REPEATED, AND THE REPETITION IS THE GUARD (Critic 71 FU-1). A single burst
+        // detects the routing mutation reliably in ISOLATION but not in the DoD gate: measured with
+        // the routing predicate removed from TrySubmitInline, one burst FAILED 5/5 isolated yet the
+        // full net10.0 suite PASSED 5/5 — i.e. the gate was green with slice S1's merge-blocking fix
+        // reverted, which is exactly the failure class this phase exists to remove. The reason is
+        // that this half detects the mutation through a RACE (a permit freed mid-burst and taken by a
+        // later send), and full-suite thread-pool contention shifts the drainer Task out of that
+        // window; part (i) cannot compensate, because with the bound frozen TryAppendOne's refusal is
+        // over-determined, and neither can slice S2's frozen-bound close test (measured PASS 3/3
+        // under the same mutation, for the same reason). So the stress half is this predicate's only
+        // detector and it has to bite under contention.
+        //
+        // Two candidate repairs were measured; only the second is used. Moving the drainer from a
+        // pool Task to a dedicated Thread raised full-suite detection to 2/4 — still probabilistic,
+        // so the thread type is not the lever. Repeating the burst with a FRESH HARNESS per attempt
+        // reached 4/4 full-suite detection under the mutation and 4/4 green at HEAD, at unchanged
+        // duration; that is what is implemented. Fresh per attempt because a reused harness carries
+        // the previous attempt's node chain, spare node and permit state, so attempts 2..K would no
+        // longer start from the saturating-burst-from-cold shape the bug needs. This is a probability
+        // argument, not a proof: a DETERMINISTIC guard for this predicate is not reachable without a
+        // white-box production seam, because the state it governs ("a permit is free AND a submission
+        // is queued") is transient by construction — the parked submitter consumes the released
+        // permit promptly. Adding such a seam is a design call, not a test fix, so it is not done
+        // here. Keep the isolated re-run of the mutation as the primary evidence in any round that
+        // touches the routing predicate; this loop is what keeps the gate honest between them.
         const int Burst = 200;
-        using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
+        const int Attempts = 8;
 
-        // The witness here is the per-record delivery callback's firing order, not the pending
-        // node's slots: 200 records across a bound of 4 span ~50 nodes, and a node is recycled long
-        // before the burst ends, so there is no single array to read. It observes the same property
-        // because the chain from append to callback is order-preserving end to end — CompleteNode
-        // enqueues a node's records to the pump in index order (the same order send_batch read
-        // them), Enqueue appends to a FIFO queue, DrainAll dequeues FIFO, and ProcessBatch fires
-        // each batch in index order. So callback order == append order == the order records reached
-        // send_batch.
-        List<int> observed = new List<int>(Burst);
-        Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Burst];
-
-        using (CancellationTokenSource sending = new CancellationTokenSource())
+        for (int attempt = 0; attempt < Attempts; attempt++)
         {
-            Task drainer = Task.Run(() =>
-            {
-                while (!sending.IsCancellationRequested)
-                {
-                    harness.ForceDrainWithoutWaiting();
-                }
-            });
+            using Harness harness = new Harness(new SendAccumulatorSettings(
+                slotThreshold: 1000, maxAccumulatedRecords: 4, batchWindowMs: 60_000, batchChunk: 1100));
 
-            for (int i = 0; i < Burst; i++)
+            // The witness here is the per-record delivery callback's firing order, not the pending
+            // node's slots: 200 records across a bound of 4 span ~50 nodes, and a node is recycled
+            // long before the burst ends, so there is no single array to read. It observes the same
+            // property because the chain from append to callback is order-preserving end to end —
+            // CompleteNode enqueues a node's records to the pump in index order (the same order
+            // send_batch read them), Enqueue appends to a FIFO queue, DrainAll dequeues FIFO, and
+            // ProcessBatch fires each batch in index order. So callback order == append order ==
+            // the order records reached send_batch.
+            List<int> observed = new List<int>(Burst);
+            Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Burst];
+
+            using (CancellationTokenSource sending = new CancellationTokenSource())
             {
-                sends[i] = harness.AppendOne((byte)i, new OrderRecordingDeliveryCallback(observed, i));
+                Task drainer = Task.Run(() =>
+                {
+                    while (!sending.IsCancellationRequested)
+                    {
+                        harness.ForceDrainWithoutWaiting();
+                    }
+                });
+
+                for (int i = 0; i < Burst; i++)
+                {
+                    sends[i] = harness.AppendOne((byte)i, new OrderRecordingDeliveryCallback(observed, i));
+                }
+
+                sending.Cancel();
+                await TestTimeout.Run(() => drainer, s_deadline);
             }
 
-            sending.Cancel();
-            await TestTimeout.Run(() => drainer, s_deadline);
-        }
+            harness.DrainNow();
+            await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
 
-        harness.DrainNow();
-        await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
+            // A settle window: the last callback fires immediately before its awaiter is released,
+            // so WhenAll already implies all 200 ran — but read the list under its own lock anyway.
+            int[] order;
+            lock (observed)
+            {
+                order = observed.ToArray();
+            }
 
-        // A settle window: the last callback fires immediately before its awaiter is released, so
-        // WhenAll already implies all 200 ran — but read the list under its own lock either way.
-        int[] order;
-        lock (observed)
-        {
-            order = observed.ToArray();
-        }
-
-        Assert.Equal(Burst, order.Length);
-        for (int i = 0; i < Burst; i++)
-        {
-            Assert.Equal(i, order[i]);
+            Assert.Equal(Burst, order.Length);
+            for (int i = 0; i < Burst; i++)
+            {
+                Assert.Equal(i, order[i]);
+            }
         }
     }
 
