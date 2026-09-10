@@ -210,6 +210,51 @@ internal static class AdminCallbacks
     internal delegate void DescribeReplicaLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_elect_leaders_callback_t</c>
+    /// (result shape 3 — one aggregate future over the map).
+    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
+    /// <c>kafka_admin_ElectLeadersResult_t</c> does declare a <c>get_error</c>: that
+    /// accessor carries the map's per-partition <em>value</em>, not a failure — see
+    /// <see cref="ElectLeadersOptionalError"/>. A non-null <paramref name="error"/> means
+    /// the election could not be run at all, and is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ElectLeadersCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_alter_partition_reassignments_callback_t</c> (result
+    /// shape 2). ⚠ A <b>per-partition</b> failure arrives inside
+    /// <paramref name="result"/>, borrowed; a non-null <paramref name="error"/> means the
+    /// request could not be submitted at all — which for this RPC includes a
+    /// <b>non-cancelled entry with no target replicas</b>, delivered on the inline path —
+    /// and is owned.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void AlterPartitionReassignmentsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_list_partition_reassignments_callback_t</c> (result
+    /// shape 3). ⚠ <paramref name="error"/> is the <b>only</b> failure channel: Java holds
+    /// a single future, and the result type declares no <c>get_error</c> at all. It is
+    /// <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListPartitionReassignmentsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_list_offsets_callback_t</c> (result
+    /// shape 1). ⚠ A <b>per-partition</b> failure arrives inside
+    /// <paramref name="result"/>, borrowed; a non-null <paramref name="error"/> means the
+    /// request could not be submitted at all — which for this RPC includes an unknown
+    /// isolation level or an unrecognised offset sentinel, both delivered on the inline
+    /// path — and is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
     /// The single rooted instance passed to every <c>close_async</c> submission. Rooted
     /// for the process lifetime, so the native thunk never dangles (ffi §B6 keep-alive).
     /// </summary>
@@ -235,6 +280,65 @@ internal static class AdminCallbacks
         new KeyedResultMarshal.Accessors(
             NativeMethods.CreateTopicsResultCount,
             NativeMethods.CreateTopicsResultGetError);
+
+    /// <summary>
+    /// Builds a per-key reader over a <b>borrowed</b> <c>*Result_get_error(result, i)</c>,
+    /// for the RPCs whose Java map value <em>is</em> an optional error.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>A factory rather than a lambda per RPC, so the body can be TESTED (M15/P4
+    /// round 1, finding 70.2).</b> <c>electLeaders</c>' own reader is unreachable without a
+    /// real <c>kafka_admin_ElectLeadersResult_t</c>, which no mock can produce — Java's
+    /// <c>MockAdminClient.electLeaders</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:797</c>) and the core mirrors that. Measured on the
+    /// hand-written form: swapping <see cref="KafkaException.FromBorrowedHandle"/> for
+    /// <see cref="KafkaException.FromHandle"/> inside it left the suite at
+    /// <b>1231/1231 green</b>. Built here from an injected accessor, the <em>same body</em>
+    /// is driven over the byte-identical
+    /// <c>kafka_admin_AlterPartitionReassignmentsResult_t</c> twin, where the swap aborts
+    /// the host.
+    /// </para>
+    /// <para>
+    /// ⚠ The handle is <b>BORROWED</b> — it dies with the result root, so it goes through
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/> and is never destroyed. A
+    /// null pointer is <see langword="null"/>: Java's empty <c>Optional</c>, i.e. that key
+    /// succeeded.
+    /// </para>
+    /// <para>
+    /// Called once per RPC at static initialization, so the closure it allocates is not on
+    /// any walk — the hoisting invariant is unchanged.
+    /// </para>
+    /// </remarks>
+    /// <param name="getError">That RPC's <c>*Result_get_error</c>.</param>
+    /// <returns>The reader.</returns>
+    internal static Func<IntPtr, int, KafkaException?> BorrowedOptionalError(
+        KeyedResultMarshal.IndexedAccessor getError) =>
+        (result, index) => KafkaException.FromBorrowedHandle(getError(result, index));
+
+    /// <summary>
+    /// Builds a <b>composite</b> key reader over a result whose key is
+    /// <c>(get_topic(i), get_partition(i))</c> — the shape M15/P2a's <c>(result, index)</c>
+    /// key seam exists for, and which three RPCs now share.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>One body instead of three copies, for the same testability reason as
+    /// <see cref="BorrowedOptionalError"/>.</b> <c>deleteRecords</c> and
+    /// <c>alterPartitionReassignments</c> both drive this body against a real result root,
+    /// so a defect in the composition — a missing
+    /// <see cref="KeyedResultMarshal.ReadStringKey"/>, a transposed pair — is caught there
+    /// and therefore for <c>electLeaders</c> too. What that still does not reach is
+    /// <em>which accessors</em> <c>electLeaders</c>' instance is built on; that is pinned
+    /// structurally by <c>AdminP4ReaderWiringTests</c>.
+    /// </remarks>
+    /// <param name="getTopic">That RPC's <c>*Result_get_topic</c>, borrowed and NUL-terminated.</param>
+    /// <param name="getPartition">That RPC's <c>*Result_get_partition</c>.</param>
+    /// <returns>The reader.</returns>
+    internal static Func<IntPtr, int, TopicPartition> TopicPartitionKey(
+        KeyedResultMarshal.IndexedAccessor getTopic, Func<IntPtr, int, int> getPartition) =>
+        (result, index) => new TopicPartition(
+            KeyedResultMarshal.ReadStringKey(getTopic(result, index)), getPartition(result, index));
 
     /// <summary>
     /// <c>createTopics</c>' key reader — Java keys this result by topic <b>name</b>
@@ -399,9 +503,8 @@ internal static class AdminCallbacks
     /// into the shipped <see cref="TopicPartition"/> that Java keys the map by.
     /// </summary>
     internal static readonly Func<IntPtr, int, TopicPartition> DeleteRecordsKey =
-        static (result, index) => new TopicPartition(
-            KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteRecordsResultGetTopic(result, index)),
-            NativeMethods.DeleteRecordsResultGetPartition(result, index));
+        TopicPartitionKey(
+            NativeMethods.DeleteRecordsResultGetTopic, NativeMethods.DeleteRecordsResultGetPartition);
 
     /// <summary>
     /// <c>deleteRecords</c>' <b>inline-scalar</b> value reader — the sub-shape M15/P2b's
@@ -628,6 +731,165 @@ internal static class AdminCallbacks
 #pragma warning restore CS0618
 
     /// <summary>
+    /// The rooted instance passed to every <c>elect_leaders_async</c> submission (result
+    /// shape 3 — one aggregate future, so it has no accessor set).
+    /// </summary>
+    internal static readonly ElectLeadersCallback ElectLeaders = OnElectLeaders;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>alter_partition_reassignments_async</c>
+    /// submission (result shape 2, composite key).
+    /// </summary>
+    internal static readonly AlterPartitionReassignmentsCallback AlterPartitionReassignments =
+        OnAlterPartitionReassignments;
+
+    /// <summary>
+    /// <c>electLeaders</c>' <b>composite</b> key reader — this result declares no
+    /// <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled into
+    /// the <see cref="TopicPartition"/> Java keys the map by. Same reader shape as
+    /// <see cref="DeleteRecordsKey"/>, which is the precedent for a partition-composed key.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartition> ElectLeadersKey =
+        TopicPartitionKey(
+            NativeMethods.ElectLeadersResultGetTopic, NativeMethods.ElectLeadersResultGetPartition);
+
+    /// <summary>
+    /// ⚠⚠ <c>electLeaders</c>' per-partition <b>VALUE</b> reader — and it reads
+    /// <c>get_error(i)</c>. This looks like a defect and is not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Java's future resolves to
+    /// <c>Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;</c>
+    /// (<c>ElectLeadersResult.java:36, :47</c>), and the javadoc on <c>partitions()</c>
+    /// defines the value: "If the election succeeded then the value for a topic partition
+    /// will be the empty Optional. Otherwise the election failed and the Optional will be
+    /// set with the error" (<c>:43-46</c>). The per-partition error <em>is</em> the map's
+    /// value, so it is read by the value reader and lands in the map — it does not fault
+    /// anything. <c>Optional&lt;Throwable&gt;</c> maps to
+    /// <see cref="KafkaException"/><c>?</c>, the same substitution M15/P3 made for
+    /// <c>OptionalLong</c> → <c>long?</c>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The ABI accessor set cannot tell you this.</b>
+    /// <c>kafka_admin_ElectLeadersResult_t</c> and
+    /// <c>kafka_admin_AlterPartitionReassignmentsResult_t</c> declare byte-identical
+    /// accessor sets — <c>count</c>, <c>get_topic</c>, <c>get_partition</c>,
+    /// <c>get_error</c>, <c>destroy</c> — and
+    /// <see cref="AlterPartitionReassignments"/> really does route its
+    /// <c>get_error(i)</c> to the per-key failure channel
+    /// (<see cref="AlterPartitionReassignmentsAccessors"/>). Only the Java return type
+    /// separates the two, which is why routing this one through
+    /// <c>Complete&lt;TKey&gt;</c> would compile, read plausibly, and be wrong.
+    /// </para>
+    /// <para>
+    /// ⚠ The pointer is <b>BORROWED</b> from the result root, so it goes through
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/> and is never destroyed —
+    /// the same rule as every other per-key error site, unaffected by it being a value
+    /// here.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, KafkaException?> ElectLeadersOptionalError =
+        BorrowedOptionalError(NativeMethods.ElectLeadersResultGetError);
+
+    /// <summary>
+    /// <c>alterPartitionReassignments</c>' universal accessors — result <b>shape 2</b>:
+    /// the ABI declares no <c>_get_value</c>, because Java's per-partition future is
+    /// <c>KafkaFuture&lt;Void&gt;</c>, so a null per-partition error <em>is</em> the
+    /// success value. ⚠⚠ The accessor pair is byte-identical to <c>electLeaders</c>';
+    /// see <see cref="ElectLeadersOptionalError"/> for why the two shapes still differ.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors AlterPartitionReassignmentsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.AlterPartitionReassignmentsResultCount,
+            NativeMethods.AlterPartitionReassignmentsResultGetError);
+
+    /// <inheritdoc cref="ElectLeadersKey"/>
+    internal static readonly Func<IntPtr, int, TopicPartition> AlterPartitionReassignmentsKey =
+        TopicPartitionKey(
+            NativeMethods.AlterPartitionReassignmentsResultGetTopic,
+            NativeMethods.AlterPartitionReassignmentsResultGetPartition);
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_partition_reassignments_async</c>
+    /// submission (result shape 3 — one aggregate future, so no accessor set).
+    /// </summary>
+    internal static readonly ListPartitionReassignmentsCallback ListPartitionReassignments =
+        OnListPartitionReassignments;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_offsets_async</c> submission (result
+    /// shape 1, composite key).
+    /// </summary>
+    internal static readonly ListOffsetsCallback ListOffsets = OnListOffsets;
+
+    /// <inheritdoc cref="ElectLeadersKey"/>
+    internal static readonly Func<IntPtr, int, TopicPartition> ListPartitionReassignmentsKey =
+        TopicPartitionKey(
+            NativeMethods.ListPartitionReassignmentsResultGetTopic,
+            NativeMethods.ListPartitionReassignmentsResultGetPartition);
+
+    /// <summary>
+    /// <c>listPartitionReassignments</c>' value reader: <c>get_value(i)</c> yields a
+    /// borrowed <c>PartitionReassignment_t</c>, whose three broker lists are copied out
+    /// before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Unlike <see cref="ElectLeadersOptionalError"/>, this one reads a genuine
+    /// <c>get_value</c>. Shape 3 now has three members and they do not agree on which
+    /// accessor carries the map's value: <c>listTopics</c> and
+    /// <c>listPartitionReassignments</c> read <c>get_value</c>, while <c>electLeaders</c>
+    /// reads <c>get_error</c> — because Java's map value differs
+    /// (<c>TopicListing</c> / <c>PartitionReassignment</c> versus
+    /// <c>Optional&lt;Throwable&gt;</c>). Which accessor to read is a per-RPC fact, not a
+    /// property of the shape.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, PartitionReassignment> PartitionReassignmentValue =
+        static (result, index) =>
+            PartitionReassignmentMarshal.CopyOut(
+                NativeMethods.ListPartitionReassignmentsResultGetValue(result, index))
+            ?? throw new KafkaException(
+                "The listPartitionReassignments result produced no reassignment for an index "
+                + "within its own count.");
+
+    /// <summary>
+    /// <c>listOffsets</c>' universal accessors — result <b>shape 1</b>, with a
+    /// <b>borrowed</b> per-partition <c>get_error</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ This RPC declares <b>both</b> a <c>get_error</c> and a <c>get_value</c>, which is
+    /// what separates it from its similarly-named Stage-2 sibling
+    /// (<c>listPartitionReassignments</c>, which declares only a <c>get_value</c>) and from
+    /// its Stage-1 near-namesake (<c>alterPartitionReassignments</c>, which declares only a
+    /// <c>get_error</c>). Three names in one family, three shapes.
+    /// </remarks>
+    internal static readonly KeyedResultMarshal.Accessors ListOffsetsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.ListOffsetsResultCount,
+            NativeMethods.ListOffsetsResultGetError);
+
+    /// <inheritdoc cref="ElectLeadersKey"/>
+    internal static readonly Func<IntPtr, int, TopicPartition> ListOffsetsKey =
+        TopicPartitionKey(
+            NativeMethods.ListOffsetsResultGetTopic, NativeMethods.ListOffsetsResultGetPartition);
+
+    /// <summary>
+    /// <c>listOffsets</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>ListOffsetsResultInfo_t</c>, copied out before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Reached only when the entry's <c>get_error</c> was null — the walker checks the
+    /// error first — which is why the header's "null value if that partition failed" case
+    /// cannot arrive here.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ListOffsetsResult.ListOffsetsResultInfo> ListOffsetsInfoValue =
+        static (result, index) =>
+            ListOffsetsResultInfoMarshal.CopyOut(NativeMethods.ListOffsetsResultGetValue(result, index))
+            ?? throw new KafkaException(
+                "The listOffsets result produced no offset information for a partition that "
+                + "reported no error.");
+
+    /// <summary>
     /// The result-root destroys, hoisted for the same reason as the accessor sets: a
     /// method group converted at the call site would allocate a delegate per completion.
     /// All are null-safe, so the trampoline's <c>finally</c> can call them
@@ -676,6 +938,16 @@ internal static class AdminCallbacks
     private static readonly Action<IntPtr> s_destroyDescribeReplicaLogDirsResult =
         NativeMethods.DescribeReplicaLogDirsResultDestroy;
 
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyListTopicsResult = NativeMethods.ListTopicsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyElectLeadersResult = NativeMethods.ElectLeadersResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyAlterPartitionReassignmentsResult =
+        NativeMethods.AlterPartitionReassignmentsResultDestroy;
+
     /// <summary>
     /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
     /// everything else here.
@@ -686,6 +958,36 @@ internal static class AdminCallbacks
     /// <inheritdoc cref="s_listConfigResourcesCount"/>
     private static readonly KeyedResultMarshal.CountAccessor s_listClientMetricsResourcesCount =
         NativeMethods.ListClientMetricsResourcesResultCount;
+
+    /// <summary>
+    /// A count accessor a <b>shape-3</b> aggregate walk reads, hoisted for the same reason
+    /// as everything else here.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Phrased per-field rather than as a count, because every <c>&lt;inheritdoc&gt;</c>
+    /// below copies this sentence verbatim — so a number here becomes a number in each of
+    /// them, and goes stale the moment the shape gains a member. It did: this read "the two
+    /// shape-3 aggregate walks" until <c>listPartitionReassignments</c> became the third
+    /// (finding 70.11), and the new field inherited the wrong count on the way in.
+    /// </remarks>
+    private static readonly KeyedResultMarshal.CountAccessor s_listTopicsCount =
+        NativeMethods.ListTopicsResultCount;
+
+    /// <inheritdoc cref="s_listTopicsCount"/>
+    private static readonly KeyedResultMarshal.CountAccessor s_electLeadersCount =
+        NativeMethods.ElectLeadersResultCount;
+
+    /// <inheritdoc cref="s_listTopicsCount"/>
+    private static readonly KeyedResultMarshal.CountAccessor s_listPartitionReassignmentsCount =
+        NativeMethods.ListPartitionReassignmentsResultCount;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyListPartitionReassignmentsResult =
+        NativeMethods.ListPartitionReassignmentsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyListOffsetsResult =
+        NativeMethods.ListOffsetsResultDestroy;
 
     private static void OnClose(IntPtr error, IntPtr userData)
     {
@@ -949,22 +1251,53 @@ internal static class AdminCallbacks
             s_destroyDescribeReplicaLogDirsResult);
 
     /// <summary>
-    /// The <b>shape-3</b> trampoline: one awaiter, no per-key error channel.
+    /// The one completion body every <b>shape-3</b> trampoline delegates to: one awaiter
+    /// over a whole map, and no per-key error channel.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The differences from the keyed trampolines are exactly the two the shape implies.
     /// The callback's <c>error</c> is the <em>only</em> failure channel, so it faults the
     /// single awaiter rather than fanning out across keys; and any failure during the
     /// walk does the same, because there is no per-key <see cref="System.Threading.Tasks.Task"/>
     /// to attribute it to. The <c>finally</c>'s three obligations are unchanged.
+    /// </para>
+    /// <para>
+    /// ⚠ "No per-key error channel" is about the <em>completion</em>, not about the
+    /// accessor set: <c>electLeaders</c> routes through here while its result type does
+    /// declare a <c>get_error</c>, because for that RPC the accessor carries the map's
+    /// value (<see cref="ElectLeadersOptionalError"/>). What the shape asserts is that a
+    /// per-key outcome never faults anything.
+    /// </para>
+    /// <para>
+    /// This mirrors <see cref="CompleteListRpc{TValue}"/>: a shared body per shape, so the
+    /// ownership rules are stated once instead of once per RPC.
+    /// </para>
     /// </remarks>
-    private static void OnListTopics(IntPtr result, IntPtr error, IntPtr userData)
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    /// <param name="count">That RPC's <c>*Result_count</c>.</param>
+    /// <param name="readKey">That RPC's key reader.</param>
+    /// <param name="readValue">That RPC's value reader.</param>
+    /// <param name="keyComparer">The comparer the assembled map is keyed by.</param>
+    /// <param name="destroyResult">That RPC's <c>*Result_destroy</c>.</param>
+    private static void CompleteAggregateRpc<TKey, TValue>(
+        IntPtr result,
+        IntPtr error,
+        IntPtr userData,
+        KeyedResultMarshal.CountAccessor count,
+        Func<IntPtr, int, TKey> readKey,
+        Func<IntPtr, int, TValue> readValue,
+        IEqualityComparer<TKey> keyComparer,
+        Action<IntPtr> destroyResult)
+        where TKey : notnull
     {
-        SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>? context = null;
+        SingleAdminOperation<IReadOnlyDictionary<TKey, TValue>>? context = null;
         try
         {
             GCHandle handle = GCHandle.FromIntPtr(userData);
-            context = (SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>)handle.Target!;
+            context = (SingleAdminOperation<IReadOnlyDictionary<TKey, TValue>>)handle.Target!;
 
             if (error != IntPtr.Zero)
             {
@@ -974,13 +1307,7 @@ internal static class AdminCallbacks
             }
             else
             {
-                KeyedResultMarshal.CompleteAggregate(
-                    result,
-                    NativeMethods.ListTopicsResultCount,
-                    context,
-                    ListTopicsKey,
-                    TopicListingValue,
-                    StringComparer.Ordinal);
+                KeyedResultMarshal.CompleteAggregate(result, count, context, readKey, readValue, keyComparer);
             }
         }
         catch (Exception exception)
@@ -991,11 +1318,114 @@ internal static class AdminCallbacks
         }
         finally
         {
-            NativeMethods.ListTopicsResultDestroy(result);
+            destroyResult(result);
             context?.FailUncompleted();
             context?.FreeGcHandle();
         }
     }
+
+    /// <summary>
+    /// <c>listTopics</c>' shape-3 trampoline: one awaiter over
+    /// <c>Map&lt;String, TopicListing&gt;</c>, keyed by topic name.
+    /// </summary>
+    private static void OnListTopics(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_listTopicsCount,
+            ListTopicsKey,
+            TopicListingValue,
+            StringComparer.Ordinal,
+            s_destroyListTopicsResult);
+
+    /// <summary>
+    /// ⚠⚠ <c>electLeaders</c>' shape-3 trampoline — <b>the aggregate walker, with
+    /// <c>get_error(i)</c> supplied as the VALUE reader.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Java's <c>ElectLeadersResult</c> holds
+    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;&gt;</c>
+    /// (<c>ElectLeadersResult.java:36, :47</c>) and its <c>partitions()</c> javadoc says
+    /// "If the election succeeded then the value for a topic partition will be the empty
+    /// Optional. Otherwise the election failed and the Optional will be set with the
+    /// error" (<c>:43-46</c>). So a per-partition failure is a map <em>value</em> on a
+    /// <b>successful</b> task, and <see cref="ElectLeadersOptionalError"/> is the reader
+    /// that produces it.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Reading the ABI accessor set alone gets this wrong.</b>
+    /// <see cref="OnAlterPartitionReassignments"/> below sits on a byte-identical accessor
+    /// set — <c>count</c>, <c>get_topic</c>, <c>get_partition</c>, <c>get_error</c>,
+    /// <c>destroy</c> — and correctly routes through <see cref="CompleteKeyedVoid"/>,
+    /// where <c>get_error(i)</c> faults that partition's own awaitable. Rewiring this
+    /// trampoline to match it compiles and is wrong: it would fault a partition Java
+    /// reports as an ordinary map entry, and would replace one future with N.
+    /// </para>
+    /// </remarks>
+    private static void OnElectLeaders(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_electLeadersCount,
+            ElectLeadersKey,
+            ElectLeadersOptionalError,
+            EqualityComparer<TopicPartition>.Default,
+            s_destroyElectLeadersResult);
+
+    /// <summary>
+    /// <c>listPartitionReassignments</c>' shape-3 trampoline: one awaiter over
+    /// <c>Map&lt;TopicPartition, PartitionReassignment&gt;</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ It shares a walker with <see cref="OnElectLeaders"/> and <see cref="OnListTopics"/>
+    /// for the reason the shape is defined by: Java stores <b>one</b> future
+    /// (<c>ListPartitionReassignmentsResult.java:31</c>), so no per-partition outcome
+    /// faults anything. Here the ABI agrees visibly — the result declares no
+    /// <c>get_error</c> — whereas <c>electLeaders</c> declares one and still belongs. The
+    /// Java stored field is what decides both.
+    /// </remarks>
+    private static void OnListPartitionReassignments(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_listPartitionReassignmentsCount,
+            ListPartitionReassignmentsKey,
+            PartitionReassignmentValue,
+            EqualityComparer<TopicPartition>.Default,
+            s_destroyListPartitionReassignmentsResult);
+
+    /// <summary>
+    /// <c>listOffsets</c>' shape-1 trampoline: one awaitable per partition, each carrying
+    /// that partition's own value or its own borrowed error.
+    /// </summary>
+    private static void OnListOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            ListOffsetsAccessors,
+            ListOffsetsKey,
+            ListOffsetsInfoValue,
+            s_destroyListOffsetsResult);
+
+    /// <summary>
+    /// <c>alterPartitionReassignments</c>' shape-2 trampoline: one awaitable per
+    /// partition, faulted by that partition's own borrowed <c>get_error(i)</c>. ⚠⚠ Its
+    /// accessor set is byte-identical to <see cref="OnElectLeaders"/>'; the Java return
+    /// type is what separates them.
+    /// </summary>
+    private static void OnAlterPartitionReassignments(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            AlterPartitionReassignmentsAccessors,
+            AlterPartitionReassignmentsKey,
+            s_destroyAlterPartitionReassignmentsResult);
 
     /// <summary>
     /// The <b>shape-5</b> trampoline: one awaiter over four cluster attributes, and no

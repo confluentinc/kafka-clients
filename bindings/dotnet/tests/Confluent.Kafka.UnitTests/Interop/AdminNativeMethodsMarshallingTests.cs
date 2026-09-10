@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -55,9 +56,22 @@ namespace Confluent.Kafka.UnitTests.Interop;
 public sealed class AdminNativeMethodsMarshallingTests
 {
     /// <summary>
-    /// Every <c>bool</c> <b>parameter</b> on an admin P/Invoke carries
-    /// <c>[MarshalAs(UnmanagedType.I1)]</c>.
+    /// Every <c>bool</c> <b>parameter</b> on an admin P/Invoke — by value or by reference —
+    /// carries <c>[MarshalAs(UnmanagedType.I1)]</c>.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <b>The by-ref clause is pre-emptive and matches nothing today (M15/P4 round 1,
+    /// finding 70.6).</b> Measured: an unfiltered grep of <c>Internal/Interop/</c> for
+    /// <c>ref bool</c> / <c>out bool</c> / <c>bool*</c> returns exactly one hit, and it is
+    /// a <c>&lt;see cref&gt;</c> in a doc comment, not a declaration (control: <c>out int</c>
+    /// / <c>out long</c> → 34 hits). It is here because the <em>narrowing filter</em> is the
+    /// defect class: <c>ParameterType == typeof(bool)</c> is exactly what hid the
+    /// <c>bool[]</c> gap until P4 declared the surface's first array, and
+    /// <c>typeof(bool).MakeByRefType()</c> is the same blind spot one shape over. Adding a
+    /// disjunct can only widen coverage; the assertion's non-vacuity is carried by
+    /// <see cref="TheSweepFindsTheAdminSurface_AndTheBoolsWithinIt"/>, which counts the
+    /// by-value bools this really does reach.
+    /// </remarks>
     [Fact]
     public void EveryAdminBoolParameter_IsMarshalledAsI1()
     {
@@ -67,7 +81,7 @@ public sealed class AdminNativeMethodsMarshallingTests
         {
             foreach (ParameterInfo parameter in method.GetParameters())
             {
-                if (parameter.ParameterType == typeof(bool) && MarshalAs(parameter) != UnmanagedType.I1)
+                if (IsScalarBool(parameter.ParameterType) && MarshalAs(parameter) != UnmanagedType.I1)
                 {
                     unmarked.Add($"{method.Name}({parameter.Name})");
                 }
@@ -75,6 +89,56 @@ public sealed class AdminNativeMethodsMarshallingTests
         }
 
         Assert.Equal(new List<string>(), unmarked);
+    }
+
+    /// <summary>
+    /// Every <c>bool</c><b>[]</b> parameter on an admin P/Invoke carries
+    /// <c>[MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)]</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>A separate assertion because the scalar sweep above does not reach an
+    /// array.</b> Its predicate is <c>ParameterType == typeof(bool)</c>, which a
+    /// <c>bool[]</c> does not satisfy — so before M15/P4 introduced one, the family-wide
+    /// claim had no array to cover and the gap was invisible. The element size is the whole
+    /// point: without <c>ArraySubType</c> the marshaller writes four-byte Win32
+    /// <c>BOOL</c>s into a buffer the core reads as one-byte C <c>bool</c>s, and — unlike
+    /// the scalar case, where each argument gets its own register — the elements really
+    /// <em>are</em> packed adjacently, so every flag after the first is read out of the
+    /// wrong byte.
+    /// <para>
+    /// The behavioural consequence is measured separately and end to end by
+    /// <c>AdminP4ResultMarshalTests.TheCancelFlag_ReachesTheCore_AndSeparatesCancelFromAnEmptyReplicaList</c>,
+    /// which is what makes this structural assertion more than a restatement of the source.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryAdminBoolArrayParameter_IsMarshalledAsAnI1Array()
+    {
+        List<string> unmarked = new List<string>();
+        int found = 0;
+
+        foreach (MethodInfo method in AdminImports())
+        {
+            foreach (ParameterInfo parameter in method.GetParameters())
+            {
+                if (parameter.ParameterType != typeof(bool[]))
+                {
+                    continue;
+                }
+
+                found++;
+                MarshalAsAttribute? attribute = MarshalAsAttribute(parameter);
+                if (attribute?.Value != UnmanagedType.LPArray || attribute.ArraySubType != UnmanagedType.I1)
+                {
+                    unmarked.Add($"{method.Name}({parameter.Name})");
+                }
+            }
+        }
+
+        Assert.Equal(new List<string>(), unmarked);
+
+        // Control-positive: a sweep that matched nothing would pass vacuously.
+        Assert.True(found >= 1, $"expected at least one admin bool[] parameter, found {found}");
     }
 
     /// <summary>
@@ -106,7 +170,7 @@ public sealed class AdminNativeMethodsMarshallingTests
         Assert.True(imports.Length >= 40, $"expected the admin P/Invoke surface, found {imports.Length}");
 
         int boolParameters = imports.Sum(
-            method => method.GetParameters().Count(parameter => parameter.ParameterType == typeof(bool)));
+            method => method.GetParameters().Count(parameter => IsScalarBool(parameter.ParameterType)));
         int boolReturns = imports.Count(method => method.ReturnType == typeof(bool));
 
         Assert.True(boolParameters >= 10, $"expected admin bool parameters, found {boolParameters}");
@@ -136,9 +200,19 @@ public sealed class AdminNativeMethodsMarshallingTests
                     "kafka_admin_", System.StringComparison.Ordinal) == true)
             .ToArray();
 
-    private static UnmanagedType? MarshalAs(ParameterInfo parameter)
+    /// <summary>
+    /// A <c>bool</c> passed by value or by reference — <b>not</b> a <c>bool[]</c>, whose
+    /// element size is carried by <c>ArraySubType</c> and which
+    /// <see cref="EveryAdminBoolArrayParameter_IsMarshalledAsAnI1Array"/> owns.
+    /// </summary>
+    private static bool IsScalarBool(Type type) =>
+        type == typeof(bool) || type == typeof(bool).MakeByRefType();
+
+    private static UnmanagedType? MarshalAs(ParameterInfo parameter) => MarshalAsAttribute(parameter)?.Value;
+
+    private static MarshalAsAttribute? MarshalAsAttribute(ParameterInfo parameter)
     {
         object[] attributes = parameter.GetCustomAttributes(typeof(MarshalAsAttribute), inherit: false);
-        return attributes.Length == 0 ? null : ((MarshalAsAttribute)attributes[0]).Value;
+        return attributes.Length == 0 ? null : (MarshalAsAttribute)attributes[0];
     }
 }

@@ -166,10 +166,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// topics such as <c>__consumer_offsets</c> are excluded.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole listing, unlike every other RPC here. There
-    /// is no per-topic outcome to report — the request carries no topic list, and the
-    /// ABI's result type has no per-key error channel — so either the call fails and the
-    /// task faults, or the whole map succeeds.
+    /// ⚠ <b>One</b> awaitable over the whole listing, rather than one per key. There is no
+    /// per-topic outcome to report — the request carries no topic list, and
+    /// <c>kafka_admin_ListTopicsResult_t</c> declares no per-key error accessor — so either
+    /// the call fails and the task faults, or the whole map succeeds.
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.TimeoutMs</c> is negative. Leave it <see langword="null"/> to use the
@@ -473,6 +473,152 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
         DescribeReplicaLogDirsOptions? options = null);
+
+    /// <summary>
+    /// Elects a leader for the given partitions — Java's
+    /// <c>electLeaders(ElectionType, Set&lt;TopicPartition&gt;, ElectLeadersOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="electionType">The kind of election to conduct.</param>
+    /// <param name="partitions">
+    /// The partitions to elect leaders for, or <see langword="null"/> for <b>every
+    /// partition in the cluster</b> — Java's null <c>Set</c>
+    /// (<c>Admin.java:1099-1100</c>). ⚠ <see langword="null"/> and an <b>empty</b>
+    /// collection are <em>different requests</em>: empty asks for an election over no
+    /// partitions. Java's parameter is a <c>Set</c>, so a repeated partition is one entry.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole election, and a per-partition failure is a
+    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// <c>Optional&lt;Throwable&gt;</c>. See <see cref="ElectLeadersResult"/>; the task
+    /// itself faults only when the election could not be run at all.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="electionType"/> is not one of <see cref="ElectionType.Preferred"/>
+    /// / <see cref="ElectionType.Unclean"/> — a value Java's enum parameter cannot
+    /// express, but a C# cast can — or <c>options.TimeoutMs</c> is negative (see
+    /// <see cref="ListTopics"/>).
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="partitions"/> contains a topic partition with a null topic.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ElectLeadersResult ElectLeaders(
+        ElectionType electionType,
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ElectLeadersOptions? options = null);
+
+    /// <summary>
+    /// Changes or reverts the reassignment of one or more partitions — Java's
+    /// <c>alterPartitionReassignments(Map&lt;TopicPartition, Optional&lt;NewPartitionReassignment&gt;&gt;,
+    /// AlterPartitionReassignmentsOptions)</c>. Returns <b>immediately</b>, without waiting
+    /// for the broker; the result carries one awaitable per partition.
+    /// </summary>
+    /// <param name="reassignments">
+    /// Topic partition → its new target replicas, or <see langword="null"/> to
+    /// <b>revert</b> that partition's reassignment — Java's <c>Optional.empty()</c>
+    /// (<c>Admin.java:1142-1143</c>). ⚠ Reverting is <em>not</em> the same as an empty
+    /// replica list: <see cref="NewPartitionReassignment"/> rejects an empty list, as Java
+    /// does, and the two travel on separate wires to the broker.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults — notably
+    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange"/>
+    /// <see langword="true"/>.
+    /// </param>
+    /// <returns>
+    /// One awaitable per partition, each reporting only whether <em>that</em>
+    /// reassignment was initiated — Java's per-partition future is
+    /// <c>KafkaFuture&lt;Void&gt;</c>. A partition that fails faults only its own
+    /// awaitable; a partially failed batch is not a failed call.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="reassignments"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="reassignments"/> contains a topic partition with a null topic.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
+        AlterPartitionReassignmentsOptions? options = null);
+
+    /// <summary>
+    /// Lists the cluster's ongoing partition reassignments — Java's
+    /// <c>listPartitionReassignments(Optional&lt;Set&lt;TopicPartition&gt;&gt;,
+    /// ListPartitionReassignmentsOptions)</c>. Returns <b>immediately</b>, without waiting
+    /// for the broker.
+    /// </summary>
+    /// <param name="partitions">
+    /// The partitions to ask about, or <see langword="null"/> for <b>every ongoing
+    /// reassignment in the cluster</b> — Java's <c>Optional.empty()</c>
+    /// (<c>Admin.java:1246-1247</c>). ⚠ <see langword="null"/> and an <b>empty</b>
+    /// collection are <em>different requests</em>. Java's parameter is a <c>Set</c>, so a
+    /// repeated partition is one entry.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole listing, rather than one per key — Java holds
+    /// a single future here. ⚠ A requested partition with <b>no</b> ongoing reassignment is
+    /// simply <b>absent</b> from the map, so the result can be shorter than the request;
+    /// that is not an error.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="partitions"/> contains a topic partition with a null topic.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListPartitionReassignmentsResult ListPartitionReassignments(
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions? options = null);
+
+    /// <summary>
+    /// Lists offsets for the given partitions — Java's
+    /// <c>listOffsets(Map&lt;TopicPartition, OffsetSpec&gt;, ListOffsetsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// awaitable per partition.
+    /// </summary>
+    /// <param name="topicPartitionOffsets">
+    /// Topic partition → which offset to retrieve for it. ⚠ The seven
+    /// <see cref="OffsetSpec"/> kinds are <em>not</em> interchangeable with their numbers:
+    /// <see cref="OffsetSpec.ForTimestamp"/> with a value that happens to equal a wire
+    /// sentinel is still a timestamp query, and produces a different call from the
+    /// no-argument kind sharing that number.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults — notably
+    /// <see cref="ListOffsetsOptions.IsolationLevel"/>
+    /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/>.
+    /// </param>
+    /// <returns>
+    /// One awaitable per partition, each carrying that partition's own
+    /// <see cref="ListOffsetsResult.ListOffsetsResultInfo"/> or its own failure. A
+    /// partition that fails faults only <em>its own</em> awaitable.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="topicPartitionOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topicPartitionOffsets"/> contains a topic partition with a null
+    /// topic, or a null spec.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.IsolationLevel</c> is not one of
+    /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/> /
+    /// <see cref="Confluent.Kafka.IsolationLevel.ReadCommitted"/> — a value Java's enum
+    /// parameter cannot express, but a C# cast can — or <c>options.TimeoutMs</c> is
+    /// negative.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListOffsetsResult ListOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
+        ListOffsetsOptions? options = null);
 
     /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background

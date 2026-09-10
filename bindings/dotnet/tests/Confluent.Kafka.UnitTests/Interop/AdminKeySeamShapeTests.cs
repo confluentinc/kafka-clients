@@ -156,8 +156,8 @@ public sealed class AdminKeySeamShapeTests
     }
 
     /// <summary>
-    /// The <b>shape-3</b> walker has no per-key <b>error</b> channel at all, because the
-    /// ABI has no per-key error function to point it at.
+    /// The <b>shape-3</b> walker has no per-key <b>error</b> channel at all, because in
+    /// that shape no per-key outcome faults anything.
     /// </summary>
     /// <remarks>
     /// ⚠ M15/P2b's plan proposed expressing shape 3 by making
@@ -168,6 +168,16 @@ public sealed class AdminKeySeamShapeTests
     /// null dereference. Stating the absence <em>structurally</em> (this method simply has
     /// no error parameter, and takes no <see cref="KeyedResultMarshal.Accessors"/> at all)
     /// delivers the same intent with nothing to get wrong.
+    /// <para>
+    /// ⚠⚠ <b>The absent parameter is a fact about the COMPLETION, not about the ABI
+    /// accessor set (M15/P4).</b> An earlier wording of this summary gave the reason as
+    /// "the ABI has no per-key error function to point it at", which
+    /// <c>kafka_admin_ElectLeadersResult_get_error</c> falsifies: that result declares one
+    /// and still routes here, because Java's
+    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;&gt;</c> makes
+    /// it the map's <em>value</em>. The stale reason pointed a maintainer at exactly the
+    /// "correction" that was measured at <b>10</b> failing tests.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheAggregateWalker_HasNoPerKeyErrorChannel()

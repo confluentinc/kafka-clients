@@ -54,8 +54,11 @@ public sealed class DeleteRecordsResult
     /// <summary>
     /// Wraps one awaitable per topic partition — Java's <b>public</b>
     /// <c>DeleteRecordsResult(Map&lt;TopicPartition, KafkaFuture&lt;DeletedRecords&gt;&gt;)</c>
-    /// (<c>DeleteRecordsResult.java:32</c>), the one <c>*Result</c> constructor Java does
-    /// not keep package-private.
+    /// (<c>DeleteRecordsResult.java:32</c>). ⚠ Java declares it <b>public</b>, unlike most
+    /// <c>*Result</c> constructors, which are package-private. (An earlier wording called
+    /// it "the one" such constructor; M15/P4 Stage 2 bound a second —
+    /// <see cref="ListOffsetsResult"/> — and a count over Java's 60 <c>*Result</c> types
+    /// finds <b>9</b>.)
     /// </summary>
     /// <param name="lowWatermarks">One awaitable per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="lowWatermarks"/> is null.</exception>

@@ -302,6 +302,88 @@ internal sealed class NativeAdminClient : IDisposable
         AdminCallbacks.IncrementalAlterConfigsCallback callback,
         IntPtr userData);
 
+    /// <summary>
+    /// The <c>elect_leaders_async</c> submit shape — <b>two</b> parallel arrays plus the
+    /// <c>all_partitions</c> discriminant, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>allPartitions</c> is Java's <b>null</b> partition set — "every partition in
+    /// the cluster" — and is <em>not</em> an empty selection. The two are different
+    /// requests and the ABI keeps them apart deliberately.
+    /// </remarks>
+    internal delegate void NativeElectLeadersSubmit(
+        IntPtr admin,
+        int electionType,
+        bool allPartitions,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.ElectLeadersCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>alter_partition_reassignments_async</c> submit shape — <b>five</b> parallel
+    /// arrays, injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>cancel[i]</c> is Java's <c>Optional.empty()</c> — revert that partition's
+    /// reassignment — and <c>targetReplicas[i]</c> is then not read. It is a dedicated
+    /// channel precisely so cancelling cannot be confused with a present-but-empty replica
+    /// list, which Java rejects.
+    /// </remarks>
+    internal delegate void NativeAlterPartitionReassignmentsSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        bool[] cancel,
+        IntPtr[] targetReplicas,
+        int[] targetReplicaCounts,
+        int count,
+        int timeoutMs,
+        bool allowReplicationFactorChange,
+        AdminCallbacks.AlterPartitionReassignmentsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_partition_reassignments_async</c> submit shape, injectable for the same
+    /// reason as <see cref="NativeCreateTopicsSubmit"/>. ⚠ <c>allPartitions</c> is Java's
+    /// <c>Optional.empty()</c> — every ongoing reassignment in the cluster — and is not an
+    /// empty selection.
+    /// </summary>
+    internal delegate void NativeListPartitionReassignmentsSubmit(
+        IntPtr admin,
+        bool allPartitions,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.ListPartitionReassignmentsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_offsets_async</c> submit shape — <b>four</b> parallel arrays plus the
+    /// isolation level, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>isTimestamp[i]</c> travels beside <c>specTimestamps[i]</c> because the
+    /// six-sentinel projection is not injective — <c>ForTimestamp(-2)</c> and
+    /// <c>Earliest()</c> would otherwise be the same call.
+    /// </remarks>
+    internal delegate void NativeListOffsetsSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        bool[] isTimestamp,
+        long[] specTimestamps,
+        int count,
+        int timeoutMs,
+        int isolationLevel,
+        AdminCallbacks.ListOffsetsCallback callback,
+        IntPtr userData);
+
     internal SafeAdminHandle Handle => _handle;
 
     /// <summary>
@@ -1933,6 +2015,645 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         return new DescribeReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal ElectLeadersResult ElectLeaders(
+        ElectionType electionType,
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ElectLeadersOptions? options) =>
+        ElectLeaders(electionType, partitions, options, NativeMethods.AdminClientElectLeadersAsync);
+
+    /// <summary>
+    /// Submits <c>electLeaders</c> and returns immediately with the <b>single</b> awaitable
+    /// Java's <c>ElectLeadersResult</c> wraps (result shape 3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
+    /// future resolves to <c>Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;</c>
+    /// (<c>ElectLeadersResult.java:47</c>), so this uses
+    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge even
+    /// though the ABI result declares a <c>get_error</c>. See
+    /// <see cref="AdminCallbacks.ElectLeadersOptionalError"/>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>No keys are pre-registered, and here that is forced twice over.</b> The keys
+    /// come from the response — and with <paramref name="partitions"/>
+    /// <see langword="null"/> the request names no partitions at all, so there is nothing
+    /// to register even in principle.
+    /// </para>
+    /// <para>
+    /// ⚠ <b><see langword="null"/> and empty are different requests.</b>
+    /// <see langword="null"/> is Java's null <c>Set</c> — elect leaders for every partition
+    /// in the cluster (<c>Admin.java:1099-1100</c>) — and sets <c>all_partitions</c>. An
+    /// empty collection asks for an election over no partitions and leaves the flag false.
+    /// Collapsing the two would silently turn a no-op into a cluster-wide election.
+    /// </para>
+    /// </remarks>
+    internal ElectLeadersResult ElectLeaders(
+        ElectionType electionType,
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ElectLeadersOptions? options,
+        NativeElectLeadersSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // Java's parameter is the ElectionType enum, so a value outside its two members is
+        // not expressible there at all; in C# it is, by a cast. Rejected here as the
+        // programmer error it is (ffi §B5) rather than left to the ABI, which would fire
+        // its completion callback inline with an IllegalArgument error instead.
+        if (electionType != ElectionType.Preferred && electionType != ElectionType.Unclean)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(electionType),
+                electionType,
+                "The election type must be ElectionType.Preferred or ElectionType.Unclean.");
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ElectLeadersOptions));
+        }
+
+        // NOT `partitions?.Count == 0` folded in: null is "every partition", empty is "no
+        // partitions", and the ABI keeps a dedicated flag so the two stay apart.
+        bool allPartitions = partitions is null;
+
+        // De-duplicated because Java's parameter is a Set, and null-topic-checked because
+        // the ABI would skip such an entry silently. Shared with
+        // listPartitionReassignments, which takes the identical selection shape.
+        List<TopicPartition> selection = DistinctPartitions(partitions, nameof(partitions));
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(selection.Count);
+
+            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
+            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[selection.Count];
+            int[] partitionIds = new int[selection.Count];
+            for (int i = 0; i < selection.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(selection[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+                partitionIds[i] = selection[i].Partition;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                (int)electionType,
+                allPartitions,
+                topics,
+                partitionIds,
+                selection.Count,
+                timeoutMs,
+                AdminCallbacks.ElectLeaders,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // The topic strings are pinned only for the call (ffi §A4's call-scoped rule):
+            // the ABI copies them out during the submit.
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+                {
+                    topic.Dispose();
+                }
+            }
+        }
+
+        return new ElectLeadersResult(operation.Task);
+    }
+
+    internal AlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
+        AlterPartitionReassignmentsOptions? options) =>
+        AlterPartitionReassignments(
+            reassignments, options, NativeMethods.AdminClientAlterPartitionReassignmentsAsync);
+
+    /// <summary>
+    /// Submits <c>alterPartitionReassignments</c> and returns immediately with one
+    /// awaitable per topic partition. Java's
+    /// <c>Map&lt;TopicPartition, Optional&lt;NewPartitionReassignment&gt;&gt;</c> becomes
+    /// the ABI's five parallel arrays.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>A <see langword="null"/> entry is Java's <c>Optional.empty()</c> — cancel —
+    /// and it travels in the dedicated <c>cancel</c> array, never as an empty replica
+    /// list.</b> The header states the intent verbatim: "A separate flag rather than a NULL
+    /// replica pointer, so cancelling stays distinct from 'present but empty', which Java
+    /// rejects." A <c>?? Array.Empty&lt;int&gt;()</c> anywhere on this path would collapse
+    /// the two, turning a cancellation into a request the ABI rejects outright.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Null-as-a-shape here is the input's meaning, not a walker discriminant.</b>
+    /// M15/P2b's rule — a result shape is never encoded in whether a field is null —
+    /// governs the <em>completion</em> seam, which P4 leaves untouched. On the request
+    /// side Java's own carrier is an <c>Optional</c>, so <c>NewPartitionReassignment?</c>
+    /// is the faithful mapping, and the value it selects is carried on its own wire, which
+    /// is exactly what that rule asks for.
+    /// </para>
+    /// <para>
+    /// Java's empty target-replica list is rejected by
+    /// <see cref="NewPartitionReassignment"/>'s constructor, so it cannot reach here; the
+    /// ABI would reject it too, on the inline callback path.
+    /// </para>
+    /// </remarks>
+    internal AlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
+        AlterPartitionReassignmentsOptions? options,
+        NativeAlterPartitionReassignmentsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (reassignments is null)
+        {
+            throw new ArgumentNullException(nameof(reassignments));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool allowReplicationFactorChange = true;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterPartitionReassignmentsOptions));
+            allowReplicationFactorChange = options.AllowReplicationFactorChange;
+        }
+
+        List<TopicPartition> keys = new List<TopicPartition>(reassignments.Count);
+        bool[] cancel = new bool[reassignments.Count];
+        int[] partitions = new int[reassignments.Count];
+        int[] targetReplicaCounts = new int[reassignments.Count];
+        int[]?[] targetReplicas = new int[reassignments.Count][];
+        int next = 0;
+        foreach (KeyValuePair<TopicPartition, NewPartitionReassignment?> entry in reassignments)
+        {
+            // A `default(TopicPartition)` has a null Topic, and the header's "an entry with
+            // a NULL topic is skipped" would silently drop it (ffi §B5).
+            if (entry.Key.Topic is null)
+            {
+                throw new ArgumentException(
+                    "The reassignments map must not contain a topic partition with a null topic.",
+                    nameof(reassignments));
+            }
+
+            keys.Add(entry.Key);
+            partitions[next] = entry.Key.Partition;
+
+            // The whole cancel-versus-empty distinction lives on these three lines: a null
+            // entry sets the flag and contributes NO replica array, a present one
+            // contributes its own (never empty — the constructor rejects that).
+            cancel[next] = entry.Value is null;
+            if (entry.Value is not null)
+            {
+                IReadOnlyList<int> replicas = entry.Value.TargetReplicas;
+                int[] ids = new int[replicas.Count];
+                for (int i = 0; i < replicas.Count; i++)
+                {
+                    ids[i] = replicas[i];
+                }
+
+                targetReplicas[next] = ids;
+                targetReplicaCounts[next] = ids.Length;
+            }
+
+            next++;
+        }
+
+        // EqualityComparer<TopicPartition>.Default dispatches to the struct's own
+        // IEquatable implementation (ordinal on the topic), so it neither boxes nor
+        // disagrees with the public AlterPartitionReassignmentsResult view — the same
+        // reasoning as the deleteRecords path.
+        VoidKeyedAdminOperation<TopicPartition> operation = new VoidKeyedAdminOperation<TopicPartition>(
+            "alterPartitionReassignments", keys, EqualityComparer<TopicPartition>.Default);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        List<GCHandle>? pinnedReplicas = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+            pinnedReplicas = new List<GCHandle>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            IntPtr[] replicaPointers = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+
+                // A cancelled entry contributes a NULL pointer and a count of 0, which the
+                // ABI never reads — `cancel[i]` alone decides. Pinned only for the call
+                // (ffi §A4): the core copies the ids out during the submit.
+                int[]? ids = targetReplicas[i];
+                if (ids is null)
+                {
+                    replicaPointers[i] = IntPtr.Zero;
+                    continue;
+                }
+
+                GCHandle pin = GCHandle.Alloc(ids, GCHandleType.Pinned);
+                pinnedReplicas.Add(pin);
+                replicaPointers[i] = pin.AddrOfPinnedObject();
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                partitions,
+                cancel,
+                replicaPointers,
+                targetReplicaCounts,
+                keys.Count,
+                timeoutMs,
+                allowReplicationFactorChange,
+                AdminCallbacks.AlterPartitionReassignments,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+                {
+                    topic.Dispose();
+                }
+            }
+
+            if (pinnedReplicas is not null)
+            {
+                foreach (GCHandle pin in pinnedReplicas)
+                {
+                    pin.Free();
+                }
+            }
+        }
+
+        return new AlterPartitionReassignmentsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal ListPartitionReassignmentsResult ListPartitionReassignments(
+        IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options) =>
+        ListPartitionReassignments(
+            partitions, options, NativeMethods.AdminClientListPartitionReassignmentsAsync);
+
+    /// <summary>
+    /// Submits <c>listPartitionReassignments</c> and returns immediately with the
+    /// <b>single</b> awaitable Java's <c>ListPartitionReassignmentsResult</c> wraps
+    /// (result shape 3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>One awaitable, despite the name's parallel with
+    /// <c>alterPartitionReassignments</c>.</b> Java stores a single
+    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, PartitionReassignment&gt;&gt;</c>
+    /// (<c>ListPartitionReassignmentsResult.java:31</c>), and the ABI's result declares no
+    /// <c>get_error</c> at all — so this uses <see cref="SingleAdminOperation{TValue}"/>,
+    /// not the per-key bridge.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Keys cannot be pre-registered even in principle</b>: the header says "only
+    /// partitions with an ongoing reassignment appear in the result, so it can be shorter
+    /// than the request". A per-key bridge would fault every quiet partition.
+    /// </para>
+    /// <para>
+    /// ⚠ <b><see langword="null"/> and empty are different requests.</b>
+    /// <see langword="null"/> is Java's <c>Optional.empty()</c> — list every ongoing
+    /// reassignment in the cluster (<c>Admin.java:1246-1247</c>) — and sets
+    /// <c>all_partitions</c>. An empty collection asks about no partitions at all.
+    /// </para>
+    /// </remarks>
+    internal ListPartitionReassignmentsResult ListPartitionReassignments(
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions? options,
+        NativeListPartitionReassignmentsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListPartitionReassignmentsOptions));
+        }
+
+        // NOT `partitions?.Count == 0` folded in — see the null-versus-empty note above.
+        bool allPartitions = partitions is null;
+        List<TopicPartition> selection = DistinctPartitions(partitions, nameof(partitions));
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                "listPartitionReassignments");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(selection.Count);
+
+            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
+            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[selection.Count];
+            int[] partitionIds = new int[selection.Count];
+            for (int i = 0; i < selection.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(selection[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+                partitionIds[i] = selection[i].Partition;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                allPartitions,
+                topics,
+                partitionIds,
+                selection.Count,
+                timeoutMs,
+                AdminCallbacks.ListPartitionReassignments,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Pinned only for the call (ffi §A4): the ABI copies out during the submit.
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+                {
+                    topic.Dispose();
+                }
+            }
+        }
+
+        return new ListPartitionReassignmentsResult(operation.Task);
+    }
+
+    internal ListOffsetsResult ListOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets, ListOffsetsOptions? options) =>
+        ListOffsets(topicPartitionOffsets, options, NativeMethods.AdminClientListOffsetsAsync);
+
+    /// <summary>
+    /// Submits <c>listOffsets</c> and returns immediately with one awaitable per topic
+    /// partition. Java's <c>Map&lt;TopicPartition, OffsetSpec&gt;</c> becomes the ABI's four
+    /// parallel arrays.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Each spec is encoded as a (flag, value) PAIR, and the flag is not
+    /// redundant.</b> The six no-argument kinds map to <c>ListOffsets</c> wire sentinels;
+    /// <see cref="OffsetSpec.ForTimestamp"/> maps to the timestamp itself — and those two
+    /// ranges overlap, so <c>ForTimestamp(-2)</c> and <see cref="OffsetSpec.Earliest"/>
+    /// would be indistinguishable without <c>is_timestamp</c>. The header states it: they
+    /// "both yield <c>-2</c>, yet Java treats them differently up to that point". Collapsing
+    /// the flag is a silent wrong-answer defect.
+    /// </remarks>
+    internal ListOffsetsResult ListOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
+        ListOffsetsOptions? options,
+        NativeListOffsetsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (topicPartitionOffsets is null)
+        {
+            throw new ArgumentNullException(nameof(topicPartitionOffsets));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        IsolationLevel isolationLevel = IsolationLevel.ReadUncommitted;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListOffsetsOptions));
+            isolationLevel = options.IsolationLevel;
+        }
+
+        // Java's parameter is the IsolationLevel enum, so a value outside its two members
+        // is not expressible there; in C# it is, by a cast. Rejected here as the programmer
+        // error it is (ffi §B5) rather than left to the ABI, which documents an inline
+        // callback carrying an IllegalArgument instead — the same call this binding already
+        // makes for ElectionType.
+        if (isolationLevel != IsolationLevel.ReadUncommitted && isolationLevel != IsolationLevel.ReadCommitted)
+        {
+            throw new ArgumentOutOfRangeException(
+                "options",
+                isolationLevel,
+                "ListOffsetsOptions.IsolationLevel must be IsolationLevel.ReadUncommitted or "
+                + "IsolationLevel.ReadCommitted.");
+        }
+
+        List<TopicPartition> keys = new List<TopicPartition>(topicPartitionOffsets.Count);
+        int[] partitionIds = new int[topicPartitionOffsets.Count];
+        bool[] isTimestamp = new bool[topicPartitionOffsets.Count];
+        long[] specTimestamps = new long[topicPartitionOffsets.Count];
+        int next = 0;
+        foreach (KeyValuePair<TopicPartition, OffsetSpec> entry in topicPartitionOffsets)
+        {
+            // A `default(TopicPartition)` has a null Topic, and the header's "an entry with
+            // a NULL topic is skipped" would silently drop it (ffi §B5).
+            if (entry.Key.Topic is null)
+            {
+                throw new ArgumentException(
+                    "The offsets map must not contain a topic partition with a null topic.",
+                    nameof(topicPartitionOffsets));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    $"The offset spec for '{entry.Key}' must not be null.",
+                    nameof(topicPartitionOffsets));
+            }
+
+            keys.Add(entry.Key);
+            partitionIds[next] = entry.Key.Partition;
+
+            // ⚠ The pair, never the value alone. A TimestampSpec sets the flag and carries
+            // its own number whatever that number is; every other kind clears the flag and
+            // carries its wire sentinel.
+            if (entry.Value is OffsetSpec.TimestampSpec timestamp)
+            {
+                isTimestamp[next] = true;
+                specTimestamps[next] = timestamp.Timestamp;
+            }
+            else
+            {
+                isTimestamp[next] = false;
+                specTimestamps[next] = SentinelFor(entry.Value, nameof(topicPartitionOffsets));
+            }
+
+            next++;
+        }
+
+        // EqualityComparer<TopicPartition>.Default dispatches to the struct's own
+        // IEquatable implementation, so it neither boxes nor disagrees with the public
+        // ListOffsetsResult view — the same reasoning as the deleteRecords path.
+        KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation =
+            new KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(
+                "listOffsets", keys, EqualityComparer<TopicPartition>.Default);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                partitionIds,
+                isTimestamp,
+                specTimestamps,
+                keys.Count,
+                timeoutMs,
+                (int)isolationLevel,
+                AdminCallbacks.ListOffsets,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+                {
+                    topic.Dispose();
+                }
+            }
+        }
+
+        return new ListOffsetsResult(operation.Tasks);
+    }
+
+    /// <summary>
+    /// The <c>ListOffsets</c> wire sentinel for one of the six no-argument
+    /// <see cref="OffsetSpec"/> kinds — Java's <c>KafkaAdminClient.getOffsetFromSpec</c>
+    /// (<c>KafkaAdminClient.java:5176-5191</c>).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Java has no <c>LatestSpec</c> branch</b> — it falls out of the <c>if/else</c>
+    /// chain to <c>return LATEST_TIMESTAMP</c> at <c>:5190</c>, which also silently swallows
+    /// any unrecognised subclass. <see cref="OffsetSpec"/>'s hierarchy is closed here
+    /// precisely so that fall-through cannot be reached by a wrong kind, so
+    /// <see cref="OffsetSpec.LatestSpec"/> is matched explicitly and lands on the same
+    /// <c>-1</c>. The final throw is therefore unreachable through the public API and
+    /// exists so a future eighth kind fails loudly rather than being queried as "latest".
+    /// </remarks>
+    private static long SentinelFor(OffsetSpec spec, string parameterName) => spec switch
+    {
+        OffsetSpec.LatestSpec => -1L,
+        OffsetSpec.EarliestSpec => -2L,
+        OffsetSpec.MaxTimestampSpec => -3L,
+        OffsetSpec.EarliestLocalSpec => -4L,
+        OffsetSpec.LatestTieredSpec => -5L,
+        OffsetSpec.EarliestPendingUploadSpec => -6L,
+        _ => throw new ArgumentException(
+            $"Unsupported offset spec '{spec.GetType().Name}'.", parameterName),
+    };
+
+    /// <summary>
+    /// De-duplicates a partition selection, preserving request order, and rejects a null
+    /// topic before it can reach the ABI.
+    /// </summary>
+    /// <remarks>
+    /// De-duplication mirrors Java, whose parameter is a <c>Set</c>. The null-topic check is
+    /// mandatory: the header skips such an entry silently, which would leave the caller
+    /// believing a partition was queried.
+    /// </remarks>
+    private static List<TopicPartition> DistinctPartitions(
+        IReadOnlyCollection<TopicPartition>? partitions, string parameterName)
+    {
+        List<TopicPartition> selection = new List<TopicPartition>(partitions?.Count ?? 0);
+        if (partitions is null)
+        {
+            return selection;
+        }
+
+        HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
+        foreach (TopicPartition partition in partitions)
+        {
+            if (partition.Topic is null)
+            {
+                throw new ArgumentException(
+                    "The partitions must not contain a topic partition with a null topic.", parameterName);
+            }
+
+            if (seen.Add(partition))
+            {
+                selection.Add(partition);
+            }
+        }
+
+        return selection;
     }
 
     /// <summary>

@@ -124,6 +124,31 @@ public sealed class KafkaAdminClient : IAdmin
         _native.DescribeReplicaLogDirs(replicas, options);
 
     /// <inheritdoc/>
+    public ElectLeadersResult ElectLeaders(
+        ElectionType electionType,
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ElectLeadersOptions? options = null) =>
+        _native.ElectLeaders(electionType, partitions, options);
+
+    /// <inheritdoc/>
+    public AlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
+        AlterPartitionReassignmentsOptions? options = null) =>
+        _native.AlterPartitionReassignments(reassignments, options);
+
+    /// <inheritdoc/>
+    public ListPartitionReassignmentsResult ListPartitionReassignments(
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions? options = null) =>
+        _native.ListPartitionReassignments(partitions, options);
+
+    /// <inheritdoc/>
+    public ListOffsetsResult ListOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
+        ListOffsetsOptions? options = null) =>
+        _native.ListOffsets(topicPartitionOffsets, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

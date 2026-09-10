@@ -1467,4 +1467,365 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DescribeReplicaLogDirsResultDestroy(IntPtr result);
+
+    // ---- M15/P4 Stage 1: electLeaders (result shape 3 — an AGGREGATE over the map) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_elect_leaders_async</c> — Java's
+    /// <c>electLeaders(ElectionType, Set&lt;TopicPartition&gt;, ElectLeadersOptions)</c>.
+    /// Java's set becomes <b>two parallel arrays</b>: entry <c>i</c> is
+    /// <c>(topics[i], partitions[i])</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <paramref name="allPartitions"/> is the explicit discriminant for Java's
+    /// <b>null</b> set — "conduct an election for every partition in the cluster"
+    /// (<c>Admin.java:1099-1100</c>). The header says the other three arguments are then
+    /// "ignored", and that the flag exists "so 'all partitions' and 'an empty selection'
+    /// stay distinguishable". A binding that mapped an empty collection onto
+    /// <see langword="true"/> would turn a request for nothing into a cluster-wide
+    /// election.
+    /// </para>
+    /// <para>
+    /// ⚠ "An entry with a NULL topic is skipped" — silently — so a null topic is rejected
+    /// at the C# boundary before any pin (ffi §B5).
+    /// </para>
+    /// <para>
+    /// ⚠ <paramref name="electionType"/> carries Java's <c>ElectionType.value</c> byte as
+    /// an <c>int32_t</c>; the header rejects anything that is neither 0 nor 1, and that
+    /// rejection fires the completion callback <b>inline on the submitting thread</b>.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_elect_leaders_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientElectLeadersAsync(
+        IntPtr admin,
+        int electionType,
+        [MarshalAs(UnmanagedType.I1)] bool allPartitions,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.ElectLeadersCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ElectLeadersResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ElectLeadersResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ElectLeadersResult_get_topic</c> — one <b>half</b> of the composite
+    /// key at <paramref name="index"/>, borrowed and NUL-terminated. This result declares
+    /// no <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ElectLeadersResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ElectLeadersResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ElectLeadersResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ElectLeadersResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ElectLeadersResult_get_error</c> — that partition's election
+    /// outcome, or null if its election succeeded. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Despite the name, this is the map's VALUE for this RPC, not an error
+    /// channel.</b> Java's future resolves to
+    /// <c>Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;</c> and its javadoc says
+    /// "If the election succeeded then the value for a topic partition will be the empty
+    /// Optional. Otherwise the election failed and the Optional will be set with the
+    /// error" (<c>ElectLeadersResult.java:43-46</c>). So a non-null pointer here becomes a
+    /// <see cref="KafkaException"/> stored <em>in the map</em>, and does not fault
+    /// anything. Contrast
+    /// <see cref="AlterPartitionReassignmentsResultGetError"/>, whose accessor set is
+    /// byte-identical and whose semantics are the ordinary per-key failure.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ElectLeadersResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ElectLeadersResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ElectLeadersResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ElectLeadersResultDestroy(IntPtr result);
+
+    // ---- M15/P4 Stage 1: alterPartitionReassignments (result shape 2, composite key) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_alter_partition_reassignments_async</c> — Java's
+    /// <c>alterPartitionReassignments(Map&lt;TopicPartition, Optional&lt;NewPartitionReassignment&gt;&gt;,
+    /// options)</c>. Java's map becomes <b>five parallel arrays</b>: entry <c>i</c> is
+    /// <c>(topics[i], partitions[i])</c> with <c>cancel[i]</c> and, when that is
+    /// <see langword="false"/>, <c>targetReplicas[i]</c> pointing at
+    /// <c>targetReplicaCounts[i]</c> broker ids.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <paramref name="cancel"/> is the explicit discriminant for Java's
+    /// <c>Optional.empty()</c>, which <b>reverts</b> that partition's reassignment
+    /// (<c>Admin.java:1142-1143</c>). The header states the design intent verbatim: "A
+    /// separate flag rather than a NULL replica pointer, so cancelling stays distinct from
+    /// 'present but empty', which Java rejects." Nothing on this path may coalesce the two
+    /// — a <c>?? Array.Empty&lt;int&gt;()</c> would turn a cancellation into a
+    /// present-but-empty request, which the ABI rejects outright.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The <c>bool</c> ARRAY needs its element type spelled out.</b> The class-wide
+    /// <c>[MarshalAs(UnmanagedType.I1)]</c> convention applies to scalar <c>bool</c>s; for
+    /// an array the element size is carried by <c>ArraySubType</c>, and without it the
+    /// marshaller writes 4-byte Win32 <c>BOOL</c>s into a buffer the core reads as C
+    /// <c>bool</c>. Every flag after the first would then be read out of the wrong byte.
+    /// </para>
+    /// <para>
+    /// ⚠ "An entry with a NULL topic is skipped" — silently — so a null topic is rejected
+    /// at the C# boundary (ffi §B5). A non-cancelled entry with no target replicas is
+    /// rejected by the ABI itself, and that rejection fires the completion callback
+    /// <b>inline on the submitting thread</b>.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_partition_reassignments_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientAlterPartitionReassignmentsAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)] bool[] cancel,
+        IntPtr[] targetReplicas,
+        int[] targetReplicaCounts,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool allowReplicationFactorChange,
+        AdminCallbacks.AlterPartitionReassignmentsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterPartitionReassignmentsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterPartitionReassignmentsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterPartitionReassignmentsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterPartitionReassignmentsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterPartitionReassignmentsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterPartitionReassignmentsResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterPartitionReassignmentsResult_get_error</c> — that partition's
+    /// error, or null if its reassignment was initiated. <b>BORROWED</b> — read, never
+    /// destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ There is deliberately no <c>_get_value</c>: Java's per-partition future is
+    /// <c>KafkaFuture&lt;Void&gt;</c> (<c>AlterPartitionReassignmentsResult.java:29</c>),
+    /// so a null error <em>is</em> the success value — result shape 2, and a non-null one
+    /// faults that partition's own awaitable. ⚠⚠ Contrast
+    /// <see cref="ElectLeadersResultGetError"/>: the two accessor sets are byte-identical
+    /// and only the Java return type separates their meanings.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterPartitionReassignmentsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterPartitionReassignmentsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterPartitionReassignmentsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AlterPartitionReassignmentsResultDestroy(IntPtr result);
+
+    // ---- M15/P4 Stage 2: listPartitionReassignments (result shape 3 — NO per-key error) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_partition_reassignments_async</c> — Java's
+    /// <c>listPartitionReassignments(Optional&lt;Set&lt;TopicPartition&gt;&gt;, options)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <paramref name="allPartitions"/> is the explicit discriminant for Java's
+    /// <c>Optional.empty()</c> — "list every ongoing reassignment in the cluster"
+    /// (<c>Admin.java:1246-1247</c>). The header says the other three arguments are then
+    /// ignored, and that the flag exists so "'all partitions' and 'an empty selection' stay
+    /// distinguishable". Same discipline as <c>elect_leaders</c>' flag.
+    /// </para>
+    /// <para>
+    /// ⚠ "An entry with a NULL topic is skipped" — silently — so a null topic is rejected
+    /// at the C# boundary before any pin (ffi §B5).
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_partition_reassignments_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListPartitionReassignmentsAsync(
+        IntPtr admin,
+        [MarshalAs(UnmanagedType.I1)] bool allPartitions,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.ListPartitionReassignmentsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListPartitionReassignmentsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListPartitionReassignmentsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListPartitionReassignmentsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListPartitionReassignmentsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListPartitionReassignmentsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListPartitionReassignmentsResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListPartitionReassignmentsResult_get_value</c> — that partition's
+    /// reassignment, <b>borrowed</b> (valid until the root is destroyed).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>This result declares no <c>get_error</c> at all</b> — Java holds a single
+    /// future, so any failure is a call failure and arrives as the callback's own owned
+    /// <c>error</c>. That absence is why this RPC routes through the aggregate walker.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListPartitionReassignmentsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListPartitionReassignmentsResultGetValue(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListPartitionReassignmentsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListPartitionReassignmentsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_PartitionReassignment_t — six FLATTENED list accessors ----
+
+    /// <summary>
+    /// <c>kafka_admin_PartitionReassignment_replica_count</c> — Java's
+    /// <c>replicas().size()</c>. The three lists are read through count/element pairs with
+    /// <b>no child handle per list</b>, the same flattened pattern as
+    /// <see cref="LogDirDescriptionReplicaCount"/>'s family.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_PartitionReassignment_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionReassignmentReplicaCount(IntPtr reassignment);
+
+    /// <summary>
+    /// <c>kafka_admin_PartitionReassignment_replica</c> — the broker id at
+    /// <paramref name="index"/>, or <c>-1</c> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_PartitionReassignment_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionReassignmentReplica(IntPtr reassignment, int index);
+
+    /// <inheritdoc cref="PartitionReassignmentReplicaCount"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_PartitionReassignment_adding_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionReassignmentAddingReplicaCount(IntPtr reassignment);
+
+    /// <inheritdoc cref="PartitionReassignmentReplica"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_PartitionReassignment_adding_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionReassignmentAddingReplica(IntPtr reassignment, int index);
+
+    /// <inheritdoc cref="PartitionReassignmentReplicaCount"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_PartitionReassignment_removing_replica_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionReassignmentRemovingReplicaCount(IntPtr reassignment);
+
+    /// <inheritdoc cref="PartitionReassignmentReplica"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_PartitionReassignment_removing_replica", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int PartitionReassignmentRemovingReplica(IntPtr reassignment, int index);
+
+    // ---- M15/P4 Stage 2: listOffsets (result shape 1 — per-key value AND per-key error) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_offsets_async</c> — Java's
+    /// <c>listOffsets(Map&lt;TopicPartition, OffsetSpec&gt;, ListOffsetsOptions)</c>. Java's
+    /// map becomes <b>four parallel arrays</b>: entry <c>i</c> is
+    /// <c>(topics[i], partitions[i])</c> with the spec in
+    /// <c>isTimestamp[i]</c> + <c>specTimestamps[i]</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b><paramref name="isTimestamp"/> is load-bearing and the header says why: the
+    /// projection is NOT injective.</b> "<c>forTimestamp(-2)</c> and <c>earliest()</c> both
+    /// yield <c>-2</c>, yet Java treats them differently up to that point." When the flag is
+    /// true the value is a timestamp <em>for any value at all</em>; when false it selects
+    /// one of six no-argument factories through the <c>ListOffsets</c> wire sentinel —
+    /// <c>-1</c> latest, <c>-2</c> earliest, <c>-3</c> max-timestamp, <c>-4</c>
+    /// earliest-local, <c>-5</c> latest-tiered, <c>-6</c> earliest-pending-upload. Dropping
+    /// the flag is a silent wrong-answer defect, not a style choice.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The <c>bool</c> ARRAY needs its element type spelled out</b>, for the same
+    /// reason as <c>alter_partition_reassignments</c>' <c>cancel</c>: without
+    /// <c>ArraySubType</c> the marshaller writes four-byte Win32 <c>BOOL</c>s into a buffer
+    /// the core reads as one-byte C <c>bool</c>s, and array elements really are packed, so
+    /// every flag after the first is read out of the wrong byte.
+    /// </para>
+    /// <para>
+    /// ⚠ <paramref name="isolationLevel"/> carries Java's <c>IsolationLevel.id()</c>
+    /// (<c>0</c> = <c>READ_UNCOMMITTED</c>, <c>1</c> = <c>READ_COMMITTED</c>). An unknown
+    /// id, and an unrecognised sentinel with <c>isTimestamp</c> false, are both <b>rejected
+    /// by the ABI</b> — and that rejection fires the completion callback <b>inline on the
+    /// submitting thread</b>.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_offsets_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListOffsetsAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)] bool[] isTimestamp,
+        long[] specTimestamps,
+        int count,
+        int timeoutMs,
+        int isolationLevel,
+        AdminCallbacks.ListOffsetsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListOffsetsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListOffsetsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListOffsetsResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListOffsetsResult_get_value</c> — that partition's offset
+    /// information, <b>borrowed</b>, or null if that partition failed.
+    /// </summary>
+    /// <remarks>
+    /// The walker reads the per-key error first, so a null reaching the value reader is the
+    /// unreachable case.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListOffsetsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListOffsetsResult_get_error</c> — that partition's error, or null if
+    /// it succeeded. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Unlike <see cref="ElectLeadersResultGetError"/>, this one really is a per-key
+    /// <em>failure</em>: Java stores one future per partition
+    /// (<c>ListOffsetsResult.java:32</c>), so a non-null error here faults that partition's
+    /// own awaitable.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListOffsetsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListOffsetsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_ListOffsetsResultInfo_t ----
+
+    /// <summary><c>kafka_admin_ListOffsetsResultInfo_offset</c> — Java's <c>offset()</c>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResultInfo_offset", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ListOffsetsResultInfoOffset(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_admin_ListOffsetsResultInfo_timestamp</c> — Java's <c>timestamp()</c>.
+    /// <c>-1</c> means the broker reported none, which is what every non-<c>forTimestamp</c>
+    /// query returns.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResultInfo_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ListOffsetsResultInfoTimestamp(IntPtr info);
+
+    /// <summary>
+    /// <c>kafka_admin_ListOffsetsResultInfo_leader_epoch</c> — writes the epoch and returns
+    /// <see langword="true"/>, or returns <see langword="false"/> when Java's
+    /// <c>leaderEpoch()</c> is <c>Optional.empty()</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>The RETURN is the presence signal — there is no sentinel.</b> A negative epoch
+    /// written through <paramref name="outEpoch"/> is a <em>present</em> value, so reading
+    /// absence as "negative" would be a wrong answer. Contrast
+    /// <see cref="LogDirDescriptionTotalBytes"/>, where <c>-1</c> genuinely is the
+    /// documented sentinel — the header is what tells the two apart.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResultInfo_leader_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ListOffsetsResultInfoLeaderEpoch(IntPtr info, out int outEpoch);
 }
