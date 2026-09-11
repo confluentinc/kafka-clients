@@ -368,6 +368,14 @@ typedef struct BatchNode {
     struct BatchNode* next_batch;
 } BatchNode;
 
+// A pending "drained" waiter: fire `cb` once `handed` reaches `target` (the
+// value of `accepted` snapshotted when the waiter registered). See
+// py_Producer_on_drained.
+typedef struct {
+    uint64_t target;
+    PyObject* cb;
+} DrainCb;
+
 // Producer with background batch sending
 typedef struct {
     PyObject *py_producer;
@@ -391,6 +399,21 @@ typedef struct {
     PyObject** space_cbs;
     int space_cbs_count;
     int space_cbs_capacity;
+    // Drain tracking (all guarded by record_batches_mutex): `accepted` counts
+    // every record appended to the tray by py_Producer_send; `handed` counts
+    // every record handed to the Rust producer by Producer_send_thread after
+    // kafka_producer_Producer_send_batch returns. A "drained" waiter (see
+    // py_Producer_on_drained) registers a target = accepted snapshot and fires
+    // once handed >= target, so a returned-but-not-yet-flushed send is part of a
+    // subsequent flush / transaction-control op (matching Java's synchronous
+    // doSend registration). `drain_requested` breaks the send task out of its
+    // 10ms/1000-record wait so a lone record is handed off promptly.
+    uint64_t accepted;
+    uint64_t handed;
+    int drain_requested;
+    DrainCb* drain_cbs;
+    int drain_cbs_count;
+    int drain_cbs_capacity;
     // Test-only: when set, the send task stops draining accumulated batches so
     // backpressure can be exercised deterministically (the mock otherwise
     // accepts instantly and never fills). Always 0 in production.
@@ -477,6 +500,45 @@ static void Producer_take_space_cbs_locked(Producer* producer,
     producer->space_cbs_capacity = 0;
 }
 
+// Detach every pending drain callback whose target is <= `handed` into a freshly
+// allocated array (caller owns it via out params) and compact the rest. Pass
+// UINT64_MAX for `handed` to detach all of them (used on send-task exit and
+// shutdown). The mutex MUST be held by the caller. The returned array is fired +
+// freed by Producer_fire_and_free_space_cbs (both are arrays of no-arg callbacks
+// backed by PyMem_Raw* allocations). The backing `drain_cbs` store itself is
+// freed once, in py_Producer_shutdown. On allocation failure the ready callbacks
+// are left in place (they fire later, on the next take or on close) rather than
+// dropped.
+static void Producer_take_ready_drain_cbs_locked(Producer* producer,
+    uint64_t handed, PyObject*** out_cbs, int* out_count) {
+    *out_cbs = NULL;
+    *out_count = 0;
+    int ready = 0;
+    for (int i = 0; i < producer->drain_cbs_count; i++) {
+        if (producer->drain_cbs[i].target <= handed) {
+            ready++;
+        }
+    }
+    if (ready == 0) {
+        return;
+    }
+    PyObject** cbs = (PyObject**)PyMem_RawMalloc(ready * sizeof(PyObject*));
+    if (cbs == NULL) {
+        return;  // leave them stored; they fire on the next take or on close
+    }
+    int out_i = 0, keep_i = 0;
+    for (int i = 0; i < producer->drain_cbs_count; i++) {
+        if (producer->drain_cbs[i].target <= handed) {
+            cbs[out_i++] = producer->drain_cbs[i].cb;
+        } else {
+            producer->drain_cbs[keep_i++] = producer->drain_cbs[i];
+        }
+    }
+    producer->drain_cbs_count = keep_i;
+    *out_cbs = cbs;
+    *out_count = ready;
+}
+
 static int Producer_poll_futures_thread(void* arg) {
     Producer* producer = (Producer*)arg;
 
@@ -536,7 +598,7 @@ static int Producer_send_thread(void* arg) {
         while ((
             producer->next_batches_to_send == NULL
             || producer->next_batches_to_send->count < PRODUCER_RECORD_SLOT_THRESHOLD
-        ) && timeout > now && !producer->closed) {
+        ) && timeout > now && !producer->closed && !producer->drain_requested) {
             struct timespec ts;
 
             timespec_get(&ts, TIME_UTC);
@@ -549,6 +611,13 @@ static int Producer_send_thread(void* arg) {
                           &producer->record_batches_mutex, &ts);
             now = current_time_ns();
         }
+
+        // A drain wakeup was requested (py_Producer_on_drained). Clear it here at
+        // the take point — NOT at the end of the iteration — so a request that
+        // arrives while we are inside send_batch survives to the next iteration.
+        // Clear on EVERY path out of the wait (including the paused and empty-tray
+        // continues below), or the send task would never sleep again (100% CPU).
+        producer->drain_requested = 0;
 
         // Test-only: while paused, do not drain — let accumulation build so
         // backpressure (py_Producer_on_space_available) can be tested.
@@ -577,6 +646,17 @@ static int Producer_send_thread(void* arg) {
         mtx_unlock(&producer->record_batches_mutex);
 
         Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
+
+        // Sum the record counts of the taken list BEFORE the send loop, which
+        // compacts count as it drops immediately-failed records (count -=
+        // errors_found below). A failed record still counts as handed — the Rust
+        // producer returned a verdict for it — so drain waiters are released for
+        // it too. The list is exclusively owned by this task now (detached under
+        // the mutex above), so no lock is needed to walk it.
+        uint64_t taken_count = 0;
+        for (BatchNode* n = head_batch_node; n != NULL; n = n->next_batch) {
+            taken_count += (uint64_t)n->count;
+        }
 
         batch_node = head_batch_node;
 
@@ -626,6 +706,22 @@ static int Producer_send_thread(void* arg) {
 
             batch_node = batch_node->next_batch;
         }
+
+        // Every taken record has now been handed to the Rust producer. Advance
+        // `handed` and release any drain waiter whose target is satisfied. Fire
+        // the callbacks AFTER releasing record_batches_mutex (same rule as the
+        // space cbs above — never call into Python holding it).
+        {
+            PyObject** drain_cbs;
+            int drain_cbs_count;
+            mtx_lock(&producer->record_batches_mutex);
+            producer->handed += taken_count;
+            Producer_take_ready_drain_cbs_locked(producer, producer->handed,
+                &drain_cbs, &drain_cbs_count);
+            mtx_unlock(&producer->record_batches_mutex);
+            Producer_fire_and_free_space_cbs(drain_cbs, drain_cbs_count);
+        }
+
         mtx_lock(&producer->pending_batches_mutex);
         if (producer->last_pending_batch) {
             producer->last_pending_batch->next_batch = head_batch_node;
@@ -637,6 +733,23 @@ static int Producer_send_thread(void* arg) {
         cnd_signal(&producer->pending_batches_available_cnd);
         mtx_unlock(&producer->pending_batches_mutex);
     }
+
+    // Release any drain waiter still pending on exit (e.g. a target never reached
+    // because the producer was paused, or a waiter that registered during the
+    // final iteration). Their records resolve via the flush below, or are dropped
+    // on close; either way the Python waiter must not hang. Fire outside the
+    // mutex. py_Producer_shutdown fires + frees the store after the join too —
+    // whoever runs first wins, the other sees an empty set.
+    {
+        PyObject** drain_cbs;
+        int drain_cbs_count;
+        mtx_lock(&producer->record_batches_mutex);
+        Producer_take_ready_drain_cbs_locked(producer, UINT64_MAX,
+            &drain_cbs, &drain_cbs_count);
+        mtx_unlock(&producer->record_batches_mutex);
+        Producer_fire_and_free_space_cbs(drain_cbs, drain_cbs_count);
+    }
+
     mtx_lock(&producer->pending_batches_mutex);
     producer->send_completed = 1;
     cnd_signal(&producer->pending_batches_available_cnd);
@@ -821,6 +934,7 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
     producer->last_accumulating_batch->count++;
     producer->accumulated_records++;
+    producer->accepted++;  // sole tray-append site; drain waiters snapshot this
 
     if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
         cnd_signal(&producer->record_batches_new_record_cnd);
@@ -873,6 +987,70 @@ static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) 
 
     if (available) {
         Py_DECREF(space_cb);  // not stored
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+// Register a "drained" callback, invoked once every record that send() has
+// ACCEPTED (appended to the C-side tray) has been handed to the Rust producer via
+// send_batch. Returns True if that is already the case (the caller need not
+// wait), False if `cb` was registered and will be called once it becomes true.
+// Twin of py_Producer_on_space_available: the target (the accepted count) is
+// snapshotted ONCE under record_batches_mutex, so records sent AFTER this call do
+// not extend the wait — mirroring how flush/close drain only what had already
+// returned. Used by the Python control ops and flush() to make a returned
+// (un-awaited) send part of the operation, matching Java's synchronous doSend
+// registration. The check-and-register is under the same lock the send task holds
+// when it advances `handed`, so there is no lost-wakeup window.
+static PyObject* py_Producer_on_drained(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* cb;
+
+    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) {
+        return NULL;
+    }
+
+    Producer* producer = (Producer*)producer_ptr;
+
+    int done = 0;
+    Py_INCREF(cb);
+    Py_BEGIN_ALLOW_THREADS
+    mtx_lock(&producer->record_batches_mutex);
+    uint64_t target = producer->accepted;  // snapshot once; later sends don't extend the wait
+    if (producer->closed
+        || producer->handed >= target
+        || thrd_equal(thrd_current(), producer->send_thread)) {
+        // Already drained; or closing; or called from the send task itself (a
+        // reentrant control op from an immediate-error delivery callback runs on
+        // the send thread — waiting on ourselves would deadlock). While the
+        // test-only pause holds, the send task will not take the tray, so a drain
+        // waiter is NOT short-circuited: it parks and is fired once unpause lets
+        // the task drain (or close() releases it). Producer_send_thread clears
+        // drain_requested every iteration before the paused continue, so a parked
+        // request does not spin the task.
+        done = 1;
+    } else {
+        if (producer->drain_cbs_count == producer->drain_cbs_capacity) {
+            int new_capacity = producer->drain_cbs_capacity
+                ? producer->drain_cbs_capacity * 2 : 8;
+            producer->drain_cbs = (DrainCb*)PyMem_RawRealloc(
+                producer->drain_cbs, new_capacity * sizeof(DrainCb));
+            producer->drain_cbs_capacity = new_capacity;
+        }
+        producer->drain_cbs[producer->drain_cbs_count].target = target;
+        producer->drain_cbs[producer->drain_cbs_count].cb = cb;
+        producer->drain_cbs_count++;
+        // Wake the send task out of its 10ms/1000-record wait so a lone record is
+        // handed off (and this waiter released) promptly.
+        producer->drain_requested = 1;
+        cnd_signal(&producer->record_batches_new_record_cnd);
+    }
+    mtx_unlock(&producer->record_batches_mutex);
+    Py_END_ALLOW_THREADS
+
+    if (done) {
+        Py_DECREF(cb);  // not stored
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
@@ -970,6 +1148,21 @@ static PyObject* py_Producer_shutdown(PyObject* self, PyObject* args) {
     Py_END_ALLOW_THREADS
 
     Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
+
+    // Release + free any drain waiters still stored, then free the backing store.
+    // The send task's exit fires these too; whoever runs first wins and the other
+    // sees an empty set (take resets count to 0). The send thread is joined here,
+    // so there is no contention, but we take the mutex to honor the _locked
+    // contract; it is still valid (destroyed just below).
+    PyObject** drain_cbs;
+    int drain_cbs_count;
+    mtx_lock(&producer->record_batches_mutex);
+    Producer_take_ready_drain_cbs_locked(producer, UINT64_MAX,
+        &drain_cbs, &drain_cbs_count);
+    mtx_unlock(&producer->record_batches_mutex);
+    Producer_fire_and_free_space_cbs(drain_cbs, drain_cbs_count);
+    PyMem_RawFree(producer->drain_cbs);
+    producer->drain_cbs = NULL;
 
     // Clean up after threads have stopped
     cnd_destroy(&producer->record_batches_new_record_cnd);
@@ -1272,11 +1465,15 @@ static PyObject* py_Producer_partitions_for_async(PyObject* self, PyObject* args
 // these. They are retained as a faithful binding of the synchronous FFI surface
 // (also exercised by the C and gRPC layers), not because Python uses them.
 //
-// §13 (merged): a transaction-control op drains any returned async sends into
-// the transaction first, exactly as flush/close do (committed on commit,
-// discarded on abort); the earlier "async-in-transaction is unsupported UB" note
-// is obsolete. Python's own send() is synchronous (registers before it returns)
-// and Python does not expose an async/outbox send path.
+// §13 (merged): a transaction-control op drains any returned sends into the
+// transaction first, exactly as flush/close do (committed on commit, discarded
+// on abort); the earlier "async-in-transaction is unsupported UB" note is
+// obsolete. Python's send() does NOT register the record with Rust synchronously
+// — it appends it to a C-side batch (the tray) that the background send task
+// later hands to the Rust producer via send_batch. So producer.py's control ops
+// and flush() first wait via Producer_on_drained until every record that send()
+// has accepted is handed off, making a returned (un-awaited) send part of the
+// operation — the Java doSend guarantee, reconstructed above the tray.
 
 static PyObject* py_Producer_init_transactions(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
@@ -7125,6 +7322,9 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
      "Register a callback fired when buffer space frees; returns True if "
      "space is already available"},
+    {"Producer_on_drained", py_Producer_on_drained, METH_VARARGS,
+     "Register a callback fired once every record send() has accepted is handed "
+     "to the Rust producer; returns True if that is already the case (no wait)"},
     {"Producer_test_set_paused", py_Producer_test_set_paused, METH_VARARGS,
      "Test-only: pause/resume the send task to exercise backpressure"},
     {"Producer_shutdown", py_Producer_shutdown, METH_VARARGS,
