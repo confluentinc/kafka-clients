@@ -654,6 +654,19 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
                 rate.maybe_wait(records_sent)
 
             batch_records = len(batch)
+            # v2 (librdkafka): flush queued produces before the txn control ops.
+            # librdkafka's produce() is async (fire-and-forget); if the batch is
+            # still un-flushed when abort_transaction() runs, those in-flight
+            # ProduceRequests are purged (_PURGE_QUEUE) but the idempotent
+            # base-sequence counter has already advanced, so the next txn's
+            # produce to the same partition goes out ahead of the broker's
+            # expected next-seq -> broker OUT_OF_ORDER_SEQUENCE_NUMBER -> the
+            # transaction flips to a fatal AbortableError. Flushing persists the
+            # batch first, so an abort has nothing to purge and the sequence
+            # stays in step. (The rust/v3 path drains its accumulator before
+            # control ops internally, so it never hits this.)
+            if v2:
+                producer.flush()
             # Send the consumed offsets to the transaction (offset + 1 per
             # partition, with the consumer group metadata).
             try:
