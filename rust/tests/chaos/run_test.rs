@@ -32,7 +32,7 @@ use std::time::Duration;
 use super::actions::{ChaosAction, ReassignMode};
 use super::common::broker_control::{BrokerControl, StopKind};
 use super::config::{ActionKind, ChaosConfig};
-use super::harness::ChaosHarness;
+use super::harness::{ChaosHarness, WorkloadPool};
 use super::reports::{self, ReportsHandle, RunReports};
 use confluent_kafka::admin::Admin;
 use rand::rngs::StdRng;
@@ -213,6 +213,34 @@ fn pick_topic(rng: &mut StdRng, harness: &ChaosHarness) -> String {
     topics[rng.random_range(0..topics.len())].clone()
 }
 
+/// One consumer-churn tick (`--consumer-churn-min`/`--consumer-churn-max`):
+/// stop a random batch of dynamically-added consumers, then start a random batch,
+/// keeping the live consumer count within `[min, max]`. Mirrors librdkafka's C
+/// chaos reference (`tests/8003-chaos-testing-consumer-group.c`):
+/// `to_stop = rand()%running + 1`, `to_start = rand()%can_start + 1`, bounded by
+/// `[1, CONSUMER_CNT]` — here bounded by `[min, max]`. The `min` base consumers
+/// are fixed (built up front, never removed); churn moves the `max - min`
+/// headroom on top of them, so live count = `min + dynamic ∈ [min, max]`.
+async fn churn_consumers(pool: &WorkloadPool<'_>, min: u32, max: u32, rng: &mut StdRng) {
+    // Stop a random batch of the currently-added dynamic consumers (down to the
+    // fixed `min` floor — `dynamic` is exactly how many are removable).
+    let dynamic = pool.dynamic_consumer_count() as u32;
+    if dynamic > 0 {
+        let to_stop = rng.random_range(1..=dynamic);
+        for _ in 0..to_stop {
+            pool.remove_consumer();
+        }
+    }
+    // Start a random batch, up to the headroom below `max`.
+    let headroom = (max - min).saturating_sub(pool.dynamic_consumer_count() as u32);
+    if headroom > 0 {
+        let to_start = rng.random_range(1..=headroom);
+        for _ in 0..to_start {
+            pool.add_consumer(super::workload::Backend::Rust).await;
+        }
+    }
+}
+
 /// Roll every broker of the cycle, but inject `hook` into the down-window of the
 /// **first** broker only (`--rebalance-mid-roll`). The remaining brokers roll
 /// normally. This is what makes the group reassignment kicked off by the hook
@@ -331,6 +359,16 @@ async fn chaos_run() {
             let cycle_1based = cycle + 1;
             eprintln!("chaos: cycle {}/{}", cycle_1based, cfg.cycles);
 
+            // Consumer churn: stop a random batch of dynamically-added consumers,
+            // then start a random batch, keeping the live count within
+            // [min, max] — librdkafka's chaos consumer-churn (the C reference's
+            // stop-random-batch/start-random-batch bounded by [1, CONSUMER_CNT],
+            // with min/max the bounds). The `min` base consumers are fixed and
+            // never removed here; churn moves the `max - min` headroom on top.
+            if let (Some(min), Some(max)) = (cfg.consumer_churn_min, cfg.consumer_churn_max) {
+                churn_consumers(&pool, min, max, &mut rng).await;
+            }
+
             // --- Random (chaos-monkey) mode: draw one action + its parameters
             // from the seeded RNG, optionally after a random delay, then move to
             // the next cycle. Rebalance add/remove still honour their cycles.
@@ -433,31 +471,63 @@ async fn chaos_run() {
         tokio::time::sleep(Duration::from_secs(cfg.between_s)).await;
     };
 
-    workloads
-        .drive(
-            &pool,
-            config.drain_dur(),
-            config.idle_threshold_dur(),
-            verifier.clone(),
-            harness.recreate_settle(),
-            scenario,
-        )
-        .await;
+    // Global watchdog: a generous overall wall-clock cap on the whole
+    // scenario + drive. A healthy run finishes in a small fraction of this; the
+    // cap exists ONLY so a WEDGED cluster — all brokers down and unable to
+    // recover, a broker that never rejoins, a cluster degraded past making any
+    // progress — fails fast (with container cleanup via `shutdown`) instead of
+    // hanging indefinitely. It scales with the run: warmup + per-cycle worst
+    // case (a roll may wait up to `up_wait_s` for a rejoin) + drain, plus
+    // margin. Every per-call path already has its own timeout (broker
+    // wait_operational, describe sampling); this is the last-resort net for any
+    // wedge those don't individually cover.
+    let watchdog = Duration::from_secs(
+        config.warmup_s
+            + u64::from(config.cycles) * (config.up_wait_s + config.stop_s + config.between_s + 30)
+            + config.drain_s
+            + 120,
+    );
+    let drive = workloads.drive(
+        &pool,
+        config.drain_dur(),
+        config.idle_threshold_dur(),
+        verifier.clone(),
+        harness.recreate_settle(),
+        scenario,
+    );
+    let wedged = tokio::time::timeout(watchdog, drive).await.is_err();
 
     let verdict = verifier.verdict(config.min_partitions());
+    if wedged {
+        eprintln!(
+            "chaos: WATCHDOG — run exceeded {watchdog:?} without finishing; the cluster is wedged \
+             (e.g. brokers down and unable to recover). Aborting; partial verdict below."
+        );
+    }
     eprintln!("{verdict}");
 
-    // Persist reports BEFORE the pass/fail assertion so a failing run still
-    // leaves its verdict, leader-change log, client log, and signature summary
-    // on disk for diagnosis.
+    // Persist reports BEFORE the pass/fail assertion so a failing OR wedged run
+    // still leaves its verdict, leader-change log, client log, and signature
+    // summary on disk for diagnosis.
     if let Some(r) = reports {
-        r.write_verdict(&verdict.to_string());
+        let body = if wedged {
+            format!(
+                "=== Chaos verdict: FAIL (watchdog) ===\n  run exceeded {watchdog:?} without completing; cluster wedged\n{verdict}"
+            )
+        } else {
+            verdict.to_string()
+        };
+        r.write_verdict(&body);
         let dir = Arc::try_unwrap(r).ok().expect("sole owner of reports at finish").finish();
         eprintln!("chaos: reports written to {}", dir.display());
     }
 
     harness.shutdown();
 
+    assert!(
+        !wedged,
+        "chaos run WEDGED: exceeded watchdog {watchdog:?} without finishing (cluster could not make progress)"
+    );
     assert!(verdict.is_pass(), "chaos run verdict was not PASS:\n{verdict}");
     assert!(verdict.delivered > 0, "no records were acknowledged — workload never ran");
 }
