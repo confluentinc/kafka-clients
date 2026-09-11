@@ -42,15 +42,38 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="AssertDrainedIntoTheOpenGate"/> for why it is the only deterministic one.
 /// </para>
 /// <para>
-/// ⚠ <b>M11/P3.2 S4 joins this file for a different property, and deliberately so</b> —
-/// <see cref="Dispose_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem"/>. The four
+/// ⚠ <b>M11/P3.2 S4 joins this file for a different property, and deliberately so</b> — the three
+/// <c>*_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem</c> tests below. The four
 /// flavor tests above guard the §3.8 <em>ordering</em> and accept "faulted with a message containing
 /// <c>closed</c>" as one legitimate outcome, so they are structurally blind to whether the queued
-/// group was completed or faulted. S4's production call sites
-/// (<c>NativeProducer.StopPump</c> / <c>StopPumpAsync</c>) therefore need their own guard here, on
-/// the <b>public</b> surface, because the S4 unit test drives the interop harness's fixture teardown
-/// instead — deleting the two production lines alone left the whole suite green (DoD §12: a
+/// group was completed or faulted. S4's production call sites therefore need their own guard here,
+/// on the <b>public</b> surface, because the S4 unit test drives the interop harness's fixture
+/// teardown instead — deleting the production lines alone left the whole suite green (DoD §12: a
 /// fixture-only guard is a proof about the fixture).
+/// </para>
+/// <para>
+/// ⚠ <b>There are TWO production call sites, and one test does not cover both.</b> S4 added
+/// <c>pump?.WaitForQueueDrain(s_pumpDrainTimeout)</c> to <c>NativeProducer.StopPump</c> <em>and</em>
+/// to <c>NativeProducer.StopPumpAsync</c>; the second serves <c>DisposeAsync</c>, <c>Close()</c> and
+/// <c>Close(CancellationToken)</c> — three of the four public teardown flavors. Deleting only
+/// <c>StopPumpAsync</c>'s line leaves the sync <c>Dispose</c> test green, so the split is:
+/// </para>
+/// <list type="bullet">
+/// <item><description><c>NativeProducer.StopPump</c> →
+/// <see cref="Dispose_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem"/>, alone.</description></item>
+/// <item><description><c>NativeProducer.StopPumpAsync</c> → the <b>pair</b>
+/// <see cref="DisposeAsync_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem"/> +
+/// <see cref="Close_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem"/>. The pair is the
+/// guard, not either half — see the measured numbers on the <c>DisposeAsync</c> twin.</description></item>
+/// </list>
+/// <para>
+/// ⚠ <b>Sensitivity here is a property of the REGIME, not of a test.</b> Every ratio quoted below was
+/// measured with the <b>whole suite</b> running. Run under a <c>--filter</c> instead and all three
+/// detect <b>nothing</b> — 0/3 each, even under the mutation that deletes <em>both</em> production
+/// lines (measured; a run takes ~37 ms filtered against ~1 s in-suite, and it is the suite's own CPU
+/// contention that keeps the pump thread off the CPU long enough for the missing drain to show).
+/// So a ratio here is meaningless without its regime: re-derive in-suite, and never grade one of
+/// these by running it alone.
 /// </para>
 /// </remarks>
 public sealed class PublicProducerAccumulatorTeardownTests
@@ -118,17 +141,20 @@ public sealed class PublicProducerAccumulatorTeardownTests
     [Fact]
     public void Dispose_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem()
     {
-        // ⚠ M11/P3.2 S4 — THE PRODUCTION CALL SITES. The twin of
+        // ⚠ M11/P3.2 S4 — PRODUCTION CALL SITE 1 OF 2: NativeProducer.StopPump (:1220), the SYNC
+        // teardown. The twin of
         // SendCompletionPumpPreStopDrainTests.Teardown_CompletesSendsAlreadyQueuedToThePump_...
         // (§6 test 17), which drives the interop harness's own fixture teardown; this one drives
-        // NativeProducer.StopPump through the PUBLIC Dispose, so the two
-        // `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` calls that actually ship are guarded.
-        // Without it, deleting BOTH production lines and keeping the fixture's left the entire
-        // suite green — the §3.8 flavor tests above cannot see it (they accept a fault whose
-        // message contains "closed", and DrainedSendCount rises through either consumer), and test
-        // 17 cannot see it either because it never enters NativeProducer. That is the DoD §12
-        // failure class from the other side: the fixture mirrors production faithfully, but nothing
-        // held production to the mirror.
+        // NativeProducer.StopPump through the PUBLIC Dispose. Without it, deleting BOTH production
+        // lines and keeping the fixture's left the entire suite green — the §3.8 flavor tests above
+        // cannot see it (they accept a fault whose message contains "closed", and DrainedSendCount
+        // rises through either consumer), and test 17 cannot see it either because it never enters
+        // NativeProducer. That is the DoD §12 failure class from the other side: the fixture
+        // mirrors production faithfully, but nothing held production to the mirror.
+        //
+        // ⚠ THIS TEST GUARDS ONE OF THE TWO SHIPPING CALL SITES, NOT BOTH. StopPumpAsync's line
+        // (:1285) is on a path this flavor never enters, and deleting it alone leaves this test
+        // green — measured, not assumed. That site is guarded by the two async-flavor tests below.
         //
         // THE ASSERTION IS RanToCompletion, not a counter. ProcessedBatchCount — test 17's witness
         // for "the pump resolved it" — is not surfaced past SendCompletionPump (NativeProducer
@@ -142,16 +168,28 @@ public sealed class PublicProducerAccumulatorTeardownTests
         // Producer_flush?), so a single round is a coin flip and no guard at all. Each round is an
         // independent trial and the mutation must win all of them.
         //
-        // SYNCHRONOUS Dispose deliberately — the DisposeAsync twin's awaited flush hands the pump an
-        // extra scheduling opportunity, which makes it detect the deletion only intermittently at
-        // this round count. Both flavors share the same `pump?.WaitForQueueDrain` step immediately
-        // before `pump?.Stop()`, so the sync path is the reliable instrument for it.
+        // ⚠ SENSITIVITY IS A PROPERTY OF THE REGIME. In-suite this test fails MPROD 3/3; run
+        // ISOLATED (--filter) under that same mutation it failed 0/3. The 3/3 belongs to the
+        // full-suite regime — quote it as such, and re-measure in-suite.
         //
-        // Mutation that must fail this, ON ITS OWN: delete the two
-        // `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` lines from NativeProducer.StopPump and
-        // StopPumpAsync, leaving the harness fixture's call in place. RunLoop then breaks on
-        // _stopping with the drained group still queued, DrainAndFaultRemaining faults it, and a
-        // round fails on RanToCompletion.
+        // THE MUTATION SPLIT, which is what makes a failure DIAGNOSTIC (a joint deletion is not —
+        // it was the recipe recorded here before, and it made the async call site look guarded when
+        // nothing tested it):
+        //
+        //   MPROD  delete BOTH `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` lines
+        //          (NativeProducer.cs :1220 AND :1285), fixture intact
+        //          → 3/3: THIS test fails, and so does the async pair's Close half. 895/2.
+        //   M1285  delete ONLY NativeProducer.cs:1285 (StopPumpAsync), :1220 and fixture intact
+        //          → 5/5: THIS test stays GREEN; only the async pair fails. 896/1.
+        //   MFIX   delete ONLY the fixture's `_pump.WaitForQueueDrain(s_deadline)`
+        //          (SendAccumulatorTests.cs:2025), production intact
+        //          → 3/3: only §6 test 17 fails; all three tests here stay green. 896/1.
+        //
+        // Three distinct signatures, so the failing test names WHICH drain was removed: THIS test
+        // is what separates MPROD from M1285, and test 17 is what identifies MFIX. Under any of
+        // them RunLoop breaks on _stopping with the drained group still queued,
+        // DrainAndFaultRemaining faults it, and a round fails with
+        // `Assert.Equal() Failure: Expected RanToCompletion / Actual Faulted`.
         const int Rounds = 48;
 
         for (int round = 0; round < Rounds; round++)
@@ -165,6 +203,77 @@ public sealed class PublicProducerAccumulatorTeardownTests
             Task<RecordMetadata>[] sends = Fire(producer);
 
             TestTimeout.Run(producer.Dispose, s_deadline);
+
+            for (int i = 0; i < sends.Length; i++)
+            {
+                Assert.Equal(TaskStatus.RanToCompletion, sends[i].Status);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem()
+    {
+        // ⚠ M11/P3.2 S4 — PRODUCTION CALL SITE 2 OF 2: NativeProducer.StopPumpAsync (:1285), HALF
+        // ONE OF A PAIR. StopPumpAsync carries its own `pump?.WaitForQueueDrain(s_pumpDrainTimeout)`
+        // line and is the teardown for DisposeAsync AND for CloseWithCallback — i.e. DisposeAsync +
+        // Close() + Close(CancellationToken), three of the four public teardown flavors. The sync
+        // Dispose test above never enters it, so deleting :1285 alone left the whole shipped suite
+        // green (895/0, 3/3) before these two existed.
+        //
+        // ⚠ THE GUARD IS THE PAIR, NOT EITHER HALF — and WHICH half loses the race is not stable
+        // across machines/regimes, which is exactly why both are kept. Measured in-suite under
+        // M1285: "at least one of the two fails" is 5/5 here, carried entirely by the Close half
+        // (Close 5/5, this one 0/5); on the reviewer's box, measuring each half ALONE, it was the
+        // other way round enough to give DisposeAsync 4/5 and Close 4/5 with the pair at 5/5. Drop
+        // either half and the guard becomes a bet on which flavor is sensitive today.
+        // Raising the round count does NOT substitute: a 160-round battery still gave 4/5 for the
+        // pair, so run-to-run variance dominates and more rounds only cost time. At HEAD
+        // (production intact) the pair is green 3/3 full-suite here and 6/6 on the reviewer's box,
+        // so the imperfection is in sensitivity, not in false failures.
+        //
+        // Everything else is the sync test's rationale verbatim: RanToCompletion is the witness
+        // (DrainedSendCount is incremented by BOTH the pump loop and Stop's terminal fault drain, so
+        // it cannot separate them, and ProcessedBatchCount is not surfaced past SendCompletionPump),
+        // and a K-burst with a fresh producer per round is mandatory because the defect is a
+        // SCHEDULING race. The three-way mutation split (MPROD / M1285 / MFIX) is written out on the
+        // sync test above; this test and the Close twin are the two that M1285 must fail.
+        const int Rounds = 48;
+
+        for (int round = 0; round < Rounds; round++)
+        {
+            AsyncMockProducer<byte[], byte[]> producer =
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+            Task<RecordMetadata>[] sends = Fire(producer);
+
+            await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
+
+            for (int i = 0; i < sends.Length; i++)
+            {
+                Assert.Equal(TaskStatus.RanToCompletion, sends[i].Status);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Close_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem()
+    {
+        // HALF TWO of the StopPumpAsync pair — see the DisposeAsync twin above for the full
+        // rationale and the measured ratios. Close() reaches the same
+        // `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` line through CloseWithCallback rather than
+        // through DisposeAsync, and the two halves lose the race on different rounds; that is
+        // precisely why the pair, and not either half, is the guard for :1285.
+        const int Rounds = 48;
+
+        for (int round = 0; round < Rounds; round++)
+        {
+            using AsyncMockProducer<byte[], byte[]> producer =
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+            Task<RecordMetadata>[] sends = Fire(producer);
+
+            await TestTimeout.Run(() => producer.Close(), s_deadline);
 
             for (int i = 0; i < sends.Length; i++)
             {
