@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -340,12 +341,117 @@ internal sealed class SendCompletionPump
     }
 
     /// <summary>
+    /// Waits — <b>bounded</b>, and <b>without draining anything itself</b> — for the queue to reach
+    /// empty while the loop is <b>still running</b>, so that teardown <em>completes</em> the sends
+    /// the core already accepted instead of faulting them (M11/P3.2 slice <b>S4</b>, decision
+    /// <b>D3</b>). Returns <see langword="true"/> if the queue reached empty within
+    /// <paramref name="timeout"/>, <see langword="false"/> on expiry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The gap it closes.</b> <see cref="RunLoop"/> reads <c>_stopping</c> at its loop top, so a
+    /// group enqueued while the loop is parked in <see cref="_signal"/>'s wait is only processed if
+    /// the pump thread is <em>scheduled</em> before <see cref="Stop"/> sets that flag; otherwise the
+    /// loop breaks and <see cref="DrainAndFaultRemaining"/> faults every awaiter. The window is
+    /// small (one <c>CloseGate</c> plus the teardown flush) and the thread's wake latency is of the
+    /// same order, so losing that race is routine rather than exotic — and it reports a record the
+    /// core accepted, <em>and which the teardown flush already resolved</em>, as failed. The anchor
+    /// has no such path at all: its poll thread's loop condition is
+    /// <c>!send_completed || current_pending_batch != NULL</c>
+    /// (<c>_confluentkafka.c:484</c>) and only its <c>cnd_wait</c> is gated on <c>!send_completed</c>
+    /// (<c>:504-507</c>), so once the send thread sets the flag — after its own
+    /// <c>Producer_flush</c> (<c>:651</c>) — the poll thread stops <em>waiting</em> but keeps
+    /// draining the pending chain to empty, completing every record.
+    /// </para>
+    /// <para>
+    /// <b>It cannot hang, because the wait is MONOTONE.</b> Its caller runs it only after
+    /// <see cref="CloseGate"/>, so <see cref="Enqueue"/> faults in place and <b>no new item can
+    /// enter the queue</b>: the queue only ever shrinks while this runs, and the wait is bounded
+    /// besides. On expiry the behaviour degrades to exactly the pre-S4 one — <see cref="Stop"/>
+    /// faults the remainder — which is a <em>defined</em> outcome, not a hang. That residual is
+    /// recorded as <b>DV-4</b>, narrowed by this method to the pathological case.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Two shapes were evaluated and REJECTED. Do not reach for either.</b>
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// <b>Draining from the teardown thread.</b> That enters the uninterruptible <c>get_all</c> on a
+    /// thread that must stay responsive — the teardown thread owes a bounded return to
+    /// <c>Dispose</c> / <c>Close</c>, and <c>get_all</c> can offer none. This method therefore only
+    /// <em>observes</em> the queue; the pump thread remains the sole consumer.
+    /// </item>
+    /// <item>
+    /// <b>Moving <see cref="RunLoop"/>'s <c>_stopping</c> check below the drain</b>, so the loop
+    /// drains before it breaks. That is the recorded <b>N=51 hang</b> directly: one unresolvable
+    /// record — the <c>AsyncMockProducer.Clear()</c> premise break (M11/P3.1 §6.3;
+    /// <c>MockProducer::clear</c> drops the core's completions <em>without</em> completing them) —
+    /// parks the loop in <c>get_all</c> forever and <see cref="Stop"/>'s join never returns.
+    /// <b><c>get_all</c> cannot be bounded, so "drain first" cannot be made safe</b>; a bounded wait
+    /// outside the loop can.
+    /// </item>
+    /// </list>
+    /// <para>
+    /// <b>The predicate reads a queue of GROUPS, not of records</b> (M11/P3.2 §3B.2) — which is why
+    /// S4 was sequenced after S3 rather than written twice. "Empty" therefore means "no
+    /// <c>send_batch</c> group is left unclaimed"; a group the pump has already dequeued is
+    /// <em>in flight</em>, and <see cref="Stop"/>'s <c>_thread.Join()</c> is what covers it, since
+    /// the loop cannot exit mid-<see cref="ProcessGroup"/>. The <b>record</b> count remains
+    /// <see cref="DrainedSendCount"/>'s job, counted in <see cref="DequeueGroup"/>.
+    /// </para>
+    /// <para>
+    /// <b>Polling rather than a new event.</b> A dedicated "queue went empty" signal would mean a
+    /// set on the pump's per-group path to serve one call per producer lifetime, and would put new
+    /// state into <see cref="RunLoop"/> — which M11/P3.2 §8.3's boundary deliberately leaves alone
+    /// apart from S3's grouping. A bounded spin-then-yield over
+    /// <see cref="ConcurrentQueue{T}.IsEmpty"/> allocates nothing and costs nothing on the normal
+    /// path, where the queue is already empty or empties within microseconds.
+    /// </para>
+    /// </remarks>
+    /// <param name="timeout">
+    /// The bound. <see cref="TimeSpan.Zero"/> degenerates to a single non-blocking check.
+    /// </param>
+    internal bool WaitForQueueDrain(TimeSpan timeout)
+    {
+        if (_queue.IsEmpty)
+        {
+            return true;
+        }
+
+        // Timestamp arithmetic rather than a Stopwatch instance — allocation-free, and the same
+        // idiom SendAccumulator.Stop already uses for its own teardown deadline. Nothing in this
+        // method allocates, calls native, or can throw, which is what makes it safe to sit between
+        // the teardown flush's catch-and-swallow and Stop(): it cannot be the reason the pump
+        // thread is left unjoined.
+        long deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * timeout.TotalSeconds);
+        SpinWait spinner = new SpinWait();
+        while (Stopwatch.GetTimestamp() < deadline)
+        {
+            if (_queue.IsEmpty)
+            {
+                return true;
+            }
+
+            // Spins briefly, then yields and finally sleeps — so a pump thread that merely needs to
+            // be scheduled is waited out in microseconds, while a genuinely stuck one costs no CPU.
+            spinner.SpinOnce();
+        }
+
+        return _queue.IsEmpty;
+    }
+
+    /// <summary>
     /// Stops the pump: signals the loop, joins the thread (so no future handle is in use), then
     /// faults + frees anything still queued. Called by <see cref="NativeProducer"/> teardown after
     /// the close latch is won and before <c>Producer_destroy</c> (the producer-outlives-pump
     /// ordering, ffi §A2). Idempotent-safe under the one-shot latch (only the latch winner calls
     /// it).
     /// </summary>
+    /// <remarks>
+    /// Teardown calls <see cref="WaitForQueueDrain"/> first, so on the normal path there is nothing
+    /// left for <see cref="DrainAndFaultRemaining"/> to fault; it stays the defined outcome for the
+    /// expiry case (and for any caller that skips the wait).
+    /// </remarks>
     internal void Stop()
     {
         _stopping = true;

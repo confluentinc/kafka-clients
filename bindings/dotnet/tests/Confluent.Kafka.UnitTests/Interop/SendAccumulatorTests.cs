@@ -1660,6 +1660,13 @@ public sealed class SendAccumulatorTests
         internal int HistoryCount => _producer.MockHistoryCount();
 
         /// <summary>
+        /// Production's own bounded pre-stop pump drain (M11/P3.2 S4), reachable on its own so a
+        /// test can assert the <b>bound</b> without also running the join that follows it in
+        /// <see cref="Dispose"/>.
+        /// </summary>
+        internal bool WaitForPumpQueueDrain(TimeSpan timeout) => _pump.WaitForQueueDrain(timeout);
+
+        /// <summary>
         /// Resolves the OLDEST record the manual mock is still holding (its pending queue is a
         /// FIFO: <c>src/producer/mock_producer.rs</c> pushes on send and pops the front here).
         /// Meaningless on an auto-completing mock.
@@ -2006,11 +2013,16 @@ public sealed class SendAccumulatorTests
             _disposed = true;
 
             // The §3.8 ordering: drain the accumulator into a STILL-OPEN pump gate, then close the
-            // gate, then flush so the pump's blocking get_all can return, then join it, then destroy.
+            // gate, then flush so the pump's blocking get_all can return, then wait (bounded) for
+            // the pump to take what the drain just queued, then join it, then destroy. The
+            // WaitForQueueDrain step is M11/P3.2 S4 and is production's own (NativeProducer.StopPump)
+            // — a fixture that skipped it would make every teardown test here a proof about the
+            // fixture rather than about the shipped ordering (DoD §12).
             bool drained = Accumulator.Stop(s_deadline);
             _pump.CloseGate();
             NativeMethods.ProducerFlush(_producer.Handle, out IntPtr flushError);
             _ = KafkaException.FromHandle(flushError);
+            _pump.WaitForQueueDrain(s_deadline);
             _pump.Stop();
             if (drained)
             {

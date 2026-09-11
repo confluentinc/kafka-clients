@@ -131,6 +131,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // StopAccumulator and SendAccumulator.Stop.
     private static readonly TimeSpan s_accumulatorDrainTimeout = TimeSpan.FromSeconds(30);
 
+    // How long teardown waits for the completion pump to take the LAST queued groups off its queue,
+    // after the gate is closed and the teardown flush has resolved them (M11/P3.2 S4, decision D3).
+    // The same 30 s as the accumulator's drain bound above and for the same reason: long enough that
+    // a healthy pump always wins (it needs only to be scheduled — the flush already resolved what it
+    // will read), short enough that Dispose returns. On expiry the outcome is DEFINED, not a hang —
+    // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
+    private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
+
     private NativeProducer(SafeProducerHandle handle)
     {
         _handle = handle;
@@ -1202,6 +1210,15 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // runs on strictly more paths.
         }
 
+        // S4 (D3): the flush has now resolved everything the pump will read, so give the pump a
+        // BOUNDED chance to take the last queued groups off its queue BEFORE Stop sets _stopping —
+        // otherwise a group enqueued by StopAccumulator above is faulted merely because the pump
+        // thread was not scheduled in time. Monotone (the gate is closed, so nothing can be added)
+        // and bounded, so it cannot hang; on expiry Stop faults the remainder as before. The two
+        // rejected shapes — draining from THIS thread, and moving RunLoop's _stopping check below
+        // the drain — are argued at WaitForQueueDrain.
+        pump?.WaitForQueueDrain(s_pumpDrainTimeout);
+
         // No pump thread to join when no async send ever started one — but the flush above already
         // ran (Blocker 2). Join outside the lock (the pump's terminal drain does not touch _pumpLock,
         // and holding it across a thread join is needless).
@@ -1258,6 +1275,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // surfaced later by the caller (CloseWithCallback), so the close-error-surfacing contract
             // is preserved.
         }
+
+        // S4 (D3), identical to the sync twin: a BOUNDED, non-draining wait for the pump to take the
+        // last queued groups before Stop sets _stopping, so teardown completes what the core
+        // accepted instead of faulting it. Monotone behind the closed gate; on expiry it degrades to
+        // the pre-S4 fault-the-remainder behaviour. It stays SYNCHRONOUS here for the same reason
+        // the join does (see this method's remarks): it is a short wait on an already-resolved
+        // backlog, not an I/O await, and making it awaitable would buy nothing.
+        pump?.WaitForQueueDrain(s_pumpDrainTimeout);
 
         // No pump thread to join when no async send ever started one — the flush above already ran.
         // The join stays blocking by design.
