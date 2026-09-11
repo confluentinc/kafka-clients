@@ -59,10 +59,27 @@ namespace Confluent.Kafka;
 /// contracts.
 /// </para>
 /// <para>
+/// ⚠ <b><c>Send</c> can BLOCK the calling thread under sustained saturation (M11/P3.3).</b> This
+/// producer accepts a bounded number of records that have not yet been handed to the core; once
+/// that bound is reached, <c>Send</c> waits for capacity for up to the configured
+/// <c>max.block.ms</c> (default 60 s) and then throws a <see cref="KafkaException"/>. That is
+/// Java's own contract — <c>KafkaProducer.send()</c> blocks up to <c>max.block.ms</c> once its
+/// accumulator is full — and it is what keeps the client's memory and latency bounded: because
+/// the <see cref="Task{TResult}"/> returned here is the <em>record's delivery</em> future rather
+/// than an admission handle, a caller never awaits admission, so an asynchronous wait would
+/// throttle nobody. The bound is sized so that reaching it is rare in practice; a producer that
+/// hits it regularly is offering records faster than its cluster can accept them. The
+/// <b>synchronous</b> <see cref="IProducer{TKey, TValue}"/> has no such window — it hands each
+/// record to the core inside the call, where the core's own <c>buffer.memory</c> provides the
+/// backpressure.
+/// </para>
+/// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
 /// no <c>wakeup()</c>: a canceled <see cref="CancellationToken"/> cancels the returned
 /// <see cref="Task"/>'s .NET-side wait, but does not abort the in-flight native op — it
-/// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4).
+/// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4). A token that fires
+/// while <c>Send</c> is blocked waiting for capacity <em>does</em> abort that wait, in which case
+/// the record is not sent at all.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="IAsyncDisposable.DisposeAsync"/> is the primary path (graceful
@@ -93,13 +110,22 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// binding, whose <c>send()</c> likewise borrows the buffer until its drain. The <b>synchronous</b>
     /// <c>IProducer.Send</c> has no such window — it hands the record to the core inside the call.
     /// </para>
+    /// <para>
+    /// ⚠ <b>Under sustained saturation this BLOCKS the calling thread, for up to the configured
+    /// <c>max.block.ms</c>, and then throws a <see cref="KafkaException"/></b> — Java's own
+    /// <c>send()</c> contract, and the only thing that bounds an async producer whose caller never
+    /// awaits admission. The type's remarks state the contract in full; it applies to the
+    /// <b>async</b> surface only.
+    /// </para>
     /// </remarks>
     /// <param name="record">The record to publish.</param>
     /// <param name="cancellationToken">
     /// Best-effort cancellation of the .NET wait. An already-canceled token throws
     /// <see cref="OperationCanceledException"/> before the send is enqueued; a token that fires
     /// afterwards cancels the returned <see cref="Task{TResult}"/> but does <b>not</b> abort the
-    /// in-flight native send (the producer has no <c>wakeup()</c>).
+    /// in-flight native send (the producer has no <c>wakeup()</c>). A token that fires while this
+    /// call is blocked waiting for accumulator capacity aborts that wait instead, and the record is
+    /// then not sent at all.
     /// </param>
     /// <returns>
     /// A task resolving with the published record's <see cref="RecordMetadata"/>, or faulting with
@@ -108,6 +134,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// The producer's accumulator stayed full for the whole of the configured <c>max.block.ms</c>,
+    /// so this record was not accepted (thrown synchronously — see the remarks).
+    /// </exception>
     Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -139,6 +169,14 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <para>
     /// ⚠ <b>Do not mutate the key / value buffers after this returns</b> — the same borrow window as
     /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>, described in full there.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>And it BLOCKS the calling thread under sustained saturation</b>, for up to the
+    /// configured <c>max.block.ms</c>, exactly as
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> does — the bound is on
+    /// the producer, not on the overload. A <see cref="KafkaException"/> thrown out of this call
+    /// fires <b>no</b> callback, per <see cref="IDeliveryCallback"/>'s contract for a synchronous
+    /// throw.
     /// </para>
     /// <para>
     /// <b>A null <paramref name="callback"/> is rejected (decision D8) — deliberately stricter than

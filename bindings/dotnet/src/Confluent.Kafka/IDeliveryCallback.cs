@@ -117,11 +117,15 @@ namespace Confluent.Kafka;
 /// <item>a <see cref="System.ArgumentNullException"/> (null record or null callback), an
 /// <see cref="System.ObjectDisposedException"/> (closed producer), a
 /// <see cref="SerializationException"/> from a serializer, or a
-/// <see cref="System.OperationCanceledException"/> from an already-canceled token → <b>no
-/// callback</b> (nothing was sent). Java's <c>SerializationException</c> extends
+/// <see cref="System.OperationCanceledException"/> from a token that was already canceled — or, on
+/// the <b>async</b> surface, that fires while the send is blocked on the producer's admission bound
+/// (M11/P3.3) → <b>no callback</b> (nothing was sent). Java's <c>SerializationException</c> extends
 /// <c>KafkaException</c>, not <c>ApiException</c>, so it too takes the throwing branch;</item>
-/// <item>a <see cref="KafkaException"/> raised <em>synchronously</em> by the send itself (the
-/// core rejected the record before accepting it) → <b>no callback</b>;</item>
+/// <item>a <see cref="KafkaException"/> raised <em>synchronously</em> by the send itself → <b>no
+/// callback</b>. Two causes reach it: the core rejected the record before accepting it; and, on the
+/// <b>async</b> surface (M11/P3.3), the producer's send admission bound stayed saturated for the
+/// whole of the configured <c>max.block.ms</c>, so the binding refused the record without the core
+/// ever seeing it. Neither accepted anything, so neither owes a notification;</item>
 /// <item>an unexpected failure — in practice an <see cref="System.OutOfMemoryException"/> — raised
 /// <em>after</em> the core accepted the record but before the binding could arrange to read its
 /// completion → <b>no callback</b>. Here the record <em>was</em> accepted and may still be

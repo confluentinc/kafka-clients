@@ -75,6 +75,14 @@ namespace Confluent.Kafka;
 /// on the wire. See <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full note.
 /// The <b>synchronous</b> producer has no such window.
 /// </para>
+/// <para>
+/// ⚠ <b><c>Send</c> BLOCKS the calling thread under sustained saturation</b> (M11/P3.3): once the
+/// producer holds its bound of accepted-but-unsent records, a send waits for capacity for up to the
+/// configured <c>max.block.ms</c> and then throws a <see cref="KafkaException"/>. Java's own
+/// <c>send()</c> contract, and what bounds this producer's memory and latency —
+/// <see cref="IAsyncProducer{TKey, TValue}"/> states it in full. The <b>synchronous</b> producer has
+/// no such window either.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>

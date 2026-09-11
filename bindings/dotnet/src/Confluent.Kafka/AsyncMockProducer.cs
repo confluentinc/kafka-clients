@@ -73,6 +73,19 @@ namespace Confluent.Kafka;
 /// on the wire. See <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full note.
 /// The <b>synchronous</b> producer has no such window.
 /// </para>
+/// <para>
+/// ⚠ <b><c>Send</c> BLOCKS the calling thread under sustained saturation</b> (M11/P3.3), exactly as
+/// on <see cref="AsyncKafkaProducer{TKey, TValue}"/> — the bound lives in the shared send
+/// accumulator, so it is not a real-producer-only behaviour.
+/// <see cref="IAsyncProducer{TKey, TValue}"/> states the contract in full. It is nonetheless hard to
+/// reach on a mock: the bound counts records the binding has accepted but <em>not yet handed to the
+/// core</em>, and the mock's <c>send_batch</c> never blocks, so the batch thread keeps clearing the
+/// accumulator within its linger window whether or not those sends have been completed. A
+/// manual-completion mock (<c>autoComplete: false</c>) therefore accumulates unresolved sends
+/// <em>past</em> this bound rather than against it — <see cref="CompleteNext"/> /
+/// <see cref="ErrorNext"/> / <see cref="Flush"/> resolve those, and they are not what returns
+/// admission capacity.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
