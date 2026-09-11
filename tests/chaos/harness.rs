@@ -295,12 +295,14 @@ impl ChaosHarness {
         // Snapshot what's already delivered on this topic as expected-lost
         // BEFORE deleting. For a single-topic run this is every delivered
         // record; for a multi-topic run only this topic's records.
-        let hint = if self.topics.len() == 1 {
-            ExpectedLossHint::AllDeliveredSoFar
-        } else {
-            ExpectedLossHint::AllDeliveredForTopic(topic.to_string())
+        let expected_lost_hint = || {
+            if self.topics.len() == 1 {
+                ExpectedLossHint::AllDeliveredSoFar
+            } else {
+                ExpectedLossHint::AllDeliveredForTopic(topic.to_string())
+            }
         };
-        self.verifier.note_expected_loss(hint);
+        self.verifier.note_expected_loss(expected_lost_hint());
 
         self.admin
             .delete_topics(
@@ -318,6 +320,8 @@ impl ChaosHarness {
         // Wait until describe no longer sees it before recreating. The dwell
         // (recreate-delayed) is applied AFTER the topic is confirmed gone.
         self.wait_topic_absent(topic, Duration::from_secs(30)).await;
+
+        self.verifier.note_expected_loss(expected_lost_hint());
 
         if !dwell.is_zero() {
             tokio::time::sleep(dwell).await;
