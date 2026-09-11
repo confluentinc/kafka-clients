@@ -612,6 +612,95 @@ public sealed class SendAccumulatorTests
         Assert.IsType<IndexOutOfRangeException>(failure.InnerException);
     }
 
+    [Fact]
+    public async Task BatchThreadFailure_ReleasesASendWaitingForSpace()
+    {
+        // ⚠ M11/P3.2 slice S5 (§F5 / decision D5) — the guard for the UNCONDITIONAL
+        // `_spaceGate.Cancel()` in AbandonOnThreadFailure.
+        //
+        // THE GAP. Stop cancels the gate explicitly, so teardown releases anyone waiting for space.
+        // The thread-death path did not: it sets _closed, settles both chains, sweeps the submission
+        // queue and calls ReleaseSpace(freed) — and a waiter ALREADY DEQUEUED and parked in
+        // WaitForSpaceAsync is in none of those. It was released only as a side effect of the
+        // permits coming back, i.e. by arithmetic. The failure this handler exists for is an
+        // OVER-RELEASE, and SemaphoreSlim.Release validates the whole count BEFORE releasing
+        // anything — so on exactly that path the throwing call releases NOTHING and the waiter is
+        // never woken. That is the hang this test fails on without the fix.
+        //
+        // WHY THE DETERMINISTIC WAITER CALLS WaitForSpaceAsync DIRECTLY. "The submitter has dequeued
+        // this submission and parked it on the gate" is not observable from outside:
+        // QueuedSubmissionCount counts queued-OR-appending and cannot separate the two, which is the
+        // same transience SendAccumulator_SubmissionOrder_IsCallOrder... records for its own
+        // predicate. So part (i) parks on production's OWN primitive — the exact method
+        // AppendQueuedAsync awaits, not a substitute for it (DoD §12) — and asserts it is still
+        // parked before the thread is killed. Part (ii) then adds a real queued send end to end; it
+        // reaches the parked state often but not on every run, and both paths fault it with the same
+        // ObjectDisposedException, so asserting its outcome is not asserting a race.
+        //
+        // THE SETUP IS DETERMINISTIC. Threshold 2 against a 60 s window: the filling record leaves
+        // the batch thread parked in its wait loop, and the injected record takes the node to the
+        // threshold and wakes it — so the thread dies when this test says so, never when a timer
+        // fires.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 2, maxAccumulatedRecords: 1, batchWindowMs: 60_000, batchChunk: 1100));
+
+        // Fill the bound: one permit taken, accumulated == 1 < threshold, so nothing drains.
+        Task<RecordMetadata> filled = harness.AppendOne(0x71);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // (i) The deterministic waiter, parked on the exhausted gate.
+        Task waiting = harness.Accumulator.WaitForSpaceAsync(CancellationToken.None);
+        Assert.False(waiting.IsCompleted, "the backpressure gate was not exhausted");
+
+        // (ii) The end-to-end waiter: a real send with no permit to take, so production's routing
+        // sends it to the submission queue. The count is incremented under _gate inside
+        // SubmitQueued, so this assertion cannot race the submitter.
+        Task<RecordMetadata> queued = harness.AppendOne(0x72);
+        Assert.Equal(1, harness.Accumulator.QueuedSubmissionCount);
+        Assert.False(queued.IsCompleted);
+
+        // Kill the batch thread. This record takes the node to the threshold and wakes it; the take
+        // then reports two accumulated against the one permit ever taken, so ReleaseSpace
+        // over-releases a semaphore of one and throws between the take and the send.
+        Task<RecordMetadata> injected = harness.AppendWithoutAPermit(0x73);
+
+        // THE ASSERTION, under a hard deadline so a waiter that is never released FAILS rather than
+        // hanging the run. Without the cancel this is where the run stops.
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => waiting, s_deadline));
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => queued, s_deadline));
+
+        // The records the handler actually holds are still settled exactly as before — S5 adds a
+        // release path, it changes none of the existing ones.
+        await AssertSettledByTheOverRelease(filled);
+        await AssertSettledByTheOverRelease(injected);
+
+        // And the thread really did take the failure path, rather than the test having proved a
+        // property of a still-running accumulator.
+        Assert.True(
+            harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+            "the failed batch thread did not exit");
+        Func<object> refused = () => harness.AppendWithoutAPermit(0x74);
+        Assert.Throws<ObjectDisposedException>(refused);
+
+        harness.Dispose();
+    }
+
+    /// <summary>
+    /// Asserts that <paramref name="send"/> was faulted by the batch thread's handler of last
+    /// resort after <c>AppendWithoutAPermit</c>'s injected over-release —
+    /// <see cref="KafkaException"/> wrapping a <see cref="SemaphoreFullException"/>, under a
+    /// deadline so a record that is never settled fails fast instead of hanging the run.
+    /// </summary>
+    private static async Task AssertSettledByTheOverRelease(Task<RecordMetadata> send)
+    {
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => send, TimeSpan.FromSeconds(10)));
+        Assert.Equal("The producer send-batch thread failed to process a batch.", failure.Message);
+        Assert.IsType<SemaphoreFullException>(failure.InnerException);
+    }
+
     // ------------------------------------- Flush's accumulator drain and its expiry (§3.5) ------
 
     [Fact]

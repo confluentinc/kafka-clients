@@ -111,7 +111,10 @@ internal sealed class SendAccumulator
     private readonly SemaphoreSlim _space;
 
     // Cancelled by Stop() so a Send parked on _space is released instead of pinning teardown behind
-    // it (§3.8 step 2, which must precede closing the accumulator). Never disposed: a
+    // it (§3.8 step 2, which must precede closing the accumulator), and — unconditionally — by
+    // AbandonOnThreadFailure, so the batch thread dying releases those waiters too rather than
+    // leaving them to permit arithmetic the failure may already have corrupted (M11/P3.2 slice S5).
+    // Never disposed: a
     // CancellationTokenSource with no timer holds no unmanaged resource, and disposing one while a
     // linked registration is being torn down is its own hazard.
     private readonly CancellationTokenSource _spaceGate = new CancellationTokenSource();
@@ -690,13 +693,12 @@ internal sealed class SendAccumulator
     /// <item>From <see cref="Stop"/>: the queue is sealed, so <see cref="SubmitQueued"/> refuses a
     /// late submission outright and settles it there; and anything already dequeued by the
     /// submitter is refused by <c>_closed</c> inside <see cref="Append"/>.</item>
-    /// <item>From <see cref="AbandonOnThreadFailure"/>: that path deliberately does <em>not</em>
-    /// cancel the gate or seal the queue, so neither clause above holds there and the <c>_closed</c>
-    /// refusal is the whole guarantee — a late submission settles once a permit becomes free, which
-    /// on that path it does (the abandoned chain's permits are released immediately after this
-    /// sweep). Making the settlement independent of permit availability is exactly what
-    /// M11/P3.2 §F5's unconditional <c>_spaceGate.Cancel()</c> would do, and it is deliberately its
-    /// own slice.</item>
+    /// <item>From <see cref="AbandonOnThreadFailure"/>: that path does not <em>seal</em> the queue,
+    /// so the first clause above does not hold there and the <c>_closed</c> refusal carries a late
+    /// submission. But it does now <b>cancel the gate, unconditionally</b> (M11/P3.2 slice S5), so
+    /// the settlement no longer depends on a permit becoming free — which matters because the
+    /// failure that path handles can be the permit accounting itself breaking. See the comment at
+    /// that call site.</item>
     /// </list>
     /// This sweep is what makes the queue <em>empty when <see cref="Stop"/> returns</em> rather
     /// than eventually.
@@ -1167,12 +1169,12 @@ internal sealed class SendAccumulator
         // could not be woken by a concurrent close at all (§2.2 / §4.6). AFTER the seal, so the
         // submission it wakes takes the bypass instead of faulting.
         //
-        // ⚠ This is the ONLY _spaceGate.Cancel() call site TODAY, and the reason is SEQUENCING, not
-        // safety. AbandonOnThreadFailure does not cancel because M11/P3.2 §F5 / decision D5 approves
-        // adding it there as its own slice (S5), so that behaviour change stays attributable — NOT
-        // because cancelling there would be unsafe.
+        // ⚠ There are now TWO _spaceGate.Cancel() call sites: this one and the unconditional one in
+        // AbandonOnThreadFailure (M11/P3.2 slice S5 / §F5 / decision D5, landed). Until S5 this was
+        // the only one, and the reason was SEQUENCING, not safety — the behaviour change was held
+        // back so it stayed attributable to its own slice, NOT because cancelling there was unsafe.
         //
-        // It would not be. The bypass is gated on _queueSealed, which ONLY this method writes (in
+        // It was not. The bypass is gated on _queueSealed, which ONLY this method writes (in
         // step 1 above, under _gate), so a waiter that handler releases reaches AppendQueuedAsync's
         // `catch (ObjectDisposedException) when (_queueSealed)` filter with the filter FALSE: the
         // throw propagates to the outer catch and that submission is FAULTED, never appended. And
@@ -1314,15 +1316,50 @@ internal sealed class SendAccumulator
         // The submission queue too: with the batch thread gone, a submission still waiting behind
         // another for a permit has nothing that will ever append it, so faulting it here is what
         // keeps this handler's "settle what is in hand" property true of BOTH stages. A submission
-        // already parked in WaitForSpaceAsync is released by the ReleaseSpace below when the
-        // abandoned chain frees capacity — the one path where that arithmetic is load-bearing
-        // rather than incidental (M11/P3.2 §F5 makes it unconditional; that is its own slice).
+        // already DEQUEUED and parked in WaitForSpaceAsync is not in _submissions and so is not
+        // reached here; the unconditional _spaceGate.Cancel() below is what releases that one
+        // (M11/P3.2 slice S5). Before S5 it was left to the ReleaseSpace arithmetic — see the
+        // comment there for why that could not be relied on.
         //
         // Faulting stays right even when this races Stop's teardown flush: _closed is set above,
         // so a bypass append (M11/P3.2 §F2) is refused and AppendQueuedAsync faults the submission
         // with the same exception. Appending here instead would strand the record — the thread that
         // would have drained it is the one that just died.
         SettleQueuedSubmissions();
+
+        // M11/P3.2 slice S5 (§F5 / decision D5). UNCONDITIONAL — and that is the point: a waiter is
+        // released by an EXPLICIT event, never by a coincidence of permit accounting.
+        //
+        // It covers BOTH stages of "waiting for space", which is why it is not redundant with the
+        // sweep above. A submission the submitter has already DEQUEUED and parked in
+        // WaitForSpaceAsync is no longer in _submissions, so SettleQueuedSubmissions cannot reach it;
+        // this is the only thing that does. One still queued behind it is reached by both, harmlessly
+        // — TrySetException is idempotent and the two paths produce the same exception.
+        //
+        // ⚠ WHY NOT THE PERMIT ARITHMETIC. Before S5 the parked case was left to ReleaseSpace(freed)
+        // below, on an UNSTATED invariant: a waiter can exist only when the permits are exhausted
+        // (_accumulated == bound), so freed > 0 must release at least one and wake it. The failure
+        // this handler exists for is an OVER-RELEASE (SemaphoreFullException) — i.e. precisely a case
+        // where that accounting is ALREADY known broken — and SemaphoreSlim.Release validates the
+        // whole count BEFORE releasing anything, so the throwing call releases NOTHING and the waiter
+        // is never woken. Resting a liveness property on arithmetic the handler's own trigger has
+        // already corrupted is the hang this line removes.
+        //
+        // Released waiters fault with ClosedDuringBackpressure, which is the right answer: the
+        // accumulator is closed and their record will never be sent.
+        //
+        // ⚠ SAFE, and established by measurement rather than asserted (Critic 71 finding 71.9). The
+        // teardown bypass is gated on _queueSealed, which ONLY Stop writes, so a waiter released from
+        // HERE reaches AppendQueuedAsync's `catch (ObjectDisposedException) when (_queueSealed)`
+        // filter with the filter FALSE: the throw propagates to the outer catch and that submission
+        // is FAULTED, never appended into an accumulator whose thread is gone. Where a concurrent
+        // Stop HAS sealed, the record still cannot be stranded, because _closed is set and the chain
+        // taken in the ONE _gate acquisition above — so a bypass append is either refused by _closed
+        // or lands in a node that same acquisition took, and SettleAbandonedChain settled it.
+        //
+        // Ordered AFTER the settles, so a pathological throw out of Cancel cannot strand the chains
+        // this handler exists to settle; and BEFORE ReleaseSpace, so it owes that call nothing.
+        _spaceGate.Cancel();
 
         try
         {
