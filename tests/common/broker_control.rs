@@ -126,7 +126,20 @@ impl<'a> BrokerControl<'a> {
     pub async fn wait_operational(&self, admin: &dyn Admin, node_id: u16, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Ok(nodes) = admin.describe_cluster(DescribeClusterOptions::new()).nodes().get().await
+            // Bound each describe attempt so a hung RPC on a degraded cluster
+            // cannot stall the loop past `deadline`. Without this, the admin
+            // client can retry `describe_cluster` internally forever and control
+            // never reaches the deadline check below — the loop's `timeout` would
+            // be silently ineffective.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let attempt = remaining.min(Duration::from_secs(5));
+            let result = admin.describe_cluster(DescribeClusterOptions::new());
+            let node_future = result.nodes();
+            let describe = node_future.get();
+            if let Ok(Ok(nodes)) = tokio::time::timeout(attempt, describe).await
                 && nodes.iter().any(|n| n.id() == i32::from(node_id))
             {
                 return true;
