@@ -1901,6 +1901,68 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
+    public async Task Admission_WhenTheBoundStaysSaturated_FiresTheCallbackBeforeFaultingTheTask()
+    {
+        // ── D3 ORDERING AT THE EXPIRY FIRING SITE (Critic 72 finding 72.15) ─────────────────────
+        // Java sets the future's value, fires the callbacks, and only THEN releases the future's
+        // waiters (ProducerBatch.java:303-323 — produceFuture.done() is last), and CLAUDE.md §4
+        // records that ordering as the binding's contract. SubmitAdmitted's expiry branch keeps it
+        // (Fire, then TrySetException), but nothing asserted it: with the two statements swapped the
+        // whole suite passed 921/921, 0/3 detected. This is the test that discriminates them.
+        //
+        // ⚠ THE PROBE IS THE AWAITER'S OWN COMPLETION STATE, READ FROM INSIDE THE CALLBACK — ffi
+        // §A6 form C's "deterministic probe, not a ticket comparison". TrySetException transitions
+        // the Task synchronously (RunContinuationsAsynchronously only defers the CONTINUATION), so
+        // `IsCompleted` inside OnCompletion is true if and only if the awaiter was released first.
+        //
+        // ⚠ The public probe shape cannot reach this site. Ordering_Async_CallbackRunsBeforeThe-
+        // TaskIsCompleted assigns `probe.Task = sendTask` AFTER Send returns, which works only
+        // because the pump fires later; here the callback fires INSIDE the submit call, so the
+        // awaiter has to be handed over before it — hence AppendOneObservingItsCompletion, which is
+        // AppendOne with the TCS created first. Everything else stays production's own primitive:
+        // the same SubmitAdmitted entry point, the same DeliveryRegistration (DoD §12).
+        const int MaxBlockMs = 250;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 2,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: MaxBlockMs));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+        Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
+
+        CompletionStateProbeDeliveryCallback probe = new CompletionStateProbeDeliveryCallback();
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneObservingItsCompletionFromAnotherThread(0xF6, probe);
+
+        await TestTimeout.Run(() => admission, s_deadline);
+        Task<RecordMetadata> refused = await admission;
+
+        // The expiry itself, so a green run cannot mean "the branch was never taken".
+        await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => refused, s_deadline));
+
+        // The vacuity guard: an uninvoked probe records nothing, and every assertion below would
+        // then pass for the wrong reason (this is the same hazard TaskWasNull closes on the public
+        // ordering test; here the awaiter is ctor-injected, so "observed a null Task" is not
+        // reachable — only "was never invoked" is).
+        Assert.True(probe.WasInvoked, "the expiry did not fire the delivery callback at all");
+        Assert.Same(refused, probe.ObservedTask);
+
+        // The assertion the mutation flips: the awaiter must NOT yet be completed.
+        Assert.False(
+            probe.TaskWasCompleted,
+            "the record's Task was already completed when the delivery callback ran — the callback " +
+            "must fire BEFORE the awaiter is released (ProducerBatch.java:303-323)");
+
+        harness.DrainNow();
+        Assert.Equal(2, harness.HistoryCount);
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+    }
+
+    [Fact]
     public async Task Admission_CallerTokenFiresWhileParked_CancelsWithThatToken_AndNothingIsSent()
     {
         // The caller's token must abort the admission wait and be REPORTED, not a linked
@@ -2409,6 +2471,47 @@ public sealed class SendAccumulatorTests
     }
 
     /// <summary>
+    /// Records the send awaiter's own completion state as seen <b>from inside</b>
+    /// <see cref="IDeliveryCallback.OnCompletion"/> — the deterministic probe for the D3 ordering
+    /// contract at a firing site that runs <em>inside</em> the submit call (Critic 72 finding
+    /// 72.15).
+    /// </summary>
+    /// <remarks>
+    /// The awaiter is injected through <see cref="Observe"/> before the submit call rather than
+    /// assigned after it, which is what makes it readable at an in-call firing site; the public
+    /// ordering test's after-the-fact assignment works only for the pump, which fires later. A
+    /// ticket comparison would be racy (<c>RunContinuationsAsynchronously</c> only
+    /// <em>schedules</em> the continuation), so the probe reads
+    /// <see cref="Task.IsCompleted"/> instead — which <c>TrySetException</c> sets synchronously.
+    /// </remarks>
+    /// <remarks>
+    /// <c>internal</c> rather than <c>private</c> like its siblings only because
+    /// <see cref="Harness.AppendOneObservingItsCompletionFromAnotherThread"/> takes it by its own
+    /// type — the awaiter has to reach the probe, not just an <see cref="IDeliveryCallback"/>.
+    /// </remarks>
+    internal sealed class CompletionStateProbeDeliveryCallback : IDeliveryCallback
+    {
+        internal Task<RecordMetadata>? ObservedTask { get; private set; }
+
+        internal bool WasInvoked { get; private set; }
+
+        internal bool TaskWasCompleted { get; private set; }
+
+        private Task<RecordMetadata>? _awaiter;
+
+        /// <summary>Hands the probe the awaiter it must read, before the submit call.</summary>
+        internal void Observe(Task<RecordMetadata> awaiter) => _awaiter = awaiter;
+
+        public void OnCompletion(RecordMetadata metadata, KafkaException? exception)
+        {
+            Task<RecordMetadata>? awaiter = _awaiter;
+            ObservedTask = awaiter;
+            TaskWasCompleted = awaiter is not null && awaiter.IsCompleted;
+            WasInvoked = true;
+        }
+    }
+
+    /// <summary>
     /// Records every <see cref="IDeliveryCallback"/> invocation, so "exactly once" can be asserted
     /// as a <b>count</b> rather than as "it ran".
     /// </summary>
@@ -2651,6 +2754,41 @@ public sealed class SendAccumulatorTests
             IDeliveryCallback? callback = null) =>
             Task.Factory.StartNew(
                 () => AppendOne(tag, callback, cancellationToken, out _),
+                CancellationToken.None,
+                TaskCreationOptions.DenyChildAttach,
+                TaskScheduler.Default);
+
+        /// <summary>
+        /// <see cref="AppendOneFromAnotherThread"/> for a firing site that runs <b>inside</b>
+        /// <c>SubmitAdmitted</c>: the record's awaiter is created and handed to
+        /// <paramref name="probe"/> <em>before</em> the submit call, so the probe can read its
+        /// completion state from inside <c>OnCompletion</c>.
+        /// </summary>
+        /// <remarks>
+        /// This is the only thing it adds — the record, the awaiter, the
+        /// <see cref="DeliveryRegistration"/> and the single <c>SubmitAdmitted</c> entry point are
+        /// all <see cref="AppendOne(byte, IDeliveryCallback?, CancellationToken, out TaskCompletionSource{RecordMetadata})"/>'s,
+        /// i.e. production's (DoD §12). Ordering the two statements the other way round is exactly
+        /// the bug under test, so the fixture must not be the thing that fixes it: it hands over the
+        /// <see cref="TaskCompletionSource{TResult}.Task"/>, never touching the source itself.
+        /// Issued from its own <see cref="Task"/> because a saturated bound parks the caller for
+        /// <c>max.block.ms</c>.
+        /// </remarks>
+        internal Task<Task<RecordMetadata>> AppendOneObservingItsCompletionFromAnotherThread(
+            byte tag,
+            CompletionStateProbeDeliveryCallback probe) =>
+            Task.Factory.StartNew(
+                () =>
+                {
+                    SerializedProducerRecord record = NewRecord(tag);
+                    TaskCompletionSource<RecordMetadata> completion = NewCompletion();
+                    probe.Observe(completion.Task);
+
+                    Accumulator.SubmitAdmitted(
+                        record, completion, NewDelivery(probe), CancellationToken.None);
+
+                    return completion.Task;
+                },
                 CancellationToken.None,
                 TaskCreationOptions.DenyChildAttach,
                 TaskScheduler.Default);
