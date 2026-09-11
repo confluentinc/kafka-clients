@@ -101,6 +101,14 @@ namespace Confluent.Kafka.Internal;
 /// </remarks>
 internal sealed class SendAccumulator
 {
+    // The Kafka protocol's REQUEST_TIMED_OUT, whose Java exception IS
+    // org.apache.kafka.common.errors.TimeoutException (Errors.java:195) — the supertype of the
+    // BufferExhaustedException Java raises for this condition. Used only by AdmissionTimedOut (see
+    // there); a bare 7 would read as a magic number, and a binding-wide ErrorCode enum is an
+    // ffi §A5 anti-pattern ("a confluent-kafka-dotnet-style Error/ErrorCode object"), so it is one
+    // named constant at its single use site.
+    private const int RequestTimedOutCode = 7;
+
     private readonly SafeProducerHandle _handle;
     private readonly PinnedTopicCache _topics;
     private readonly SendCompletionPump _pump;
@@ -144,12 +152,28 @@ internal sealed class SendAccumulator
     // immediately before it. The synchronous wait is what throttles (M11/P7: 591.6k / 127 MiB /
     // p50 7 ms).
     //
-    // ⚠ NO FAIR PRIMITIVE IS NEEDED, and adding one would be out of scope. SemaphoreSlim documents
-    // no waiter ordering, which would matter for an ASYNC admission (one caller can park many
-    // sends) and is moot for a BLOCKING one: a blocked caller has at most ONE send in flight, so
-    // whichever waiter the runtime wakes, a single caller's own sends cannot invert. Per-caller
-    // order is all Java promises (ProducerConfig.java:274) and all M11/P3.2 claimed, and the FIFO
-    // submission queue still carries it independently.
+    // ⚠ ORDERING needs no fair primitive here. SemaphoreSlim documents no waiter ordering, which
+    // would matter for an ASYNC admission (one caller can park many sends) and is moot for a
+    // BLOCKING one: a blocked caller has at most ONE send in flight, so whichever waiter the
+    // runtime wakes, a single caller's own sends cannot invert. Per-caller order is all Java
+    // promises (ProducerConfig.java:274) and all M11/P3.2 claimed, and the FIFO submission queue
+    // still carries it independently.
+    //
+    // ⚠ STARVATION IS A SEPARATE QUESTION, AND HERE .NET DIVERGES FROM JAVA — recorded, accepted
+    // for this phase, NOT claimed as parity. Java's BufferPool is fair by contract: "It is fair.
+    // That is all memory is given to the longest waiting thread until it has sufficient memory"
+    // (BufferPool.java:40), implemented as a Deque<Condition> waiters with addLast / peekFirst
+    // ().signal(). SemaphoreSlim is not, and it barges: Admit's Wait(0) fast path can take a permit
+    // that a Release just made available while an older AdmitSlow waiter is still being woken. So
+    // under sustained saturation with many concurrent senders the oldest caller can time out at
+    // max.block.ms while newer ones succeed, where Java would have served it first.
+    //
+    // Accepted here because the residual is narrow and bounded: barging is bounded by
+    // max.block.ms, and the timed-out caller's outcome is a RETRIABLE failed Task plus a delivery
+    // callback (see AdmissionTimedOut) — which is precisely what Java produces on genuine buffer
+    // exhaustion, so the caller's recovery path is the same one Java gives it. Adding a fair
+    // primitive (a lock + a FIFO Queue<TaskCompletionSource>, or SemaphoreSlim's ordering emulated
+    // by hand) is deliberately out of scope for this slice, not a claim that it would be wrong.
     private readonly SemaphoreSlim _admission;
 
     // Cancelled by Stop() so a Send parked on _space is released instead of pinning teardown behind
@@ -418,11 +442,12 @@ internal sealed class SendAccumulator
     /// <remarks>
     /// <b>Test observation point, not production surface</b> (the <c>SendBatchCallCount</c>
     /// precedent). It exists because a missing <see cref="ReleaseAdmission"/> has no
-    /// <em>behavioural</em> observable on some paths: every reachable refusal of an
-    /// already-admitted record happens during teardown, which has also cancelled
-    /// <see cref="_spaceGate"/> — so a later caller whose permit was leaked reports "the producer is
-    /// closing" rather than waiting out <c>max.block.ms</c>, i.e. exactly what it would report had
-    /// the permit come back. A count is what separates those. It is <em>not</em> a restatement of
+    /// <em>behavioural</em> observable on some paths. On the two refusal paths that need it —
+    /// <see cref="SubmitAdmitted"/>'s <c>finally</c> and <see cref="SubmitQueued"/>'s sealed
+    /// refusal — teardown has also cancelled <see cref="_spaceGate"/>, so a later caller whose
+    /// permit was leaked reports "the producer is closing" rather than waiting out
+    /// <c>max.block.ms</c>, i.e. exactly what it would report had the permit come back. A count is
+    /// what separates those. It is <em>not</em> a restatement of
     /// <see cref="AdmittedRecordCount"/>: that one counts records the accumulator is holding, this
     /// one counts permits, and a leak moves only the second.
     /// </remarks>
@@ -432,8 +457,10 @@ internal sealed class SendAccumulator
     /// <b>The production send path's single entry point (M11/P3.3):</b> takes an admission permit —
     /// <b>blocking the calling thread</b> when the bound is saturated — and then routes the record
     /// through <see cref="TrySubmitInline"/> / <see cref="SubmitQueued"/>. On return the record has
-    /// been accepted (appended, or queued behind the FIFO); on a throw nothing has been appended,
-    /// pinned, or charged against either bound.
+    /// either been accepted (appended, or queued behind the FIFO) or <b>refused by
+    /// <c>max.block.ms</c> expiry</b>, in which case <paramref name="completion"/> is already
+    /// faulted and <paramref name="delivery"/> has already fired; on a throw nothing has been
+    /// appended, pinned, or charged against either bound.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -485,16 +512,46 @@ internal sealed class SendAccumulator
     /// <exception cref="OperationCanceledException">
     /// <paramref name="cancellationToken"/> fired while this send was waiting to be admitted.
     /// </exception>
-    /// <exception cref="KafkaException">
-    /// The admission bound stayed saturated for the whole of <c>max.block.ms</c>.
-    /// </exception>
     internal void SubmitAdmitted(
         in SerializedProducerRecord record,
         TaskCompletionSource<RecordMetadata> completion,
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken)
     {
-        Admit(cancellationToken);
+        if (!Admit(cancellationToken))
+        {
+            // ── JAVA'S BUFFER-EXHAUSTED SHAPE (Critic 72 finding 72.1) ──────────────────────────
+            // max.block.ms elapsed with the bound still saturated. Java does NOT throw out of
+            // send() for this: BufferPool.allocate throws BufferExhaustedException
+            // (BufferPool.java:161) on expiry of the accumulator-memory wait
+            // (RecordAccumulator.java:333 <- KafkaProducer.java:1029-1030, whose remainingWaitMs
+            // derives from max.block.ms at :995); BufferExhaustedException extends TimeoutException
+            // (BufferExhaustedException.java:29) extends RetriableException
+            // (TimeoutException.java:22) extends ApiException, so it lands in doSend's
+            // `catch (ApiException e)` at KafkaProducer.java:1049-1061, which FIRES THE CALLBACK
+            // with the -1 placeholder metadata (:1051-1055) and returns a FAILED FUTURE (:1061)
+            // rather than rethrowing. So this method fires the delivery callback and faults the
+            // record's awaiter, and Send does not throw.
+            //
+            // The callback runs BEFORE the awaiter is released (ffi §A6 form C / M14/P1 D3, Java's
+            // ProducerBatch.java:303-323 ordering), and it goes through DeliveryRegistration.Fire
+            // with a null metadata so the -1 PLACEHOLDER IS BUILT THERE, by the one site that owns
+            // that construction. Building it here would be a second placeholder construction —
+            // which is how M14/P1 shipped a placeholder whose partition tripped
+            // TopicPartition's negative-partition guard INSIDE Fire's no-throw swallow, making the
+            // callback's effect silently absent rather than differently shaped.
+            //
+            // Two things Java's catch does that this binding has no surface for, so they are
+            // recorded rather than mimicked: `this.errors.record()` (:1056) — the producer's
+            // metrics are the CORE's metric map, read through Producer_metrics, and the binding
+            // keeps no error counter of its own to bump; and `interceptors.onSendError(...)`
+            // (:1057) — producer interceptors are deferred (CLAUDE.md §4 "Interceptors: Defer"),
+            // so there is nothing to notify. Neither is invented here.
+            KafkaException expired = AdmissionTimedOut();
+            delivery?.Fire(metadata: null, failure: expired);
+            completion.TrySetException(expired);
+            return;
+        }
 
         bool accepted = false;
         try
@@ -510,10 +567,13 @@ internal sealed class SendAccumulator
         {
             if (!accepted)
             {
-                // Only the INLINE route can get here: TrySubmitInline throws
-                // ObjectDisposedException when teardown closed the accumulator between the
-                // admission above and the append. SubmitQueued does not throw — it settles a
-                // sealed-queue refusal itself, and gives the permit back at that site.
+                // The INLINE route reaches here: TrySubmitInline throws ObjectDisposedException
+                // when teardown closed the accumulator between the admission above and the append.
+                // The QUEUED route does not owe the permit here — SubmitQueued settles a
+                // sealed-queue refusal itself and gives the permit back at that site, and once a
+                // submission IS queued the permit is owed by ReleaseQueuedSlot or by the chain's
+                // take, so EnsureSubmitterRunning deliberately does not let a failure escape past
+                // the enqueue (see there).
                 ReleaseAdmission(1);
             }
         }
@@ -522,8 +582,8 @@ internal sealed class SendAccumulator
     /// <summary>
     /// <see cref="SubmitAdmitted"/>'s non-blocking probe: reports <see langword="false"/> — having
     /// appended, pinned and charged nothing — when either the admission bound or the inline routing
-    /// refuses. The <b>only</b> other way into the accumulator, so admission accounting cannot be
-    /// bypassed by taking the inline path directly.
+    /// refuses. It takes the admission permit itself, so admission accounting stays whole without
+    /// the caller reaching <see cref="TrySubmitInline"/> directly.
     /// </summary>
     /// <remarks>
     /// It exists for the tests that assert a refusal (a saturated bound, or a submission queued
@@ -559,7 +619,10 @@ internal sealed class SendAccumulator
 
     /// <summary>
     /// Takes one admission permit, waiting for up to
-    /// <see cref="SendAccumulatorSettings.MaxBlockMs"/> if the bound is saturated.
+    /// <see cref="SendAccumulatorSettings.MaxBlockMs"/> if the bound is saturated. Reports
+    /// <see langword="false"/> — rather than throwing — when that wait expires, because Java's
+    /// outcome for the equivalent expiry is a failed future plus a callback, not a throw out of
+    /// <c>send()</c> (see <see cref="SubmitAdmitted"/>).
     /// </summary>
     /// <remarks>
     /// The <see cref="SemaphoreSlim.Wait(int)"/><c>(0)</c> fast path is the steady-state send, and
@@ -567,15 +630,12 @@ internal sealed class SendAccumulator
     /// allocates (the linked token source) lives in <see cref="AdmitSlow"/>, which runs only when
     /// the bound is already full.
     /// </remarks>
-    private void Admit(CancellationToken cancellationToken)
-    {
-        if (_admission.Wait(0))
-        {
-            return;
-        }
-
-        AdmitSlow(cancellationToken);
-    }
+    /// <returns>
+    /// <see langword="true"/> when a permit was taken; <see langword="false"/> when
+    /// <c>max.block.ms</c> elapsed with the bound still saturated.
+    /// </returns>
+    private bool Admit(CancellationToken cancellationToken) =>
+        _admission.Wait(0) || AdmitSlow(cancellationToken);
 
     /// <summary>
     /// The blocking half of <see cref="Admit"/>: parks the calling thread until a permit frees, the
@@ -583,11 +643,16 @@ internal sealed class SendAccumulator
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Java's shape, including the exception on expiry.</b> <c>KafkaProducer.send()</c> blocks up
-    /// to <c>max.block.ms</c> waiting for accumulator memory and then throws; so does this. The
-    /// exception is the binding's flat <see cref="KafkaException"/> (ffi §A5 — there is no typed
-    /// hierarchy yet), with a message that names the knob and the bound so an operator can act on
-    /// it.
+    /// <b>Java's shape — blocking, and NOT a throw on expiry.</b> <c>KafkaProducer.send()</c> blocks
+    /// up to <c>max.block.ms</c> waiting for accumulator memory, and so does this; but on expiry
+    /// Java returns a <em>failed future</em> and fires the callback rather than throwing out of
+    /// <c>send()</c>, so this reports the expiry to <see cref="SubmitAdmitted"/> instead of raising
+    /// it. The full Java citation chain is at that method's expiry branch. (⚠ This paragraph used to
+    /// read "including the exception on expiry … and then throws; so does this", which was false:
+    /// Java throws for the <em>metadata</em> wait — <c>waitOnMetadata</c>,
+    /// <c>KafkaProducer.java:989-992</c>, rethrown — and returns a failed future for the
+    /// <em>accumulator-memory</em> wait, which is the one being mirrored here. Critic 72 finding
+    /// 72.1.)
     /// </para>
     /// <para>
     /// <b>Teardown wins over the caller's token when both fired</b>, matching
@@ -603,12 +668,26 @@ internal sealed class SendAccumulator
     /// thread takes the chain, so a saturated bound with a NON-EMPTY chain always drains. A
     /// saturated bound whose records are all still QUEUED needs the submitter to append them first,
     /// and on a pool starved by blocked senders that can stall — which is why this wait is bounded
-    /// rather than infinite, and why its expiry is a defined outcome (an error the caller can see)
-    /// rather than a hang. <see cref="FlushQueuedSubmissions"/> carries the identical dependency and
-    /// the identical mitigation.
+    /// rather than infinite, and why its expiry is a defined outcome rather than a hang. This is
+    /// PLAN §11 risk 1's mechanism made precise, not a dependency the plan missed.
+    /// </para>
+    /// <para>
+    /// <b>The exposure is NOT <see cref="FlushQueuedSubmissions"/>'s, even though the dependency
+    /// is.</b> Both are bounded waits on progress made by a pool task, and that much is shared. But
+    /// that flush blocks <em>one</em> thread (the disposer), runs after the gate is already
+    /// cancelled so it does not compete with blocked senders, and degrades to "the terminal sweep
+    /// faults the remainder" — a slower teardown. This wait blocks <em>N caller threads</em>, and
+    /// when those callers are pool threads it can <em>create</em> the starvation it is exposed to, a
+    /// feedback loop the flush cannot have; its degraded outcome is a <b>user-visible send
+    /// failure</b> — a retriable failed <see cref="Task"/> plus a delivery callback — not a slower
+    /// teardown. (⚠ This paragraph used to claim "the identical dependency and the identical
+    /// mitigation", which understated both halves. Critic 72 verdict 4.)
     /// </para>
     /// </remarks>
-    private void AdmitSlow(CancellationToken cancellationToken)
+    /// <returns>
+    /// <see langword="true"/> when a permit was taken before <c>max.block.ms</c> elapsed.
+    /// </returns>
+    private bool AdmitSlow(CancellationToken cancellationToken)
     {
         CancellationToken gate = _spaceGate.Token;
         bool admitted;
@@ -638,10 +717,11 @@ internal sealed class SendAccumulator
             throw;
         }
 
-        if (!admitted)
-        {
-            throw AdmissionTimedOut();
-        }
+        // Expiry is REPORTED, not thrown — SubmitAdmitted turns it into Java's failed-future plus
+        // callback. Teardown and cancellation above still throw, because Java throws for those too
+        // (a closed producer is an IllegalStateException there, not an ApiException) and because
+        // the caller's Send has not returned yet.
+        return admitted;
     }
 
     /// <summary>
@@ -702,8 +782,7 @@ internal sealed class SendAccumulator
     /// the admission bound never charged — and the batch thread's next
     /// <see cref="ReleaseAdmission"/> would then over-release, i.e. exactly the
     /// <see cref="SemaphoreFullException"/> the fixture's own <c>AppendWithoutAPermit</c> injects on
-    /// purpose. The two ways in are <see cref="SubmitAdmitted"/> (blocking) and
-    /// <see cref="TryAdmitAndSubmitInline"/> (non-blocking).
+    /// purpose.
     /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">
@@ -821,12 +900,48 @@ internal sealed class SendAccumulator
     /// <summary>
     /// Starts the submitter loop if one is not already running. The 0 → 1 transition is the
     /// exclusive token, so at most one loop exists per accumulator (see <see cref="SubmitQueued"/>).
+    /// <b>Never throws</b>, because its caller has already enqueued the submission.
     /// </summary>
+    /// <remarks>
+    /// <b>The <c>catch</c> is what keeps the admission arithmetic sound</b> (Critic 72 finding
+    /// 72.6). <see cref="SubmitQueued"/> calls this <em>after</em> the enqueue, so from that moment
+    /// the submission's admission permit is owed by <see cref="ReleaseQueuedSlot"/> (or by the
+    /// chain's take). Letting a failure escape would make <see cref="SubmitAdmitted"/>'s
+    /// <c>finally</c> release that permit as well — an <b>over-release</b>, i.e. a
+    /// <see cref="SemaphoreFullException"/> on the batch thread, which is the failure
+    /// <see cref="AbandonOnThreadFailure"/> exists to survive. Resetting the token instead keeps
+    /// the queue drainable: a later <see cref="SubmitQueued"/>, or <see cref="Stop"/>'s own call,
+    /// restarts the loop and drains FIFO from the front, and the terminal
+    /// <see cref="SettleQueuedSubmissions"/> sweep settles whatever is left. Leaving the token
+    /// latched at 1 instead would strand the queue with nothing to append it (an M11/P3.2-era
+    /// shape) until <see cref="Stop"/>, whose own CAS would also fail.
+    /// <para>
+    /// ⚠ <b>Defensive, and deliberately not claimed as test-covered.</b>
+    /// <see cref="Task.Run(Func{Task})"/> always queues to <see cref="TaskScheduler.Default"/>
+    /// rather than to an ambient scheduler, so no fixture can install a rejecting one; what reaches
+    /// here is an <see cref="OutOfMemoryException"/> or a thread-pool queue failure, neither of
+    /// which a broker-free test can schedule. The repo's standard of care is to spend a line of
+    /// code on an OOM residual rather than to argue it away (ffi §A6 form C's residual list names
+    /// <see cref="OutOfMemoryException"/> explicitly).
+    /// </para>
+    /// </remarks>
     private void EnsureSubmitterRunning()
     {
-        if (Interlocked.CompareExchange(ref _submitterRunning, 1, 0) == 0)
+        if (Interlocked.CompareExchange(ref _submitterRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
         {
             _ = Task.Run(RunSubmitterAsync);
+        }
+        catch (Exception)
+        {
+            // Interlocked.Exchange, matching RunSubmitterAsync's own release: both sides of the
+            // start/stop handshake are full fences (see there), and a Volatile.Write here would
+            // break that symmetry.
+            Interlocked.Exchange(ref _submitterRunning, 0);
         }
     }
 
@@ -1904,10 +2019,26 @@ internal sealed class SendAccumulator
 
             // The ADMISSION bound's release site (M11/P3.3) — the one that unblocks callers parked
             // in AdmitSlow. It is the SAME moment _space's is, which is what keeps the two
-            // accountings trivially comparable, and it is why the admitted population is bounded by
-            // the cap plus whatever the batch thread is currently sending: those records have left
-            // the accumulator's chain but not yet the process. The residual is one chunk
-            // (BatchChunk), not unbounded, and is accepted for the same reason _space accepts it.
+            // accountings trivially comparable and makes the overshoot structurally identical to
+            // the one _space already accepts (both release at TakeChainLocked, so both exclude the
+            // in-flight chain by construction).
+            //
+            // ⚠ THE OVERSHOOT IS THE IN-FLIGHT CHAIN, NOT ONE CHUNK (corrected — Critic 72 finding
+            // 72.5; it read "one chunk (BatchChunk)"). Permits are released for the WHOLE taken
+            // chain, so the accepted-but-unsent population can exceed MaxAdmittedRecords by |chain|
+            // — every record taken but not yet passed to a send_batch call. A chain holds at most
+            // the appends possible between two takes, so
+            //
+            //     overshoot <= min(MaxAdmittedRecords, MaxAccumulatedRecords) + the teardown bypass
+            //
+            // (min, because a permit-backed append needs a _space permit and an admission-charged
+            // one needs an _admission permit; the bypass appends are the only ones outside _space).
+            // At the shipped defaults — MaxAccumulated 1000, cap 5000, BatchChunk 1100 — that is
+            // ~1000, so peak accepted-but-unsent is ~6000. BatchChunk is an upper bound on it only
+            // by coincidence at those values (1000 < 1100), and CONFLUENT_KAFKA_PRODUCER_BATCH_CHUNK
+            // is an independent override clamped only from above, so MAX_ACCUMULATED=10000 +
+            // BATCH_CHUNK=100 gives an overshoot of 10000 rather than 100. It scales with
+            // MaxAccumulatedRecords, which is what a cap sweep has to size against.
             ReleaseAdmission(admitted);
 
             if (chain is not null)
@@ -1991,17 +2122,35 @@ internal sealed class SendAccumulator
             "The producer was closed while this send was waiting to be admitted to the accumulator.");
 
     /// <summary>
-    /// The admission bound stayed saturated for the whole of <c>max.block.ms</c>. Java's own
-    /// outcome — <c>KafkaProducer.send()</c> throws once it has waited <c>max.block.ms</c> for
-    /// accumulator memory — expressed as the binding's flat <see cref="KafkaException"/> (ffi §A5).
+    /// The admission bound stayed saturated for the whole of <c>max.block.ms</c> — expressed as the
+    /// binding's flat <see cref="KafkaException"/> (ffi §A5), carrying <b>Java's classification</b>
+    /// for the exception it stands in for. It faults the record's awaiter and is handed to the
+    /// delivery callback; it is never thrown out of <c>Send</c> (see <see cref="SubmitAdmitted"/>).
     /// </summary>
+    /// <remarks>
+    /// <b>Retriable, code 7 — not the message-only ctor</b> (Critic 72 finding 72.1, item 3; it
+    /// used to use <c>new KafkaException(message)</c>, whose documented effect is <c>Code == 0</c>
+    /// — the protocol's <c>NONE</c>, i.e. "success" — with <c>IsRetriable == false</c>). Java's
+    /// stand-in is <c>BufferExhaustedException</c> → <c>TimeoutException</c> →
+    /// <c>RetriableException</c>, so the idiomatic
+    /// <c>catch (KafkaException e) when (e.IsRetriable)</c> retry must match. Code 7 is
+    /// <c>REQUEST_TIMED_OUT</c>, the protocol code whose Java exception <em>is</em>
+    /// <c>TimeoutException</c> (<c>Errors.java:195</c>) — i.e. the supertype of the exception being
+    /// stood in for — and the core classifies it retriable too
+    /// (<c>src/common/protocol/errors.rs:429</c>). This is the first
+    /// <b>binding-generated</b> classified <see cref="KafkaException"/>; every other one comes from
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> over a core error handle.
+    /// </remarks>
     private KafkaException AdmissionTimedOut() =>
         new KafkaException(
+            RequestTimedOutCode,
             "The producer did not admit this record within max.block.ms (" +
             _settings.MaxBlockMs.ToString(CultureInfo.InvariantCulture) +
             " ms): it has already accepted " +
             _settings.MaxAdmittedRecords.ToString(CultureInfo.InvariantCulture) +
-            " records that have not yet been handed to the core.");
+            " records that have not yet been handed to the batch thread.",
+            isRetriable: true,
+            isFatal: false);
 
     /// <summary>
     /// Sends every node of the chain <see cref="_inFlight"/> names, advancing it as each node is

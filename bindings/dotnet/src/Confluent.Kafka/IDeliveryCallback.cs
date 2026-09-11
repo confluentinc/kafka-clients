@@ -104,7 +104,10 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Which outcomes fire it, and which do not (decision D5).</b> The rule is: <b>a throw out of
 /// <c>Send</c> means no callback; a send whose core-reported completion the binding reads —
-/// successfully or not — fires it.</b> Java's <c>doSend</c> splits the same way: the terminal
+/// successfully or not — fires it; and so does the one failure the binding <em>generates</em> for
+/// which Java also fires, the <c>max.block.ms</c> admission expiry.</b> Java's <c>doSend</c> splits
+/// the same way — by whether the failure is an <c>ApiException</c>, not by who produced it: the
+/// terminal
 /// <c>catch (InterruptedException / KafkaException / Exception)</c> clauses re-throw without
 /// invoking the callback (<c>KafkaProducer.java:1069-1081</c>), while an appended record's
 /// callback fires later on the I/O thread. Note the two halves of that rule are <em>not</em>
@@ -121,11 +124,20 @@ namespace Confluent.Kafka;
 /// the <b>async</b> surface, that fires while the send is blocked on the producer's admission bound
 /// (M11/P3.3) → <b>no callback</b> (nothing was sent). Java's <c>SerializationException</c> extends
 /// <c>KafkaException</c>, not <c>ApiException</c>, so it too takes the throwing branch;</item>
-/// <item>a <see cref="KafkaException"/> raised <em>synchronously</em> by the send itself → <b>no
-/// callback</b>. Two causes reach it: the core rejected the record before accepting it; and, on the
-/// <b>async</b> surface (M11/P3.3), the producer's send admission bound stayed saturated for the
-/// whole of the configured <c>max.block.ms</c>, so the binding refused the record without the core
-/// ever seeing it. Neither accepted anything, so neither owes a notification;</item>
+/// <item>a <see cref="KafkaException"/> raised <em>synchronously</em> by the send itself — the core
+/// rejected the record before accepting it → <b>no callback</b>. Nothing was accepted, so nothing
+/// is owed;</item>
+/// <item>the <b>async</b> surface's send admission bound (M11/P3.3) stayed saturated for the whole
+/// of the configured <c>max.block.ms</c>, so the binding refused the record without the core ever
+/// seeing it → <b>fires</b>, with the placeholder metadata and a <b>retriable</b>
+/// <see cref="KafkaException"/>, and the send's <see cref="System.Threading.Tasks.Task{TResult}"/>
+/// faults with the same object (<c>Send</c> does not throw). This is the one outcome the binding
+/// generates <em>itself</em> that still notifies, and it is Java-faithful rather than an exception
+/// to the rule above: Java's accumulator-memory wait raises <c>BufferExhaustedException</c>, an
+/// <c>ApiException</c> subclass, so <c>doSend</c>'s <c>catch (ApiException)</c> fires the callback
+/// with the <c>-1</c> placeholder and returns a <em>failed future</em> without rethrowing
+/// (<c>KafkaProducer.java:1049-1061</c>). ⚠ Until this was corrected the binding threw
+/// synchronously and fired nothing, and this list said so;</item>
 /// <item>an unexpected failure — in practice an <see cref="System.OutOfMemoryException"/> — raised
 /// <em>after</em> the core accepted the record but before the binding could arrange to read its
 /// completion → <b>no callback</b>. Here the record <em>was</em> accepted and may still be
@@ -314,8 +326,11 @@ public interface IDeliveryCallback
     /// per record</b>, never twice, on any path. It is invoked <b>exactly once</b> for every record
     /// whose core-reported completion the binding reads and turns into the send's result: every
     /// normal outcome, success or failure, including a record whose awaiter had already been
-    /// canceled. It is <b>not</b> invoked where the binding faults a send <em>itself</em> instead of
-    /// reporting a core completion — a bounded set of residuals (teardown paths, plus
+    /// canceled. It is also invoked for the <c>max.block.ms</c> admission expiry, which the binding
+    /// generates without a core completion because Java fires its own <c>Callback</c> there
+    /// (<c>KafkaProducer.java:1049-1061</c>). It is <b>not</b> invoked on the paths where the
+    /// binding faults a send <em>itself</em> for a reason Java has no callback for — a bounded set
+    /// of residuals (teardown paths, plus
     /// unexpected-failure windows before the send reaches the completion pump and on the pump
     /// itself), enumerated exhaustively under <b>Recorded residuals</b> in the remarks on
     /// <see cref="IDeliveryCallback"/>, which is also the one place they are compared with each

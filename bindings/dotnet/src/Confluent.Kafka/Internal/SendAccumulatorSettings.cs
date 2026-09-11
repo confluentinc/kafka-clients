@@ -121,8 +121,8 @@ internal readonly struct SendAccumulatorSettings
 
     /// <summary>
     /// Builds a settings value from explicit numbers — the "compose" half that
-    /// <see cref="FromEnvironment"/>'s "read and validate" half feeds. Validation lives entirely in
-    /// <see cref="FromEnvironment"/>, so this constructor takes the values as given (the derived
+    /// <see cref="FromEnvironment(int)"/>'s "read and validate" half feeds. Validation lives
+    /// entirely there, so this constructor takes the values as given (the derived
     /// <see cref="SlotCapacity"/> and the chunk clamp still apply).
     /// </summary>
     /// <remarks>
@@ -208,26 +208,48 @@ internal readonly struct SendAccumulatorSettings
     internal int MaxAdmittedRecords { get; }
 
     /// <summary>
-    /// How long a <c>Send</c> blocked on the admission bound waits before failing with a
-    /// <see cref="KafkaException"/> — the user's <c>max.block.ms</c>
-    /// (<see cref="MaxBlockMsKey"/>), default <see cref="DefaultMaxBlockMs"/>. Zero is legal and
-    /// means "never block": the fast path still admits when capacity is free, and a saturated
-    /// bound fails immediately.
+    /// How long a <c>Send</c> blocked on the admission bound waits before the record is refused
+    /// with a <b>retriable</b> <see cref="KafkaException"/> — delivered through the send's own
+    /// <c>Task</c> and its delivery callback, Java's buffer-exhausted outcome, rather than thrown.
+    /// The user's <c>max.block.ms</c> (<see cref="MaxBlockMsKey"/>), default
+    /// <see cref="DefaultMaxBlockMs"/>. Zero is legal and means "never block": the fast path still
+    /// admits when capacity is free, and a saturated bound refuses immediately.
     /// </summary>
     internal int MaxBlockMs { get; }
 
     /// <summary>
-    /// Builds the settings for one producer, reading each override <b>once</b>. Called from the
-    /// accumulator's constructor, so a process can host producers with different settings and a
-    /// test can change an override between constructions.
+    /// Builds the settings for one producer, reading each environment override <b>once</b> and
+    /// <see cref="MaxBlockMsKey"/> out of <paramref name="config"/>. Called per accumulator, so a
+    /// process can host producers with different settings and a test can change an override between
+    /// constructions.
     /// </summary>
     /// <param name="config">
     /// The producer's own config map, or <see langword="null"/> for a producer built without one (a
     /// <c>MockProducer</c>). Only <see cref="MaxBlockMsKey"/> is read from it; every other value
     /// here comes from the environment.
     /// </param>
+    /// <remarks>
+    /// <b>Production does not use this overload</b> — <c>NativeProducer</c> resolves
+    /// <see cref="MaxBlockMsKey"/> eagerly at construction (Critic 72 finding 72.9) and calls
+    /// <see cref="FromEnvironment(int)"/> with the resolved value, so it retains no reference to the
+    /// caller's dictionary. This overload is the composition of
+    /// <see cref="ReadMaxBlockMs(IReadOnlyDictionary{string, string}?)"/> with that one, kept so the
+    /// config-key parsing can be exercised end to end.
+    /// </remarks>
     internal static SendAccumulatorSettings FromEnvironment(
-        IReadOnlyDictionary<string, string>? config = null)
+        IReadOnlyDictionary<string, string>? config = null) =>
+        FromEnvironment(ReadMaxBlockMs(config));
+
+    /// <summary>
+    /// Builds the settings for one producer from an <b>already-resolved</b> <c>max.block.ms</c>,
+    /// reading each environment override <b>once</b>. The production path — see
+    /// <see cref="FromEnvironment(IReadOnlyDictionary{string, string}?)"/>'s remarks.
+    /// </summary>
+    /// <param name="maxBlockMs">
+    /// The producer's <c>max.block.ms</c>, already read and validated by
+    /// <see cref="ReadMaxBlockMs(IReadOnlyDictionary{string, string}?)"/>.
+    /// </param>
+    internal static SendAccumulatorSettings FromEnvironment(int maxBlockMs)
     {
         int threshold = ReadPositive(ThresholdVariable, DefaultSlotThreshold);
 
@@ -245,7 +267,6 @@ internal readonly struct SendAccumulatorSettings
         // bound answers a different question and coupling it to Python's 1000 is what the sibling
         // branch's sweep measured as a throughput cliff (D3). Its own constant, its own override.
         int maxAdmitted = ReadPositive(MaxAdmittedVariable, DefaultMaxAdmittedRecords);
-        int maxBlockMs = ReadMaxBlockMs(config);
 
         return new SendAccumulatorSettings(
             threshold, maxAccumulated, window, chunk, maxAdmitted, maxBlockMs);
@@ -253,7 +274,9 @@ internal readonly struct SendAccumulatorSettings
 
     /// <summary>
     /// Reads <see cref="MaxBlockMsKey"/> out of the producer's config map, falling back to
-    /// <see cref="DefaultMaxBlockMs"/> when it is absent, unparseable or negative.
+    /// <see cref="DefaultMaxBlockMs"/> when it is absent, unparseable or negative. Called <b>once
+    /// per producer, at construction</b> (Critic 72 finding 72.9), so the binding neither retains
+    /// the caller's dictionary nor re-reads a value the caller may since have edited.
     /// </summary>
     /// <remarks>
     /// The same ignore-rather-than-throw policy as the environment overrides above, for a stronger
@@ -262,7 +285,7 @@ internal readonly struct SendAccumulatorSettings
     /// Non-negative rather than positive: Java's <c>max.block.ms</c> is <c>atLeast(0)</c>, and zero
     /// is a meaningful "never block" rather than a typo.
     /// </remarks>
-    private static int ReadMaxBlockMs(IReadOnlyDictionary<string, string>? config)
+    internal static int ReadMaxBlockMs(IReadOnlyDictionary<string, string>? config)
     {
         if (config is null || !config.TryGetValue(MaxBlockMsKey, out string? raw))
         {

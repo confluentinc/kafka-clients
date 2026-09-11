@@ -139,16 +139,25 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
     private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
-    // The config map this producer was built from, or null for a MockProducer (which has none).
-    // Kept for exactly ONE reason: SendAccumulatorSettings reads `max.block.ms` out of it to bound
-    // the send-admission wait (M11/P3.3). It is not consulted anywhere else — the core owns every
-    // other config key — and it is the caller's own dictionary, read-only and never mutated here.
-    private readonly IReadOnlyDictionary<string, string>? _config;
+    // The send-admission wait's bound: the user's `max.block.ms`, resolved ONCE at construction
+    // (M11/P3.3). Every other accumulator setting still comes from the environment, read when the
+    // accumulator is first created.
+    //
+    // ⚠ Read EAGERLY, and the producer retains no reference to the caller's config map (Critic 72
+    // finding 72.9). It used to hold the IReadOnlyDictionary and let SendAccumulatorSettings read
+    // the key inside EnsureAccumulator — i.e. on the first async send. IReadOnlyDictionary does not
+    // stop its owner mutating the underlying Dictionary, so a user editing their config map between
+    // constructing the producer and its first send silently changed the effective max.block.ms
+    // while the core had already been configured from the values read here; it also pinned the
+    // user's dictionary for the producer's lifetime. Every other key in the map is consumed eagerly
+    // in Create, so this one is now too. (The ENVIRONMENT overrides stay late-bound on purpose —
+    // SendAccumulatorSettings documents why — but a user config value is not in that class.)
+    private readonly int _maxBlockMs;
 
-    private NativeProducer(SafeProducerHandle handle, IReadOnlyDictionary<string, string>? config)
+    private NativeProducer(SafeProducerHandle handle, int maxBlockMs)
     {
         _handle = handle;
-        _config = config;
+        _maxBlockMs = maxBlockMs;
     }
 
     /// <summary>
@@ -245,8 +254,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 "kafka_producer_KafkaProducer_new returned a null handle without an error.");
         }
 
-        // The config is retained so the send accumulator can read `max.block.ms` from it (§_config).
-        return new NativeProducer(handle, config);
+        // `max.block.ms` is read HERE, once, like every other key in the map (see _maxBlockMs); the
+        // map itself is not retained.
+        return new NativeProducer(handle, SendAccumulatorSettings.ReadMaxBlockMs(config));
     }
 
     /// <summary>
@@ -266,7 +276,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         // No config map: MockProducer_new takes none, so the accumulator's `max.block.ms` falls
         // back to the Kafka default (60 s), exactly as it does for a real producer that omits it.
-        return new NativeProducer(handle, config: null);
+        return new NativeProducer(handle, SendAccumulatorSettings.DefaultMaxBlockMs);
     }
 
     /// <summary>The submit shape shared by the two void-result async peripherals.</summary>
@@ -437,10 +447,15 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <b>M11/P3.3 — admission is bounded, and this method BLOCKS the calling thread when the bound
     /// is saturated.</b> Once the producer holds
     /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> records that have been accepted but
-    /// not yet handed to the core, this call parks the caller for up to the configured
-    /// <c>max.block.ms</c> and then throws a <see cref="KafkaException"/>. That is Java's own shape
-    /// — <c>KafkaProducer.send()</c> blocks up to <c>max.block.ms</c> once the accumulator is full —
-    /// and it is the only thing that throttles: the caller is handed the record's delivery
+    /// not yet handed to the batch thread, this call parks the caller for up to the configured
+    /// <c>max.block.ms</c>; if the bound is still saturated when that elapses, the record is refused
+    /// with a <b>retriable</b> <see cref="KafkaException"/> delivered through the returned
+    /// <see cref="Task{TResult}"/> — and through the delivery callback — rather than thrown, which is
+    /// Java's own outcome for buffer exhaustion (<c>KafkaProducer.java:1049-1061</c>; the citation
+    /// chain is at <see cref="SendAccumulator.SubmitAdmitted"/>). Blocking up to
+    /// <c>max.block.ms</c> is Java's shape too — <c>KafkaProducer.send()</c> blocks that long once
+    /// the accumulator is full — and it is the only thing that throttles: the caller is handed the
+    /// record's delivery
     /// <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2 deviation DV-1), so an
     /// asynchronous admission wait bounds a container while the accepted population grows without
     /// limit (measured: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB). The bound covers
@@ -481,7 +496,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
     /// <c>Send(record)</c> path. It is invoked immediately before the returned
     /// <see cref="Task{TResult}"/> completes (decision D3) — on the pump thread for a record the core
-    /// accepted, or on the batch thread for one the core rejected per-record. A synchronous throw out
+    /// accepted, on the batch thread for one the core rejected per-record, and on <em>this</em>
+    /// thread for a record refused by the <c>max.block.ms</c> admission expiry (M11/P3.3, the
+    /// Java-faithful buffer-exhausted outcome). A synchronous throw out
     /// of this method fires <b>nothing</b> (decision D5), and under the accumulator every such throw
     /// is a case where the record never reached the core at all: the disposed guard (directly, and
     /// again inside <see cref="EnsureAccumulator"/> under its lock), the already-canceled token, a
@@ -497,9 +514,6 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="OperationCanceledException">
     /// <paramref name="cancellationToken"/> was already canceled, or fired while this send was
     /// blocked on the admission bound.
-    /// </exception>
-    /// <exception cref="KafkaException">
-    /// The admission bound stayed saturated for the whole of the configured <c>max.block.ms</c>.
     /// </exception>
     internal Task<RecordMetadata> SendViaPump(
         SerializedProducerRecord record,
@@ -599,19 +613,27 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
         catch (Exception)
         {
-            // Three synchronous failures reach here, all of them "nothing reached the core" and so
-            // all of them firing no delivery callback (D5):
+            // What reaches here is "nothing reached the core", and so fires no delivery callback
+            // (D5). The `catch` is deliberately broad — an unexpected managed failure (an
+            // OutOfMemoryException inside the pinning, say) reaches it too, and the conclusion holds
+            // for those as well, which is why this note describes the paths rather than counting
+            // them (Critic 72 finding 72.8; it used to open "Three synchronous failures"):
             //
-            //   * the admission bound stayed saturated for max.block.ms -> KafkaException;
             //   * `cancellationToken` fired while this send was blocked on admission ->
             //     OperationCanceledException carrying the CALLER's token;
             //   * teardown closed the accumulator (either while blocked on admission, or between
             //     the guards above and an inline append) -> ObjectDisposedException.
             //
-            // Each leaves `completion` unsettled — or settled only by the registration below —
-            // so the disposing continuation chained to it may never run. Release the registration
-            // here instead; a send routed to the QUEUE and failed there is faulted through
-            // `completion` and so disposes it that way.
+            // ⚠ The max.block.ms expiry is NOT here. It faults `completion` and fires the delivery
+            // callback instead of throwing — Java's own outcome for buffer exhaustion
+            // (KafkaProducer.java:1049-1061); see SendAccumulator.SubmitAdmitted. That path
+            // therefore returns normally through the line below, and the disposing continuation
+            // chained to the now-faulted `completion` runs on its own.
+            //
+            // Each path that DOES throw leaves `completion` unsettled — or settled only by the
+            // registration below — so the disposing continuation chained to it may never run.
+            // Release the registration here instead; a send routed to the QUEUE and failed there is
+            // faulted through `completion` and so disposes it that way.
             cancellationRegistration.Dispose();
             throw;
         }
@@ -1007,11 +1029,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             ThrowIfClosed();
             SendCompletionPump pump = _pump ??= new SendCompletionPump();
 
-            // The config is passed so the accumulator's admission wait is bounded by the user's own
-            // `max.block.ms` rather than by a binding-invented number (M11/P3.3); every other
-            // setting still comes from the environment.
+            // The already-resolved `max.block.ms` is passed so the accumulator's admission wait is
+            // bounded by the user's own value rather than by a binding-invented number (M11/P3.3);
+            // every other setting still comes from the environment, read here.
             return _accumulator ??= new SendAccumulator(
-                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment(_config));
+                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment(_maxBlockMs));
         }
     }
 
