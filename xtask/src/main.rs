@@ -312,6 +312,11 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///                            (default: producer:rust,consumer:rust)
 ///   --consumers N          shorthand for 1 rust producer + N rust consumers
 ///                          (librdkafka's --consumers; not usable with --workload)
+///   --consumer-churn-min M      consumer churn: keep the live consumer count in
+///   --consumer-churn-max X      [M, X]; each cycle stop a random batch then start
+///                               a random batch (librdkafka chaos churn). Both
+///                               required together; owns the consumer set (not
+///                               usable with --consumers/--workload)
 ///   --rps N                producer target records/sec, 0 = max (200)
 ///   --stop-s N             seconds a broker stays down per roll (5)
 ///   --drain-s N            drain window at the end (15)
@@ -518,6 +523,8 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--commit", "CHAOS_COMMIT"),
         ("--topic", "CHAOS_TOPIC"),
         ("--consumers", "CHAOS_CONSUMERS"),
+        ("--consumer-churn-min", "CHAOS_CONSUMER_CHURN_MIN"),
+        ("--consumer-churn-max", "CHAOS_CONSUMER_CHURN_MAX"),
     ];
 
     while i < raw.len() {

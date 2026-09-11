@@ -470,10 +470,21 @@ async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collecti
         )
         .all_topic_names()
         .expect("describe_topics by name yields a name-keyed result");
-    let descriptions = match described.get().await {
-        Ok(d) => d,
-        Err(err) => {
+    // Bound the describe: on a degraded cluster (a broker just killed for the
+    // roll) the admin client can retry `describe_topics` internally without ever
+    // resolving, which would hang the down/up leader sampling — and thus the whole
+    // run — indefinitely, before the roll ever reaches the bounded
+    // `wait_operational`. A timeout here converts that hang into a tolerated skip
+    // (same as an outright describe error): leader sampling is best-effort, so
+    // `None` just means "couldn't sample this time", and the roll proceeds.
+    let descriptions = match tokio::time::timeout(Duration::from_secs(10), described.get()).await {
+        Ok(Ok(d)) => d,
+        Ok(Err(err)) => {
             eprintln!("chaos: describe_topics for {topic} failed (tolerated, sampling continues): {err}");
+            return None;
+        },
+        Err(_) => {
+            eprintln!("chaos: describe_topics for {topic} timed out (tolerated, sampling continues)");
             return None;
         },
     };

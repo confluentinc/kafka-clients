@@ -119,6 +119,15 @@ pub struct ChaosConfig {
     /// `--no-broker-roll`); otherwise there is no down-window to inject into and
     /// the add/remove falls back to the top of the cycle.
     pub rebalance_mid_roll: bool,
+    /// Consumer-churn lower/upper bounds (`--consumer-churn-min`/`--consumer-churn-max`).
+    /// When set (both together), every cycle stops a random batch of consumers and
+    /// then starts a random batch, keeping the live consumer count within
+    /// `[min, max]` — librdkafka's chaos consumer-churn (the C reference's
+    /// stop-random-batch / start-random-batch bounded by `[1, CONSUMER_CNT]`, with
+    /// `min`/`max` replacing those bounds). `None` = no churn. `min` consumers are
+    /// the fixed floor (built up front); churn adds/removes up to `max - min` more.
+    pub consumer_churn_min: Option<u32>,
+    pub consumer_churn_max: Option<u32>,
     /// Per-workload client-log rotation budget in MiB (`--log-budget-mb`).
     pub log_budget_mb: u64,
     /// Workloads to run (`--workload role:backend`, repeatable).
@@ -148,23 +157,59 @@ impl ChaosConfig {
         let brokers = env_parse("CHAOS_BROKERS", 3)?;
         let num_topics: u16 = env_parse("CHAOS_NUM_TOPICS", 1)?;
         let random = env_str("CHAOS_RANDOM", "0") == "1";
+        // Consumer churn (`--consumer-churn-min`/`--consumer-churn-max`): both
+        // must be given together; `min >= 1` and `max >= min`. When set, churn
+        // owns the consumer set (1 producer + `min` fixed consumers built up
+        // front; churn adds/removes up to `max - min` more), so it is mutually
+        // exclusive with --consumers and --workload.
+        let consumer_churn_min = env_opt_u32("CHAOS_CONSUMER_CHURN_MIN")?;
+        let consumer_churn_max = env_opt_u32("CHAOS_CONSUMER_CHURN_MAX")?;
+        match (consumer_churn_min, consumer_churn_max) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err("use both --consumer-churn-min and --consumer-churn-max together".to_string());
+            },
+            (Some(lo), Some(hi)) => {
+                if lo < 1 {
+                    return Err("--consumer-churn-min must be >= 1".to_string());
+                }
+                if hi < lo {
+                    return Err("--consumer-churn-max must be >= --consumer-churn-min".to_string());
+                }
+            },
+            (None, None) => {},
+        }
+
         // `--consumers N`: 1 rust producer + N rust consumers (librdkafka's
         // --consumers). Mutually exclusive with --workload.
-        let workloads = match env_opt_u32("CHAOS_CONSUMERS")? {
-            Some(n) => {
-                if std::env::var("CHAOS_WORKLOADS").is_ok_and(|v| !v.is_empty()) {
-                    return Err("use either --consumers or --workload, not both".to_string());
-                }
-                if n == 0 {
-                    return Err("--consumers must be >= 1".to_string());
-                }
-                let mut spec = String::from("producer:rust");
-                for _ in 0..n {
-                    spec.push_str(",consumer:rust");
-                }
-                parse_workloads(&spec)?
-            },
-            None => parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?,
+        let workloads = if let Some(lo) = consumer_churn_min {
+            if env_opt_u32("CHAOS_CONSUMERS")?.is_some() {
+                return Err("use either --consumer-churn-* or --consumers, not both".to_string());
+            }
+            if std::env::var("CHAOS_WORKLOADS").is_ok_and(|v| !v.is_empty()) {
+                return Err("use either --consumer-churn-* or --workload, not both".to_string());
+            }
+            let mut spec = String::from("producer:rust");
+            for _ in 0..lo {
+                spec.push_str(",consumer:rust");
+            }
+            parse_workloads(&spec)?
+        } else {
+            match env_opt_u32("CHAOS_CONSUMERS")? {
+                Some(n) => {
+                    if std::env::var("CHAOS_WORKLOADS").is_ok_and(|v| !v.is_empty()) {
+                        return Err("use either --consumers or --workload, not both".to_string());
+                    }
+                    if n == 0 {
+                        return Err("--consumers must be >= 1".to_string());
+                    }
+                    let mut spec = String::from("producer:rust");
+                    for _ in 0..n {
+                        spec.push_str(",consumer:rust");
+                    }
+                    parse_workloads(&spec)?
+                },
+                None => parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?,
+            }
         };
         if workloads.is_empty() {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
@@ -241,6 +286,8 @@ impl ChaosConfig {
             rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
             rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
             rebalance_mid_roll: env_str("CHAOS_REBALANCE_MID_ROLL", "0") == "1",
+            consumer_churn_min,
+            consumer_churn_max,
             log_budget_mb: env_parse("CHAOS_LOG_BUDGET_MB", 64)?,
             workloads,
             commit_mode,

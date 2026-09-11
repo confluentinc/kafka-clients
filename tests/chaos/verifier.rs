@@ -105,6 +105,20 @@ pub enum ExpectedLossHint {
     /// minted a new one (delayed), or the id could not be resolved under churn.
     /// Records ABOVE the resume point that are unobserved remain real loss.
     RecreateBlackout(String),
+    /// A topic recreate replaced generation `old_id` with a new one, destroying
+    /// every record acked to `old_id`. At verdict, any delivered-but-unobserved
+    /// record whose physical `topic_id` is a destroyed generation is expected-lost
+    /// — the operator deleted the data the client was correctly acked into.
+    ///
+    /// Unlike the point-in-time snapshots (`AllDeliveredForTopic`), this is
+    /// evaluated against the `topic_id` recorded WITH each delivered record, so it
+    /// is immune to the async-ack race: a produce acked to the old generation by a
+    /// broker that had not yet deleted its log emits its `Delivered` event
+    /// whenever the ack lands — possibly long after the topic vanished from
+    /// metadata — and is still attributed to the destroyed generation. Only
+    /// emitted when the recreate minted a genuinely new id (delayed recreate);
+    /// an immediate recreate that reuses the id relies on `RecreateBlackout`.
+    DestroyedGeneration(Uuid),
 }
 
 /// Records workload events and renders a pass/fail verdict. The harness owns a
@@ -185,6 +199,10 @@ struct ConservationState {
     /// index on that topic is excused (the consumer skipped it during the
     /// blackout). See [`ExpectedLossHint::RecreateBlackout`].
     recreate_blackout: BTreeSet<String>,
+    /// Topic-ids of destroyed generations (a delayed recreate minted a new id).
+    /// At verdict, an unobserved delivered record whose physical `topic_id` is in
+    /// this set is expected-lost. See [`ExpectedLossHint::DestroyedGeneration`].
+    destroyed_generations: BTreeSet<Uuid>,
     /// Count of producer sends that failed (context, not loss).
     failed_sends: usize,
     /// Total consume events seen (incl. redeliveries) — the drain-progress
@@ -225,13 +243,16 @@ impl ConservationState {
     fn lost_keys(&self) -> Vec<LogicalKey> {
         let blackout_resume = self.blackout_resume();
         self.delivered
-            .keys()
-            .filter(|key| !self.observed.contains_key(*key) && !self.expected_lost.contains(*key))
-            .filter(|(topic, idx)| match blackout_resume.get(topic.as_str()) {
+            .iter()
+            .filter(|(key, _)| !self.observed.contains_key(*key) && !self.expected_lost.contains(*key))
+            // A delivered record whose physical topic_id is a destroyed
+            // generation is expected-lost regardless of when its ack landed.
+            .filter(|(_, (topic_id, _, _))| !self.destroyed_generations.contains(topic_id))
+            .filter(|((topic, idx), _)| match blackout_resume.get(topic.as_str()) {
                 Some(&resume) => *idx > resume,
                 None => true,
             })
-            .cloned()
+            .map(|(key, _)| key.clone())
             .collect()
     }
 }
@@ -293,6 +314,9 @@ impl Verifier for ConservationVerifier {
             ExpectedLossHint::RecreateBlackout(topic) => {
                 s.recreate_blackout.insert(topic);
             },
+            ExpectedLossHint::DestroyedGeneration(old_id) => {
+                s.destroyed_generations.insert(old_id);
+            },
         }
     }
 
@@ -349,23 +373,17 @@ impl Verifier for ConservationVerifier {
         }
 
         // Report expected-lost as every delivered record that was legitimately
-        // excused: the explicit expected_lost snapshots PLUS blackout-skipped
-        // records (unobserved, below a blackout topic's resume point) not already
-        // counted in expected_lost.
-        let blackout_resume = s.blackout_resume();
-        let blackout_excused = s
-            .delivered
-            .keys()
-            .filter(|key| !s.observed.contains_key(*key) && !s.expected_lost.contains(*key))
-            .filter(|(topic, idx)| match blackout_resume.get(topic.as_str()) {
-                Some(&resume) => *idx <= resume,
-                None => false,
-            })
-            .count();
+        // excused, via ANY path (recreate snapshot, blackout skip, or destroyed
+        // generation): a delivered record is either observed, scored as loss, or
+        // excused, so the excused count is `unobserved delivered − lost`. This
+        // includes every excusal mechanism without double-counting and keeps the
+        // numbers reconciling: delivered = observed + lost + expected-lost.
+        let unobserved_delivered = s.delivered.keys().filter(|key| !s.observed.contains_key(*key)).count();
+        let expected_lost = unobserved_delivered.saturating_sub(lost.len());
 
         ChaosVerdict {
             delivered: s.delivered.len(),
-            expected_lost: s.expected_lost.len() + blackout_excused,
+            expected_lost,
             failed_sends: s.failed_sends,
             logical_duplicates,
             physical_duplicates,
@@ -706,5 +724,32 @@ mod tests {
             "t1's unconsumed record is still real loss"
         );
         assert!(!verdict.is_pass(), "loss on t1 must fail the run");
+    }
+
+    /// A delayed recreate mints a new topic id; records acked to the OLD id are on
+    /// a destroyed generation and are expected-lost — even when their `Delivered`
+    /// event arrives (as here) AFTER the recreate, the async-ack race the
+    /// point-in-time snapshots cannot close. Records on the NEW (live) id that are
+    /// never consumed are still real loss.
+    #[test]
+    fn destroyed_generation_old_id_records_are_not_loss() {
+        let v = ConservationVerifier::new();
+        let old_id = Uuid::from_bytes([7u8; 16]);
+        let new_id = Uuid::from_bytes([8u8; 16]);
+        // Recreate happened: harness marks the old generation destroyed.
+        v.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+        // A late ack to the OLD generation lands only now (after the recreate),
+        // unobserved — must be excused, not loss.
+        v.record(WorkloadEvent::Delivered { index: 50, topic: "t".into(), topic_id: old_id, partition: 0, offset: 50 });
+        // A record on the NEW generation, unobserved -> REAL loss.
+        v.record(WorkloadEvent::Delivered { index: 51, topic: "t".into(), topic_id: new_id, partition: 0, offset: 0 });
+        let verdict = v.verdict(1);
+        assert_eq!(
+            verdict.lost,
+            vec![("t".to_string(), 51)],
+            "old-generation ack is excused; new-generation loss is real: {verdict}"
+        );
+        assert_eq!(verdict.expected_lost, 1, "the destroyed-generation record is expected-lost");
+        assert!(!verdict.is_pass(), "unconsumed live-generation record must fail");
     }
 }
