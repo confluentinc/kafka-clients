@@ -541,12 +541,15 @@ internal sealed class SendAccumulator
             // TopicPartition's negative-partition guard INSIDE Fire's no-throw swallow, making the
             // callback's effect silently absent rather than differently shaped.
             //
-            // Two things Java's catch does that this binding has no surface for, so they are
-            // recorded rather than mimicked: `this.errors.record()` (:1056) — the producer's
-            // metrics are the CORE's metric map, read through Producer_metrics, and the binding
-            // keeps no error counter of its own to bump; and `interceptors.onSendError(...)`
-            // (:1057) — producer interceptors are deferred (CLAUDE.md §4 "Interceptors: Defer"),
-            // so there is nothing to notify. Neither is invented here.
+            // Things Java's catch does that this binding has no surface for, so they are recorded
+            // rather than mimicked — including `this.errors.record()` (:1056), the producer's
+            // metrics being the CORE's metric map, read through Producer_metrics, with no
+            // binding-side error counter to bump; `interceptors.onSendError(...)` (:1057), producer
+            // interceptors being deferred (CLAUDE.md §4 "Interceptors: Defer"), so there is nothing
+            // to notify; and `transactionManager.maybeTransitionToErrorState(e)` (:1059), which this
+            // binding cannot reach at all because transactions are not exposed (CLAUDE.md §1:
+            // "Admin / transactions are not exposed yet") — there is no transaction manager to
+            // transition, and no producer here can be transactional. None is invented.
             KafkaException expired = AdmissionTimedOut();
             delivery?.Fire(metadata: null, failure: expired);
             completion.TrySetException(expired);
@@ -915,6 +918,24 @@ internal sealed class SendAccumulator
     /// <see cref="SettleQueuedSubmissions"/> sweep settles whatever is left. Leaving the token
     /// latched at 1 instead would strand the queue with nothing to append it (an M11/P3.2-era
     /// shape) until <see cref="Stop"/>, whose own CAS would also fail.
+    /// <para>
+    /// ⚠ <b>The restart comes from a later send or from <see cref="Stop"/> — NOT from a drain</b>
+    /// (Critic 72 finding 72.16). <see cref="DrainPending"/> / <see cref="DrainPendingAsync"/> — the
+    /// <c>Flush</c> path — only force the batch thread's window; neither calls this method, so
+    /// neither can restart a loop that failed to start. Any later async send does: while anything is
+    /// queued the inline route is refused, so that send reaches <see cref="SubmitQueued"/> and this
+    /// method with it. The outcome for a <c>Flush</c> that lands in this window with no send behind
+    /// it is therefore: the strand keeps <see cref="_queued"/> at 1, so
+    /// <see cref="IsEmptyAndIdleLocked"/> never holds — a <see cref="DrainPending"/> caller waits
+    /// out its whole timeout and reports <see langword="false"/>, and <c>Flush</c>'s
+    /// <see cref="DrainPendingAsync"/>, which <c>NativeProducer.FlushAfterDrain</c> awaits with
+    /// <b>no</b> timeout, stays pending until the caller's own
+    /// <see cref="CancellationToken"/> fires or teardown's sweep settles the queue. Bounded, and
+    /// bounded by the caller or by teardown rather than by this method — which is why the fix here
+    /// is the token reset and <em>not</em> a new <see cref="EnsureSubmitterRunning"/> call on the
+    /// drain path: that would change <c>Flush</c>'s behaviour for a window reachable only on the
+    /// failure path below, well outside the slice that owns the bound.
+    /// </para>
     /// <para>
     /// ⚠ <b>Defensive, and deliberately not claimed as test-covered.</b>
     /// <see cref="Task.Run(Func{Task})"/> always queues to <see cref="TaskScheduler.Default"/>
@@ -2137,9 +2158,10 @@ internal sealed class SendAccumulator
     /// <c>REQUEST_TIMED_OUT</c>, the protocol code whose Java exception <em>is</em>
     /// <c>TimeoutException</c> (<c>Errors.java:195</c>) — i.e. the supertype of the exception being
     /// stood in for — and the core classifies it retriable too
-    /// (<c>src/common/protocol/errors.rs:429</c>). This is the first
-    /// <b>binding-generated</b> classified <see cref="KafkaException"/>; every other one comes from
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/> over a core error handle.
+    /// (<c>src/common/protocol/errors.rs:429</c>). The classification is
+    /// <b>binding-generated</b> here: there is no core error handle for
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> to copy it out of, because the core never saw
+    /// this record.
     /// </remarks>
     private KafkaException AdmissionTimedOut() =>
         new KafkaException(

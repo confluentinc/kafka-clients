@@ -41,43 +41,60 @@ namespace Confluent.Kafka;
 /// the background I/O thread so it should be fast" (<c>Callback.java:20-21</c>). The .NET
 /// analogue depends on which surface you sent through:
 /// <list type="bullet">
-/// <item><b>Async</b> (<see cref="IAsyncProducer{TKey, TValue}"/>) — on the producer's
-/// <b>send-completion pump thread</b>, the .NET counterpart of Java's I/O thread. It is a single
-/// thread <em>per producer</em>, so callbacks of <em>one</em> producer never run concurrently with
-/// each other, and a slow callback delays every other send's completion. Keep it short. (The
-/// guarantee is per-producer, so one callback instance shared across <em>two</em> producers can
-/// still be entered concurrently — one pump thread each.)</item>
+/// <item><b>Async</b> (<see cref="IAsyncProducer{TKey, TValue}"/>) — for a record whose
+/// core-reported completion the binding reads, on the producer's <b>send-completion pump
+/// thread</b>, the .NET counterpart of Java's I/O thread. There is one such thread per producer and
+/// it walks its completions one at a time, so the invocations it makes are serialized with respect
+/// to one another, and a slow callback there delays every other send's completion. Keep it short.
+/// Failure outcomes can be delivered from elsewhere: a record the core rejects as the batch is
+/// handed over is delivered from the producer's <b>send-batch thread</b>, and a record refused by
+/// the <c>max.block.ms</c> admission expiry (M11/P3.3) is delivered <b>inline on the thread that
+/// called <c>Send</c></b>, before that call returns.</item>
 /// <item><b>Sync</b> (<see cref="IProducer{TKey, TValue}"/>) — <b>inline on the calling thread</b>,
 /// before <c>Send</c> returns or throws. The blocking send has no pump (it waits on the record's
-/// future itself), so there is no other thread to run it on — and therefore <b>no
-/// non-concurrency guarantee at all</b>. Concurrent <c>Send</c> on one producer is explicitly
-/// supported and deliberately unsynchronized (the Rust core's <c>Mutex</c> serializes, and a
-/// binding-side send lock is an ffi §A1 anti-pattern), so one <see cref="IDeliveryCallback"/>
-/// instance passed to <c>Send</c> from N threads <b>is</b> entered on N threads at once.
-/// <b>What this means for you: a callback instance you share across concurrent sync sends must
-/// itself be thread-safe</b> — synchronize any mutable state it touches (a per-send instance
-/// needs nothing). This is a recorded <b>divergence from Java</b>, where every <c>Callback</c>
-/// runs on the producer's single background I/O thread (<c>Callback.java:20-21</c>) and a user
-/// never has to make one thread-safe; see the §4 delivery-callback divergence in the binding's
-/// <c>CLAUDE.md</c>.</item>
+/// future itself), so there is no other thread to run it on. Concurrent <c>Send</c> on one producer
+/// is explicitly supported and deliberately unsynchronized (the Rust core's <c>Mutex</c>
+/// serializes, and a binding-side send lock is an ffi §A1 anti-pattern), so one
+/// <see cref="IDeliveryCallback"/> instance passed to <c>Send</c> from N threads <b>is</b> entered
+/// on N threads at once.</item>
 /// </list>
-/// Do not block on producer progress from inside it on the async surface: the pump thread it runs
-/// on is the same thread that must resolve every other in-flight send.
+/// <b>What this means for you: a callback instance you share across sends must itself be
+/// thread-safe</b> — synchronize any mutable state it touches (a per-send instance needs nothing).
+/// On the sync surface concurrent <c>Send</c> calls enter it on their own threads. On the
+/// <b>async</b> surface an invocation made away from the pump — any of the sites named above — can
+/// overlap one the pump is making, and two callers whose admission expires together enter it at the
+/// same instant. A single instance shared across <em>two</em> producers can also be entered from
+/// each producer's own pump. This is a recorded <b>divergence from Java</b> on both surfaces, where
+/// every <c>Callback</c> runs on the producer's single background I/O thread
+/// (<c>Callback.java:20-21</c>) and a user never has to make one thread-safe; see the §4
+/// delivery-callback divergence in the binding's <c>CLAUDE.md</c>. ⚠ These remarks used to give the
+/// async surface an unqualified per-producer non-concurrency guarantee, on the reasoning that the
+/// pump was the only thread firing them; the admission expiry falsified it (Critic 72 finding
+/// 72.10).
+/// Do not block on producer progress from inside it while it is running on the pump thread: that is
+/// the same thread that must resolve every other in-flight send.
 /// </para>
 /// <para>
-/// <b>Sending again from inside it IS supported</b> — the canonical retry-on-failure shape. On the
-/// async surface the reentrant send is queued and drained on the pump's next iteration (the pump
-/// holds no managed lock while the callback runs); on the sync surface the callback runs after the
-/// blocking wait has already returned. Both are covered by a regression test.
+/// <b>Sending again from inside it IS supported</b> — the canonical retry-on-failure shape — because
+/// no managed lock is held while the callback runs, wherever it runs. Where it runs on the pump
+/// thread the reentrant send is queued and drained by the accumulator as usual; on the sync surface
+/// the callback runs after the blocking wait has already returned. Both are covered by a regression
+/// test. ⚠ Where it instead runs <b>inline on the caller's thread</b> — the async admission expiry
+/// above — the reentrant <c>Send</c> runs <em>synchronously inside</em> the outer <c>Send</c>, on
+/// that same thread, and can itself block for another <c>max.block.ms</c> and expire in turn. Since
+/// that outcome is deliberately <b>retriable</b>, retry-from-inside-the-callback is exactly the
+/// shape it invites, so bound the retry (or hand the record to your own queue) rather than
+/// recursing.
 /// </para>
 /// <para>
-/// <b>Tearing the producer down from inside it is NOT supported on the async surface.</b>
-/// <c>Close</c> / <c>Dispose</c> stop and <b>join</b> the send-completion pump thread — which is
-/// the very thread the callback is running on — so calling either from here asks that thread to
-/// wait for itself. Java guards the equivalent explicitly (its <c>close</c> detects being called
-/// from the sender thread and skips the join); this binding does not, and adding such a guard is
-/// out of scope here. Close the producer from the thread that owns it instead. This does not apply
-/// to the sync surface, where the callback runs on the caller's own thread.
+/// <b>Tearing the producer down from inside it is NOT supported while it is running on a thread the
+/// producer owns</b> — the async surface's send-completion pump or its send-batch thread.
+/// <c>Close</c> / <c>Dispose</c> stop and <b>join</b> both, so calling either from there asks a
+/// thread to wait for itself. Java guards the equivalent explicitly (its <c>close</c> detects being
+/// called from the sender thread and skips the join); this binding does not, and adding such a guard
+/// is out of scope here. Close the producer from the thread that owns it instead. Where the callback
+/// runs inline on a caller's own thread — the sync surface, and the async admission expiry — that
+/// particular self-join does not arise, but the advice is unchanged.
 /// </para>
 /// <para>
 /// <b>Ordering — it runs BEFORE the send's result is observable (decision D3).</b> Java sets the
@@ -104,8 +121,8 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Which outcomes fire it, and which do not (decision D5).</b> The rule is: <b>a throw out of
 /// <c>Send</c> means no callback; a send whose core-reported completion the binding reads —
-/// successfully or not — fires it; and so does the one failure the binding <em>generates</em> for
-/// which Java also fires, the <c>max.block.ms</c> admission expiry.</b> Java's <c>doSend</c> splits
+/// successfully or not — fires it; and so does the <c>max.block.ms</c> admission expiry, a failure
+/// the binding <em>generates</em> and for which Java fires too.</b> Java's <c>doSend</c> splits
 /// the same way — by whether the failure is an <c>ApiException</c>, not by who produced it: the
 /// terminal
 /// <c>catch (InterruptedException / KafkaException / Exception)</c> clauses re-throw without
@@ -131,9 +148,9 @@ namespace Confluent.Kafka;
 /// of the configured <c>max.block.ms</c>, so the binding refused the record without the core ever
 /// seeing it → <b>fires</b>, with the placeholder metadata and a <b>retriable</b>
 /// <see cref="KafkaException"/>, and the send's <see cref="System.Threading.Tasks.Task{TResult}"/>
-/// faults with the same object (<c>Send</c> does not throw). This is the one outcome the binding
-/// generates <em>itself</em> that still notifies, and it is Java-faithful rather than an exception
-/// to the rule above: Java's accumulator-memory wait raises <c>BufferExhaustedException</c>, an
+/// faults with the same object (<c>Send</c> does not throw). The binding generates this failure
+/// <em>itself</em>, and firing here is Java-faithful rather than an exception to the rule above:
+/// Java's accumulator-memory wait raises <c>BufferExhaustedException</c>, an
 /// <c>ApiException</c> subclass, so <c>doSend</c>'s <c>catch (ApiException)</c> fires the callback
 /// with the <c>-1</c> placeholder and returns a <em>failed future</em> without rethrowing
 /// (<c>KafkaProducer.java:1049-1061</c>). ⚠ Until this was corrected the binding threw

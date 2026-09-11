@@ -598,7 +598,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         //
         // ⚠ AND THE ADMISSION BOUND IS WHY THAT MATTERS RATHER THAN MERELY BEING TRUE (M11/P3.3).
         // SubmitAdmitted can now BLOCK this caller's thread, for up to max.block.ms, when the
-        // producer already holds MaxAdmittedRecords accepted-but-unsent records. That is the fix:
+        // producer already holds MaxAdmittedRecords records accepted but not yet handed to the
+        // batch thread (the permit comes back at TakeChainLocked, before send_batch runs, so the
+        // accepted-but-unsent POPULATION is larger than the bound by the in-flight chain — the
+        // overshoot arithmetic is at _admission). That is the fix:
         // the caller does not await admission (it is handed the record's delivery Task), so an
         // ASYNCHRONOUS admission wait throttles nobody and just parks continuations — measured at
         // 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape this replaces measured
