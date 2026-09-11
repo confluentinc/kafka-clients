@@ -390,12 +390,23 @@ internal sealed class SendAccumulator
     /// path bypassed entirely, all of it in the node chain.
     /// </para>
     /// <para>
-    /// ⚠ <b>It can read one HIGHER than the bound, transiently, and that is the accounting rather
-    /// than a breach.</b> A submission the single submitter has just appended is counted in
-    /// <c>_chainRecords</c> before <see cref="ReleaseQueuedSlot"/> accounts it out of
-    /// <c>_queued</c>, so it is double-counted for that window. There is at most <b>one</b>
-    /// submitter (M11/P3.2's exclusive token), so the overshoot is at most one record. Reading
-    /// lower is impossible: the increment always precedes the decrement.
+    /// ⚠ <b>It is exact only at rest, and it can read on EITHER side of the true admitted
+    /// population while sends are in flight.</b> Both skews are bounded and both are properties of
+    /// the accounting rather than of the bound:
+    /// <list type="bullet">
+    /// <item><b>High by at most one.</b> A submission the single submitter has just appended is
+    /// counted in <c>_chainRecords</c> before <see cref="ReleaseQueuedSlot"/> accounts it out of
+    /// <c>_queued</c>, so it sits in both terms for that window. There is at most <b>one</b>
+    /// submitter (M11/P3.2's exclusive token), so this is at most one record.</item>
+    /// <item><b>Low by the number of callers between admission and routing.</b>
+    /// <see cref="SubmitAdmitted"/> takes the permit <em>before</em> it chooses a route, so a caller
+    /// in that window holds an admission permit and appears in neither term. Safe for an
+    /// upper-bound assertion — under-reporting can only hide a breach, never invent one — but it
+    /// means a sampled peak is a lower bound on the true peak, and an equality is meaningful only
+    /// once every caller has returned.</item>
+    /// </list>
+    /// <see cref="AvailableAdmissions"/> has neither skew, being the gate's own count; the two
+    /// witnesses are complementary rather than interchangeable.
     /// </para>
     /// </remarks>
     internal int AdmittedRecordCount => Volatile.Read(ref _queued) + Volatile.Read(ref _chainRecords);
@@ -450,6 +461,15 @@ internal sealed class SendAccumulator
     /// thread's take (<see cref="TakeChainLocked"/>), a settled-without-appending submission
     /// (<see cref="ReleaseQueuedSlot"/>), or <see cref="SubmitQueued"/>'s sealed refusal. Only the
     /// throwing inline route is settled here.
+    /// </para>
+    /// <para>
+    /// <b>NO PIN IS HELD WHILE BLOCKED HERE</b>, which is the M11/P3.1 §4.4 invariant — <em>the pin
+    /// must not be taken before the capacity it is waiting for</em> — extended one step earlier:
+    /// admission precedes the routing decision, and all pinning happens inside
+    /// <see cref="SubmitCore"/>, after a route has been chosen. So a caller parked for up to
+    /// <c>max.block.ms</c> is holding a record reference and nothing else, never a
+    /// <see cref="System.Buffers.MemoryHandle"/> or an interned topic pin. A bound on <em>records</em>
+    /// would otherwise become an unbounded pin window, which is the reason the invariant exists.
     /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to accept.</param>
