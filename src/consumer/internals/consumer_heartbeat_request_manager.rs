@@ -28,7 +28,7 @@ use std::sync::Mutex;
 
 use tokio::sync::mpsc;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::Uuid;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
@@ -87,7 +87,7 @@ pub(crate) enum PendingHeartbeatCompletion {
     /// Transport-level failure (network error, in-flight cancellation,
     /// type mismatch on the response body). The drain calls
     /// `inner.on_failure(...)` and `membership_manager.on_heartbeat_failure(retriable)`.
-    Failure { error: KafkaError, completion_time_ms: i64 },
+    Failure { error: Error, completion_time_ms: i64 },
 }
 
 /// Tracks which fields were sent on the most recent heartbeat. Java's
@@ -405,14 +405,14 @@ impl ConsumerHeartbeatRequestManager {
                             request_latency_ms,
                         },
                         _ => PendingHeartbeatCompletion::Failure {
-                            error: KafkaError::new(Errors::UnknownServerError),
+                            error: Error::new(Errors::UnknownServerError),
                             completion_time_ms: now_ms,
                         },
                     }
                 },
                 Ok(Err(err)) => PendingHeartbeatCompletion::Failure { error: err, completion_time_ms: now_ms },
                 Err(_recv) => PendingHeartbeatCompletion::Failure {
-                    error: KafkaError::new(Errors::NetworkException),
+                    error: Error::new(Errors::NetworkError),
                     completion_time_ms: now_ms,
                 },
             };
@@ -512,11 +512,24 @@ impl ConsumerHeartbeatRequestManager {
         self.reset_heartbeat_state();
         // Classify via the abstract dispatch first, then delegate to
         // the consumer-specific extras.
-        let error_message = format!("{error:?}");
-        let action = self.inner.classify_response_error(error, &error_message, completion_time_ms);
+        //
+        // Java: `String errorMessage = errorMessageForResponse(response);`
+        // (`AbstractHeartbeatRequestManager.java:353`), whose consumer
+        // implementation is `return response.data().errorMessage();`
+        // (`ConsumerHeartbeatRequestManager.java:195-197`). It is the
+        // BROKER-supplied diagnostic and is nullable — for several codes
+        // (`UNSUPPORTED_ASSIGNOR`, `INVALID_REGULAR_EXPRESSION`, and every
+        // unknown code) it is the only information available about what the
+        // broker rejected, so it must not be substituted with the error
+        // enum's own name.
+        let error_message = response.data().error_message.as_deref();
+        let group_id = self.membership_manager.group_id();
+        let action = self
+            .inner
+            .classify_response_error(error, error_message, &group_id, completion_time_ms);
         let final_action = match action {
             HeartbeatErrorAction::DelegateToSpecific => self
-                .handle_specific_exception_in_response(error, &error_message, completion_time_ms)
+                .handle_specific_error_in_response(error, error_message, completion_time_ms)
                 .unwrap_or_else(|| {
                     // Java: `AbstractHeartbeatRequestManager.java:435-441` —
                     // the `default:` arm of `onErrorResponse`'s switch
@@ -531,9 +544,16 @@ impl ConsumerHeartbeatRequestManager {
                     log::error!(
                         "ConsumerGroupHeartbeatRequest failed due to unexpected error {:?}: {}",
                         error,
-                        error_message
+                        error_message.unwrap_or_default()
                     );
-                    HeartbeatErrorAction::Fatal(KafkaError::with_message(error, error_message.clone()))
+                    // Java: `handleFatalFailure(error.exception(errorMessage))`
+                    // — `Errors.exception(String)` falls back to the code's own
+                    // default message when the broker sent none
+                    // (`Errors.java:462-469`).
+                    HeartbeatErrorAction::Fatal(match error_message {
+                        Some(message) => Error::with_message(error, message),
+                        None => Error::new(error),
+                    })
                 }),
             other => other,
         };
@@ -551,7 +571,7 @@ impl ConsumerHeartbeatRequestManager {
                 // member transitions through FENCED → JOINING and
                 // re-joins silently; the user never sees the fence
                 // from `poll()`. Emitting a `BackgroundEvent::Error`
-                // would surface `KafkaError::FencedMemberEpoch` to
+                // would surface `Error::FencedMemberEpoch` to
                 // the user, diverging from Java which returns
                 // `ConsumerRecords::empty()` and rejoins
                 // transparently.
@@ -603,7 +623,7 @@ impl ConsumerHeartbeatRequestManager {
     /// Transport-level / non-response failure handler. Mirrors Java's
     /// `onFailure(Throwable, long)`
     /// (`AbstractHeartbeatRequestManager.java:321-338`).
-    fn on_failure(&mut self, error: &KafkaError, completion_time_ms: i64) {
+    fn on_failure(&mut self, error: &Error, completion_time_ms: i64) {
         // Java: `resetHeartbeatState()` at the top of `onFailure`.
         self.reset_heartbeat_state();
         let abstract_action = self.inner.on_failure(error, completion_time_ms);
@@ -642,8 +662,8 @@ impl ConsumerHeartbeatRequestManager {
     /// `current_time_ms` is threaded through to
     /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
     /// attributed to the actual failure time rather than epoch zero.
-    pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::KafkaError, current_time_ms: i64) -> bool {
-        use crate::common::KafkaError;
+    pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
+        use crate::common::Error;
         use crate::common::protocol::Errors;
         if error.error() == Errors::UnsupportedVersion {
             let msg = error.to_string();
@@ -653,7 +673,7 @@ impl ConsumerHeartbeatRequestManager {
                 CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
             };
             log::error!("ConsumerGroupHeartbeatRequest failed due to unsupported version: {message}");
-            let fatal_err = KafkaError::unsupported_version(message.to_string());
+            let fatal_err = Error::unsupported_version(message.to_string());
             // Java (`ConsumerHeartbeatRequestManager.java:109`):
             // `handleFatalFailure(new UnsupportedVersionException(message, exception));`
             // i.e. emits ErrorEvent AND calls
@@ -675,13 +695,13 @@ impl ConsumerHeartbeatRequestManager {
     /// Wrap the shared `classify_response_error` dispatch with the
     /// Consumer-specific extras (UNSUPPORTED_VERSION, UNRELEASED_INSTANCE_ID,
     /// FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND).
-    pub(crate) fn handle_specific_exception_in_response(
+    pub(crate) fn handle_specific_error_in_response(
         &mut self,
         error: crate::common::protocol::Errors,
-        error_message: &str,
+        error_message: Option<&str>,
         _current_time_ms: i64,
     ) -> Option<HeartbeatErrorAction> {
-        use crate::common::KafkaError;
+        use crate::common::Error;
         use crate::common::protocol::Errors;
         match error {
             Errors::UnsupportedVersion => {
@@ -689,29 +709,33 @@ impl ConsumerHeartbeatRequestManager {
                     "ConsumerGroupHeartbeatRequest failed due to unsupported version response on broker side: {}",
                     CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
                 );
-                Some(HeartbeatErrorAction::Fatal(KafkaError::unsupported_version(
+                Some(HeartbeatErrorAction::Fatal(Error::unsupported_version(
                     CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG.to_string(),
                 )))
             },
             Errors::UnreleasedInstanceId => {
                 log::error!(
                     "ConsumerGroupHeartbeatRequest failed due to unreleased instance id: {}",
-                    error_message
+                    error_message.unwrap_or_default()
                 );
-                Some(HeartbeatErrorAction::Fatal(KafkaError::with_message(
-                    error,
-                    error_message.to_string(),
-                )))
+                // Java: `handleFatalFailure(error.exception(errorMessage))`
+                // (`ConsumerHeartbeatRequestManager.java:136-139`).
+                Some(HeartbeatErrorAction::Fatal(match error_message {
+                    Some(message) => Error::with_message(error, message),
+                    None => Error::new(error),
+                }))
             },
             Errors::FencedInstanceId => {
                 log::error!(
                     "ConsumerGroupHeartbeatRequest failed due to fenced instance id: {}",
-                    error_message
+                    error_message.unwrap_or_default()
                 );
-                Some(HeartbeatErrorAction::Fatal(KafkaError::with_message(
-                    error,
-                    error_message.to_string(),
-                )))
+                // Java: `handleFatalFailure(error.exception(errorMessage))`
+                // (`ConsumerHeartbeatRequestManager.java:130-135`).
+                Some(HeartbeatErrorAction::Fatal(match error_message {
+                    Some(message) => Error::with_message(error, message),
+                    None => Error::new(error),
+                }))
             },
             Errors::GroupIdNotFound => {
                 // AK 4.3.1: if the group doesn't exist (e.g., the member never
@@ -782,13 +806,14 @@ impl ConsumerHeartbeatRequestManager {
                     log::warn!(
                         "ConsumerGroupHeartbeatRequest failed with GROUP_ID_NOT_FOUND on first heartbeat \
                          (memberEpoch=0): {}. Will retry with backoff.",
-                        error_message
+                        error_message.unwrap_or_default()
                     );
                     Some(HeartbeatErrorAction::Handled)
                 } else {
                     log::warn!(
                         "ConsumerGroupHeartbeatRequest failed with GROUP_ID_NOT_FOUND while rejoining \
-                         (memberEpoch={member_epoch}): {error_message}. Member will rejoin from scratch."
+                         (memberEpoch={member_epoch}): {}. Member will rejoin from scratch.",
+                        error_message.unwrap_or_default()
                     );
                     self.inner.heartbeat_request_state.reset();
                     Some(HeartbeatErrorAction::Fenced)
@@ -1272,14 +1297,14 @@ mod tests {
         assert!(!mgr.should_send_leave_heartbeat_now());
     }
 
-    /// `handle_specific_exception_in_response` for `UnsupportedVersion`
+    /// `handle_specific_error_in_response` for `UnsupportedVersion`
     /// is fatal with the consumer-protocol-not-supported message.
     #[test]
     fn handle_specific_unsupported_version_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_exception_in_response(
+        let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::UnsupportedVersion,
-            "broker doesn't support",
+            Some("broker doesn't support"),
             0,
         );
         match action {
@@ -1290,22 +1315,22 @@ mod tests {
         }
     }
 
-    /// `handle_specific_exception_in_response` for `FencedInstanceId`
+    /// `handle_specific_error_in_response` for `FencedInstanceId`
     /// is fatal.
     #[test]
     fn handle_specific_fenced_instance_id_is_fatal() {
         let mut mgr = make();
         let action =
-            mgr.handle_specific_exception_in_response(crate::common::protocol::Errors::FencedInstanceId, "msg", 0);
+            mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, Some("msg"), 0);
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
     }
 
-    /// `handle_specific_exception_in_response` returns None for an
+    /// `handle_specific_error_in_response` returns None for an
     /// error not in the consumer-specific set.
     #[test]
     fn handle_specific_returns_none_for_other_errors() {
         let mut mgr = make();
-        let action = mgr.handle_specific_exception_in_response(crate::common::protocol::Errors::None, "", 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, Some(""), 0);
         assert!(action.is_none());
     }
 
@@ -1361,9 +1386,9 @@ mod tests {
     fn group_id_not_found_while_unsubscribed_is_skipped() {
         let (mut mgr, _coord, mm) = make_with_coord(None);
         assert_eq!(mm.state(), MemberState::Unsubscribed);
-        let action = mgr.handle_specific_exception_in_response(
+        let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::GroupIdNotFound,
-            "group not found",
+            Some("group not found"),
             0,
         );
         assert!(
@@ -1474,9 +1499,9 @@ mod tests {
     #[test]
     fn handle_specific_unreleased_instance_id_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_exception_in_response(
+        let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::UnreleasedInstanceId,
-            "instance id still in use",
+            Some("instance id still in use"),
             0,
         );
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
@@ -1491,7 +1516,7 @@ mod tests {
         make_joining(&mm);
         // Build an UnsupportedVersion error WITHOUT the regex-not-supported
         // tag so we hit the CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG branch.
-        let err = crate::common::KafkaError::unsupported_version("broker too old".to_string());
+        let err = crate::common::Error::unsupported_version("broker too old".to_string());
         let fatal = mgr.handle_specific_failure(&err, 12_345);
         assert!(fatal, "UnsupportedVersion must be classified as fatal");
 
@@ -1746,7 +1771,7 @@ mod tests {
         let unsent = result.unsent_requests.into_iter().next().unwrap();
 
         // Fire a transport-layer retriable failure through the handler.
-        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkError));
 
         // Wait deterministically for the drain on the next `poll(now)`
         // to observe the failure and advance heartbeat-request state.
@@ -2132,7 +2157,7 @@ mod tests {
     /// match (which only handles
     /// `NotCoordinator|CoordinatorNotAvailable|CoordinatorLoadInProgress|GroupAuthorizationFailed|TopicAuthorizationFailed|InvalidRequest|GroupMaxSizeReached|UnsupportedAssignor|FencedMemberEpoch|UnknownMemberId|InvalidRegularExpression`),
     /// so it falls through to `DelegateToSpecific`. The Consumer
-    /// variant's `handle_specific_exception_in_response` only
+    /// variant's `handle_specific_error_in_response` only
     /// recognises `UnsupportedVersion|UnreleasedInstanceId|FencedInstanceId`,
     /// so it returns `None` and the fallback `Fatal` arm must fire.
     ///
@@ -2828,5 +2853,87 @@ mod tests {
         assert_eq!(tps2.len(), 1);
         assert_eq!(tps2[0].topic_id, topic_id);
         assert_eq!(tps2[0].partitions, vec![0]);
+    }
+
+    /// End-to-end: the broker's `ErrorMessage` field of the heartbeat response
+    /// reaches the application.
+    ///
+    /// Java threads `errorMessageForResponse(response)` —
+    /// `response.data().errorMessage()`
+    /// (`ConsumerHeartbeatRequestManager.java:195-197`) — through the whole
+    /// error switch. Substituting the Rust `Errors` enum's own name destroys
+    /// the only actionable part of the diagnostic: here, why the regex failed
+    /// to compile.
+    #[tokio::test]
+    async fn error_response_surfaces_the_broker_error_message() {
+        use crate::client_response::ClientResponse;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::request_header::RequestHeader;
+        use crate::consumer::internals::events::background_event::BackgroundEvent;
+        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+
+        let (mut mgr, coord, mm, mut rx) = make_with_coord_capturing_events(Some(0));
+        set_coordinator(&coord);
+        make_joining(&mm);
+
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::InvalidRegularExpression.code();
+        data.error_message = Some("regex 'foo[' failed to compile: missing ]".to_string());
+        data.member_id = Some(mm.member_id());
+        data.member_epoch = 0;
+        data.heartbeat_interval_ms = 1_000;
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+
+        let header = RequestHeader::new(
+            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+            "",
+            1,
+        )
+        .expect("header ok");
+        let client_response = ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
+        );
+        unsent.handler().on_complete(client_response);
+
+        // Drive poll() until the forwarder has enqueued the completion and the
+        // drain has emitted the fatal ErrorEvent.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let error = loop {
+            let _ = mgr.poll(0);
+            if let Ok(envelope) = rx.try_recv() {
+                match envelope.event {
+                    BackgroundEvent::Error { error } => break error,
+                    other => panic!("expected an Error event, got {other:?}"),
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no ErrorEvent was emitted for the INVALID_REGULAR_EXPRESSION response"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        };
+
+        assert_eq!(error.error(), Errors::InvalidRegularExpression);
+        assert_eq!(
+            "Invalid RE2J SubscriptionPattern provided in the call to subscribe. \
+             regex 'foo[' failed to compile: missing ]",
+            error.message(),
+            "the broker's ErrorMessage must survive; the Rust enum's Debug name must not \
+             be substituted for it"
+        );
     }
 }

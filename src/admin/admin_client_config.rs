@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Configuration for the admin client.
 ///
@@ -70,9 +70,9 @@ impl AdminClientConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `bootstrap.servers` is missing
+    /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
     /// or a numeric value fails to parse.
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
+    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
         let mut bootstrap_set = false;
 
@@ -101,7 +101,7 @@ impl AdminClientConfig {
         }
 
         if !bootstrap_set || config.bootstrap_servers.is_empty() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::config(format!(
                 "Missing required configuration \"{}\" which has no default value.",
                 Self::BOOTSTRAP_SERVERS_CONFIG
             )));
@@ -190,18 +190,12 @@ impl Default for AdminClientConfig {
     }
 }
 
-fn parse_i32(key: &str, value: &str) -> Result<i32, KafkaError> {
-    value
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| KafkaError::illegal_argument(format!("Invalid value \"{value}\" for configuration \"{key}\"")))
+fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
+    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
 }
 
-fn parse_i64(key: &str, value: &str) -> Result<i64, KafkaError> {
-    value
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| KafkaError::illegal_argument(format!("Invalid value \"{value}\" for configuration \"{key}\"")))
+fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
+    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
 }
 
 #[cfg(test)]

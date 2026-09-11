@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::stats::WindowedCount;
 use crate::common::metrics::{ClosureGauge, MetricValue, MetricValueProvider, Metrics, RecordingLevel, Sensor};
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
 use crate::consumer::internals::sensor_builder::SensorBuilder;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -79,20 +79,20 @@ impl FetchMetricsManager {
         // registration error). Sensor registration only fails on a duplicate
         // metric name (a construction-time programming error here), so the
         // `.expect`s are unreachable in practice.
-        let build_throttle = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_throttle = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "fetch-throttle-time", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.fetch_throttle_time_avg)?
                 .with_max(&metrics_registry.fetch_throttle_time_max)?
                 .build())
         };
-        let build_bytes = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_bytes = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "bytes-fetched", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.fetch_size_avg)?
                 .with_max(&metrics_registry.fetch_size_max)?
                 .with_meter(&metrics_registry.bytes_consumed_rate, &metrics_registry.bytes_consumed_total)?
                 .build())
         };
-        let build_records = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_records = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "records-fetched", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.records_per_request_avg)?
                 .with_meter(
@@ -101,7 +101,7 @@ impl FetchMetricsManager {
                 )?
                 .build())
         };
-        let build_latency = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_latency = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "fetch-latency", RecordingLevel::Info)?
                 .with_avg(&metrics_registry.fetch_latency_avg)?
                 .with_max(&metrics_registry.fetch_latency_max)?
@@ -115,12 +115,12 @@ impl FetchMetricsManager {
         // INFO, matching Java: the client-level `records-lag-max` /
         // `records-lead-min` are on by default, as are the per-partition DETAIL
         // sensors (full Java parity, see ctor doc + `record_partition_lag/lead`).
-        let build_lag = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_lag = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "records-lag", RecordingLevel::Info)?
                 .with_max(&metrics_registry.records_lag_max)?
                 .build())
         };
-        let build_lead = || -> Result<Arc<Sensor>, KafkaError> {
+        let build_lead = || -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::new(&metrics, "records-lead", RecordingLevel::Info)?
                 .with_min(&metrics_registry.records_lead_min)?
                 .build())
@@ -216,7 +216,7 @@ impl FetchMetricsManager {
         let name = topic_bytes_fetched_metric_name(topic);
         self.maybe_record_deprecated_bytes_fetched(&name, topic, bytes);
 
-        let bytes_fetched = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let bytes_fetched = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
                     .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
@@ -239,7 +239,7 @@ impl FetchMetricsManager {
         let name = topic_records_fetched_metric_name(topic);
         self.maybe_record_deprecated_records_fetched(&name, topic, records);
 
-        let records_fetched = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let records_fetched = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
                     .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
@@ -269,7 +269,7 @@ impl FetchMetricsManager {
         let name = partition_records_lag_metric_name(tp);
         self.maybe_record_deprecated_partition_lag(&name, tp, lag);
 
-        let records_lag = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let records_lag = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
                     .with_value(&self.metrics_registry.partition_records_lag)?
@@ -295,7 +295,7 @@ impl FetchMetricsManager {
         let name = partition_records_lead_metric_name(tp);
         self.maybe_record_deprecated_partition_lead(&name, tp, lead as f64);
 
-        let records_lead = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let records_lead = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
                     .with_value(&self.metrics_registry.partition_records_lead)?
@@ -390,7 +390,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(topic) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_tags(topic)
@@ -415,7 +415,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(topic) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_tags(topic)
@@ -439,7 +439,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(tp.topic()) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_partition_tags(tp)
@@ -461,7 +461,7 @@ impl FetchMetricsManager {
         if !should_report_deprecated_metric(tp.topic()) {
             return;
         }
-        let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
+        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
             Ok(
                 SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
                     topic_partition_tags(tp)
@@ -570,7 +570,7 @@ fn should_report_deprecated_metric(topic: &str) -> bool {
 ///
 /// Note the log fires per record while the collision persists. That is intended:
 /// it is a genuine misconfiguration, and the volume is the signal.
-fn resolve_sensor(built: Result<Arc<Sensor>, KafkaError>, what: &str) -> Option<Arc<Sensor>> {
+fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
     match built {
         Ok(sensor) => Some(sensor),
         Err(err) => {

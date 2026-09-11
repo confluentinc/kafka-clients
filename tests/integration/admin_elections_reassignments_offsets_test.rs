@@ -53,7 +53,7 @@ use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::{
-    TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_exception_with_timeout, wait_until_true_with_timeout,
+    TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_error_with_timeout, wait_until_true_with_timeout,
 };
 use crate::multilanguage_admin_test;
 
@@ -113,7 +113,7 @@ async fn offset_of<B: AdminBackend>(
     tp: &TopicPartition,
     spec: OffsetSpec,
     options: ListOffsetsOptions,
-) -> Result<confluent_kafka::admin::ListOffsetsResultInfo, confluent_kafka::common::KafkaError> {
+) -> Result<confluent_kafka::admin::ListOffsetsResultInfo, confluent_kafka::common::Error> {
     let outcomes = admin
         .list_offsets(&HashMap::from([(tp.clone(), spec)]), options)
         .await
@@ -181,12 +181,12 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
 /// The client is *correct* not to retry this itself — Java's describe-by-names
 /// `Call` completes the per-topic future exceptionally on any topic-level error
 /// (`KafkaAdminClient.java:2253-2254`, `if (error != Errors.NONE)` →
-/// `future.completeExceptionally(error.exception())`), with no retry — so the
+/// `future.completeExceptionally(error.error())`), with no retry — so the
 /// wait belongs in the test.
 ///
 /// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Every other outcome — a failed
 /// call, a missing key, any other per-topic error — panics on the first attempt,
-/// because `retry_on_exception_with_timeout` catches the `Err` return and not
+/// because `retry_on_error_with_timeout` catches the `Err` return and not
 /// panics. So this cannot turn a genuine backend defect into a 60-second
 /// timeout.
 ///
@@ -196,7 +196,7 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
 /// and no assertion is weakened.
 async fn partition_zero_of<B: AdminBackend>(admin: &B, topic: &str) -> TopicPartitionInfo {
     let found: RefCell<Option<TopicPartitionInfo>> = RefCell::new(None);
-    retry_on_exception_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async {
+    retry_on_error_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async {
         let backend = admin.name();
         let described = admin
             .describe_topics(std::slice::from_ref(&topic.to_string()), DescribeTopicsOptions::new())

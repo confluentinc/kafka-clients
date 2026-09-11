@@ -114,7 +114,7 @@ impl ListOffsetsRequest {
     ///
     /// Returns an error if the wire byte does not correspond to a known
     /// isolation level.
-    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::KafkaError> {
+    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 

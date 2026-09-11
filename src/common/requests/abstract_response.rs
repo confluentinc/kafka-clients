@@ -28,6 +28,9 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
+use super::CorrelationIdMismatchError;
+use super::correlation_id_mismatch_error::correlation_id_mismatch_io_error;
+
 use super::AddOffsetsToTxnResponse;
 use super::AddPartitionsToTxnResponse;
 use super::AlterClientQuotasResponse;
@@ -818,15 +821,24 @@ impl ConcreteResponse {
         let response_header = ResponseHeader::parse(buffer, api_key.response_header_version(api_version))?;
 
         if request_header.correlation_id() != response_header.correlation_id() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            // Java throws `CorrelationIdMismatchException`
+            // (`AbstractResponse.java:105`), which `NetworkClient.parseResponse`
+            // catches **by type** and either converts to a `SchemaException` or
+            // rethrows (`NetworkClient.java:829-838`). An untyped
+            // `ErrorKind::InvalidData` made that dispatch unexpressible, so the
+            // typed value travels in the `io::Error` payload — the crate's
+            // documented mechanism for a Java exception class crossing an
+            // `io::Result` boundary (see `correlation_id_mismatch_io_error`).
+            return Err(correlation_id_mismatch_io_error(CorrelationIdMismatchError::new(
                 format!(
                     "Correlation id for response ({}) does not match request ({}), request header: {}",
                     response_header.correlation_id(),
                     request_header.correlation_id(),
                     request_header
                 ),
-            ));
+                request_header.correlation_id(),
+                response_header.correlation_id(),
+            )));
         }
 
         Self::parse(api_key, buffer, api_version)
@@ -1057,7 +1069,9 @@ impl ConcreteResponse {
             },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
+                format!(
+                    "ApiKey {api_key} is not currently handled in `parse_response`, the code should be updated to do so."
+                ),
             )),
         }
     }
@@ -1132,4 +1146,25 @@ pub fn single_error_count(error: Errors) -> HashMap<Errors, i32> {
 /// Helper: increments the count for the given error in the map.
 pub fn update_error_counts(error_counts: &mut HashMap<Errors, i32>, error: Errors) {
     *error_counts.entry(error).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Java's `parseResponse` default arm throws an `AssertionError` whose text
+    /// interpolates the `ApiKeys` value — the enum constant — and ends with the
+    /// "code should be updated" clause (`AbstractResponse.java:295-296`). The
+    /// method name is snake_cased per CLAUDE.md §2; the rest is verbatim.
+    #[test]
+    fn test_parse_response_unhandled_api_key_message() {
+        let mut readable = ByteBufferAccessor::from_bytes(Vec::new());
+        let error = ConcreteResponse::parse(&ApiKeys::VOTE, &mut readable, 0)
+            .expect_err("VOTE is a broker-only api with no client-side parser");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "ApiKey VOTE is not currently handled in `parse_response`, the code should be updated to do so."
+        );
+    }
 }

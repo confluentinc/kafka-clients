@@ -36,12 +36,13 @@
 //! 3. Returns `Ok(())` if I/O would block (partial read/write)
 //! 4. Stores partial reads in `net_in_buffer` for the next call
 
+use crate::common::Error;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
 use crate::common::network::KafkaSend;
 use crate::common::network::NetworkReceive;
 use crate::common::network::Receive;
-use crate::common::network::authentication_error::auth_io_error;
+use crate::common::network::authentication_error::{auth_io_error, auth_io_error_with_source};
 use crate::common::network::{InterestOps, TransportLayer};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::ApiVersionsRequestBuilder;
@@ -364,21 +365,15 @@ impl SaslClientAuthenticator {
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<ConcreteResponse>> {
-        let response_bytes = match self.receive_response_or_token(transport).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                kafka_debug!(
-                    self.log_context,
-                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-                );
-                self.set_sasl_state(SaslState::Failed);
-                // Java throws IllegalSaslStateException (an AuthenticationException)
-                // here — a genuine authentication failure, fatal and not retried.
-                return Err(auth_io_error(format!(
-                    "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-                )));
-            },
+        // Java's `catch (BufferUnderflowException | SchemaException |
+        // IllegalArgumentException e)` covers only the *parse* of the response
+        // (handled on the `parse_response` call below). `receiveResponseOrToken()`
+        // throws `IOException`, which that clause does NOT catch, so a transient
+        // read failure propagates as a network disconnect — retriable, reconnect
+        // with backoff — rather than becoming a fatal authentication failure.
+        let response_bytes = match self.receive_response_or_token(transport).await? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         };
 
         let request_header = self
@@ -386,17 +381,46 @@ impl SaslClientAuthenticator {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
         let mut buffer = ByteBufferAccessor::from_bytes(response_bytes);
-        let response = ConcreteResponse::parse_response(&mut buffer, request_header).map_err(|e| {
-            kafka_debug!(
-                self.log_context,
-                "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-            );
-            self.set_sasl_state(SaslState::Failed);
-            // Java throws IllegalSaslStateException (an AuthenticationException).
-            auth_io_error(format!(
-                "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-            ))
-        })?;
+        // Java routes through `NetworkClient.parseResponse` (`:824-840`), not the
+        // raw parse, so a correlation-id mismatch is converted to a
+        // `SchemaException` **only** when the request used a reserved SASL
+        // correlation id and the response did not; otherwise it is rethrown.
+        //
+        // Java then catches exactly three classes here:
+        // `BufferUnderflowException | SchemaException | IllegalArgumentException`
+        // (`SaslClientAuthenticator.java`). A rethrown
+        // `CorrelationIdMismatchException` is an `IllegalStateException` and is
+        // NOT among them, so it propagates out of `receiveKafkaResponse` without
+        // failing authentication. Catching everything here — as this did before —
+        // turned that case into a fatal authentication failure.
+        //
+        // Java's re-authentication branch (`reauthInfo.reauthenticating()`, which
+        // parks an unrelated in-flight receive in `pendingAuthenticatedReceives`
+        // and returns null) has no counterpart: KIP-368 client-side
+        // re-authentication is not wired in this client, so `reauthenticating()`
+        // is always false and the branch is unreachable. See COMMENTS finding 25.
+        let response = match crate::network_client::parse_response(&mut buffer, request_header) {
+            Ok(response) => response,
+            Err(error) if matches!(error, Error::Schema(_) | Error::LocalIllegalArgument(_)) => {
+                kafka_debug!(
+                    self.log_context,
+                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
+                );
+                self.set_sasl_state(SaslState::Failed);
+                // Java: `throw new IllegalSaslStateException(msg, e)` — the
+                // two-argument form, so the message is Java's literal text and the
+                // cause hangs off `getCause()` rather than being appended to it.
+                return Err(auth_io_error_with_source(
+                    "Invalid SASL mechanism response, server may be expecting a different protocol",
+                    error,
+                ));
+            },
+            Err(error) => {
+                // Outside Java's catch: propagate without touching the SASL state
+                // and without classifying it as an authentication failure.
+                return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()));
+            },
+        };
         self.current_request_header = None;
         Ok(Some(response))
     }

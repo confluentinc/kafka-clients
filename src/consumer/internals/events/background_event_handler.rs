@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use tokio::sync::mpsc;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 
 use super::background_event::{BackgroundEvent, BackgroundEventEnvelope};
@@ -88,10 +88,10 @@ impl BackgroundEventHandler {
     /// Java: `add(BackgroundEvent event)`. Stamps `enqueued_ms` and
     /// sends.
     ///
-    /// Returns `Err(KafkaError::illegal_state(...))` if the receiver has
+    /// Returns `Err(Error::local_illegal_state(...))` if the receiver has
     /// already been dropped — equivalent to Java's `IllegalStateException`
     /// thrown by a closed queue.
-    pub(crate) fn add(&self, event: BackgroundEvent, now_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn add(&self, event: BackgroundEvent, now_ms: i64) -> Result<(), Error> {
         let envelope = BackgroundEventEnvelope { event, enqueued_ms: now_ms };
         // Java records `backgroundEventQueue.size() + 1` before adding.
         if let (Some(metrics), Some(queue_size)) = (&self.async_consumer_metrics, &self.queue_size) {
@@ -102,7 +102,7 @@ impl BackgroundEventHandler {
             if let Some(queue_size) = &self.queue_size {
                 queue_size.fetch_sub(1, Ordering::SeqCst);
             }
-            KafkaError::illegal_state(format!(
+            Error::local_illegal_state(format!(
                 "App-side background-event receiver is closed; cannot enqueue {}",
                 err.0.event.type_name()
             ))
@@ -129,14 +129,14 @@ mod tests {
         let handler = BackgroundEventHandler::new(tx);
 
         handler
-            .add(BackgroundEvent::Error { error: KafkaError::timeout("boom") }, 7)
+            .add(BackgroundEvent::Error { error: Error::timeout("boom") }, 7)
             .expect("send ok");
 
         let env = rx.recv().await.expect("got envelope");
         assert_eq!(env.enqueued_ms, 7);
         match env.event {
             BackgroundEvent::Error { error } => {
-                assert!(matches!(error, KafkaError::Timeout(_)));
+                assert!(matches!(error, Error::Timeout(_)));
             },
             other => panic!("unexpected variant {}", other.type_name()),
         }
@@ -149,7 +149,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = BackgroundEventHandler::new(tx);
 
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         handler
             .add(
                 BackgroundEvent::PartitionsRemoved {
@@ -180,9 +180,9 @@ mod tests {
         drop(rx);
         let handler = BackgroundEventHandler::new(tx);
         let err = handler
-            .add(BackgroundEvent::Error { error: KafkaError::timeout("x") }, 0)
+            .add(BackgroundEvent::Error { error: Error::timeout("x") }, 0)
             .expect_err("must fail");
-        assert!(matches!(err, KafkaError::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
     }
 
     /// M6 wiring: `add` records the background-event queue size against the
@@ -204,10 +204,10 @@ mod tests {
         handler.set_async_consumer_metrics(Arc::clone(&acm), Arc::clone(&queue_size));
 
         handler
-            .add(BackgroundEvent::Error { error: KafkaError::timeout("a") }, 0)
+            .add(BackgroundEvent::Error { error: Error::timeout("a") }, 0)
             .expect("send ok");
         handler
-            .add(BackgroundEvent::Error { error: KafkaError::timeout("b") }, 0)
+            .add(BackgroundEvent::Error { error: Error::timeout("b") }, 0)
             .expect("send ok");
 
         assert_eq!(queue_size.load(Ordering::SeqCst), 2);

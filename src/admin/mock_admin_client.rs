@@ -76,10 +76,8 @@ use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::{Error, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid};
 use crate::common::{GroupState, GroupType};
-use crate::common::{
-    KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
-};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
 use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResponseData;
@@ -182,7 +180,7 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] when `num_brokers` is less than
+    /// Returns [`Error::local_illegal_argument`] when `num_brokers` is less than
     /// one. Java throws instead of producing a broker-less mock: its
     /// `Builder.build()` reads `brokers.get(0)` for the controller
     /// (`MockAdminClient.java:210`), which raises `IndexOutOfBoundsException` on
@@ -199,7 +197,7 @@ impl MockAdminClient {
     /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
     /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
     /// `kafka_admin_MockAdminClient_new` and abort the process.
-    pub fn create(num_brokers: i32) -> Result<Self, KafkaError> {
+    pub fn create(num_brokers: i32) -> Result<Self, Error> {
         let brokers: Vec<Node> = (0..num_brokers)
             .map(|id| Node::new(id, "localhost".to_string(), 1000 + id))
             .collect();
@@ -209,7 +207,7 @@ impl MockAdminClient {
         let controller = match brokers.first() {
             Some(node) => node.clone(),
             None => {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "num_brokers must be at least 1, was {num_brokers}"
                 )));
             },
@@ -276,7 +274,7 @@ impl MockAdminClient {
     // --- seeding mutators ---------------------------------------------------
     //
     // Convention for this group: a seeding helper whose Java counterpart is a
-    // `void` method that *throws* returns `Result<(), KafkaError>` and reuses
+    // `void` method that *throws* returns `Result<(), Error>` and reuses
     // Java's message verbatim, rather than panicking. Java's throws here are all
     // catchable `IllegalArgumentException`s, and CLAUDE.md §10.2 asks for a
     // `Result` for a recoverable Java throw even when it is unchecked. A helper
@@ -317,17 +315,17 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `broker_id` is not one of the
+    /// Returns [`Error::LocalIllegalArgument`] if `broker_id` is not one of the
     /// mock's brokers. Java has no equivalent setter — `Builder.brokerLogDirs`
     /// installs the whole list up front — so this message has no Java
     /// counterpart; it exists because indexing `brokerLogDirs` out of range
     /// would otherwise panic.
-    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), KafkaError> {
+    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let slot = usize::try_from(broker_id)
             .ok()
             .and_then(|id| state.broker_log_dirs.get_mut(id))
-            .ok_or_else(|| KafkaError::illegal_argument(format!("Broker {broker_id} does not exist.")))?;
+            .ok_or_else(|| Error::local_illegal_argument(format!("Broker {broker_id} does not exist.")))?;
         *slot = log_dirs;
         Ok(())
     }
@@ -338,7 +336,7 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] with Java's message if the topic
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
     /// was already added, or if any partition names a broker the mock does not
     /// have as its leader, in its replica list, or in its ISR
     /// (`MockAdminClient.java:296-309`).
@@ -348,10 +346,10 @@ impl MockAdminClient {
         name: &str,
         partitions: Vec<TopicPartitionInfo>,
         configs: Option<BTreeMap<String, String>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         if state.all_topics.contains_key(name) {
-            return Err(KafkaError::illegal_argument(format!("Topic {name} was already added.")));
+            return Err(Error::local_illegal_argument(format!("Topic {name} was already added.")));
         }
         // Java validates every partition against the broker list before touching
         // `brokerLogDirs` (MockAdminClient.java:298-309). Note that
@@ -362,13 +360,13 @@ impl MockAdminClient {
         for partition in &partitions {
             let known_leader = partition.leader().is_some_and(|leader| state.brokers.contains(leader));
             if !known_leader {
-                return Err(KafkaError::illegal_argument("Leader broker unknown"));
+                return Err(Error::local_illegal_argument("Leader broker unknown"));
             }
             if !partition.replicas().iter().all(|node| state.brokers.contains(node)) {
-                return Err(KafkaError::illegal_argument("Unknown brokers in replica list"));
+                return Err(Error::local_illegal_argument("Unknown brokers in replica list"));
             }
             if !partition.isr().iter().all(|node| state.brokers.contains(node)) {
-                return Err(KafkaError::illegal_argument("Unknown brokers in isr list"));
+                return Err(Error::local_illegal_argument("Unknown brokers in isr list"));
             }
         }
         // Each partition starts on the first log directory of its leader broker.
@@ -383,7 +381,7 @@ impl MockAdminClient {
         for leader in partitions.iter().filter_map(TopicPartitionInfo::leader) {
             let dirs = &state.broker_log_dirs[leader.id() as usize];
             let first = dirs.first().ok_or_else(|| {
-                KafkaError::illegal_argument(format!("Broker {} has no log directories.", leader.id()))
+                Error::local_illegal_argument(format!("Broker {} has no log directories.", leader.id()))
             })?;
             partition_log_dirs.push(first.clone());
         }
@@ -411,14 +409,14 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] with Java's message if the topic
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
     /// does not exist (`MockAdminClient.java:328-330`).
-    pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), KafkaError> {
+    pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let topic = state
             .all_topics
             .get_mut(name)
-            .ok_or_else(|| KafkaError::illegal_argument(format!("Topic {name} did not exist.")))?;
+            .ok_or_else(|| Error::local_illegal_argument(format!("Topic {name} did not exist.")))?;
         topic.marked_for_deletion = true;
         Ok(())
     }
@@ -429,8 +427,8 @@ impl MockAdminClient {
     }
 }
 
-fn timeout_error() -> KafkaError {
-    KafkaError::Timeout("The mock timed out the request.".to_string())
+fn timeout_error() -> Error {
+    Error::timeout("The mock timed out the request.".to_string())
 }
 
 /// Current wall-clock time in milliseconds since the Unix epoch, mirroring
@@ -463,17 +461,17 @@ fn current_time_millis() -> i64 {
 fn find_partition_reassignment(
     state: &State,
     partition: &TopicPartition,
-) -> Result<Option<PartitionReassignment>, KafkaError> {
+) -> Result<Option<PartitionReassignment>, Error> {
     let Some(reassignment) = state.reassignments.get(partition) else {
         return Ok(None);
     };
     let metadata = state.all_topics.get(partition.topic()).ok_or_else(|| {
-        KafkaError::illegal_state(format!(
+        Error::local_illegal_state(format!(
             "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata"
         ))
     })?;
     let info = metadata.partitions.get(partition.partition() as usize).ok_or_else(|| {
-        KafkaError::illegal_state(format!(
+        Error::local_illegal_state(format!(
             "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo"
         ))
     })?;
@@ -522,7 +520,7 @@ fn to_config_object(map: &BTreeMap<String, String>) -> Config {
 /// Returns an error for an unsupported op type (mirrors Java's
 /// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
 /// that Java's mock does not implement, matching its `default` branch.
-fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), KafkaError> {
+fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), Error> {
     for op in ops {
         match op.op_type() {
             OpType::Set => {
@@ -535,7 +533,7 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
                 map.remove(op.config_entry().name());
             },
             other => {
-                return Err(KafkaError::with_message(
+                return Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("Unsupported op type {other:?}"),
                 ));
@@ -548,15 +546,15 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 /// Reads the config description for a single resource.
 ///
 /// Corresponds to `MockAdminClient.getResourceDescription`.
-fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, KafkaError> {
+fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
     match resource.resource_type() {
         ConfigResourceType::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
-                KafkaError::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
+                Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
             })?;
             match state.broker_configs.get(broker_id) {
                 Some(config) => Ok(to_config_object(config)),
-                None => Err(KafkaError::with_message(
+                None => Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("Broker {} not found.", resource.name()),
                 )),
@@ -573,7 +571,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                     return Ok(to_config_object(&config));
                 }
             }
-            Err(KafkaError::with_message(
+            Err(Error::with_message(
                 Errors::UnknownTopicOrPartition,
                 format!("Resource {resource} not found."),
             ))
@@ -581,7 +579,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
         ConfigResourceType::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let config = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
             Ok(to_config_object(&config))
@@ -589,7 +587,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
         ConfigResourceType::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut group_config = state.group_configs.get(resource_name).cloned().unwrap_or_default();
             // Overlay defaults for keys not already present (Java's `putIfAbsent`).
@@ -598,7 +596,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             }
             Ok(to_config_object(&group_config))
         },
-        _ => Err(KafkaError::unsupported_version("Not implemented yet")),
+        _ => Err(Error::unsupported_version("Not implemented yet")),
     }
 }
 
@@ -609,14 +607,14 @@ fn handle_incremental_resource_alteration(
     state: &mut State,
     resource: &ConfigResource,
     ops: &[AlterConfigOp],
-) -> Result<(), KafkaError> {
+) -> Result<(), Error> {
     match resource.resource_type() {
         ConfigResourceType::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
-                KafkaError::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
+                Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
             })?;
             if broker_id >= state.broker_configs.len() {
-                return Err(KafkaError::with_message(
+                return Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("no such broker as {broker_id}"),
                 ));
@@ -628,10 +626,7 @@ fn handle_incremental_resource_alteration(
         },
         ConfigResourceType::Topic => {
             let metadata = state.all_topics.get_mut(resource.name()).ok_or_else(|| {
-                KafkaError::with_message(
-                    Errors::UnknownTopicOrPartition,
-                    format!("No such topic as {}", resource.name()),
-                )
+                Error::with_message(Errors::UnknownTopicOrPartition, format!("No such topic as {}", resource.name()))
             })?;
             let mut new_map = metadata.configs.clone().unwrap_or_default();
             apply_alter_ops(&mut new_map, ops)?;
@@ -641,7 +636,7 @@ fn handle_incremental_resource_alteration(
         ConfigResourceType::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut new_map = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
             apply_alter_ops(&mut new_map, ops)?;
@@ -651,14 +646,14 @@ fn handle_incremental_resource_alteration(
         ConfigResourceType::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut new_map = state.group_configs.get(resource_name).cloned().unwrap_or_default();
             apply_alter_ops(&mut new_map, ops)?;
             state.group_configs.insert(resource_name.to_string(), new_map);
             Ok(())
         },
-        _ => Err(KafkaError::unsupported_version("Not implemented yet")),
+        _ => Err(Error::unsupported_version("Not implemented yet")),
     }
 }
 
@@ -671,7 +666,7 @@ impl Admin for MockAdminClient {
         if state.timeout_next_requests > 0 {
             for new_topic in new_topics {
                 let handle: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
-                handle.complete_exceptionally(timeout_error());
+                handle.complete_with_error(timeout_error());
                 result.insert(new_topic.name().to_string(), handle.future());
             }
             state.timeout_next_requests -= 1;
@@ -683,7 +678,7 @@ impl Admin for MockAdminClient {
             let topic_name = new_topic.name().to_string();
 
             if state.all_topics.contains_key(&topic_name) {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::TopicAlreadyExists,
                     format!("Topic {topic_name} exists already."),
                 ));
@@ -696,7 +691,7 @@ impl Admin for MockAdminClient {
                 replication_factor = state.default_replication_factor;
             }
             if replication_factor as usize > state.brokers.len() {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::InvalidReplicationFactor,
                     format!(
                         "Replication factor: {} is larger than brokers: {}",
@@ -722,7 +717,7 @@ impl Admin for MockAdminClient {
             // situation as a per-topic error instead of a panic (CLAUDE.md
             // §10.2), so `create_topics` gets the same treatment here.
             if state.broker_log_dirs[leader.id() as usize].is_empty() {
-                handle.complete_exceptionally(KafkaError::illegal_argument(format!(
+                handle.complete_with_error(Error::local_illegal_argument(format!(
                     "Broker {} has no log directories.",
                     leader.id()
                 )));
@@ -782,9 +777,9 @@ impl Admin for MockAdminClient {
                 for name in names {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                     } else if state.all_topics.remove(&name).is_none() {
-                        handle.complete_exceptionally(KafkaError::with_message(
+                        handle.complete_with_error(Error::with_message(
                             Errors::UnknownTopicOrPartition,
                             format!("Topic {name} does not exist."),
                         ));
@@ -806,12 +801,12 @@ impl Admin for MockAdminClient {
                 for id in ids {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                     } else {
                         let name = state.topic_names.remove(&id);
                         let removed = name.as_ref().is_some_and(|n| state.all_topics.remove(n).is_some());
                         if !removed {
-                            handle.complete_exceptionally(KafkaError::with_message(
+                            handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicOrPartition,
                                 format!("Topic {id} does not exist."),
                             ));
@@ -837,7 +832,7 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<HashMap<String, TopicListing>> = KafkaFutureImpl::new();
 
         if state.timeout_next_requests > 0 {
-            handle.complete_exceptionally(timeout_error());
+            handle.complete_with_error(timeout_error());
             state.timeout_next_requests -= 1;
             return ListTopicsResult::new(handle.future());
         }
@@ -866,7 +861,7 @@ impl Admin for MockAdminClient {
                 for requested in &names {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                         result.insert(requested.clone(), handle.future());
                         continue;
                     }
@@ -883,7 +878,7 @@ impl Admin for MockAdminClient {
                             ));
                         },
                         _ => {
-                            handle.complete_exceptionally(KafkaError::with_message(
+                            handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicOrPartition,
                                 format!("Topic {requested} not found."),
                             ));
@@ -902,7 +897,7 @@ impl Admin for MockAdminClient {
                 for requested in &ids {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                         result.insert(*requested, handle.future());
                         continue;
                     }
@@ -924,7 +919,7 @@ impl Admin for MockAdminClient {
                             ));
                         },
                         None => {
-                            handle.complete_exceptionally(KafkaError::with_message(
+                            handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicId,
                                 format!("Topic id {requested} not found."),
                             ));
@@ -948,12 +943,12 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.createPartitions` (MockAdminClient.java:626-628)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic in new_partitions.keys() {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(topic.clone(), handle.future());
         }
         CreatePartitionsResult::new(result)
@@ -968,12 +963,12 @@ impl Admin for MockAdminClient {
         // returns an empty result for an empty request and otherwise throws
         // `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the non-empty case returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic_partition in records_to_delete.keys() {
             let handle: KafkaFutureImpl<DeletedRecords> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(topic_partition.clone(), handle.future());
         }
         DeleteRecordsResult::new(result)
@@ -987,12 +982,12 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.describeProducers` (MockAdminClient.java:1368-1370)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic_partition in partitions {
             let handle: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(topic_partition.clone(), handle.future());
         }
         DescribeProducersResult::new(result)
@@ -1006,10 +1001,10 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.abortTransaction` (MockAdminClient.java:1378-1381)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         AbortTransactionResult::new(HashMap::from([(spec.topic_partition().clone(), handle.future())]))
     }
 
@@ -1021,12 +1016,12 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.describeTransactions` (MockAdminClient.java:1373-1375)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<TransactionDescription> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(id.clone(), handle.future());
         }
         DescribeTransactionsResult::new(result)
@@ -1036,12 +1031,12 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.fenceProducers` (MockAdminClient.java:1393-1395)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<ProducerIdAndEpoch> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(id.clone(), handle.future());
         }
         FenceProducersResult::new(result)
@@ -1053,7 +1048,7 @@ impl Admin for MockAdminClient {
         // `.claude/rules/admin-client.md` §9 the Rust mock completes the
         // top-level future exceptionally instead of panicking.
         let handle: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         ListTransactionsResult::new(handle.future())
     }
 
@@ -1094,10 +1089,10 @@ impl Admin for MockAdminClient {
 
         if state.timeout_next_requests > 0 {
             let err = timeout_error();
-            nodes.complete_exceptionally(err.clone());
-            controller.complete_exceptionally(err.clone());
-            cluster_id.complete_exceptionally(err.clone());
-            authorized_operations.complete_exceptionally(err);
+            nodes.complete_with_error(err.clone());
+            controller.complete_with_error(err.clone());
+            cluster_id.complete_with_error(err.clone());
+            authorized_operations.complete_with_error(err);
             state.timeout_next_requests -= 1;
         } else {
             nodes.complete(state.brokers.clone());
@@ -1125,7 +1120,7 @@ impl Admin for MockAdminClient {
             let mut result = HashMap::new();
             for resource in config_resources {
                 let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
-                handle.complete_exceptionally(timeout_error());
+                handle.complete_with_error(timeout_error());
                 result.insert(resource.clone(), handle.future());
             }
             state.timeout_next_requests -= 1;
@@ -1137,7 +1132,7 @@ impl Admin for MockAdminClient {
             let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
             match get_resource_description(&mut state, resource) {
                 Ok(config) => handle.complete(config),
-                Err(e) => handle.complete_exceptionally(e),
+                Err(e) => handle.complete_with_error(e),
             };
             result.insert(resource.clone(), handle.future());
         }
@@ -1155,7 +1150,7 @@ impl Admin for MockAdminClient {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
             match handle_incremental_resource_alteration(&mut state, resource, ops) {
                 Ok(()) => handle.complete(()),
-                Err(e) => handle.complete_exceptionally(e),
+                Err(e) => handle.complete_with_error(e),
             };
             result.insert(resource.clone(), handle.future());
         }
@@ -1292,14 +1287,14 @@ impl Admin for MockAdminClient {
 
             let dirs = state.broker_log_dirs.get(replica.broker_id() as usize);
             if dirs.is_none() {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::ReplicaNotAvailable,
                     format!("Can't find {replica}"),
                 ));
                 continue;
             }
             if !dirs.unwrap().contains(new_log_dir) {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::KafkaStorageError,
                     format!("Log directory {new_log_dir} is offline"),
                 ));
@@ -1331,7 +1326,7 @@ impl Admin for MockAdminClient {
                     handle.complete(());
                 },
                 None => {
-                    handle.complete_exceptionally(KafkaError::with_message(
+                    handle.complete_with_error(Error::with_message(
                         Errors::ReplicaNotAvailable,
                         format!("Can't find {replica}"),
                     ));
@@ -1386,15 +1381,15 @@ impl Admin for MockAdminClient {
     /// Mirrors `MockAdminClient.electLeaders`, which throws
     /// `UnsupportedOperationException("Not implemented yet")`
     /// (`MockAdminClient.java:797`). Translated to a future failed with an
-    /// "unsupported" `KafkaError` (CLAUDE.md §10.1: no panic in public API).
+    /// "unsupported" `Error` (CLAUDE.md §10.1: no panic in public API).
     fn elect_leaders(
         &self,
         _election_type: ElectionType,
         _partitions: Option<HashSet<TopicPartition>>,
         _options: ElectLeadersOptions,
     ) -> ElectLeadersResult {
-        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         ElectLeadersResult::new(handle.future())
     }
 
@@ -1412,7 +1407,7 @@ impl Admin for MockAdminClient {
             let out_of_range = partition.partition() < 0
                 || topic_metadata.is_none_or(|m| (m.partitions.len() as i32) <= partition.partition());
             if out_of_range {
-                future.complete_exceptionally(KafkaError::new(Errors::UnknownTopicOrPartition));
+                future.complete_with_error(Error::new(Errors::UnknownTopicOrPartition));
             } else if let Some(reassignment) = new_reassignment {
                 state.reassignments.insert(partition.clone(), reassignment.clone());
                 future.complete(());
@@ -1452,7 +1447,7 @@ impl Admin for MockAdminClient {
                 },
                 Ok(None) => {},
                 Err(e) => {
-                    handle.complete_exceptionally(e);
+                    handle.complete_with_error(e);
                     return ListPartitionReassignmentsResult::new(handle.future());
                 },
             }
@@ -1466,7 +1461,7 @@ impl Admin for MockAdminClient {
     /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
     /// (`MockAdminClient.java:1230`); since a synchronous throw is not
     /// representable in this signature, the affected partition's future is
-    /// failed with an "unsupported" `KafkaError` (CLAUDE.md §10.1).
+    /// failed with an "unsupported" `Error` (CLAUDE.md §10.1).
     fn list_offsets(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
@@ -1478,7 +1473,7 @@ impl Admin for MockAdminClient {
             let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
             match spec {
                 OffsetSpec::Timestamp(_) => {
-                    future.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+                    future.complete_with_error(Error::unsupported_version("Not implemented yet"));
                 },
                 OffsetSpec::Earliest => {
                     let offset = state.beginning_offsets.get(tp).copied().unwrap_or(-1);
@@ -1498,7 +1493,7 @@ impl Admin for MockAdminClient {
         // Mirrors Java's `MockAdminClient.listGroups`: one CONSUMER/STABLE
         // GroupListing per seeded group config.
         let state = self.state.lock().unwrap();
-        let listings: Vec<Result<GroupListing, KafkaError>> = state
+        let listings: Vec<Result<GroupListing, Error>> = state
             .group_configs
             .keys()
             .map(|g| {
@@ -1510,7 +1505,7 @@ impl Admin for MockAdminClient {
                 ))
             })
             .collect();
-        let handle: KafkaFutureImpl<Vec<Result<GroupListing, KafkaError>>> = KafkaFutureImpl::new();
+        let handle: KafkaFutureImpl<Vec<Result<GroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
         ListGroupsResult::new(handle.future())
     }
@@ -1520,12 +1515,12 @@ impl Admin for MockAdminClient {
         // Mirrors Java's `MockAdminClient.listConsumerGroups`: a simple
         // ConsumerGroupListing per seeded group config.
         let state = self.state.lock().unwrap();
-        let listings: Vec<Result<ConsumerGroupListing, KafkaError>> = state
+        let listings: Vec<Result<ConsumerGroupListing, Error>> = state
             .group_configs
             .keys()
             .map(|g| Ok(ConsumerGroupListing::new(g.clone(), None, None, false)))
             .collect();
-        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, KafkaError>>> = KafkaFutureImpl::new();
+        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
         ListConsumerGroupsResult::new(handle.future())
     }
@@ -1542,7 +1537,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeConsumerGroupsResult::new(futures)
@@ -1560,7 +1555,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ClassicGroupDescription> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeClassicGroupsResult::new(futures)
@@ -1580,7 +1575,7 @@ impl Admin for MockAdminClient {
                 .keys()
                 .map(|group| {
                     let handle: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
-                    handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+                    handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
                     (group.clone(), handle.future())
                 })
                 .collect();
@@ -1604,7 +1599,7 @@ impl Admin for MockAdminClient {
         // calling thread — and abort the process. So the error is surfaced on the
         // group's future, which the trait signature can carry
         // (CLAUDE.md §10.1/§10.2, admin-client.md §9).
-        let offsets: Result<GroupOffsets, KafkaError> = state
+        let offsets: Result<GroupOffsets, Error> = state
             .committed_offsets
             .iter()
             .filter(|(tp, _)| include_all || spec.get_topic_partitions().is_some_and(|tps| tps.contains(tp)))
@@ -1618,7 +1613,7 @@ impl Admin for MockAdminClient {
                 handle.complete(offsets);
             },
             Err(error) => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
             },
         }
         ListConsumerGroupOffsetsResult::new(HashMap::from([(group.clone(), handle.future())]))
@@ -1636,7 +1631,7 @@ impl Admin for MockAdminClient {
         // admin-client.md §9 the Rust mock surfaces that as an exceptional
         // future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implement yet"));
         AlterConsumerGroupOffsetsResult::new(handle.future())
     }
 
@@ -1651,7 +1646,7 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:783). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions.clone())
     }
 
@@ -1667,7 +1662,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DeleteConsumerGroupsResult::new(futures)
@@ -1683,7 +1678,7 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:801-803). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<MemberIdentity, Errors>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         RemoveMembersFromConsumerGroupResult::new(handle.future(), options.members().clone())
     }
 
@@ -1696,7 +1691,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for acl in acls {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(acl.clone(), handle.future());
         }
         CreateAclsResult::new(futures)
@@ -1708,7 +1703,7 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:811-813). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         DescribeAclsResult::new(handle.future())
     }
 
@@ -1720,7 +1715,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for filter in filters {
             let handle: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(filter.clone(), handle.future());
         }
         DeleteAclsResult::new(futures)
@@ -1736,7 +1731,7 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:1243-1245). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implement yet"));
         DescribeClientQuotasResult::new(handle.future())
     }
 
@@ -1752,7 +1747,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for entry in entries {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implement yet"));
             futures.insert(entry.entity().clone(), handle.future());
         }
         AlterClientQuotasResult::new(futures)
@@ -1768,7 +1763,7 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:1251-1254). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         DescribeUserScramCredentialsResult::new(handle.future())
     }
 
@@ -1784,7 +1779,7 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for alteration in alterations {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(alteration.user().to_string(), handle.future());
         }
         AlterUserScramCredentialsResult::new(futures)
@@ -1797,7 +1792,7 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
         for renewer in options.get_renewers() {
             if renewer.principal_type() != KafkaPrincipal::USER_TYPE {
-                handle.complete_exceptionally(KafkaError::with_message(Errors::InvalidPrincipalType, ""));
+                handle.complete_with_error(Error::with_message(Errors::InvalidPrincipalType, ""));
                 return CreateDelegationTokenResult::new(handle.future());
             }
         }
@@ -1810,7 +1805,7 @@ impl Admin for MockAdminClient {
         // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
         // future is completed exceptionally instead.
         let Some(owner) = options.get_renewers().first().cloned() else {
-            handle.complete_exceptionally(KafkaError::illegal_argument(
+            handle.complete_with_error(Error::local_illegal_argument(
                 "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner",
             ));
             return CreateDelegationTokenResult::new(handle.future());
@@ -1850,7 +1845,7 @@ impl Admin for MockAdminClient {
         if token_found {
             handle.complete(expiry_timestamp);
         } else {
-            handle.complete_exceptionally(KafkaError::with_message(Errors::DelegationTokenNotFound, ""));
+            handle.complete_with_error(Error::with_message(Errors::DelegationTokenNotFound, ""));
         }
         RenewDelegationTokenResult::new(handle.future())
     }
@@ -1885,7 +1880,7 @@ impl Admin for MockAdminClient {
         if token_found {
             handle.complete(expiry_timestamp);
         } else {
-            handle.complete_exceptionally(KafkaError::with_message(Errors::DelegationTokenNotFound, ""));
+            handle.complete_with_error(Error::with_message(Errors::DelegationTokenNotFound, ""));
         }
         ExpireDelegationTokenResult::new(handle.future())
     }
@@ -1929,7 +1924,7 @@ impl Admin for MockAdminClient {
                     supported_features.insert(feature.clone(), supported);
                 },
                 (Err(e), _) | (_, Err(e)) => {
-                    handle.complete_exceptionally(e);
+                    handle.complete_with_error(e);
                     return DescribeFeaturesResult::new(handle.future());
                 },
             }
@@ -1943,11 +1938,11 @@ impl Admin for MockAdminClient {
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<UpdateFeaturesResult, KafkaError> {
+    ) -> Result<UpdateFeaturesResult, Error> {
         // Mirrors MockAdminClient.updateFeatures: validate each update against
         // the seeded version bounds; the first failure aborts the whole batch.
         let mut state = self.state.lock().unwrap();
-        let mut error: Option<KafkaError> = None;
+        let mut error: Option<Error> = None;
         for (feature, update) in feature_updates {
             let cur = state.feature_levels.get(feature).copied().unwrap_or(0);
             let next = update.max_version_level();
@@ -1970,7 +1965,7 @@ impl Admin for MockAdminClient {
                     }
                 },
                 Some(e) => {
-                    handle.complete_exceptionally(e.clone());
+                    handle.complete_with_error(e.clone());
                 },
             }
             results.insert(feature.clone(), handle.future());
@@ -2025,8 +2020,8 @@ fn validate_feature_update(cur: i16, next: i16, min: i16, max: i16, upgrade_type
 
 /// Composes the mock's `InvalidRequestException` for a rejected feature update.
 /// Mirrors `MockAdminClient.invalidUpdateVersion`.
-fn invalid_update_version(feature: &str, version: i16, message: &str) -> KafkaError {
-    KafkaError::with_message(
+fn invalid_update_version(feature: &str, version: i16, message: &str) -> Error {
+    Error::with_message(
         Errors::InvalidRequest,
         format!("Invalid update version {version} for feature {feature}. {message}"),
     )
@@ -2049,7 +2044,7 @@ mod tests {
     fn create_rejects_zero_brokers_rather_than_fabricating_a_controller() {
         let err = MockAdminClient::create(0).expect_err("zero brokers must be rejected");
         assert!(
-            matches!(err, KafkaError::IllegalArgument(_)),
+            matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
         assert_eq!(err.message(), "num_brokers must be at least 1, was 0");
@@ -2097,7 +2092,7 @@ mod tests {
         mock
     }
 
-    async fn update_one(mock: &MockAdminClient, next: i16, upgrade_type: UpgradeType) -> Result<(), KafkaError> {
+    async fn update_one(mock: &MockAdminClient, next: i16, upgrade_type: UpgradeType) -> Result<(), Error> {
         let updates = HashMap::from([("feature".to_string(), FeatureUpdate::new(next, upgrade_type).unwrap())]);
         let result = mock.update_features(&updates, UpdateFeaturesOptions::new()).unwrap();
         result.values()["feature"].get().await
@@ -2341,7 +2336,7 @@ mod tests {
         let client = admin();
         client.timeout_next_request(1);
         let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
-        assert!(matches!(result.values()["t"].get().await, Err(KafkaError::Timeout(_))));
+        assert!(matches!(result.values()["t"].get().await, Err(Error::Timeout(_))));
         // Next request succeeds.
         let result2 = client.create_topics(&[NewTopic::new("t2", 1, 1)], CreateTopicsOptions::new());
         result2.all().get().await.unwrap();
@@ -2365,9 +2360,9 @@ mod tests {
         client.timeout_next_request(1);
         // First call times out on every future.
         let timed_out = client.describe_cluster(DescribeClusterOptions::new());
-        assert!(matches!(timed_out.nodes().get().await, Err(KafkaError::Timeout(_))));
-        assert!(matches!(timed_out.controller().get().await, Err(KafkaError::Timeout(_))));
-        assert!(matches!(timed_out.cluster_id().get().await, Err(KafkaError::Timeout(_))));
+        assert!(matches!(timed_out.nodes().get().await, Err(Error::Timeout(_))));
+        assert!(matches!(timed_out.controller().get().await, Err(Error::Timeout(_))));
+        assert!(matches!(timed_out.cluster_id().get().await, Err(Error::Timeout(_))));
         // The counter is decremented, so the next call succeeds.
         let recovered = client.describe_cluster(DescribeClusterOptions::new());
         assert_eq!(recovered.nodes().get().await.unwrap().len(), 3);
@@ -2427,7 +2422,7 @@ mod tests {
         client.timeout_next_request(1);
         let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
         let timed_out = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
-        assert!(matches!(timed_out.values()[&resource].get().await, Err(KafkaError::Timeout(_))));
+        assert!(matches!(timed_out.values()[&resource].get().await, Err(Error::Timeout(_))));
         let recovered = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         recovered.values()[&resource].get().await.unwrap();
     }
@@ -3016,7 +3011,7 @@ mod tests {
         mock.add_topic(false, "topic", partitions.clone(), None).unwrap();
         let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
+            matches!(error, Error::LocalIllegalArgument(_)),
             "Java throws IllegalArgumentException: {error:?}"
         );
         assert_eq!(error.message(), "Topic topic was already added.");
@@ -3104,7 +3099,7 @@ mod tests {
         let mock = admin();
         let error = mock.mark_topic_for_deletion("nope").unwrap_err();
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
+            matches!(error, Error::LocalIllegalArgument(_)),
             "Java throws IllegalArgumentException: {error:?}"
         );
         assert_eq!(error.message(), "Topic nope did not exist.");
@@ -3120,7 +3115,7 @@ mod tests {
         // `IllegalArgumentException("Invalid negative offset")` from
         // `new OffsetAndMetadata(...)` while building the row
         // (MockAdminClient.java:756, OffsetAndMetadata.java:49-50). The Rust mock
-        // must surface a `KafkaError`, not panic: the FFI runs this inline on the
+        // must surface a `Error`, not panic: the FFI runs this inline on the
         // caller's thread, so a panic would unwind out of `extern "C"`.
         let mock = admin();
         let tp = TopicPartition::new("topic".to_string(), 0);
@@ -3135,7 +3130,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
+            matches!(error, Error::LocalIllegalArgument(_)),
             "Java throws IllegalArgumentException: {error:?}"
         );
         assert_eq!(error.message(), "Invalid negative offset");

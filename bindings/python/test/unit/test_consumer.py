@@ -27,6 +27,11 @@ from consumer import (
 )
 from producer import KafkaError
 
+# Generated from kafka_common_ErrorCode_t (cargo xtask generate-error-codes).
+# Private plumbing, not public API -- imported here because asserting the error
+# code is the point: it identifies the class, which message text only hinted at.
+import _error_code as ec
+
 POLL_TIMEOUT = 1.0
 
 
@@ -241,7 +246,7 @@ def test_wakeup_sets_flag_consumed_by_next_poll():
         c.wakeup()
         with pytest.raises(KafkaError) as exc:
             c.poll(POLL_TIMEOUT)
-        assert "woke" in str(exc.value).lower()
+        assert exc.value.code == ec.WAKEUP
         recs = c.poll(POLL_TIMEOUT)
         assert len(recs) == 1
         assert c.assignment() == {tp}

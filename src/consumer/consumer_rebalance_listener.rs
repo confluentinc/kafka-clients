@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 
 /// A callback interface that the user can implement to trigger custom actions
 /// when the set of partitions assigned to the consumer changes.
@@ -69,12 +69,12 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     ///
     /// The Java method is `void` but can throw checked / unchecked
     /// exceptions; per CLAUDE.md §10 we convert this to
-    /// `Result<(), KafkaError>`.
+    /// `Result<(), Error>`.
     ///
     /// `partitions` is `&[TopicPartition]` rather than
     /// `Vec<TopicPartition>` per CLAUDE.md §12 — accept the most general
     /// borrowed form. Implementors who need ownership can `to_vec()`.
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     /// A callback method the user can implement to provide handling of
     /// customized offsets on completion of a successful partition
@@ -84,7 +84,7 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     ///
     /// Corresponds to Java's
     /// `void onPartitionsAssigned(Collection<TopicPartition> partitions)`.
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     /// A callback method you can implement to provide handling of cleaning
     /// up resources for partitions that have already been reassigned to
@@ -98,7 +98,7 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     /// `default void onPartitionsLost(Collection<TopicPartition> partitions) {
     ///     onPartitionsRevoked(partitions);
     /// }`.
-    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.on_partitions_revoked(partitions).await
     }
 }

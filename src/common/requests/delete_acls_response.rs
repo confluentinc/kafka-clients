@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::acl::{AccessControlEntry, AclBinding, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePattern, ResourceType};
@@ -125,7 +125,7 @@ impl DeleteAclsResponse {
     ///
     /// Returns an error if the matching ACL carries invalid pattern/permission
     /// components (mirrors Java's constructor exceptions).
-    pub fn acl_binding(matching_acl: &DeleteAclsMatchingAcl) -> Result<AclBinding, KafkaError> {
+    pub fn acl_binding(matching_acl: &DeleteAclsMatchingAcl) -> Result<AclBinding, Error> {
         let pattern = ResourcePattern::new(
             ResourceType::from_code(matching_acl.resource_type),
             matching_acl.resource_name.clone(),

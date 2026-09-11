@@ -26,7 +26,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::serialization::StringSerializer;
@@ -190,16 +190,16 @@ pub async fn send_value_printed(producer: &StringProducer, topic: &str, value: &
 pub enum SendFailure {
     /// `send()` itself returned `Err` — Java's rethrowing catch blocks. This is
     /// how a misuse of the transactional API surfaces.
-    Synchronous(KafkaError),
+    Synchronous(Error),
     /// `send()` returned a future that then resolved to an error — Java's
     /// `catch (ApiException e)`, or a broker-side rejection of a record the
     /// client accepted.
-    ViaFuture(KafkaError),
+    ViaFuture(Error),
 }
 
 impl SendFailure {
     /// The error, whichever path carried it.
-    pub fn error(&self) -> &KafkaError {
+    pub fn error(&self) -> &Error {
         match self {
             Self::Synchronous(error) | Self::ViaFuture(error) => error,
         }
@@ -210,7 +210,7 @@ impl SendFailure {
     /// `Err(..)` — reported as a ❌ by the caller — when the error arrived through
     /// the future instead, because that means the client routed a
     /// non-`ApiException` into Java's `ApiException` block.
-    pub fn expect_synchronous(self, what: &str) -> Result<KafkaError, String> {
+    pub fn expect_synchronous(self, what: &str) -> Result<Error, String> {
         match self {
             Self::Synchronous(error) => Ok(error),
             Self::ViaFuture(error) => Err(format!(
@@ -224,7 +224,7 @@ impl SendFailure {
     ///
     /// `Err(..)` when `send()` returned it synchronously instead — for a record
     /// the client accepted, that would mean it never reached the broker.
-    pub fn expect_via_future(self, what: &str) -> Result<KafkaError, String> {
+    pub fn expect_via_future(self, what: &str) -> Result<Error, String> {
         match self {
             Self::ViaFuture(error) => Ok(error),
             Self::Synchronous(error) => Err(format!(

@@ -35,7 +35,7 @@ use crate::common::requests::{
     ConcreteResponse, ListOffsetsResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder,
 };
 use crate::common::utils::{ExponentialBackoff, LogContext};
-use crate::common::{KafkaError, KafkaFuture, Node, TopicPartition};
+use crate::common::{Error, KafkaFuture, Node, TopicPartition};
 use crate::list_offsets_response_data::{
     ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
 };
@@ -94,7 +94,7 @@ impl AdminApiHandler<TopicPartition, ()> for MockApiHandler {
         };
 
         let mut completed: HashMap<TopicPartition, ()> = HashMap::new();
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut unmapped: Vec<TopicPartition> = Vec::new();
 
         for topic in &response.data().topics {
@@ -104,8 +104,8 @@ impl AdminApiHandler<TopicPartition, ()> for MockApiHandler {
                 if error != Errors::None {
                     if matches!(error, Errors::NotLeaderOrFollower | Errors::LeaderNotAvailable) {
                         unmapped.push(topic_partition);
-                    } else if !KafkaError::new(error).is_retriable() {
-                        failed.insert(topic_partition, KafkaError::new(error));
+                    } else if !Error::new(error).is_retriable_error() {
+                        failed.insert(topic_partition, Error::new(error));
                     }
                 } else {
                     completed.insert(topic_partition, ());
@@ -571,12 +571,7 @@ async fn test_fatal_lookup_error() {
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].keys, HashSet::from([tp0.clone()]));
 
-    driver.on_failure(
-        NOW,
-        &specs[0].scope,
-        &specs[0].keys,
-        &KafkaError::new(Errors::UnknownServerError),
-    );
+    driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &Error::new(Errors::UnknownServerError));
     assert!(futures[&tp0].is_done());
     assert_eq!(futures[&tp0].get().await.unwrap_err().error(), Errors::UnknownServerError);
     assert!(driver.poll().is_empty());
@@ -592,7 +587,14 @@ fn test_retry_lookup_after_disconnect() {
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].keys, HashSet::from([tp0.clone()]));
 
-    driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &KafkaError::new(Errors::NetworkException));
+    // Java's `AdminApiDriver.onFailure` tests `instanceof DisconnectException`,
+    // which is its own class here — not the `NETWORK_EXCEPTION` wire code.
+    driver.on_failure(
+        NOW,
+        &specs[0].scope,
+        &specs[0].keys,
+        &Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected")),
+    );
     let retry_specs = driver.poll();
     assert_eq!(retry_specs.len(), 1);
     assert_eq!(retry_specs[0].keys, HashSet::from([tp0.clone()]));

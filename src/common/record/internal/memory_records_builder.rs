@@ -686,7 +686,7 @@ impl MemoryRecordsBuilder {
         let timestamp_delta = timestamp - self.base_timestamp.unwrap();
         let size_in_bytes = self
             .write_record(offset_delta, timestamp_delta, key, value, headers)
-            .expect("I/O exception when writing to the append stream, closing");
+            .expect("I/O error when writing to the append stream, closing");
         self.record_written(offset, timestamp, size_in_bytes);
     }
 

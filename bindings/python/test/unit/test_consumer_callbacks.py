@@ -45,9 +45,15 @@ from producer import KafkaError
 
 WAIT = 2.0
 
-# ConcurrentModification (and any other unmapped error) surfaces in the bindings
-# as UnknownServerError.
+# A generic Python exception raised from a listener (not a KafkaError subtype)
+# is genuinely unmapped and surfaces in the bindings as UnknownServerError.
 UNKNOWN_SERVER_ERROR = -1
+
+# The access guard rejects a concurrent op with LocalConcurrentModificationError,
+# which has its own dedicated FFI code rather than folding into
+# UnknownServerError -- see kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION
+# in src/ffi/common.rs.
+LOCAL_CONCURRENT_MODIFICATION = -2
 
 
 def _tps(partitions):
@@ -346,7 +352,7 @@ def test_seek_while_a_listener_callback_is_being_dispatched():
         # silently applied behind the in-flight rebalance.
         assert not rebalanced.is_set()
         assert outcome["error"] is not None
-        assert outcome["error"].code == UNKNOWN_SERVER_ERROR
+        assert outcome["error"].code == LOCAL_CONCURRENT_MODIFICATION
     finally:
         release.set()
         seeker.join(timeout=WAIT)
@@ -376,7 +382,7 @@ def test_consumer_method_from_listener_is_rejected_as_concurrent():
     c.rebalance([TopicPartition("t", 0)])
     assert seen["error"] is not None, \
         "a plain consumer call from a callback must be rejected"
-    assert seen["error"].code == UNKNOWN_SERVER_ERROR
+    assert seen["error"].code == LOCAL_CONCURRENT_MODIFICATION
     c.close()
 
 

@@ -35,7 +35,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::offset_commit_callback::OffsetCommitCallback;
 
@@ -60,7 +60,7 @@ struct PendingCallback {
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     /// Optional error captured at enqueue time. `None` for the interceptor
     /// invocation (Java passes `null`).
-    error: Option<KafkaError>,
+    error: Option<Error>,
 }
 
 /// Utility that helps the application thread (Rust: caller task) invoke
@@ -186,7 +186,7 @@ where
         &self,
         callback: Arc<dyn OffsetCommitCallback>,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        error: Option<KafkaError>,
+        error: Option<Error>,
     ) {
         let task = PendingCallback { kind: CallbackKind::User { callback }, offsets, error };
         let mut guard = match self.pending.lock() {
@@ -276,7 +276,7 @@ mod tests {
     }
 
     /// Recorded invocation entry — offsets + optional error.
-    type RecordedCall = (HashMap<TopicPartition, OffsetAndMetadata>, Option<KafkaError>);
+    type RecordedCall = (HashMap<TopicPartition, OffsetAndMetadata>, Option<Error>);
 
     /// Test callback that records each `on_complete` invocation.
     struct RecordingCallback {
@@ -298,7 +298,7 @@ mod tests {
 
     #[async_trait]
     impl OffsetCommitCallback for RecordingCallback {
-        async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+        async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
             self.invocations.fetch_add(1, Ordering::SeqCst);
             self.recorded.lock().unwrap().push((offsets.clone(), error.cloned()));
         }

@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::{KafkaError, KafkaFuture, TopicPartition};
+use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The result of `Admin::list_offsets`.
 ///
@@ -43,12 +43,9 @@ impl ListOffsetsResult {
     ///
     /// Returns an error (invalid argument) if the offset for `partition` was not
     /// attempted, mirroring Java's `IllegalArgumentException`.
-    pub fn partition_result(
-        &self,
-        partition: &TopicPartition,
-    ) -> Result<KafkaFuture<ListOffsetsResultInfo>, KafkaError> {
+    pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<ListOffsetsResultInfo>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
-            KafkaError::illegal_argument(format!("List Offsets for partition \"{partition}\" was not attempted"))
+            Error::local_illegal_argument(format!("List Offsets for partition \"{partition}\" was not attempted"))
         })
     }
 
