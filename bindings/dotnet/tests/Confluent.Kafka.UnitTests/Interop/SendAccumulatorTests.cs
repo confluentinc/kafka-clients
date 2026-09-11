@@ -1803,11 +1803,19 @@ public sealed class SendAccumulatorTests
 
         /// <summary>
         /// Appends one record, queueing it behind the backpressure bound if it is full — through the
-        /// <b>same two entry points</b> <c>NativeProducer.SendViaPump</c> uses, so the routing rule
-        /// itself is production's (DoD §12; M11/P3.2 §3.3). This fixture used to re-implement
-        /// "permit-then-<c>Submit</c>, else await-then-<c>Submit</c>", which would have left the
-        /// ordering tests below proving a property of the fixture rather than of the code.
+        /// <b>same single entry point</b> <c>NativeProducer.SendViaPump</c> uses, so the admission
+        /// bound and the routing rule are both production's (DoD §12; M11/P3.2 §3.3, M11/P3.3 §7).
+        /// This fixture used to re-implement "permit-then-<c>Submit</c>, else
+        /// await-then-<c>Submit</c>", which would have left the ordering tests below proving a
+        /// property of the fixture rather than of the code.
         /// </summary>
+        /// <remarks>
+        /// ⚠ <b>It can BLOCK the calling thread</b> since M11/P3.3, exactly as production's
+        /// <c>Send</c> does: a saturated admission bound parks the caller for up to
+        /// <c>max.block.ms</c>. Every test that saturates the bound on purpose must therefore drive
+        /// this from its own <see cref="Task"/> (or supply a short <c>maxBlockMs</c>) rather than
+        /// from the xUnit test thread — see <c>AppendOneFromAnotherThread</c>.
+        /// </remarks>
         internal Task<RecordMetadata> AppendOne(byte tag, IDeliveryCallback? callback = null) =>
             AppendOne(tag, callback, CancellationToken.None, out _);
 
@@ -1826,13 +1834,38 @@ public sealed class SendAccumulatorTests
             completion = NewCompletion();
             DeliveryRegistration? delivery = NewDelivery(callback);
 
-            if (!Accumulator.TrySubmitInline(record, completion, delivery))
-            {
-                Accumulator.SubmitQueued(record, completion, delivery, cancellationToken);
-            }
+            // ONE call, production's own: SubmitAdmitted takes the admission permit (blocking when
+            // the bound is saturated) and then makes the inline-vs-queued routing decision. The
+            // fixture deliberately holds no copy of either rule.
+            Accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
 
             return completion.Task;
         }
+
+        /// <summary>
+        /// <see cref="AppendOne(byte, IDeliveryCallback?)"/> issued from a <b>separate</b>
+        /// <see cref="Task"/>, so a test can saturate the admission bound and then observe that the
+        /// next send <em>blocks</em> without the xUnit test thread being the one that parks.
+        /// </summary>
+        /// <remarks>
+        /// The <b>outer</b> task is the admission observable: it completes when
+        /// <c>SubmitAdmitted</c> returns, or faults with whatever admission threw — which is the
+        /// whole contract under test. The <b>inner</b> task is the record's own delivery future,
+        /// and exists only when admission succeeded.
+        /// <para>
+        /// <see cref="TaskFactory.StartNew{TResult}(Func{TResult}, CancellationToken, TaskCreationOptions, TaskScheduler)"/>
+        /// rather than <see cref="Task.Run(Func{Task})"/> deliberately: <c>Task.Run</c> would
+        /// <em>unwrap</em> the inner task, so awaiting it would wait for the record's delivery
+        /// instead of for its admission — the two are exactly what this helper must keep apart.
+        /// </para>
+        /// </remarks>
+        internal Task<Task<RecordMetadata>> AppendOneFromAnotherThread(
+            byte tag, CancellationToken cancellationToken) =>
+            Task.Factory.StartNew(
+                () => AppendOne(tag, callback: null, cancellationToken, out _),
+                CancellationToken.None,
+                TaskCreationOptions.DenyChildAttach,
+                TaskScheduler.Default);
 
         /// <summary>
         /// <b>The injection for the batch thread's own failure path</b>, and the ONE place this
@@ -2039,9 +2072,10 @@ public sealed class SendAccumulatorTests
             callback is null ? null : new DeliveryRegistration(callback, Topic, 0);
 
         /// <summary>
-        /// Attempts one append <b>inline</b>, through production's own routing entry point; null
-        /// when it was refused — because the bound is full, <b>or</b> because a submission is
-        /// already queued ahead of it (M11/P3.2 §F1: the second condition is the ordering fix, and
+        /// Attempts one append <b>inline and without ever blocking</b>, through production's own
+        /// non-blocking entry point; null when it was refused — because the admission bound is
+        /// saturated, because the backpressure bound is full, <b>or</b> because a submission is
+        /// already queued ahead of it (M11/P3.2 §F1: the third condition is the ordering fix, and
         /// this probe reports it the same way).
         /// </summary>
         internal Task<RecordMetadata>? TryAppendOne(byte tag)
@@ -2049,7 +2083,7 @@ public sealed class SendAccumulatorTests
             SerializedProducerRecord record = NewRecord(tag);
             TaskCompletionSource<RecordMetadata> completion = NewCompletion();
 
-            return Accumulator.TrySubmitInline(record, completion, delivery: null)
+            return Accumulator.TryAdmitAndSubmitInline(record, completion, delivery: null)
                 ? completion.Task
                 : null;
         }

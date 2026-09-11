@@ -139,9 +139,16 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
     private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
-    private NativeProducer(SafeProducerHandle handle)
+    // The config map this producer was built from, or null for a MockProducer (which has none).
+    // Kept for exactly ONE reason: SendAccumulatorSettings reads `max.block.ms` out of it to bound
+    // the send-admission wait (M11/P3.3). It is not consulted anywhere else — the core owns every
+    // other config key — and it is the caller's own dictionary, read-only and never mutated here.
+    private readonly IReadOnlyDictionary<string, string>? _config;
+
+    private NativeProducer(SafeProducerHandle handle, IReadOnlyDictionary<string, string>? config)
     {
         _handle = handle;
+        _config = config;
     }
 
     /// <summary>
@@ -238,7 +245,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 "kafka_producer_KafkaProducer_new returned a null handle without an error.");
         }
 
-        return new NativeProducer(handle);
+        // The config is retained so the send accumulator can read `max.block.ms` from it (§_config).
+        return new NativeProducer(handle, config);
     }
 
     /// <summary>
@@ -255,7 +263,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // Non-fallible: MockProducer_new always returns a valid owned handle,
         // already wrapped by the marshaller (M2/P2). No out_error, no IsInvalid guard.
         SafeProducerHandle handle = NativeMethods.MockProducerNew(autoComplete);
-        return new NativeProducer(handle);
+
+        // No config map: MockProducer_new takes none, so the accumulator's `max.block.ms` falls
+        // back to the Kafka default (60 s), exactly as it does for a real producer that omits it.
+        return new NativeProducer(handle, config: null);
     }
 
     /// <summary>The submit shape shared by the two void-result async peripherals.</summary>
@@ -414,12 +425,28 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <b>M11/P3.2 — records reach <c>send_batch</c> in the order a caller called this method</b>
     /// (§F1). Deferring the append opened a window in which a send that found capacity could
     /// overtake one still waiting for it; the routing now runs through
-    /// <see cref="SendAccumulator.TrySubmitInline"/> /
-    /// <see cref="SendAccumulator.SubmitQueued"/>, which refuse the inline path while anything is
-    /// queued ahead and append everything queued from a single FIFO submitter. Java documents
+    /// <see cref="SendAccumulator.SubmitAdmitted"/> — the accumulator's own
+    /// <c>TrySubmitInline</c> / <c>SubmitQueued</c> pair, private since M11/P3.3 — which refuses the
+    /// inline path while anything is
+    /// queued ahead and appends everything queued from a single FIFO submitter. Java documents
     /// ordering as preserved in the default configuration
     /// (<c>ProducerConfig.java:274</c>), and the reorder happened <em>before</em> the core saw the
     /// records, so no core-side setting could have restored it.
+    /// </para>
+    /// <para>
+    /// <b>M11/P3.3 — admission is bounded, and this method BLOCKS the calling thread when the bound
+    /// is saturated.</b> Once the producer holds
+    /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> records that have been accepted but
+    /// not yet handed to the core, this call parks the caller for up to the configured
+    /// <c>max.block.ms</c> and then throws a <see cref="KafkaException"/>. That is Java's own shape
+    /// — <c>KafkaProducer.send()</c> blocks up to <c>max.block.ms</c> once the accumulator is full —
+    /// and it is the only thing that throttles: the caller is handed the record's delivery
+    /// <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2 deviation DV-1), so an
+    /// asynchronous admission wait bounds a container while the accepted population grows without
+    /// limit (measured: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB). The bound covers
+    /// <b>both</b> submission routes, because capping one container only relocates the pile-up
+    /// (§2.3, measured). The <b>sync</b> <see cref="Send"/> has no such window — it hands the record
+    /// to the core inside the call and blocks on the core's own <c>buffer.memory</c>.
     /// </para>
     /// </summary>
     /// <remarks>
@@ -461,9 +488,19 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// pump or accumulator that could not be started, and the accumulator refusing an append because
     /// teardown closed it.
     /// </param>
-    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
+    /// <param name="cancellationToken">
+    /// Best-effort cancellation of the .NET wait (no native abort). It also aborts the admission
+    /// wait above, in which case the record is <b>not</b> sent and the cancellation is reported
+    /// synchronously, carrying this token.
+    /// </param>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was already canceled, or fired while this send was
+    /// blocked on the admission bound.
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// The admission bound stayed saturated for the whole of the configured <c>max.block.ms</c>.
+    /// </exception>
     internal Task<RecordMetadata> SendViaPump(
         SerializedProducerRecord record,
         DeliveryRegistration? delivery,
@@ -543,32 +580,38 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // ⚠ THIS METHOD MUST NOT BECOME `async`. It has to stay synchronous so a serializer throw
         // (raised above this carrier, before the call) and the precondition throws above still
         // surface synchronously rather than as a faulted Task — the reason
-        // AsyncKafkaProducer.SendValidated is deliberately not `async` either. Neither route yields
-        // here: the queued route returns as soon as the submission is queued, and the waiting
-        // happens on the accumulator's submitter loop.
+        // AsyncKafkaProducer.SendValidated is deliberately not `async` either.
+        //
+        // ⚠ AND THE ADMISSION BOUND IS WHY THAT MATTERS RATHER THAN MERELY BEING TRUE (M11/P3.3).
+        // SubmitAdmitted can now BLOCK this caller's thread, for up to max.block.ms, when the
+        // producer already holds MaxAdmittedRecords accepted-but-unsent records. That is the fix:
+        // the caller does not await admission (it is handed the record's delivery Task), so an
+        // ASYNCHRONOUS admission wait throttles nobody and just parks continuations — measured at
+        // 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape this replaces measured
+        // 2.04 GiB / p50 3.5 s. A blocking SemaphoreSlim.Wait(timeout, token) is a genuine
+        // synchronous primitive, NOT an async operation being blocked on, so it is not the
+        // sync-over-async footgun ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4
+        // draws for the consumer's sync Seek. Making this method `async` to "await admission" would
+        // break the synchronous-throw contract above AND reintroduce the defect.
         try
         {
-            if (!accumulator.TrySubmitInline(record, completion, delivery))
-            {
-                accumulator.SubmitQueued(record, completion, delivery, cancellationToken);
-            }
+            accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
         }
         catch (Exception)
         {
-            // TrySubmitInline can throw ObjectDisposedException when teardown closed the
-            // accumulator between the guards above and the append. The throw is the documented
-            // outcome (nothing reached the core, so it stays SYNCHRONOUS — D5), but it leaves
-            // `completion` unsettled, so the disposing continuation chained to it never runs.
-            // Release the registration here instead; the queued route routes the same failure
-            // through `completion` and so disposes it that way.
+            // Three synchronous failures reach here, all of them "nothing reached the core" and so
+            // all of them firing no delivery callback (D5):
             //
-            // Note which failures reach here, since the routing narrowed it: only a send that took
-            // the INLINE route can fail synchronously. A send routed to the queue while teardown is
-            // closing the accumulator is faulted through `completion` instead — the pre-queue slow
-            // path did exactly the same for the same state, so the only shift is that "closed AND a
-            // submission already queued" now takes the async form where a free permit would once
-            // have made it synchronous. Both surface the identical ObjectDisposedException, and the
-            // ThrowIfClosed guard above still makes the ordinary closed-producer case synchronous.
+            //   * the admission bound stayed saturated for max.block.ms -> KafkaException;
+            //   * `cancellationToken` fired while this send was blocked on admission ->
+            //     OperationCanceledException carrying the CALLER's token;
+            //   * teardown closed the accumulator (either while blocked on admission, or between
+            //     the guards above and an inline append) -> ObjectDisposedException.
+            //
+            // Each leaves `completion` unsettled — or settled only by the registration below —
+            // so the disposing continuation chained to it may never run. Release the registration
+            // here instead; a send routed to the QUEUE and failed there is faulted through
+            // `completion` and so disposes it that way.
             cancellationRegistration.Dispose();
             throw;
         }
@@ -963,8 +1006,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // closing producer — teardown would never join its thread).
             ThrowIfClosed();
             SendCompletionPump pump = _pump ??= new SendCompletionPump();
+
+            // The config is passed so the accumulator's admission wait is bounded by the user's own
+            // `max.block.ms` rather than by a binding-invented number (M11/P3.3); every other
+            // setting still comes from the environment.
             return _accumulator ??= new SendAccumulator(
-                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment());
+                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment(_config));
         }
     }
 

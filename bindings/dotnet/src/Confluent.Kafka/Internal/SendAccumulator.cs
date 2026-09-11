@@ -17,6 +17,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -68,6 +69,19 @@ namespace Confluent.Kafka.Internal;
 /// (DoD §12).
 /// </para>
 /// <para>
+/// <b>Admission is BOUNDED, and exceeding it blocks the calling thread</b> (M11/P3.3,
+/// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> / <see cref="SubmitAdmitted"/>). The
+/// ordering fix above made the submission queue <em>the</em> path under sustained load — once one
+/// send is queued, every later one is too — and nothing limited its depth, so the client accepted
+/// an unbounded number of sends (measured: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB,
+/// against 41 ms / 239 MB immediately before). Capping the queue alone would have moved the pile
+/// rather than removed it: with the queue path bypassed the identical bloat reappeared in the node
+/// chain (§2.3). So the bound sits on <em>admission</em>, above the routing decision, covering both
+/// routes; and it is <b>synchronous</b>, because the caller never awaits admission — it is handed
+/// the record's delivery <see cref="Task"/> and moves on (deviation DV-1), so an asynchronous
+/// admission wait bounds a container and throttles nobody.
+/// </para>
+/// <para>
 /// ⚠ <b>The submitter is NOT a third background thread.</b> It is a task-based loop, started by
 /// whichever caller queued the first submission, with <b>at most one</b> in flight per accumulator,
 /// and it does not poll — it awaits a backpressure permit and appends. <c>ffi-marshalling.md</c>
@@ -108,7 +122,35 @@ internal sealed class SendAccumulator
     // full, applied here at batch granularity in front of the Rust accumulator"
     // (_confluentkafka.c:21-26). Unlike Option C's native block inside the coarse FFI mutex, this is
     // a MANAGED, cancellable wait, which is what lets teardown wake a blocked sender (§2.2).
+    //
+    // ⚠ It is NOT the admission bound, and after M11/P3.2 it is not a bound on what the client has
+    // ACCEPTED either: a send this refuses is queued (SubmitQueued) and its Send returns anyway, so
+    // the accepted-but-unsent population grew without limit. _admission below is what bounds that.
     private readonly SemaphoreSlim _space;
+
+    // THE ADMISSION BOUND (M11/P3.3): one permit per record ACCEPTED by a routing entry point — and
+    // therefore returned from the caller's Send — that has not yet been taken by the batch thread.
+    // It sits ABOVE the routing decision, so it covers BOTH routes; capping only the submission
+    // queue would relocate the pile-up into the node chain, which was measured rather than argued
+    // (§2.3: with the queue path bypassed, p50 3,436 ms / RSS 2.04 GiB — indistinguishable from the
+    // unbounded shape).
+    //
+    // Saturating it makes the CALLING THREAD block, bounded by max.block.ms. That is the whole
+    // point and it is Java's shape (KafkaProducer.send() blocks once buffer.memory is full); an
+    // asynchronous admission wait does not throttle anyone, because the caller does not await
+    // admission — it is handed the record's delivery Task and moves on (deviation DV-1). Measured
+    // twice: M11/P6's `await _inflight.WaitAsync` gave 63.5k msg/s / 3.0 GB / p50 10,001 ms, and
+    // M11/P3.2's unbounded queue gave 583k / 2.04 GiB / p50 3,524 ms, against 537k / 239 MB / 41 ms
+    // immediately before it. The synchronous wait is what throttles (M11/P7: 591.6k / 127 MiB /
+    // p50 7 ms).
+    //
+    // ⚠ NO FAIR PRIMITIVE IS NEEDED, and adding one would be out of scope. SemaphoreSlim documents
+    // no waiter ordering, which would matter for an ASYNC admission (one caller can park many
+    // sends) and is moot for a BLOCKING one: a blocked caller has at most ONE send in flight, so
+    // whichever waiter the runtime wakes, a single caller's own sends cannot invert. Per-caller
+    // order is all Java promises (ProducerConfig.java:274) and all M11/P3.2 claimed, and the FIFO
+    // submission queue still carries it independently.
+    private readonly SemaphoreSlim _admission;
 
     // Cancelled by Stop() so a Send parked on _space is released instead of pinning teardown behind
     // it (§3.8 step 2, which must precede closing the accumulator), and — unconditionally — by
@@ -117,6 +159,17 @@ internal sealed class SendAccumulator
     // Never disposed: a
     // CancellationTokenSource with no timer holds no unmanaged resource, and disposing one while a
     // linked registration is being torn down is its own hazard.
+    //
+    // ⚠ SHARED WITH _admission SINCE M11/P3.3, deliberately — this gate is the accumulator's
+    // "capacity is never coming" signal, and both bounds need releasing on exactly the same two
+    // events (teardown, and the batch thread dying). One CTS means there is no SECOND piece of
+    // teardown wiring to forget, which is the phase's own top risk (PLAN §11 risk 2): the two
+    // Cancel() call sites below already exist and are already covered by
+    // Backpressure_TeardownCancelsTheGate_… and BatchThreadFailure_ReleasesASendWaitingForSpace.
+    // The two waits do differ in what they DO when released — a queued submission takes the
+    // teardown bypass and is still sent (its Send already returned), while a caller blocked on
+    // ADMISSION throws, because its Send has not returned yet and "nothing was sent" is the honest
+    // answer — but that is handled at each wait site, not by a second token.
     private readonly CancellationTokenSource _spaceGate = new CancellationTokenSource();
 
     // The chain the batch thread TOOK from the accumulator and has not finished sending yet.
@@ -175,6 +228,18 @@ internal sealed class SendAccumulator
     private Node? _tail;      // the node being filled (anchor: last_accumulating_batch)
     private Node? _spare;     // one fully-settled node kept for reuse (see RecycleNode)
     private int _accumulated; // records appended but not yet taken by the batch thread
+
+    // ALL records appended but not yet taken — _accumulated's twin, minus the permit-backed
+    // qualifier. The two differ by exactly the teardown-bypass appends (SubmitCore's holdsPermit:
+    // false), which are in the chain and will be sent but took no _space permit. Written only under
+    // _gate; read lock-free (Volatile) by AdmittedRecordCount.
+    //
+    // It exists because the ADMISSION permit is owed back for every record that reaches a node,
+    // bypassed or not, whereas _accumulated deliberately excludes the bypassed ones so
+    // TakeChainLocked does not over-release _space. Folding the two would break one bound or the
+    // other: counting bypassed records in _accumulated is a SemaphoreFullException on the batch
+    // thread, and excluding them from this one leaks an admission permit per teardown-flushed send.
+    private int _chainRecords;
     private bool _closed;     // no further appends; the thread drains once more and exits
     private bool _forceDrain; // a DrainPending caller is waiting; skip the rest of the window
     private bool _draining;   // a taken chain is being sent right now (outside the lock)
@@ -198,6 +263,7 @@ internal sealed class SendAccumulator
         _settings = settings;
         _windowTicks = (long)(Stopwatch.Frequency * (settings.BatchWindowMs / 1000.0));
         _space = new SemaphoreSlim(settings.MaxAccumulatedRecords, settings.MaxAccumulatedRecords);
+        _admission = new SemaphoreSlim(settings.MaxAdmittedRecords, settings.MaxAdmittedRecords);
 
         _thread = new Thread(RunLoop)
         {
@@ -309,6 +375,256 @@ internal sealed class SendAccumulator
     internal int QueuedSubmissionCount => Volatile.Read(ref _queued);
 
     /// <summary>
+    /// <b>The admitted population</b> (M11/P3.3): records whose <c>Send</c> has returned to the
+    /// caller but which the batch thread has not taken yet — the sum of the two places such a
+    /// record can be sitting, the submission queue and the node chain. The quantity
+    /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> bounds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Derived from production's own bookkeeping, not from the gate.</b> Both terms are
+    /// maintained by the submission and append paths and neither reads
+    /// <see cref="_admission"/>, so this is a genuine witness rather than a restatement of the
+    /// semaphore: remove the admission wait and both terms keep growing. <c>QueuedSubmissionCount</c>
+    /// alone is NOT the quantity of interest — §2.3 measured the identical bloat with the queue
+    /// path bypassed entirely, all of it in the node chain.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>It can read one HIGHER than the bound, transiently, and that is the accounting rather
+    /// than a breach.</b> A submission the single submitter has just appended is counted in
+    /// <c>_chainRecords</c> before <see cref="ReleaseQueuedSlot"/> accounts it out of
+    /// <c>_queued</c>, so it is double-counted for that window. There is at most <b>one</b>
+    /// submitter (M11/P3.2's exclusive token), so the overshoot is at most one record. Reading
+    /// lower is impossible: the increment always precedes the decrement.
+    /// </para>
+    /// </remarks>
+    internal int AdmittedRecordCount => Volatile.Read(ref _queued) + Volatile.Read(ref _chainRecords);
+
+    /// <summary>
+    /// <b>The production send path's single entry point (M11/P3.3):</b> takes an admission permit —
+    /// <b>blocking the calling thread</b> when the bound is saturated — and then routes the record
+    /// through <see cref="TrySubmitInline"/> / <see cref="SubmitQueued"/>. On return the record has
+    /// been accepted (appended, or queued behind the FIFO); on a throw nothing has been appended,
+    /// pinned, or charged against either bound.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Admission and routing are ONE call, deliberately.</b> The bound has to be taken above the
+    /// routing decision (§2.3 — it covers both routes), and if the two were separate calls the test
+    /// fixture would carry its own copy of "admit, then route", which is the shape DoD §12 exists
+    /// to forbid: a fixture that can drift from production is a fixture the ordering and bound
+    /// tests are really about. Every caller — production's <c>SendViaPump</c> and the unit-test
+    /// harness alike — reaches the bound only through here.
+    /// </para>
+    /// <para>
+    /// <b>It stays synchronous, and that is the fix.</b> An <c>async</c> admission wait cannot
+    /// throttle: the caller is handed the record's delivery <see cref="Task"/> and does not await
+    /// admission (deviation DV-1), so a parked continuation is just another unbounded container —
+    /// measured as such, twice (see <see cref="_admission"/>). A blocking
+    /// <see cref="SemaphoreSlim.Wait(int, CancellationToken)"/> is a genuine synchronous primitive,
+    /// not an asynchronous operation being blocked on, so it is <em>not</em> the sync-over-async
+    /// footgun ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4 draws for the
+    /// consumer's sync <c>Seek</c>. It is also what lets <c>SendViaPump</c> stay non-<c>async</c>,
+    /// which its own comment requires.
+    /// </para>
+    /// <para>
+    /// <b>Ownership of the permit transfers with the record.</b> Once a route has accepted it, the
+    /// permit is given back by whichever path the record leaves the accumulator through — the batch
+    /// thread's take (<see cref="TakeChainLocked"/>), a settled-without-appending submission
+    /// (<see cref="ReleaseQueuedSlot"/>), or <see cref="SubmitQueued"/>'s sealed refusal. Only the
+    /// throwing inline route is settled here.
+    /// </para>
+    /// </remarks>
+    /// <param name="record">The already-serialized record to accept.</param>
+    /// <param name="completion">The record's awaiter.</param>
+    /// <param name="delivery">The record's delivery-callback carrier, or <see langword="null"/>.</param>
+    /// <param name="cancellationToken">
+    /// The caller's token. It aborts the admission wait, reporting <b>with the caller's own
+    /// token</b>, and the record is not sent.
+    /// </param>
+    /// <exception cref="ObjectDisposedException">
+    /// The producer is closing — nothing was appended.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> fired while this send was waiting to be admitted.
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// The admission bound stayed saturated for the whole of <c>max.block.ms</c>.
+    /// </exception>
+    internal void SubmitAdmitted(
+        in SerializedProducerRecord record,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery,
+        CancellationToken cancellationToken)
+    {
+        Admit(cancellationToken);
+
+        bool accepted = false;
+        try
+        {
+            if (!TrySubmitInline(record, completion, delivery))
+            {
+                SubmitQueued(record, completion, delivery, cancellationToken);
+            }
+
+            accepted = true;
+        }
+        finally
+        {
+            if (!accepted)
+            {
+                // Only the INLINE route can get here: TrySubmitInline throws
+                // ObjectDisposedException when teardown closed the accumulator between the
+                // admission above and the append. SubmitQueued does not throw — it settles a
+                // sealed-queue refusal itself, and gives the permit back at that site.
+                ReleaseAdmission(1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SubmitAdmitted"/>'s non-blocking probe: reports <see langword="false"/> — having
+    /// appended, pinned and charged nothing — when either the admission bound or the inline routing
+    /// refuses. The <b>only</b> other way into the accumulator, so admission accounting cannot be
+    /// bypassed by taking the inline path directly.
+    /// </summary>
+    /// <remarks>
+    /// It exists for the tests that assert a refusal (a saturated bound, or a submission queued
+    /// ahead) without wanting the blocking wait that the real send path takes. Keeping it here
+    /// rather than letting a fixture call <see cref="TrySubmitInline"/> itself is what keeps the
+    /// permit arithmetic whole: an append that skipped admission would make the batch thread's next
+    /// <see cref="ReleaseAdmission"/> over-release.
+    /// </remarks>
+    internal bool TryAdmitAndSubmitInline(
+        in SerializedProducerRecord record,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery)
+    {
+        if (!_admission.Wait(0))
+        {
+            return false;
+        }
+
+        bool accepted = false;
+        try
+        {
+            accepted = TrySubmitInline(record, completion, delivery);
+            return accepted;
+        }
+        finally
+        {
+            if (!accepted)
+            {
+                ReleaseAdmission(1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Takes one admission permit, waiting for up to
+    /// <see cref="SendAccumulatorSettings.MaxBlockMs"/> if the bound is saturated.
+    /// </summary>
+    /// <remarks>
+    /// The <see cref="SemaphoreSlim.Wait(int)"/><c>(0)</c> fast path is the steady-state send, and
+    /// it is <b>allocation-free</b> — the DoD §10 send-path budget must not move. Everything that
+    /// allocates (the linked token source) lives in <see cref="AdmitSlow"/>, which runs only when
+    /// the bound is already full.
+    /// </remarks>
+    private void Admit(CancellationToken cancellationToken)
+    {
+        if (_admission.Wait(0))
+        {
+            return;
+        }
+
+        AdmitSlow(cancellationToken);
+    }
+
+    /// <summary>
+    /// The blocking half of <see cref="Admit"/>: parks the calling thread until a permit frees, the
+    /// caller cancels, teardown cancels the gate, or <c>max.block.ms</c> elapses.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Java's shape, including the exception on expiry.</b> <c>KafkaProducer.send()</c> blocks up
+    /// to <c>max.block.ms</c> waiting for accumulator memory and then throws; so does this. The
+    /// exception is the binding's flat <see cref="KafkaException"/> (ffi §A5 — there is no typed
+    /// hierarchy yet), with a message that names the knob and the bound so an operator can act on
+    /// it.
+    /// </para>
+    /// <para>
+    /// <b>Teardown wins over the caller's token when both fired</b>, matching
+    /// <see cref="WaitForSpaceAsync"/>: the producer is going away, so "closed" is the more accurate
+    /// answer than "you cancelled". Otherwise the cancellation is reported with the
+    /// <em>caller's</em> token — never the linked one — so the idiomatic
+    /// <c>catch (OperationCanceledException e) when (e.CancellationToken == ct)</c> matches, exactly
+    /// as <see cref="QueuedSubmission"/> requires for the queued route.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Progress depends on the batch thread, which is a real thread — but refilling the chain
+    /// depends on the submitter, which is a pool task.</b> Permits are returned when the batch
+    /// thread takes the chain, so a saturated bound with a NON-EMPTY chain always drains. A
+    /// saturated bound whose records are all still QUEUED needs the submitter to append them first,
+    /// and on a pool starved by blocked senders that can stall — which is why this wait is bounded
+    /// rather than infinite, and why its expiry is a defined outcome (an error the caller can see)
+    /// rather than a hang. <see cref="FlushQueuedSubmissions"/> carries the identical dependency and
+    /// the identical mitigation.
+    /// </para>
+    /// </remarks>
+    private void AdmitSlow(CancellationToken cancellationToken)
+    {
+        CancellationToken gate = _spaceGate.Token;
+        bool admitted;
+        try
+        {
+            if (!cancellationToken.CanBeCanceled)
+            {
+                admitted = _admission.Wait(_settings.MaxBlockMs, gate);
+            }
+            else
+            {
+                using CancellationTokenSource linked =
+                    CancellationTokenSource.CreateLinkedTokenSource(gate, cancellationToken);
+                admitted = _admission.Wait(_settings.MaxBlockMs, linked.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (gate.IsCancellationRequested)
+            {
+                throw ClosedDuringAdmission();
+            }
+
+            // Re-reported with the CALLER's token: the throw above carries the linked token, which
+            // no caller can compare against.
+            cancellationToken.ThrowIfCancellationRequested();
+            throw;
+        }
+
+        if (!admitted)
+        {
+            throw AdmissionTimedOut();
+        }
+    }
+
+    /// <summary>
+    /// Returns <paramref name="count"/> admission permits — the counterpart of
+    /// <see cref="Admit"/>, called wherever a record leaves the admitted population. A no-op for
+    /// zero, because <see cref="SemaphoreSlim.Release(int)"/> rejects a zero count.
+    /// </summary>
+    /// <remarks>
+    /// Never called with <see cref="_gate"/> held, for <see cref="ReleaseSpace"/>'s reason: a
+    /// release can make a blocked caller runnable, and that caller appends.
+    /// </remarks>
+    private void ReleaseAdmission(int count)
+    {
+        if (count > 0)
+        {
+            _admission.Release(count);
+        }
+    }
+
+    /// <summary>
     /// <b>The routing decision, slice 1 of the M11/P3.2 §F1 ordering fix.</b> Appends
     /// <paramref name="record"/> inline — on the caller's thread, before returning — and reports
     /// <see langword="true"/>; or reports <see langword="false"/>, in which case the caller must
@@ -343,12 +659,21 @@ internal sealed class SendAccumulator
     /// permit is taken only to be given back), and it is one volatile read on the steady-state
     /// send path (DoD §10 — no new allocation).
     /// </para>
+    /// <para>
+    /// ⚠ <b><see langword="private"/> since M11/P3.3.</b> It assumes its caller already holds an
+    /// <em>admission</em> permit for this record, so reaching it from outside would append a record
+    /// the admission bound never charged — and the batch thread's next
+    /// <see cref="ReleaseAdmission"/> would then over-release, i.e. exactly the
+    /// <see cref="SemaphoreFullException"/> the fixture's own <c>AppendWithoutAPermit</c> injects on
+    /// purpose. The two ways in are <see cref="SubmitAdmitted"/> (blocking) and
+    /// <see cref="TryAdmitAndSubmitInline"/> (non-blocking).
+    /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">
     /// The producer is closing — nothing was appended (the same synchronous outcome
     /// <see cref="Submit"/> produces, propagated rather than swallowed).
     /// </exception>
-    internal bool TrySubmitInline(
+    private bool TrySubmitInline(
         in SerializedProducerRecord record,
         TaskCompletionSource<RecordMetadata> completion,
         DeliveryRegistration? delivery)
@@ -414,8 +739,14 @@ internal sealed class SendAccumulator
     /// <see cref="_queued"/> strictly decreasing from the seal onward and therefore makes
     /// <see cref="Stop"/>'s flush wait terminate.
     /// </para>
+    /// <para>
+    /// ⚠ <b><see langword="private"/> since M11/P3.3</b>, for <see cref="TrySubmitInline"/>'s
+    /// reason: it assumes an admission permit is already held for this record, and it is the site
+    /// that gives that permit back on the one path where the submission is refused rather than
+    /// queued.
+    /// </para>
     /// </remarks>
-    internal void SubmitQueued(
+    private void SubmitQueued(
         in SerializedProducerRecord record,
         TaskCompletionSource<RecordMetadata> completion,
         DeliveryRegistration? delivery,
@@ -438,6 +769,12 @@ internal sealed class SendAccumulator
             // Settled outside the lock: the accumulator's one call-out into user code runs from a
             // completion, and nothing that can run user code belongs under _gate.
             completion.TrySetException(ClosedDuringBackpressure());
+
+            // The admission permit goes back HERE, and only here, for this outcome. This is the one
+            // refusal that does NOT surface as a throw to SubmitAdmitted (the caller's awaitable is
+            // faulted instead), so its `finally` cannot see it — and it never entered the queue, so
+            // ReleaseQueuedSlot cannot either.
+            ReleaseAdmission(1);
             return;
         }
 
@@ -485,16 +822,24 @@ internal sealed class SendAccumulator
         {
             while (_submissions.TryDequeue(out QueuedSubmission submission))
             {
+                bool appended = false;
                 try
                 {
-                    await AppendQueuedAsync(submission).ConfigureAwait(false);
+                    appended = await AppendQueuedAsync(submission).ConfigureAwait(false);
                 }
                 finally
                 {
                     // This submission is no longer queued-or-appending. Under _gate, because the
                     // idle predicate reads the count and the drain waiters must be released the
                     // moment the second stage empties.
-                    ReleaseQueuedSlot();
+                    //
+                    // `appended` decides who owes the ADMISSION permit back (M11/P3.3): an appended
+                    // record is in the chain and the batch thread's take releases it, while one
+                    // that cancelled or faulted never reaches a node, so it is released here. A
+                    // false from a pathological throw out of AppendQueuedAsync (which documents
+                    // itself as never throwing) is the safe direction — it can only precede
+                    // SubmitCore, whose success is the last thing that method does.
+                    ReleaseQueuedSlot(appended);
                 }
             }
 
@@ -580,6 +925,15 @@ internal sealed class SendAccumulator
     /// never structure. M11/P3.2 PLAN §1.3.)
     /// </para>
     /// <para>
+    /// <b>The <see langword="bool"/> it returns is the admission permit's owner (M11/P3.3):</b>
+    /// <see langword="true"/> means the record is in the node chain and the batch thread's take
+    /// will release its admission permit; <see langword="false"/> means it never got there and
+    /// <see cref="ReleaseQueuedSlot"/> releases it instead. It is exactly "did
+    /// <see cref="SubmitCore"/> return normally", which is why it is computed here rather than
+    /// inferred by the loop — <see cref="SubmitCore"/>'s refusal is swallowed into this method's own
+    /// <c>catch</c>, so the loop cannot see it.
+    /// </para>
+    /// <para>
     /// Two things the bypass does <b>not</b> change. It ignores the <em>bound</em>, never
     /// <c>_closed</c>: <see cref="Append"/>'s closed check still refuses, which is what keeps a
     /// late append from being stranded in a chain whose batch thread has already taken its final
@@ -588,7 +942,11 @@ internal sealed class SendAccumulator
     /// semantics for a cancelled parked send (§3.4 item 4), unchanged.
     /// </para>
     /// </remarks>
-    private async Task AppendQueuedAsync(QueuedSubmission submission)
+    /// <returns>
+    /// <see langword="true"/> if the record was appended (so the chain now owns its admission
+    /// permit); <see langword="false"/> if it was cancelled or faulted instead.
+    /// </returns>
+    private async Task<bool> AppendQueuedAsync(QueuedSubmission submission)
     {
         CancellationToken cancellationToken = submission.CancellationToken;
         try
@@ -637,15 +995,17 @@ internal sealed class SendAccumulator
                 }
 
                 submission.Completion.TrySetCanceled(cancellationToken);
-                return;
+                return false;
             }
 
             SubmitCore(
                 submission.Record, submission.Completion, submission.Delivery, holdsPermit);
+            return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             submission.Completion.TrySetCanceled(cancellationToken);
+            return false;
         }
         catch (Exception exception)
         {
@@ -655,6 +1015,7 @@ internal sealed class SendAccumulator
             // core either way, so no delivery callback fires (M11/P3.1 D5) — the same outcome, and
             // the same exception, the pre-queue slow path produced.
             submission.Completion.TrySetException(exception);
+            return false;
         }
     }
 
@@ -662,7 +1023,12 @@ internal sealed class SendAccumulator
     /// Accounts one settled submission out of the queued-or-appending count, and releases the drain
     /// waiters if that emptied the accumulator's second stage.
     /// </summary>
-    private void ReleaseQueuedSlot()
+    /// <param name="appended">
+    /// Whether the submission reached the node chain. <see langword="false"/> releases its
+    /// <b>admission</b> permit here, because no later site will: the chain's release
+    /// (<see cref="TakeChainLocked"/>) only covers records that got as far as a node.
+    /// </param>
+    private void ReleaseQueuedSlot(bool appended)
     {
         lock (_gate)
         {
@@ -671,6 +1037,13 @@ internal sealed class SendAccumulator
             // Wakes DrainPending, which waits on _gate while only queued submissions remain.
             Monitor.PulseAll(_gate);
             SignalIdleLocked();
+        }
+
+        // OUTSIDE the lock, for ReleaseSpace's reason: releasing a permit can make a blocked
+        // caller runnable, and that caller appends (so it would take _gate).
+        if (!appended)
+        {
+            ReleaseAdmission(1);
         }
     }
 
@@ -722,7 +1095,9 @@ internal sealed class SendAccumulator
             }
             finally
             {
-                ReleaseQueuedSlot();
+                // Nothing swept here reached a node, so this is also where its admission permit
+                // goes back (M11/P3.3).
+                ReleaseQueuedSlot(appended: false);
             }
         }
     }
@@ -892,6 +1267,12 @@ internal sealed class SendAccumulator
             {
                 _accumulated++;
             }
+
+            // UNCONDITIONAL, unlike the above (M11/P3.3). Every record that reaches a node holds an
+            // ADMISSION permit — the teardown-bypassed ones included, since the bypass skips only
+            // the _space bound and their Send returned long before teardown began — and the batch
+            // thread's take is what gives it back.
+            _chainRecords++;
 
             // Early wake at the threshold (anchor :825-827). Below it the batch thread is purely
             // timer-driven, which is what makes the sub-threshold delay 0..window uniform.
@@ -1300,11 +1681,12 @@ internal sealed class SendAccumulator
 
         Node? chain;
         int freed;
+        int admitted;
         lock (_gate)
         {
             // Refuse further appends: an accumulator whose thread is gone can only strand them.
             _closed = true;
-            chain = TakeChainLocked(out freed);
+            chain = TakeChainLocked(out freed, out admitted);
             _draining = false;
             Monitor.PulseAll(_gate);
             SignalIdleLocked();
@@ -1372,6 +1754,20 @@ internal sealed class SendAccumulator
             // records is what matters, and it has already happened above — so swallow rather than
             // let this escape and kill the thread with an unhandled exception.
         }
+
+        // A SEPARATE try, not a shared one: an over-release of _space must not skip this release,
+        // and vice versa. Neither is load-bearing for liveness — the unconditional Cancel() above
+        // is what releases a blocked caller, precisely so no waiter depends on arithmetic this
+        // handler's own trigger may already have corrupted (M11/P3.2 slice S5, applied to the new
+        // bound as well) — so both can be swallowed independently.
+        try
+        {
+            ReleaseAdmission(admitted);
+        }
+        catch (Exception)
+        {
+            // See above.
+        }
     }
 
     /// <summary>
@@ -1419,6 +1815,7 @@ internal sealed class SendAccumulator
             Node? chain;
             bool stopping;
             int freed;
+            int admitted;
 
             lock (_gate)
             {
@@ -1444,7 +1841,7 @@ internal sealed class SendAccumulator
 
                 _forceDrain = false;
                 stopping = _closed;
-                chain = TakeChainLocked(out freed);
+                chain = TakeChainLocked(out freed, out admitted);
                 if (chain is not null)
                 {
                     _draining = true;
@@ -1467,6 +1864,14 @@ internal sealed class SendAccumulator
             // callbacks after unlocking (:581). Releasing under the lock could run a waiter's
             // continuation inline on this thread, and that continuation appends.
             ReleaseSpace(freed);
+
+            // The ADMISSION bound's release site (M11/P3.3) — the one that unblocks callers parked
+            // in AdmitSlow. It is the SAME moment _space's is, which is what keeps the two
+            // accountings trivially comparable, and it is why the admitted population is bounded by
+            // the cap plus whatever the batch thread is currently sending: those records have left
+            // the accumulator's chain but not yet the process. The residual is one chunk
+            // (BatchChunk), not unbounded, and is accepted for the same reason _space accepts it.
+            ReleaseAdmission(admitted);
 
             if (chain is not null)
             {
@@ -1496,9 +1901,18 @@ internal sealed class SendAccumulator
 
     /// <summary>
     /// Takes the whole chain and resets the accumulation (anchor :562-579), reporting how many
-    /// backpressure permits the caller must release once it has left the lock.
+    /// backpressure and admission permits the caller must release once it has left the lock.
     /// </summary>
-    private Node? TakeChainLocked(out int freed)
+    /// <param name="freed">
+    /// Backpressure (<c>_space</c>) permits owed back — the <em>permit-backed</em> records only, so
+    /// a teardown-bypassed record does not over-release that bound.
+    /// </param>
+    /// <param name="admitted">
+    /// Admission permits owed back — <em>every</em> record in the taken chain, bypassed or not
+    /// (M11/P3.3). The two counts differ by exactly the bypassed records, which is why they are
+    /// reported separately rather than shared.
+    /// </param>
+    private Node? TakeChainLocked(out int freed, out int admitted)
     {
         Node? chain = _head;
         _head = null;
@@ -1506,6 +1920,8 @@ internal sealed class SendAccumulator
 
         freed = _accumulated;
         _accumulated = 0;
+        admitted = _chainRecords;
+        _chainRecords = 0;
         return chain;
     }
 
@@ -1526,6 +1942,29 @@ internal sealed class SendAccumulator
         new ObjectDisposedException(
             nameof(NativeProducer),
             "The producer was closed while this send was waiting for accumulator space.");
+
+    /// <summary>
+    /// A <c>Send</c> blocked on the admission bound, released by teardown cancelling the gate. Its
+    /// own message rather than <see cref="ClosedDuringBackpressure"/>'s, because the two describe
+    /// different waits and only this one happens <em>before</em> <c>Send</c> has returned.
+    /// </summary>
+    private static ObjectDisposedException ClosedDuringAdmission() =>
+        new ObjectDisposedException(
+            nameof(NativeProducer),
+            "The producer was closed while this send was waiting to be admitted to the accumulator.");
+
+    /// <summary>
+    /// The admission bound stayed saturated for the whole of <c>max.block.ms</c>. Java's own
+    /// outcome — <c>KafkaProducer.send()</c> throws once it has waited <c>max.block.ms</c> for
+    /// accumulator memory — expressed as the binding's flat <see cref="KafkaException"/> (ffi §A5).
+    /// </summary>
+    private KafkaException AdmissionTimedOut() =>
+        new KafkaException(
+            "The producer did not admit this record within max.block.ms (" +
+            _settings.MaxBlockMs.ToString(CultureInfo.InvariantCulture) +
+            " ms): it has already accepted " +
+            _settings.MaxAdmittedRecords.ToString(CultureInfo.InvariantCulture) +
+            " records that have not yet been handed to the core.");
 
     /// <summary>
     /// Sends every node of the chain <see cref="_inFlight"/> names, advancing it as each node is
