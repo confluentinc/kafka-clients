@@ -67,13 +67,30 @@ namespace Confluent.Kafka.UnitTests;
 /// guard, not either half — see the measured numbers on the <c>DisposeAsync</c> twin.</description></item>
 /// </list>
 /// <para>
-/// ⚠ <b>Sensitivity here is a property of the REGIME, not of a test.</b> Every ratio quoted below was
-/// measured with the <b>whole suite</b> running. Run under a <c>--filter</c> instead and all three
-/// detect <b>nothing</b> — 0/3 each, even under the mutation that deletes <em>both</em> production
-/// lines (measured; a run takes ~37 ms filtered against ~1 s in-suite, and it is the suite's own CPU
-/// contention that keeps the pump thread off the CPU long enough for the missing drain to show).
-/// So a ratio here is meaningless without its regime: re-derive in-suite, and never grade one of
-/// these by running it alone.
+/// ⚠ <b>Sensitivity here is a property of the REGIME, not of a test — and the isolated regime does
+/// NOT behave the same for all three.</b> Every ratio quoted below was measured with the
+/// <b>whole suite</b> running, and in-suite is where they must be re-derived. Under a
+/// <c>--filter</c> instead, the split is:
+/// </para>
+/// <list type="bullet">
+/// <item><description>The two <b>async</b> halves detect <b>nothing</b> isolated — 0/3 each, on both
+/// machines, even under the mutation that deletes <em>both</em> production lines. For them the
+/// mechanism holds: it is the suite's own CPU contention that keeps the pump thread off the CPU long
+/// enough for the missing drain to show.</description></item>
+/// <item><description>The <b>sync</b> half <em>does</em> detect isolated, at roughly a third of runs
+/// — <b>4/11</b> under that same mutation, against <b>0/8</b> at HEAD under the identical filter as
+/// the control. So the contention mechanism above is <em>false</em> for it: it fails in ~24 ms with
+/// nothing else running.</description></item>
+/// </list>
+/// <para>
+/// ⚠ This paragraph previously said <em>all three</em> detect nothing isolated, 0/3 each, and gave
+/// the contention mechanism for all three. The 0/3 behind that was a <b>sample</b>, not a property —
+/// at a ≈30 % per-run rate P(0 of 3) ≈ 0.34 — and it was contradicted by a 1/3 already on record.
+/// Corrected per Critic 71 finding 71.15. The directive it carried survives unchanged, because an
+/// isolated <b>pass</b> still proves nothing for any of the three: never grade one of these by an
+/// isolated pass, and re-derive every ratio in-suite. But an isolated <b>failure of the sync half</b>
+/// is a real detection, and it is the cheapest check available — ~0.7 s per filtered run against
+/// ~11 s for the suite, so five filtered runs give ≈84 % detection in ~3.5 s.
 /// </para>
 /// </remarks>
 public sealed class PublicProducerAccumulatorTeardownTests
@@ -168,22 +185,41 @@ public sealed class PublicProducerAccumulatorTeardownTests
         // Producer_flush?), so a single round is a coin flip and no guard at all. Each round is an
         // independent trial and the mutation must win all of them.
         //
-        // ⚠ SENSITIVITY IS A PROPERTY OF THE REGIME. In-suite this test fails MPROD 3/3; run
-        // ISOLATED (--filter) under that same mutation it failed 0/3. The 3/3 belongs to the
-        // full-suite regime — quote it as such, and re-measure in-suite.
+        // ⚠ SENSITIVITY IS A PROPERTY OF THE REGIME — so quote every ratio WITH its regime.
+        // IN-SUITE this test fails MPROD 7/7 (a seven-run battery; the fix round's 3/3 is the same
+        // property at n=3). ISOLATED (--filter) under that same mutation it fails at roughly a
+        // third of runs: 4/11, with 0/8 at HEAD under the identical filter as the control.
+        // ⚠ The fix round recorded "0/3 isolated" here and read it as "isolated detects nothing".
+        // 0 of 3 is a SAMPLE consistent with a ~30% rate (P ≈ 0.34), not a property; corrected per
+        // Critic 71 finding 71.15. An isolated PASS still proves nothing — but an isolated FAILURE
+        // of THIS test is a real detection, and at ~0.7 s per filtered run against ~11 s in-suite
+        // it is the cheapest re-verification there is. The class remarks carry the three-way split:
+        // the two async halves below genuinely are 0/3 isolated, and the CPU-contention mechanism
+        // is theirs, not this test's (this one fails in ~24 ms with nothing else running).
         //
         // THE MUTATION SPLIT, which is what makes a failure DIAGNOSTIC (a joint deletion is not —
         // it was the recipe recorded here before, and it made the async call site look guarded when
-        // nothing tested it):
+        // nothing tested it). ⚠ MATCH ON THE IDENTIFYING MEMBER, NOT ON A TOTAL: the failing SET
+        // varies run to run, so a total is one observed sample, while which member is present is
+        // the stable property — and it is the property the split's conclusion actually rests on:
         //
         //   MPROD  delete BOTH `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` lines
         //          (NativeProducer.cs :1220 AND :1285), fixture intact
-        //          → 3/3: THIS test fails, and so does the async pair's Close half. 895/2.
+        //          → detected 10/10 over two batteries (3/3 then 7/7).
+        //            IDENTIFIED BY: THIS test is in the failing set — present 7/7 of the seven-run
+        //            battery, and absent 5/5 under M1285. Test 17 is never in it.
+        //            The rest of the set VARIES: observed {Dispose,Close,DisposeAsync} ×4 (894/3),
+        //            {Dispose,Close} ×1 (895/2), {Dispose} ×2 (896/1). The 895/2 recorded here as
+        //            THE signature occurred once in seven — it is a sample, not the signature.
         //   M1285  delete ONLY NativeProducer.cs:1285 (StopPumpAsync), :1220 and fixture intact
-        //          → 5/5: THIS test stays GREEN; only the async pair fails. 896/1.
+        //          → detected 5/5.
+        //            IDENTIFIED BY: THIS test stays GREEN (5/5 — by design; that is what makes it
+        //            the discriminant) while the async pair fails. Observed 896/1, Close half only.
         //   MFIX   delete ONLY the fixture's `_pump.WaitForQueueDrain(s_deadline)`
         //          (SendAccumulatorTests.cs:2025), production intact
-        //          → 3/3: only §6 test 17 fails; all three tests here stay green. 896/1.
+        //          → detected 3/3.
+        //            IDENTIFIED BY: §6 test 17 is the only failure; all three tests here stay
+        //            green — strictly disjoint from both others. Observed 896/1.
         //
         // Three distinct signatures, so the failing test names WHICH drain was removed: THIS test
         // is what separates MPROD from M1285, and test 17 is what identifies MFIX. Under any of
@@ -222,11 +258,14 @@ public sealed class PublicProducerAccumulatorTeardownTests
         // green (895/0, 3/3) before these two existed.
         //
         // ⚠ THE GUARD IS THE PAIR, NOT EITHER HALF — and WHICH half loses the race is not stable
-        // across machines/regimes, which is exactly why both are kept. Measured in-suite under
-        // M1285: "at least one of the two fails" is 5/5 here, carried entirely by the Close half
-        // (Close 5/5, this one 0/5); on the reviewer's box, measuring each half ALONE, it was the
-        // other way round enough to give DisposeAsync 4/5 and Close 4/5 with the pair at 5/5. Drop
-        // either half and the guard becomes a bet on which flavor is sensitive today.
+        // across REGIMES, which is exactly why both are kept. (Say regimes, not machines: in the
+        // shipped 897-test regime BOTH machines measure the same split, so nothing here is
+        // cross-machine evidence — 71.15(f).) Measured in-suite under M1285: "at least one of the
+        // two fails" is 5/5 here, carried entirely by the Close half (Close 5/5, this one 0/5),
+        // and the reviewer reproduces exactly that 5/5 and 0/5. The other way round — DisposeAsync
+        // 4/5 and Close 4/5 with the pair at 5/5 — came from a DIFFERENT regime: each half measured
+        // ALONE in a 896-test suite, not the pair in the shipped 897. Drop either half and the
+        // guard becomes a bet on which flavor is sensitive in today's regime.
         // Raising the round count does NOT substitute: a 160-round battery still gave 4/5 for the
         // pair, so run-to-run variance dominates and more rounds only cost time. At HEAD
         // (production intact) the pair is green 3/3 full-suite here and 6/6 on the reviewer's box,
