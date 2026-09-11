@@ -401,6 +401,23 @@ internal sealed class SendAccumulator
     internal int AdmittedRecordCount => Volatile.Read(ref _queued) + Volatile.Read(ref _chainRecords);
 
     /// <summary>
+    /// How many admission permits are still available — the <b>leak witness</b> for the release
+    /// sites, and the only one some of them have.
+    /// </summary>
+    /// <remarks>
+    /// <b>Test observation point, not production surface</b> (the <c>SendBatchCallCount</c>
+    /// precedent). It exists because a missing <see cref="ReleaseAdmission"/> has no
+    /// <em>behavioural</em> observable on some paths: every reachable refusal of an
+    /// already-admitted record happens during teardown, which has also cancelled
+    /// <see cref="_spaceGate"/> — so a later caller whose permit was leaked reports "the producer is
+    /// closing" rather than waiting out <c>max.block.ms</c>, i.e. exactly what it would report had
+    /// the permit come back. A count is what separates those. It is <em>not</em> a restatement of
+    /// <see cref="AdmittedRecordCount"/>: that one counts records the accumulator is holding, this
+    /// one counts permits, and a leak moves only the second.
+    /// </remarks>
+    internal int AvailableAdmissions => _admission.CurrentCount;
+
+    /// <summary>
     /// <b>The production send path's single entry point (M11/P3.3):</b> takes an admission permit —
     /// <b>blocking the calling thread</b> when the bound is saturated — and then routes the record
     /// through <see cref="TrySubmitInline"/> / <see cref="SubmitQueued"/>. On return the record has

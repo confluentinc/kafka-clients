@@ -1776,9 +1776,11 @@ public sealed class SendAccumulatorTests
         Assert.Contains("250 ms", failure.Message, StringComparison.Ordinal);
         Assert.Contains("2 records", failure.Message, StringComparison.Ordinal);
 
-        // The refused send took no permit — asserted so a leak on the timeout path would fail here
-        // rather than silently shrinking the bound for every later send.
+        // The refused send neither took a permit nor invented one — asserted on the permit count as
+        // well as on the record count, because an expiry that released a permit it never held would
+        // move only the first (and would over-release the semaphore on the batch thread later).
         Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
 
         // And it was not sent — asserted on the CORE's record count, not on an awaiter.
         harness.DrainNow();
@@ -1822,6 +1824,10 @@ public sealed class SendAccumulatorTests
         Assert.Equal(2, harness.HistoryCount);
         Assert.Equal(2, harness.Accumulator.SendBatchRecordCount);
         Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
+
+        // The cancelled caller took no permit, so the drain hands back exactly the two the filled
+        // records held — a leak here would read 1, which the record count above cannot see.
+        Assert.Equal(2, harness.Accumulator.AvailableAdmissions);
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
     }
 
@@ -1970,6 +1976,117 @@ public sealed class SendAccumulatorTests
         Assert.Equal(Queued, sends.Length);
 
         harness.Dispose();
+    }
+
+    [Fact]
+    public async Task Admission_QueuedSubmissionSettledWithoutAppending_ReturnsItsPermit()
+    {
+        // The release site for a submission that never reaches a node — the cancel / fault / sweep
+        // path through ReleaseQueuedSlot. It needs its own test because the witness counters cannot
+        // see a semaphore leak: _queued is decremented either way, so a leaked permit shows up only
+        // as a bound that has silently shrunk for every LATER send.
+        //
+        // So the observable is a subsequent send's admission SUCCEEDING. Space 1 against admission
+        // 2 means the second send must queue, and a 60 s window means only an explicit drain can
+        // free space — so the only thing that can hand the third send its admission permit is the
+        // cancelled submission giving one back.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 1,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: 60_000));
+
+        Task<RecordMetadata> appended = harness.AppendOne(0xB1);
+
+        using CancellationTokenSource cancellation = new CancellationTokenSource();
+        Task<RecordMetadata> queued = harness.AppendOne(0xB2, callback: null, cancellation.Token, out _);
+        Assert.Equal(1, harness.Accumulator.QueuedSubmissionCount);
+
+        // Saturated: both permits are out.
+        Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
+        Assert.Null(harness.TryAppendOne(0xBF));
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => queued, s_deadline));
+
+        // THE ASSERTION: the next send is admitted without waiting. With the release deleted this
+        // parks for the whole 60 s max.block.ms, so the deadline — not an equality — is what fails.
+        Task<Task<RecordMetadata>> readmitted =
+            harness.AppendOneFromAnotherThread(0xB3, CancellationToken.None);
+        await TestTimeout.Run(() => readmitted, TimeSpan.FromSeconds(10));
+        Task<RecordMetadata> third = await readmitted;
+
+        // It queued (space is still held by the first record), which is what confirms the permit it
+        // consumed was an ADMISSION permit rather than a space one.
+        Assert.Equal(1, harness.Accumulator.QueuedSubmissionCount);
+
+        harness.DrainNow();
+        await TestTimeout.Run(() => appended, s_deadline);
+        await TestTimeout.Run(() => third, s_deadline);
+        Assert.Equal(2, harness.HistoryCount);
+    }
+
+    [Fact]
+    public async Task Admission_RefusedSubmit_ReturnsItsPermit_OnBothRoutes()
+    {
+        // The two release sites a refused submit can take, each with its own phase because they are
+        // separate code: SubmitAdmitted's `finally` (the INLINE route threw) and SubmitQueued's
+        // sealed-refusal (the QUEUED route, which settles the awaiter instead of throwing, so the
+        // `finally` cannot see it). A leak at either site shrinks the bound permanently.
+        //
+        // ⚠ THE WITNESS IS THE PERMIT COUNT, AND IT HAS TO BE. The obvious behavioural witness — a
+        // later send still being admissible — does NOT work here, and a first draft of this test
+        // passed under both mutations because of it: every reachable way to refuse an
+        // already-admitted record runs during teardown, and teardown has also cancelled the
+        // backpressure gate, so a caller whose permit was leaked reports "the producer is closing"
+        // rather than waiting out max.block.ms — indistinguishable from the permit having come back.
+        // AvailableAdmissions separates them (and the accumulator's doc says why it exists).
+        //
+        // The same fact is why neither site has a behavioural consequence a user could observe: the
+        // accumulator is dead either way. They are asserted because the arithmetic is a property in
+        // its own right, not because a leak there would be user-visible.
+
+        // ---- phase 1: the inline route. Space is free, so TrySubmitInline is chosen and Append
+        // refuses it on _closed, which surfaces as a synchronous throw.
+        using Harness inline = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 4,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 1,
+            maxBlockMs: 250));
+        _ = inline.Accumulator.Stop(s_deadline);
+        Assert.Equal(1, inline.Accumulator.AvailableAdmissions);
+
+        // Func<object>, not a lambda returning the Task directly: the xUnit analyzer reads
+        // `() => AppendOne(..)` as an async assertion and rejects it (the AppendWithoutAPermit
+        // precedent above uses the same shape).
+        Func<object> refusedInline = () => inline.AppendOne(0xC1);
+        Assert.Throws<ObjectDisposedException>(refusedInline);
+        Assert.Equal(1, inline.Accumulator.AvailableAdmissions);
+
+        // ---- phase 2: the sealed queue. The space permits are consumed, so TrySubmitInline must
+        // refuse and SubmitQueued is reached with the seal already set.
+        using Harness sealedQueue = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 2,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 1,
+            maxBlockMs: 250));
+        sealedQueue.ConsumePermits(2);
+        _ = sealedQueue.Accumulator.Stop(s_deadline);
+        Assert.Equal(1, sealedQueue.Accumulator.AvailableAdmissions);
+
+        // This route settles the awaiter rather than throwing, which is exactly why its release
+        // cannot live in SubmitAdmitted's `finally`.
+        Task<RecordMetadata> refused = sealedQueue.AppendOne(0xD1);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => refused, s_deadline));
+        Assert.Equal(1, sealedQueue.Accumulator.AvailableAdmissions);
     }
 
     // --------------------------------------- admission settings (M11/P3.3 D3) -------------------
