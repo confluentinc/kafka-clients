@@ -1557,6 +1557,541 @@ public sealed class SendAccumulatorTests
         Assert.Equal(0, callback.Count);
     }
 
+    // ------------------------------------------- the admission bound (M11/P3.3 §8.1) ------------
+
+    [Fact]
+    public async Task Admission_IsBounded_WhenTheFloodOutrunsTheDrain()
+    {
+        // ⚠ THE PHASE'S PRIMARY GATE, and the DoD item it exists to add (§8.1). M11/P3.2's ordering
+        // fix made the submission queue THE path under sustained load — once one send is queued
+        // TrySubmitInline refuses every later one — and nothing bounded its depth, so the client
+        // accepted sends without limit: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB,
+        // against 41 ms / 239 MB immediately before it. A correctness-only suite cannot see that:
+        // every record is still delivered, in order, exactly once, so the suite passes and the
+        // client bloats. That is why this asserts a POPULATION rather than an outcome.
+        //
+        // ⚠ AND WHY THE WITNESS IS NOT QueuedSubmissionCount. §2.3 falsified "cap the queue"
+        // experimentally: with the queue path bypassed (MAX_ACCUMULATED=4000000, so TryAcquireSpace
+        // always wins and _queued never leaves 0) the identical bloat reappeared in the NODE CHAIN —
+        // p50 3,436 ms, RSS 2.04 GiB. The quantity of interest is the whole ADMITTED population,
+        // which is what AdmittedRecordCount reports and what the bound covers.
+        //
+        // THE REGIME IS DETERMINISTIC, not a race. A 60 s window with no drainer means NOTHING ever
+        // frees an admission permit, so exactly Cap sends can be admitted and every later one must
+        // wait out max.block.ms and fail. The mutation (an admission that does not wait) admits all
+        // Senders*PerSender of them, so the population reads 3x the cap.
+        //
+        // The burst is nonetheless repeated with a FRESH harness per attempt, for the reason
+        // recorded at SendAccumulator_SubmissionOrder_IsCallOrder_AcrossTheBackpressureBound: an
+        // isolated PASS is not evidence a guard is absent, nor a suite PASS that it is present, and
+        // a reused harness would start attempts 2..K from the previous attempt's chain, spare node
+        // and permit state rather than from cold.
+        const int Cap = 16;
+        const int Space = 4;
+        const int Senders = 4;
+        const int PerSender = 12;
+        const int Attempts = 8;
+
+        for (int attempt = 0; attempt < Attempts; attempt++)
+        {
+            using Harness harness = new Harness(new SendAccumulatorSettings(
+                slotThreshold: 1000,
+                maxAccumulatedRecords: Space,
+                batchWindowMs: 60_000,
+                batchChunk: 1100,
+                maxAdmittedRecords: Cap,
+                maxBlockMs: 20));
+
+            // Sampled DURING the flood as well as asserted after it: the after-assertion alone
+            // would pass an implementation that admitted everything and then shed records, and the
+            // peak is what "the population stays within the bound" actually means. One writer, read
+            // only after the sampler has been awaited.
+            int peak = 0;
+            using CancellationTokenSource flooding = new CancellationTokenSource();
+            Task sampler = Task.Run(
+                async () =>
+                {
+                    while (!flooding.IsCancellationRequested)
+                    {
+                        int observed = harness.Accumulator.AdmittedRecordCount;
+                        if (observed > peak)
+                        {
+                            peak = observed;
+                        }
+
+                        await Task.Delay(1).ConfigureAwait(false);
+                    }
+                },
+                CancellationToken.None);
+
+            Task<int>[] floods = new Task<int>[Senders];
+            for (int s = 0; s < Senders; s++)
+            {
+                int sender = s;
+                floods[sender] = Task.Run(
+                    () =>
+                    {
+                        int refused = 0;
+                        for (int i = 0; i < PerSender; i++)
+                        {
+                            try
+                            {
+                                // Production's own entry point, blocking exactly as production's
+                                // Send blocks (DoD §12 — the fixture holds no copy of the rule).
+                                _ = harness.AppendOne((byte)((sender * PerSender) + i));
+                            }
+                            catch (KafkaException)
+                            {
+                                refused++;
+                            }
+                        }
+
+                        return refused;
+                    },
+                    CancellationToken.None);
+            }
+
+            int[] refusedPerSender = new int[Senders];
+            await TestTimeout.Run(
+                async () => refusedPerSender = await Task.WhenAll(floods).ConfigureAwait(false),
+                s_deadline);
+
+            flooding.Cancel();
+            await TestTimeout.Run(() => sampler, s_deadline);
+
+            int refusedTotal = 0;
+            foreach (int refused in refusedPerSender)
+            {
+                refusedTotal += refused;
+            }
+
+            // (1) Exactly Cap sends were accepted — there are exactly Cap permits and nothing can
+            // return one, so this is an equality rather than a bound.
+            Assert.Equal(Cap, (Senders * PerSender) - refusedTotal);
+
+            // (2) The population the bound is about. THE assertion: 16 with the gate, 48 without.
+            Assert.Equal(Cap, harness.Accumulator.AdmittedRecordCount);
+
+            // (3) And it never exceeded the bound while the flood was running. Cap + 1 rather than
+            // Cap because the single submitter's in-flight submission is counted in both terms for
+            // the window between its append and its accounting — see AdmittedRecordCount.
+            Assert.True(
+                peak <= Cap + 1,
+                $"the admitted population peaked at {peak} against a bound of {Cap} — the " +
+                "admission wait did not throttle the flood");
+
+            // (4) Nothing has reached the core: the 60 s window is what makes the regime
+            // deterministic, so if this is non-zero the setup drained and the test measured nothing.
+            Assert.Equal(0, harness.HistoryCount);
+        }
+    }
+
+    [Fact]
+    public async Task Admission_SaturatedBound_ParksTheCaller_AndTheDrainReleasesIt()
+    {
+        // The blocking contract itself, written to the BLOCKING shape from the start (PLAN §11
+        // risk 4): the parked send is issued from its OWN task and the assertion is on that task,
+        // never `parked.IsCompleted == false` over an inline call — which is what hung about half
+        // the cap tests on the sibling branch.
+        //
+        // A 60 s window means only an explicit drain can free capacity, and a 60 s max.block.ms
+        // means the parked caller cannot time out instead — so "parked" and "released" are both
+        // properties of the gate rather than of a timer.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 4,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 4,
+            maxBlockMs: 60_000));
+
+        Task<RecordMetadata>[] filled = harness.Append(4);
+        Assert.Equal(4, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // The non-blocking probe is refused — and refusing it must not consume a permit, which the
+        // two assertions around it pin.
+        Assert.Null(harness.TryAppendOne(0xF0));
+        Assert.Equal(4, harness.Accumulator.AdmittedRecordCount);
+
+        // The blocking one PARKS. A settle window, not a poll: the assertion is that something must
+        // NOT have happened, so it needs time in which to have happened.
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0xF1, CancellationToken.None);
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(
+            admission.IsCompleted,
+            "the fifth send was admitted although the producer already held its whole bound");
+        Assert.Equal(4, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // The drain takes the chain, which is what returns the admission permits.
+        harness.DrainNow();
+
+        await TestTimeout.Run(() => admission, s_deadline);
+        Task<RecordMetadata> parked = await admission;
+
+        // It was admitted, not dropped: the record reaches the core like any other.
+        harness.DrainNow();
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+        await TestTimeout.Run(() => parked, s_deadline);
+        Assert.Equal(5, harness.Accumulator.SendBatchRecordCount);
+        Assert.Equal(5, harness.HistoryCount);
+    }
+
+    [Fact]
+    public async Task Admission_WhenTheBoundStaysSaturated_FailsAfterMaxBlockMs()
+    {
+        // Java's outcome — send() blocks up to max.block.ms for accumulator memory and then throws
+        // — and the message is asserted (DoD §3), because a flat KafkaException's code alone cannot
+        // tell an operator which knob to move.
+        const int MaxBlockMs = 250;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 2,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: MaxBlockMs));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+        Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
+
+        Stopwatch elapsed = Stopwatch.StartNew();
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(
+                () => harness.AppendOneFromAnotherThread(0xF3, CancellationToken.None),
+                s_deadline));
+        elapsed.Stop();
+
+        // ⚠ THE DISCRIMINATOR between "waited, then failed" and "failed immediately". Without it an
+        // admission that never blocks at all passes every other assertion here. The lower bound is
+        // deliberately loose (a scheduler can overshoot but not undershoot a semaphore timeout).
+        Assert.True(
+            elapsed.Elapsed >= TimeSpan.FromMilliseconds(MaxBlockMs / 2),
+            $"the saturated send failed after {elapsed.Elapsed}, well inside the {MaxBlockMs} ms " +
+            "max.block.ms — it did not wait for capacity at all");
+
+        Assert.Contains("max.block.ms", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("250 ms", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("2 records", failure.Message, StringComparison.Ordinal);
+
+        // The refused send took no permit — asserted so a leak on the timeout path would fail here
+        // rather than silently shrinking the bound for every later send.
+        Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
+
+        // And it was not sent — asserted on the CORE's record count, not on an awaiter.
+        harness.DrainNow();
+        Assert.Equal(2, harness.HistoryCount);
+        Assert.Equal(2, harness.Accumulator.SendBatchRecordCount);
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+    }
+
+    [Fact]
+    public async Task Admission_CallerTokenFiresWhileParked_CancelsWithThatToken_AndNothingIsSent()
+    {
+        // The caller's token must abort the admission wait and be REPORTED, not a linked
+        // substitute, so `catch (OperationCanceledException e) when (e.CancellationToken == ct)`
+        // matches — the same contract QueuedSubmission already carries for the queued route.
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 2,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: 60_000));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+
+        using CancellationTokenSource cancellation = new CancellationTokenSource();
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0xF5, cancellation.Token);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(admission.IsCompleted, "the send was admitted although the bound was full");
+
+        cancellation.Cancel();
+
+        OperationCanceledException failure = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => admission, s_deadline));
+        Assert.Equal(cancellation.Token, failure.CancellationToken);
+
+        // Nothing was appended, so nothing can reach the core — asserted on the core's record count
+        // rather than only on the awaiter's state, and AFTER a drain that would have sent it.
+        harness.DrainNow();
+        Assert.Equal(2, harness.HistoryCount);
+        Assert.Equal(2, harness.Accumulator.SendBatchRecordCount);
+        Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+    }
+
+    [Fact]
+    public async Task Admission_ParkedCaller_IsReleasedByStop_AndDisposeReturns()
+    {
+        // PLAN §11 risk 2 — the phase's own top risk: a caller blocked on admission that teardown
+        // does not wake hangs Dispose. A 60 s max.block.ms means the timeout cannot be what
+        // releases it, so this is a property of the gate.
+        //
+        // ⚠ NO ASSERTION ON THE MESSAGE, deliberately. Two paths produce an
+        // ObjectDisposedException here and they carry different text: the gate's cancellation (the
+        // expected one, since Stop cancels at step 2 while the batch thread is still parked in its
+        // 60 s wait), and — if the final drain's permit release were to win the race instead — the
+        // closed-accumulator refusal inside Append. The TYPE is the contract; the text is not.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 2,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: 60_000));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0xF4, CancellationToken.None);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(admission.IsCompleted, "the send was admitted although the bound was full");
+
+        // Teardown must RETURN rather than hang behind the parked caller — under a hard deadline so
+        // a hang fails the run instead of blocking it.
+        TestTimeout.Run(
+            () => Assert.True(
+                harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+                "the batch thread did not exit"),
+            TimeSpan.FromSeconds(20));
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => admission, TimeSpan.FromSeconds(10)));
+
+        // Either way the record was never handed to the core: only the two filled ones were.
+        Assert.Equal(2, harness.Accumulator.SendBatchRecordCount);
+        await TestTimeout.Run(() => Task.WhenAll(filled), TimeSpan.FromSeconds(10));
+
+        // And the whole teardown returns — the no-hang regression this test is named for.
+        TestTimeout.Run(harness.Dispose, TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task Admission_ParkedCaller_IsReleasedByTheBatchThreadsFailureHandler()
+    {
+        // The admission twin of BatchThreadFailure_ReleasesASendWaitingForSpace, and it needs its
+        // own test for the same reason that one did: the handler settles both chains and sweeps the
+        // submission queue, and a caller parked on ADMISSION is in none of those. It is released
+        // only by the unconditional Cancel() — never by permit arithmetic, which is precisely what
+        // the failure this handler exists for (an over-release) has already corrupted.
+        //
+        // The setup mirrors that test's: threshold 2 against a 60 s window, so the batch thread is
+        // parked in its wait loop until the injected record takes the node to the threshold and
+        // wakes it. A 60 s max.block.ms means the parked caller cannot time out instead.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 2,
+            maxAccumulatedRecords: 1,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 1,
+            maxBlockMs: 60_000));
+
+        // The one admission permit and the one space permit both go to this record.
+        Task<RecordMetadata> filled = harness.AppendOne(0x81);
+        Assert.Equal(1, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
+
+        // Parked on admission, from its own task.
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0x82, CancellationToken.None);
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(admission.IsCompleted, "the send was admitted although the bound was full");
+
+        // Kill the batch thread: this record takes the node to the threshold and wakes it, and the
+        // take then reports two accumulated against the one space permit ever taken, so
+        // ReleaseSpace over-releases a semaphore of one and throws between the take and the send.
+        Task<RecordMetadata> injected = harness.AppendWithoutAPermit(0x83);
+
+        // THE ASSERTION, under a hard deadline so a waiter that is never released FAILS rather than
+        // hanging the run. Without the cancel this is where the run stops.
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => TestTimeout.Run(() => admission, s_deadline));
+
+        // The records the handler actually holds are still settled exactly as before.
+        await AssertSettledByTheOverRelease(filled);
+        await AssertSettledByTheOverRelease(injected);
+
+        // And the thread really did take the failure path.
+        Assert.True(
+            harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+            "the failed batch thread did not exit");
+
+        harness.Dispose();
+    }
+
+    [Fact]
+    public void Admission_TeardownFlushedSendsReturnTheirPermits_NotJustThePermitBackedOnes()
+    {
+        // The bypass's own accounting (§F2 x M11/P3.3). A teardown-flushed submission is appended
+        // WITHOUT a space permit, so it is deliberately excluded from _accumulated — but it DOES
+        // hold an admission permit, taken when its Send was accepted long before teardown began. If
+        // the two counts were folded together, one of them breaks: counting the bypassed record in
+        // _accumulated makes the batch thread over-release _space (a SemaphoreFullException, i.e.
+        // the very failure AbandonOnThreadFailure exists to survive, triggered by teardown itself),
+        // and excluding it from the admission count leaks one permit per teardown-flushed send.
+        //
+        // The frozen SPACE bound is what forces every submission onto the bypass: the permits are
+        // consumed with nothing accumulated, so no drain can ever free space capacity. Admission
+        // permits are untouched by that, which is the whole point of their being separate.
+        const int Queued = 3;
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 4,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 8,
+            maxBlockMs: 60_000));
+
+        harness.ConsumePermits(4);
+
+        Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Queued];
+        for (int i = 0; i < Queued; i++)
+        {
+            sends[i] = harness.AppendOne((byte)(0x90 + i));
+        }
+
+        Assert.Equal(Queued, harness.Accumulator.QueuedSubmissionCount);
+        Assert.Equal(Queued, harness.Accumulator.AdmittedRecordCount);
+
+        // Teardown flushes all three into the chain bypassing the space bound, the final take sends
+        // them — and gives back all three ADMISSION permits, which is what the assertion below
+        // measures. A SemaphoreFullException on the batch thread would make Stop report
+        // `false` here (abandoned, not drained), so the over-release direction is covered too.
+        Assert.True(harness.Accumulator.Stop(s_deadline), "the batch thread did not exit");
+
+        Assert.Equal(Queued, harness.Accumulator.SendBatchRecordCount);
+        Assert.Equal(Queued, harness.HistoryCount);
+        Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(Queued, sends.Length);
+
+        harness.Dispose();
+    }
+
+    // --------------------------------------- admission settings (M11/P3.3 D3) -------------------
+
+    [Fact]
+    public void Settings_AdmissionDefaults_AreTheProvisionalCapAndKafkasMaxBlockMs()
+    {
+        SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>());
+
+        // PROVISIONAL — slice S2 replaces it with a value measured on this branch (§8.3). It is an
+        // order of magnitude above Python's 1000, which a sibling branch measured starving .NET to
+        // 96.9k msg/s, and it is deliberately NOT the same number as MaxAccumulatedRecords.
+        Assert.Equal(5000, settings.MaxAdmittedRecords);
+        Assert.Equal(60_000, settings.MaxBlockMs);
+        Assert.NotEqual(settings.MaxAccumulatedRecords, settings.MaxAdmittedRecords);
+    }
+
+    [Fact]
+    public void Settings_AdmissionBound_IsNotCoupledToTheThreshold()
+    {
+        // ⚠ THE D3 ASSERTION. MaxAccumulatedRecords DEFAULTS TO the threshold, because Python
+        // defines it that way; the admission bound must not, because coupling the two is exactly
+        // what made Python's 1000 look transferable when the measurement says it is not. Lowering
+        // the threshold moves one and not the other.
+        SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
+        {
+            [SendAccumulatorSettings.ThresholdVariable] = "25",
+        });
+
+        Assert.Equal(25, settings.SlotThreshold);
+        Assert.Equal(25, settings.MaxAccumulatedRecords);
+        Assert.Equal(5000, settings.MaxAdmittedRecords);
+    }
+
+    [Fact]
+    public void Settings_AdmissionOverride_TakesEffect_AndIsItsOwnVariable()
+    {
+        SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
+        {
+            [SendAccumulatorSettings.MaxAccumulatedVariable] = "17",
+            [SendAccumulatorSettings.MaxAdmittedVariable] = "321",
+        });
+
+        // Separately named, so the two move independently — the observable form of D3.
+        Assert.Equal(17, settings.MaxAccumulatedRecords);
+        Assert.Equal(321, settings.MaxAdmittedRecords);
+    }
+
+    [Theory]
+    [InlineData("not-a-number")]
+    [InlineData("")]
+    [InlineData("0")]
+    [InlineData("-5")]
+    public void Settings_InvalidAdmissionOverride_FallsBackToTheDefault(string raw)
+    {
+        // An operator escape hatch must not be able to fail producer construction — and a ZERO cap
+        // in particular would make every send block for max.block.ms and then fail.
+        SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
+        {
+            [SendAccumulatorSettings.MaxAdmittedVariable] = raw,
+        });
+
+        Assert.Equal(5000, settings.MaxAdmittedRecords);
+    }
+
+    [Fact]
+    public void Settings_MaxBlockMs_ComesFromTheConfigDict()
+    {
+        // The one value here read from the user's CONFIG rather than the environment, because it is
+        // a real Kafka producer key the core already knows — honouring an existing knob instead of
+        // inventing a binding-only one.
+        SendAccumulatorSettings settings = ReadSettingsWith(
+            new Dictionary<string, string?>(),
+            new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = "1234" });
+
+        Assert.Equal(1234, settings.MaxBlockMs);
+    }
+
+    [Fact]
+    public void Settings_MaxBlockMs_ZeroIsHonoured_AndMeansNeverBlock()
+    {
+        // Java's max.block.ms is atLeast(0), so zero is a meaningful value rather than a typo: the
+        // fast path still admits when capacity is free, and a saturated bound fails at once.
+        SendAccumulatorSettings settings = ReadSettingsWith(
+            new Dictionary<string, string?>(),
+            new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = "0" });
+
+        Assert.Equal(0, settings.MaxBlockMs);
+    }
+
+    [Theory]
+    [InlineData("not-a-number")]
+    [InlineData("")]
+    [InlineData("-1")]
+    public void Settings_InvalidMaxBlockMs_FallsBackToKafkasDefault(string raw)
+    {
+        // Ignored rather than thrown, for a stronger reason than the environment overrides: the
+        // core reads this key too, so a value it rejects fails producer construction there with the
+        // core's own message — the binding must not pre-empt that with a worse one.
+        SendAccumulatorSettings settings = ReadSettingsWith(
+            new Dictionary<string, string?>(),
+            new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = raw });
+
+        Assert.Equal(60_000, settings.MaxBlockMs);
+    }
+
+    [Fact]
+    public void Settings_MaxBlockMs_AboveIntRange_IsClampedRatherThanRejected()
+    {
+        // max.block.ms is a Java `long`, so a value above int.MaxValue is legal there and must not
+        // read as a parse failure here. int.MaxValue ms is ~24 days, indistinguishable from the
+        // unbounded wait the operator asked for.
+        SendAccumulatorSettings settings = ReadSettingsWith(
+            new Dictionary<string, string?>(),
+            new Dictionary<string, string>
+            {
+                [SendAccumulatorSettings.MaxBlockMsKey] = "9223372036854775807",
+            });
+
+        Assert.Equal(int.MaxValue, settings.MaxBlockMs);
+    }
+
     /// <summary>
     /// Polls <paramref name="condition"/> until it holds or <paramref name="timeout"/> expires,
     /// then asserts it — so a property that never arrives fails with
@@ -1656,7 +2191,9 @@ public sealed class SendAccumulatorTests
     /// restoring the previous values afterwards. The read itself is pure — no producer is
     /// constructed inside the window — so a concurrently-running test class cannot observe it.
     /// </summary>
-    private static SendAccumulatorSettings ReadSettingsWith(Dictionary<string, string?> overrides)
+    private static SendAccumulatorSettings ReadSettingsWith(
+        Dictionary<string, string?> overrides,
+        IReadOnlyDictionary<string, string>? config = null)
     {
         string[] all =
         {
@@ -1664,6 +2201,7 @@ public sealed class SendAccumulatorTests
             SendAccumulatorSettings.MaxAccumulatedVariable,
             SendAccumulatorSettings.WindowVariable,
             SendAccumulatorSettings.ChunkVariable,
+            SendAccumulatorSettings.MaxAdmittedVariable,
         };
 
         Dictionary<string, string?> previous = new Dictionary<string, string?>();
@@ -1676,7 +2214,7 @@ public sealed class SendAccumulatorTests
 
         try
         {
-            return SendAccumulatorSettings.FromEnvironment();
+            return SendAccumulatorSettings.FromEnvironment(config);
         }
         finally
         {
