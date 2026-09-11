@@ -340,6 +340,18 @@ impl ChaosHarness {
 
         eprintln!("chaos: topic {topic} recreated: id {old_id} -> {new_id}");
 
+        // The old generation's records are gone. Mark its topic_id destroyed so the
+        // verifier excuses every record acked to it — even acks that land AFTER the
+        // topic vanished from metadata (the async-ack race the point-in-time
+        // snapshots above cannot close; see `DestroyedGeneration`). Only when the
+        // recreate minted a genuinely new id (delayed recreate); an immediate
+        // recreate that reuses the id relies on the `RecreateBlackout` heuristic
+        // below, since old and new records then share a topic_id.
+        if old_id != new_id && old_id != Uuid::zero() {
+            self.verifier
+                .note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+        }
+
         // Mark the topic as a recreate BLACKOUT. An immediate recreate (dwell 0)
         // can reuse the SAME topic id (in-place topic_id mutation — a
         // librdkafka-documented mode); when it does, the consumer's committed
@@ -669,6 +681,13 @@ impl<'h> WorkloadPool<'h> {
         eprintln!("chaos: added consumer {label} (rebalance)");
     }
 
+    /// Number of consumers added dynamically at runtime that are still live
+    /// (i.e. removable). The churn loop reads this to stay within its bounds:
+    /// the live consumer count is the fixed base plus this.
+    pub fn dynamic_consumer_count(&self) -> usize {
+        self.inner.added_consumer_stops.borrow().len()
+    }
+
     /// Stop the most-recently-added runtime consumer, triggering a rebalance.
     /// No-op if none were added.
     pub fn remove_consumer(&self) {
@@ -754,7 +773,10 @@ impl RunningWorkloads {
         }
 
         // The scenario (which may push consumers into the pool) followed by the
-        // cooldown → drain sequence.
+        // cooldown → drain sequence. `pool_inner` gives the control future access
+        // to the runtime-added (churn / rebalance-add) consumers' stop flags so it
+        // can stop them too at shutdown.
+        let pool_inner = pool.pending_queue();
         let control = async move {
             scenario.await;
             // (1) Signal producers, then wait for them to finish so the delivered
@@ -768,6 +790,15 @@ impl RunningWorkloads {
             // (2) Drain until all delivered observed (or `drain` elapses); (3) stop consumers.
             drain_wait(drain, idle_threshold, verifier.as_ref(), settle.as_ref()).await;
             for stop in &consumer_stops {
+                stop.store(true, Ordering::Relaxed);
+            }
+            // Also stop consumers added at runtime (consumer churn /
+            // --rebalance-add-cycle): their stop flags live in the pool, NOT in
+            // `consumer_stops` (which only holds the base workloads). Without this,
+            // any churn-added consumer still alive at drain never terminates, so the
+            // drive loop's live set never empties and the run hangs AFTER a
+            // successful drain (the churn-scenario post-drain hang).
+            for stop in pool_inner.added_consumer_stops.borrow().iter() {
                 stop.store(true, Ordering::Relaxed);
             }
         };
