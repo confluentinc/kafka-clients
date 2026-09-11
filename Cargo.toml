@@ -96,6 +96,17 @@ name = "performance"
 path = "tests/performance/main.rs"
 test = false
 
+# Chaos / fault-injection tests (producer + KIP-848 consumer). `test = false`
+# keeps them out of a plain `cargo test`: they stand up a dedicated Docker
+# cluster and stop/kill/restart its brokers, so they are slow and destructive.
+# Every scenario is also `#[ignore]`. Run explicitly with
+# `cargo test --features integration-tests --test chaos -- --ignored` or
+# `cargo xtask chaos`. See design/current/chaos-fault-injection-harness.md.
+[[test]]
+name = "chaos"
+path = "tests/chaos/main.rs"
+test = false
+
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
