@@ -41,6 +41,17 @@ namespace Confluent.Kafka.UnitTests;
 /// with the ordering inverted. The witness is now <c>DrainedSendCount</c>; see
 /// <see cref="AssertDrainedIntoTheOpenGate"/> for why it is the only deterministic one.
 /// </para>
+/// <para>
+/// ⚠ <b>M11/P3.2 S4 joins this file for a different property, and deliberately so</b> —
+/// <see cref="Dispose_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem"/>. The four
+/// flavor tests above guard the §3.8 <em>ordering</em> and accept "faulted with a message containing
+/// <c>closed</c>" as one legitimate outcome, so they are structurally blind to whether the queued
+/// group was completed or faulted. S4's production call sites
+/// (<c>NativeProducer.StopPump</c> / <c>StopPumpAsync</c>) therefore need their own guard here, on
+/// the <b>public</b> surface, because the S4 unit test drives the interop harness's fixture teardown
+/// instead — deleting the two production lines alone left the whole suite green (DoD §12: a
+/// fixture-only guard is a proof about the fixture).
+/// </para>
 /// </remarks>
 public sealed class PublicProducerAccumulatorTeardownTests
 {
@@ -102,6 +113,64 @@ public sealed class PublicProducerAccumulatorTeardownTests
         await TestTimeout.Run(() => producer.Close(cts.Token), s_deadline);
 
         AssertDrainedIntoTheOpenGate(producer, sends, "Close(CancellationToken)");
+    }
+
+    [Fact]
+    public void Dispose_CompletesSendsAlreadyQueuedToThePump_RatherThanFaultingThem()
+    {
+        // ⚠ M11/P3.2 S4 — THE PRODUCTION CALL SITES. The twin of
+        // SendCompletionPumpPreStopDrainTests.Teardown_CompletesSendsAlreadyQueuedToThePump_...
+        // (§6 test 17), which drives the interop harness's own fixture teardown; this one drives
+        // NativeProducer.StopPump through the PUBLIC Dispose, so the two
+        // `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` calls that actually ship are guarded.
+        // Without it, deleting BOTH production lines and keeping the fixture's left the entire
+        // suite green — the §3.8 flavor tests above cannot see it (they accept a fault whose
+        // message contains "closed", and DrainedSendCount rises through either consumer), and test
+        // 17 cannot see it either because it never enters NativeProducer. That is the DoD §12
+        // failure class from the other side: the fixture mirrors production faithfully, but nothing
+        // held production to the mirror.
+        //
+        // THE ASSERTION IS RanToCompletion, not a counter. ProcessedBatchCount — test 17's witness
+        // for "the pump resolved it" — is not surfaced past SendCompletionPump (NativeProducer
+        // exposes only DrainedSendCount), and DrainedSendCount is incremented by BOTH the pump loop
+        // and Stop's terminal fault drain, so it cannot separate them. What S4 makes deterministic
+        // on this surface is that every send the core already accepted is COMPLETED; the pre-S4
+        // behaviour faults some of them, and a fault is not RanToCompletion.
+        //
+        // ⚠ A K-BURST WITH A FRESH PRODUCER PER ROUND, for test 17's reason: the defect is a
+        // SCHEDULING race (does the pump thread wake inside a window made of one CloseGate plus one
+        // Producer_flush?), so a single round is a coin flip and no guard at all. Each round is an
+        // independent trial and the mutation must win all of them.
+        //
+        // SYNCHRONOUS Dispose deliberately — the DisposeAsync twin's awaited flush hands the pump an
+        // extra scheduling opportunity, which makes it detect the deletion only intermittently at
+        // this round count. Both flavors share the same `pump?.WaitForQueueDrain` step immediately
+        // before `pump?.Stop()`, so the sync path is the reliable instrument for it.
+        //
+        // Mutation that must fail this, ON ITS OWN: delete the two
+        // `pump?.WaitForQueueDrain(s_pumpDrainTimeout)` lines from NativeProducer.StopPump and
+        // StopPumpAsync, leaving the harness fixture's call in place. RunLoop then breaks on
+        // _stopping with the drained group still queued, DrainAndFaultRemaining faults it, and a
+        // round fails on RanToCompletion.
+        const int Rounds = 48;
+
+        for (int round = 0; round < Rounds; round++)
+        {
+            AsyncMockProducer<byte[], byte[]> producer =
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+            // Left in the accumulator: teardown's own StopAccumulator is what drains them, so the
+            // group reaches the pump's queue in exactly the F4 window — microseconds before
+            // _stopping — with the teardown flush having already resolved what the pump will read.
+            Task<RecordMetadata>[] sends = Fire(producer);
+
+            TestTimeout.Run(producer.Dispose, s_deadline);
+
+            for (int i = 0; i < sends.Length; i++)
+            {
+                Assert.Equal(TaskStatus.RanToCompletion, sends[i].Status);
+            }
+        }
     }
 
     [Fact]
