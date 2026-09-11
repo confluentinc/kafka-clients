@@ -1,0 +1,357 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+
+namespace Confluent.Kafka.Internal;
+
+/// <summary>
+/// The async send accumulator's tuning constants (M11/P3.1 §3.2). <b>Every value with a Python
+/// counterpart takes Python's value, and keeps Python's name</b>
+/// (<c>bindings/python/_confluentkafka.c:19-27</c> and the bare <c>10 ms</c> literal in
+/// <c>Producer_send_thread</c>), so the two bindings can be diffed line for line. Read <b>once, at
+/// construction</b>, from environment variables that exist only as an escape hatch — the defaults
+/// are the shipped behavior.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why environment variables and not config keys.</b> There is no <c>ProducerConfig</c> type in
+/// this binding — config is a <c>KeyValuePair&lt;string,string&gt;</c> dictionary consumed by the
+/// Rust core — so inventing a config-dict key the core does not know would be new public surface
+/// for a knob that exists only to make a future performance result actionable. Environment
+/// variables avoid that, following the recorded precedent of
+/// <c>CONFLUENT_KAFKA_PRODUCER_MAX_INFLIGHT_SENDS</c> ("read once at construction; not a Kafka
+/// config-dict key").
+/// </para>
+/// <para>
+/// <b>The 10 ms window is an accepted cost, not an oversight (§3.3).</b> The batch thread's timer is
+/// <b>free-running</b> — the deadline is taken from the loop's own clock at the top of each
+/// iteration, unrelated to when a record arrived — so a sub-threshold batch waits
+/// <b>0–<see cref="BatchWindowMs"/> ms uniformly</b>, mean ~half the window, not the full window.
+/// That is Python's shape and it is kept deliberately; a test asserting stage-1 timing must
+/// therefore assert a <em>bound</em>, never an expected value. A "first record starts the timer"
+/// variant would change the mechanism as well as the magnitude and is explicitly out of scope.
+/// </para>
+/// <para>
+/// <b>An unparseable or out-of-range override is ignored</b> rather than throwing: these are
+/// operator escape hatches read during producer construction, and failing to build a producer
+/// because of a typo in an optional environment variable would be a worse outcome than running
+/// with the Python-parity default.
+/// </para>
+/// <para>
+/// ⚠ <b>Two of these values have NO Python counterpart, and are the M11/P3.3 admission bound</b>
+/// (§7 option A): <see cref="MaxAdmittedRecords"/> and <see cref="MaxBlockMs"/>. Python needs
+/// neither, because its <c>send()</c> blocks the calling OS thread and so bounds the accepted
+/// population for free; .NET's <c>Send</c> returns a <see cref="System.Threading.Tasks.Task"/>
+/// and the caller does not await admission, so the bound has to be explicit. They are
+/// <b>deliberately not</b> a reuse of <see cref="MaxAccumulatedRecords"/> (decision D3): that one
+/// bounds records <em>appended but not yet taken</em>, this one bounds records <em>accepted but
+/// not yet appended-and-taken</em>, and a sibling branch measured Python's 1000 starving .NET to
+/// 96.9k msg/s when the two were coupled.
+/// </para>
+/// </remarks>
+internal readonly struct SendAccumulatorSettings
+{
+    /// <summary><c>PRODUCER_RECORD_SLOT_THRESHOLD</c> (<c>_confluentkafka.c:19</c>).</summary>
+    internal const int DefaultSlotThreshold = 1000;
+
+    /// <summary>
+    /// The gap Python adds on top of the threshold to size a node:
+    /// <c>PRODUCER_RECORD_SLOT_CAPACITY (PRODUCER_RECORD_SLOT_THRESHOLD + 100)</c>
+    /// (<c>_confluentkafka.c:20</c>). Kept as the same derivation, not as a second literal.
+    /// </summary>
+    internal const int SlotCapacityHeadroom = 100;
+
+    /// <summary>The bare <c>10 ms</c> literal in Python's send-thread wait loop.</summary>
+    internal const int DefaultBatchWindowMs = 10;
+
+    /// <summary>
+    /// The admission bound's default — <b>the measured knee on this branch</b> (M11/P3.3 slice S2,
+    /// PLAN §8.3). Replaces the provisional 5000 this phase shipped S1 with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The sweep</b> (local broker, async max-rate, 1 KiB values, 15 s measured, <c>acks=all</c>,
+    /// <c>batch.size</c> 1 MiB, <c>linger.ms</c> 5, at commit <c>1685e44d</c>):
+    /// </para>
+    /// <list type="table">
+    /// <item><term>500</term><description>43.6k msg/s · p50 22 ms · 85 MB — <b>starved</b></description></item>
+    /// <item><term>1000</term><description><b>603.2k msg/s · p50 75 ms · p99 99 ms · 210 MB · 418% CPU</b></description></item>
+    /// <item><term>2000</term><description>591.6k msg/s · p50 77 ms · 217 MB</description></item>
+    /// <item><term>5000</term><description>586.4k msg/s · p50 82 ms · 227 MB</description></item>
+    /// <item><term>10000</term><description>588.3k msg/s · p50 91 ms · 238 MB</description></item>
+    /// </list>
+    /// <para>
+    /// 1000 is best on <em>every</em> axis at once — highest throughput, lowest p50/p99, lowest RSS,
+    /// lowest CPU — and the cliff below it is sharp (500 loses 14× the throughput). Above it the
+    /// pipeline only deepens: latency and RSS rise monotonically for no throughput gain.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>This INVERTS the sibling branch's sweep, and the reason is the topology, not the
+    /// number.</b> M11/P7 measured cap 1000 as "too tight — starves the pipeline" (96.9k msg/s) and
+    /// 5000 as its knee. That branch blocked on an <em>inline</em> <c>Producer_send</c> per record,
+    /// so a tight bound stalled the caller before the core could buffer anything. Here the batch
+    /// thread keeps feeding the core, so the binding stops hoarding and the core's own
+    /// <c>buffer.memory</c> carries the pipeline depth — at cap 1000 the in-flight population is
+    /// ~48k records, only ~1000 of which sit in this binding. <b>A cap value is meaningful only
+    /// together with where the block sits relative to the core's buffer</b>; do not port one
+    /// between send paths.
+    /// </para>
+    /// <para>
+    /// That the measured value coincides with <see cref="DefaultSlotThreshold"/> is a result, not a
+    /// reuse: this bound keeps its own name and its own override
+    /// (<see cref="MaxAdmittedVariable"/>) per decision D3, and the two remain independently
+    /// settable — they bound different populations.
+    /// </para>
+    /// </remarks>
+    internal const int DefaultMaxAdmittedRecords = 1000;
+
+    /// <summary>
+    /// The Kafka default for <c>max.block.ms</c> — Java's
+    /// <c>ProducerConfig.MAX_BLOCK_MS_CONFIG</c> default, which is what
+    /// <c>KafkaProducer.send()</c> blocks up to once the accumulator is full.
+    /// </summary>
+    internal const int DefaultMaxBlockMs = 60_000;
+
+    internal const string ThresholdVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_THRESHOLD";
+    internal const string MaxAccumulatedVariable = "CONFLUENT_KAFKA_PRODUCER_MAX_ACCUMULATED";
+    internal const string WindowVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_WINDOW_MS";
+    internal const string ChunkVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_CHUNK";
+
+    /// <summary>
+    /// The admission bound's own override — <b>separately named</b> from
+    /// <see cref="MaxAccumulatedVariable"/> because the two bound different populations (D3).
+    /// </summary>
+    internal const string MaxAdmittedVariable = "CONFLUENT_KAFKA_PRODUCER_MAX_ADMITTED";
+
+    /// <summary>
+    /// The Java dotted config key the admission wait is bounded by. <b>A config-dict key, not an
+    /// environment variable</b> — unlike every other value here — because it is a real Kafka
+    /// producer config the core already knows, so reading it from the user's own config map is
+    /// honouring an existing knob rather than inventing new surface.
+    /// </summary>
+    internal const string MaxBlockMsKey = "max.block.ms";
+
+    /// <summary>
+    /// Builds a settings value from explicit numbers — the "compose" half that
+    /// <see cref="FromEnvironment(int)"/>'s "read and validate" half feeds. Validation lives
+    /// entirely there, so this constructor takes the values as given (the derived
+    /// <see cref="SlotCapacity"/> and the chunk clamp still apply).
+    /// </summary>
+    /// <remarks>
+    /// The two M11/P3.3 parameters are <b>optional</b>, defaulting to the shipped values, so the
+    /// ~35 existing test constructions keep expressing exactly what they express today (a test that
+    /// says nothing about admission gets production's admission bound). A test that needs the bound
+    /// to saturate passes <paramref name="maxAdmittedRecords"/> explicitly.
+    /// </remarks>
+    internal SendAccumulatorSettings(
+        int slotThreshold,
+        int maxAccumulatedRecords,
+        int batchWindowMs,
+        int batchChunk,
+        int maxAdmittedRecords = DefaultMaxAdmittedRecords,
+        int maxBlockMs = DefaultMaxBlockMs)
+    {
+        SlotThreshold = slotThreshold;
+        SlotCapacity = slotThreshold + SlotCapacityHeadroom;
+        MaxAccumulatedRecords = maxAccumulatedRecords;
+        BatchWindowMs = batchWindowMs;
+        MaxAdmittedRecords = maxAdmittedRecords;
+        MaxBlockMs = maxBlockMs;
+
+        // A chunk larger than a node is indistinguishable from a full node, because a chunk never
+        // spans two nodes (§3.4). Clamping keeps the ceil(count / chunk) formula honest instead of
+        // letting an over-large override read as a different mode.
+        BatchChunk = Math.Min(batchChunk, SlotCapacity);
+    }
+
+    /// <summary>
+    /// The record count at which an appending <c>Send</c> wakes the batch thread early rather than
+    /// letting the window run out (Python <c>PRODUCER_RECORD_SLOT_THRESHOLD</c>, 1000).
+    /// </summary>
+    internal int SlotThreshold { get; }
+
+    /// <summary>
+    /// A node's fixed capacity — <see cref="SlotThreshold"/> + <see cref="SlotCapacityHeadroom"/>
+    /// (Python <c>PRODUCER_RECORD_SLOT_CAPACITY</c>, 1100). A node never holds more, so this is
+    /// also the largest batch a single <c>send_batch</c> can carry.
+    /// </summary>
+    internal int SlotCapacity { get; }
+
+    /// <summary>
+    /// The backpressure bound: records appended but not yet taken by the batch thread (Python
+    /// <c>PRODUCER_MAX_ACCUMULATED_RECORDS</c>, which is <em>defined as</em> the threshold). Python's
+    /// own comment is the Java-faithfulness argument for having a stage-1 bound at all: <i>"once this
+    /// many records are accumulated but not yet taken by the send task, the producer is 'full' and
+    /// further enqueuing should wait until the send task drains a batch. One complete batch beyond
+    /// the one being filled — mirrors Java's <c>send()</c> blocking once <c>buffer.memory</c> is
+    /// full, applied here at batch granularity in front of the Rust accumulator."</i>
+    /// </summary>
+    internal int MaxAccumulatedRecords { get; }
+
+    /// <summary>The free-running linger window in milliseconds (Python's bare 10 ms literal).</summary>
+    internal int BatchWindowMs { get; }
+
+    /// <summary>
+    /// The maximum number of records in one <c>send_batch</c> call. Defaults to
+    /// <see cref="SlotCapacity"/> — Python's <b>effective</b> per-call maximum, since it issues one
+    /// call per node and a node fills to exactly <c>SLOT_CAPACITY</c>. Python has no name for it;
+    /// this is the phase's only net-new constant name, and its default value is Python's, so at the
+    /// defaults it changes nothing (<c>ceil(count / chunk)</c> is always 1). It exists as the single
+    /// knob that trades batching efficiency against how long one <c>send_batch</c> holds the core's
+    /// coarse producer mutex (§3.4).
+    /// </summary>
+    internal int BatchChunk { get; }
+
+    /// <summary>
+    /// <b>The admission bound (M11/P3.3):</b> how many records may be <em>accepted by</em>
+    /// <c>Send</c> — so returned to the caller — while still waiting to be handed to the batch
+    /// thread. It covers <b>both</b> submission routes (the inline append and the FIFO submission
+    /// queue), because capping one container only relocates the pile-up into the other: with
+    /// M11/P3.2's queue path bypassed the identical bloat reappeared in the node chain
+    /// (M11/P3.3 §2.3, measured). Exceeding it makes the calling thread <b>wait</b>, bounded by
+    /// <see cref="MaxBlockMs"/> — Java's own shape, since <c>KafkaProducer.send()</c> blocks up to
+    /// <c>max.block.ms</c> once the accumulator is full.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="MaxAccumulatedRecords"/> in both quantity and purpose, and the
+    /// separation is decision D3 rather than an accident — see the type's remarks. Default
+    /// <see cref="DefaultMaxAdmittedRecords"/>, the knee measured on this branch (M11/P3.3 S2).
+    /// </remarks>
+    internal int MaxAdmittedRecords { get; }
+
+    /// <summary>
+    /// How long a <c>Send</c> blocked on the admission bound waits before the record is refused
+    /// with a <b>retriable</b> <see cref="KafkaException"/> — delivered through the send's own
+    /// <c>Task</c> and its delivery callback, Java's buffer-exhausted outcome, rather than thrown.
+    /// The user's <c>max.block.ms</c> (<see cref="MaxBlockMsKey"/>), default
+    /// <see cref="DefaultMaxBlockMs"/>. Zero is legal and means "never block": the fast path still
+    /// admits when capacity is free, and a saturated bound refuses immediately.
+    /// </summary>
+    internal int MaxBlockMs { get; }
+
+    /// <summary>
+    /// Builds the settings for one producer, reading each environment override <b>once</b> and
+    /// <see cref="MaxBlockMsKey"/> out of <paramref name="config"/>. Called per accumulator, so a
+    /// process can host producers with different settings and a test can change an override between
+    /// constructions.
+    /// </summary>
+    /// <param name="config">
+    /// The producer's own config map, or <see langword="null"/> for a producer built without one (a
+    /// <c>MockProducer</c>). Only <see cref="MaxBlockMsKey"/> is read from it; every other value
+    /// here comes from the environment.
+    /// </param>
+    /// <remarks>
+    /// <b>Production does not use this overload</b> — <c>NativeProducer</c> resolves
+    /// <see cref="MaxBlockMsKey"/> eagerly at construction (Critic 72 finding 72.9) and calls
+    /// <see cref="FromEnvironment(int)"/> with the resolved value, so it retains no reference to the
+    /// caller's dictionary. This overload is the composition of
+    /// <see cref="ReadMaxBlockMs(IReadOnlyDictionary{string, string}?)"/> with that one, kept so the
+    /// config-key parsing can be exercised end to end.
+    /// </remarks>
+    internal static SendAccumulatorSettings FromEnvironment(
+        IReadOnlyDictionary<string, string>? config = null) =>
+        FromEnvironment(ReadMaxBlockMs(config));
+
+    /// <summary>
+    /// Builds the settings for one producer from an <b>already-resolved</b> <c>max.block.ms</c>,
+    /// reading each environment override <b>once</b>. The production path — see
+    /// <see cref="FromEnvironment(IReadOnlyDictionary{string, string}?)"/>'s remarks.
+    /// </summary>
+    /// <param name="maxBlockMs">
+    /// The producer's <c>max.block.ms</c>, already read and validated by
+    /// <see cref="ReadMaxBlockMs(IReadOnlyDictionary{string, string}?)"/>.
+    /// </param>
+    internal static SendAccumulatorSettings FromEnvironment(int maxBlockMs)
+    {
+        int threshold = ReadPositive(ThresholdVariable, DefaultSlotThreshold);
+
+        // Python couples the bound to the threshold (PRODUCER_MAX_ACCUMULATED_RECORDS is *defined*
+        // as PRODUCER_RECORD_SLOT_THRESHOLD), so the default follows the effective threshold rather
+        // than the constant — otherwise lowering only the threshold would silently decouple them.
+        int maxAccumulated = ReadPositive(MaxAccumulatedVariable, threshold);
+        // ReadPositive, not ReadNonNegative: a zero window would make the batch thread's wait loop
+        // expire instantly on every iteration, i.e. a spin loop burning a core while idle. Python's
+        // window is a compile-time 10 ms and has no zero form to be faithful to.
+        int window = ReadPositive(WindowVariable, DefaultBatchWindowMs);
+        int chunk = ReadPositive(ChunkVariable, threshold + SlotCapacityHeadroom);
+
+        // DELIBERATELY not derived from `threshold`, unlike `maxAccumulated` above: the admission
+        // bound answers a different question and coupling it to Python's 1000 is what the sibling
+        // branch's sweep measured as a throughput cliff (D3). Its own constant, its own override.
+        int maxAdmitted = ReadPositive(MaxAdmittedVariable, DefaultMaxAdmittedRecords);
+
+        return new SendAccumulatorSettings(
+            threshold, maxAccumulated, window, chunk, maxAdmitted, maxBlockMs);
+    }
+
+    /// <summary>
+    /// Reads <see cref="MaxBlockMsKey"/> out of the producer's config map, falling back to
+    /// <see cref="DefaultMaxBlockMs"/> when it is absent, unparseable or negative. Called <b>once
+    /// per producer, at construction</b> (Critic 72 finding 72.9), so the binding neither retains
+    /// the caller's dictionary nor re-reads a value the caller may since have edited.
+    /// </summary>
+    /// <remarks>
+    /// The same ignore-rather-than-throw policy as the environment overrides above, for a stronger
+    /// reason: the core reads this key too, so a value it rejects will fail producer construction
+    /// there, with the core's own message — the binding must not pre-empt that with a worse one.
+    /// Non-negative rather than positive: Java's <c>max.block.ms</c> is <c>atLeast(0)</c>, and zero
+    /// is a meaningful "never block" rather than a typo.
+    /// </remarks>
+    internal static int ReadMaxBlockMs(IReadOnlyDictionary<string, string>? config)
+    {
+        if (config is null || !config.TryGetValue(MaxBlockMsKey, out string? raw))
+        {
+            return DefaultMaxBlockMs;
+        }
+
+        // long, then clamp: max.block.ms is a Java `long` config, so a value above int.MaxValue is
+        // legal there and must not read as a parse failure here. Clamping to int.MaxValue ms
+        // (~24 days) is indistinguishable from the unbounded wait the user asked for.
+        if (!long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed)
+            || parsed < 0)
+        {
+            return DefaultMaxBlockMs;
+        }
+
+        return (int)Math.Min(parsed, int.MaxValue);
+    }
+
+    private static int ReadPositive(string variable, int fallback)
+    {
+        int value = Read(variable, fallback);
+        return value >= 1 ? value : fallback;
+    }
+
+    private static int Read(string variable, int fallback)
+    {
+        string? raw;
+        try
+        {
+            raw = Environment.GetEnvironmentVariable(variable);
+        }
+        catch (System.Security.SecurityException)
+        {
+            // A restricted host can deny environment access; fall back rather than fail the
+            // producer's construction over an optional knob.
+            return fallback;
+        }
+
+        return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
+            ? parsed
+            : fallback;
+    }
+}
