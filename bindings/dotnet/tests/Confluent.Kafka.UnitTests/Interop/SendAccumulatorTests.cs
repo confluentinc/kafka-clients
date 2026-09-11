@@ -1634,15 +1634,34 @@ public sealed class SendAccumulatorTests
                         int refused = 0;
                         for (int i = 0; i < PerSender; i++)
                         {
-                            try
-                            {
-                                // Production's own entry point, blocking exactly as production's
-                                // Send blocks (DoD §12 — the fixture holds no copy of the rule).
-                                _ = harness.AppendOne((byte)((sender * PerSender) + i));
-                            }
-                            catch (KafkaException)
+                            // Production's own entry point, blocking exactly as production's
+                            // Send blocks (DoD §12 — the fixture holds no copy of the rule).
+                            Task<RecordMetadata> send =
+                                harness.AppendOne((byte)((sender * PerSender) + i));
+
+                            // ⚠ A REFUSAL IS A FAULTED TASK, NOT A THROW (Critic 72 finding 72.1).
+                            // This loop used to count `catch (KafkaException)`; the max.block.ms
+                            // expiry now faults the record's Task and returns, which is Java's
+                            // buffer-exhausted outcome. The state is observable the instant
+                            // AppendOne returns — TrySetException transitions the Task
+                            // synchronously, and RunContinuationsAsynchronously defers only the
+                            // continuations — so this stays a deterministic count rather than a
+                            // poll. Observing `Exception` also keeps the fault from surfacing later
+                            // as an UnobservedTaskException; an ACCEPTED send's Task is still
+                            // pending here (nothing drains under the 60 s window), which is exactly
+                            // what makes IsFaulted the discriminator.
+                            if (send.IsFaulted)
                             {
                                 refused++;
+                                AggregateException? fault = send.Exception;
+                                if (fault?.InnerException is not KafkaException)
+                                {
+                                    // Fail the flood task loudly rather than silently counting a
+                                    // refusal of the wrong kind.
+                                    throw new InvalidOperationException(
+                                        "a refused send faulted with something other than a " +
+                                        "KafkaException: " + fault?.InnerException);
+                                }
                             }
                         }
 
@@ -1666,7 +1685,8 @@ public sealed class SendAccumulatorTests
             }
 
             // (1) Exactly Cap sends were accepted — there are exactly Cap permits and nothing can
-            // return one, so this is an equality rather than a bound.
+            // return one, so this is an equality rather than a bound. (A "refusal" is a faulted
+            // returned Task, counted in the flood loop above — see the note there.)
             Assert.Equal(Cap, (Senders * PerSender) - refusedTotal);
 
             // (2) The population the bound is about. THE assertion: 16 with the gate, 48 without.
@@ -1740,11 +1760,23 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public async Task Admission_WhenTheBoundStaysSaturated_FailsAfterMaxBlockMs()
+    public async Task Admission_WhenTheBoundStaysSaturated_FaultsTheSendAfterMaxBlockMs_WithoutThrowing()
     {
-        // Java's outcome — send() blocks up to max.block.ms for accumulator memory and then throws
-        // — and the message is asserted (DoD §3), because a flat KafkaException's code alone cannot
-        // tell an operator which knob to move.
+        // ── JAVA'S BUFFER-EXHAUSTED OUTCOME, all three axes (Critic 72 finding 72.1) ────────────
+        // BufferPool.allocate throws BufferExhaustedException on expiry (BufferPool.java:161),
+        // reached from KafkaProducer.doSend's try via RecordAccumulator.java:333 <-
+        // KafkaProducer.java:1029-1030 (remainingWaitMs from max.block.ms at :995). That exception
+        // extends TimeoutException -> RetriableException -> ApiException, so doSend's
+        // `catch (ApiException e)` at :1049-1061 handles it: it fires the callback with the -1
+        // placeholder and returns a FAILED FUTURE (:1061) rather than rethrowing. So:
+        //
+        //   1. Send RETURNS (it does not throw)               — the `admission` task completing;
+        //   2. the record's Task FAULTS with a KafkaException — asserted below;
+        //   3. the exception is RETRIABLE with a real code    — asserted below.
+        //
+        // Before the fix the binding threw synchronously with Code == 0 / IsRetriable == false, and
+        // nothing in the suite asserted the classification, so all three were unguarded.
+        // The delivery callback (axis 4 of the same Java line) has its own test, below.
         const int MaxBlockMs = 250;
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
@@ -1758,11 +1790,16 @@ public sealed class SendAccumulatorTests
         Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
 
         Stopwatch elapsed = Stopwatch.StartNew();
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(
-                () => harness.AppendOneFromAnotherThread(0xF3, CancellationToken.None),
-                s_deadline));
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0xF3, CancellationToken.None);
+
+        // ⚠ AWAITED FOR ITS *COMPLETION*, NOT FOR A FAULT — that IS assertion 1. The outer task
+        // carries whatever `SubmitAdmitted` threw, so had the expiry stayed a synchronous throw
+        // this await would itself have faulted with the KafkaException and the test would be red
+        // here rather than measuring the record's Task below.
+        await TestTimeout.Run(() => admission, s_deadline);
         elapsed.Stop();
+        Task<RecordMetadata> refused = await admission;
 
         // ⚠ THE DISCRIMINATOR between "waited, then failed" and "failed immediately". Without it an
         // admission that never blocks at all passes every other assertion here. The lower bound is
@@ -1772,9 +1809,22 @@ public sealed class SendAccumulatorTests
             $"the saturated send failed after {elapsed.Elapsed}, well inside the {MaxBlockMs} ms " +
             "max.block.ms — it did not wait for capacity at all");
 
+        // Assertion 2: the record's own Task is what carries the failure.
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => refused, s_deadline));
+
+        // The message is asserted (DoD §3), because a flat KafkaException's code alone cannot tell
+        // an operator which knob to move.
         Assert.Contains("max.block.ms", failure.Message, StringComparison.Ordinal);
         Assert.Contains("250 ms", failure.Message, StringComparison.Ordinal);
         Assert.Contains("2 records", failure.Message, StringComparison.Ordinal);
+
+        // Assertion 3: Java's classification. `IsRetriable` is the load-bearing one — the idiomatic
+        // `catch (KafkaException e) when (e.IsRetriable)` retry must match, as it does in Java —
+        // and Code != 0 matters because 0 is the protocol's NONE, i.e. "success" on an exception.
+        Assert.True(failure.IsRetriable, "Java's BufferExhaustedException is a RetriableException");
+        Assert.False(failure.IsFatal);
+        Assert.Equal(7, failure.Code);   // REQUEST_TIMED_OUT, whose Java exception IS TimeoutException
 
         // The refused send neither took a permit nor invented one — asserted on the permit count as
         // well as on the record count, because an expiry that released a permit it never held would
@@ -1786,6 +1836,67 @@ public sealed class SendAccumulatorTests
         harness.DrainNow();
         Assert.Equal(2, harness.HistoryCount);
         Assert.Equal(2, harness.Accumulator.SendBatchRecordCount);
+        await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
+    }
+
+    [Fact]
+    public async Task Admission_WhenTheBoundStaysSaturated_FiresTheDeliveryCallback_WithThePlaceholder()
+    {
+        // Axis 4 of the same Java line (Critic 72 finding 72.1, item 2): doSend's
+        // `catch (ApiException e)` fires the callback BEFORE returning the failed future
+        // (KafkaProducer.java:1051-1055), with `new RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1,
+        // -1)` — the -1 placeholder Callback.java:28-33 documents. Before the fix this outcome
+        // fired NOTHING, on the rationale "neither accepted anything, so neither owes a
+        // notification" — which is exactly the rationale Java rejects here: its buffer-exhausted
+        // path accepted nothing either and still fires.
+        //
+        // ⚠ Async surface only, deliberately: the expiry is the ADMISSION bound's, and only the
+        // async Send has an admission bound (the sync Send hands the record to the core inside the
+        // call and blocks on the core's own buffer.memory). So ffi §A6 form C's "run every
+        // behavioural test against both flavors" has nothing to run on the sync side here.
+        const int MaxBlockMs = 250;
+        using Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 2,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: MaxBlockMs));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+        Assert.Equal(2, harness.Accumulator.AdmittedRecordCount);
+
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0xF4, CancellationToken.None, callback);
+        await TestTimeout.Run(() => admission, s_deadline);
+        Task<RecordMetadata> refused = await admission;
+
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => refused, s_deadline));
+
+        // Exactly once, after a SETTLE WINDOW: a first observation of "1" cannot distinguish one
+        // invocation from two (ffi §A6 form C's tests-required list).
+        await Task.Delay(TimeSpan.FromMilliseconds(150));
+        Assert.Equal(1, callback.Count);
+
+        // The placeholder, NOT null — and built by DeliveryRegistration.Fire, the one site that
+        // owns that construction. (M14/P1 shipped a second construction whose negative partition
+        // tripped TopicPartition's guard inside Fire's no-throw swallow, making the callback's
+        // effect silently absent; reusing Fire is what forecloses that here. The count assertion
+        // above is what would catch it: an exception inside Fire is swallowed, so a hand-rolled
+        // placeholder that threw would leave Count at 0 with everything else still green.)
+        Assert.NotNull(callback.LastMetadata);
+        Assert.Equal(Topic, callback.LastMetadata!.Topic);
+        Assert.Equal(-1L, callback.LastMetadata.Offset);
+        Assert.Equal(-1L, callback.LastMetadata.Timestamp);
+
+        // The SAME object on both surfaces — one failure driving both, as in Java, where one
+        // completeFutureAndFireCallbacks both resolves the future and fires the callbacks.
+        Assert.Same(failure, callback.LastException);
+
+        harness.DrainNow();
+        Assert.Equal(2, harness.HistoryCount);
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
     }
 
@@ -1964,15 +2075,27 @@ public sealed class SendAccumulatorTests
         Assert.Equal(Queued, harness.Accumulator.QueuedSubmissionCount);
         Assert.Equal(Queued, harness.Accumulator.AdmittedRecordCount);
 
-        // Teardown flushes all three into the chain bypassing the space bound, the final take sends
-        // them — and gives back all three ADMISSION permits, which is what the assertion below
-        // measures. A SemaphoreFullException on the batch thread would make Stop report
-        // `false` here (abandoned, not drained), so the over-release direction is covered too.
+        // Teardown flushes all three into the chain bypassing the space bound, and the final take
+        // sends them. Each assertion below covers ONE direction of the accounting, and they are not
+        // interchangeable:
+        //
+        //   * OVER-release (the bypassed record counted in _accumulated): a SemaphoreFullException
+        //     on the batch thread makes Stop report `false`, so `Assert.True(Stop(...))` covers it.
+        //   * LEAK (the bypassed record excluded from the admission count): only
+        //     AvailableAdmissions can see it. ⚠ AdmittedRecordCount CANNOT — it is
+        //     `_queued + _chainRecords`, and TakeChainLocked zeroes `_chainRecords` whether or not
+        //     the ReleaseAdmission beside it runs, so it reads 0 either way. This test claimed that
+        //     assertion measured the leak direction and it measured nothing: moving the
+        //     unconditional `_chainRecords++` into Append's `if (chargedToBound)` block — precisely
+        //     the leak this test is named for — went UNDETECTED 0/8 in-suite, while the
+        //     AvailableAdmissions line below is red 3/3 under it (Expected 8, Actual 5 — the three
+        //     leaked permits). Critic 72 finding 72.2.
         Assert.True(harness.Accumulator.Stop(s_deadline), "the batch thread did not exit");
 
         Assert.Equal(Queued, harness.Accumulator.SendBatchRecordCount);
         Assert.Equal(Queued, harness.HistoryCount);
-        Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);
+        Assert.Equal(0, harness.Accumulator.AdmittedRecordCount);   // the chain is empty
+        Assert.Equal(8, harness.Accumulator.AvailableAdmissions);   // maxAdmittedRecords: all back
         Assert.Equal(Queued, sends.Length);
 
         harness.Dispose();
@@ -2039,11 +2162,15 @@ public sealed class SendAccumulatorTests
         //
         // ⚠ THE WITNESS IS THE PERMIT COUNT, AND IT HAS TO BE. The obvious behavioural witness — a
         // later send still being admissible — does NOT work here, and a first draft of this test
-        // passed under both mutations because of it: every reachable way to refuse an
-        // already-admitted record runs during teardown, and teardown has also cancelled the
-        // backpressure gate, so a caller whose permit was leaked reports "the producer is closing"
-        // rather than waiting out max.block.ms — indistinguishable from the permit having come back.
-        // AvailableAdmissions separates them (and the accumulator's doc says why it exists).
+        // passed under both mutations because of it: BOTH refusal paths below run during teardown,
+        // and teardown has also cancelled the backpressure gate, so a caller whose permit was
+        // leaked reports "the producer is closing" rather than waiting out max.block.ms —
+        // indistinguishable from the permit having come back. AvailableAdmissions separates them
+        // (and the accumulator's doc says why it exists). ⚠ This is a fact about THESE two paths,
+        // not about every refusal of an already-admitted record: a CANCELLED queued submission's
+        // release (ReleaseQueuedSlot) is not a teardown path and does have a behavioural witness —
+        // Admission_QueuedSubmissionSettledWithoutAppending_ReturnsItsPermit uses it. (The "every
+        // reachable refusal … happens during teardown" wording here was false. Critic 72 / 72.7.)
         //
         // The same fact is why neither site has a behavioural consequence a user could observe: the
         // accumulator is dead either way. They are asserted because the arithmetic is a property in
@@ -2504,9 +2631,13 @@ public sealed class SendAccumulatorTests
         /// </summary>
         /// <remarks>
         /// The <b>outer</b> task is the admission observable: it completes when
-        /// <c>SubmitAdmitted</c> returns, or faults with whatever admission threw — which is the
-        /// whole contract under test. The <b>inner</b> task is the record's own delivery future,
-        /// and exists only when admission succeeded.
+        /// <c>SubmitAdmitted</c> returns, or faults with whatever admission <em>threw</em> — which
+        /// is the whole contract under test. The <b>inner</b> task is the record's own delivery
+        /// future. ⚠ Admission <b>expiry</b> does not fault the outer task: it is Java's
+        /// buffer-exhausted outcome, so the record's <em>inner</em> task is faulted and
+        /// <c>SubmitAdmitted</c> returns normally (Critic 72 finding 72.1). So a test of the expiry
+        /// awaits the outer task for the timing and the inner one for the failure; a test of
+        /// teardown or cancellation still awaits the outer one for both.
         /// <para>
         /// <see cref="TaskFactory.StartNew{TResult}(Func{TResult}, CancellationToken, TaskCreationOptions, TaskScheduler)"/>
         /// rather than <see cref="Task.Run(Func{Task})"/> deliberately: <c>Task.Run</c> would
@@ -2515,9 +2646,11 @@ public sealed class SendAccumulatorTests
         /// </para>
         /// </remarks>
         internal Task<Task<RecordMetadata>> AppendOneFromAnotherThread(
-            byte tag, CancellationToken cancellationToken) =>
+            byte tag,
+            CancellationToken cancellationToken,
+            IDeliveryCallback? callback = null) =>
             Task.Factory.StartNew(
-                () => AppendOne(tag, callback: null, cancellationToken, out _),
+                () => AppendOne(tag, callback, cancellationToken, out _),
                 CancellationToken.None,
                 TaskCreationOptions.DenyChildAttach,
                 TaskScheduler.Default);
