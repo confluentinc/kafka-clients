@@ -390,7 +390,7 @@ on the facts, so the rejection should be re-decided, not inherited.
 
 | | Option | Bounded? | Throttles the caller? | Ordering | Java fidelity | Mode |
 |---|---|---|---|---|---|---|
-| **A** | **Blocking admission** on the slow path: `Send` stays non-`async`; when the bound is saturated the calling thread waits (bounded by `max.block.ms`), then the record joins the FIFO queue. Timeout → `KafkaException`. | ✅ | ✅ structurally | ✅ preserved, and *strengthened* | ✅ this is Java's shape | A |
+| **A** | **Blocking admission** on the slow path: `Send` stays non-`async`; when the bound is saturated the calling thread waits (bounded by `max.block.ms`), then the record joins the FIFO queue. On expiry: **fire the delivery callback with the -1 placeholder and fault the returned `Task` as retriable** — `Send` does **not** throw (corrected post-72.1; see the note below). | ✅ | ✅ structurally | ✅ preserved, and *strengthened* | ✅ this is Java's shape | A |
 | **B** | **Bounded async admission** (the shape originally suggested — e.g. `Channel.CreateBounded` + `WriteAsync`). | ❌ see below | ❌ | ✅ | ✗ | A |
 | **C** | **Fail fast** — when saturated, fault the record's `Task` with a retriable `KafkaException` (librdkafka's `QUEUE_FULL`). | ✅ | n/a (rejects instead) | ✅ | ✗ Java blocks, it does not drop | A |
 | **D** | **Byte-based bound**, or tie the managed bound to the core's `buffer.memory`. | ✅ | depends on A/B/C | ✅ | ✅✅ closest to Java | **B** |
@@ -442,15 +442,59 @@ this branch.** Concretely:
 2. Fast path stays `Wait(0)`-shaped and allocation-free (DoD §10 budget unchanged).
 3. Slow path **blocks the calling thread**, bounded by `max.block.ms` (read from the config
    dict — a real Kafka key, default 60000, the M11/P7 D3 precedent), cancellable by the
-   caller's token and by teardown's gate. Timeout → `KafkaException` with an asserted message.
+   caller's token and by teardown's gate.
+
+   ⚠ **CORRECTED post-72.1 — this originally read "Timeout → `KafkaException` with an
+   asserted message", which was implemented and found to be a Java-fidelity defect.** Java's
+   `BufferExhaustedException` extends `TimeoutException` → `RetriableException` →
+   `ApiException`, and `KafkaProducer.doSend`'s `catch (ApiException)` **fires the callback
+   with the -1 placeholder `RecordMetadata`, records the error, notifies interceptors, and
+   returns a failed future** — `send()` itself does **not** throw. So on expiry the binding
+   must **fault the returned `Task`** with a **retriable** error and **fire the delivery
+   callback**, reusing the existing failure-placeholder machinery in `IDeliveryCallback.cs`
+   (⚠ `TopicPartition`'s ctor rejects a negative partition and the placeholder's partition is
+   `-1`, so a hand-rolled construction throws *inside* the callback's no-throw swallow
+   boundary and makes the callback **silently absent** — the M14/P1 trap). The
+   **precondition** throws (disposed producer, already-cancelled token) stay **synchronous**;
+   only the expiry case moves from throw to faulted `Task`. This also means
+   `bindings/dotnet/CLAUDE.md §4` now *has* an analogue of Java's `catch (ApiException)` row,
+   where it previously claimed none existed and called the absence ABI-forced — a Manager-owned
+   correction, held for approval.
 4. Cap default from a **measured sweep on this branch** (§8.3); override via env var
    (`CONFLUENT_KAFKA_PRODUCER_MAX_ACCUMULATED_*`-style, read once at construction), matching
    the existing `SendAccumulatorSettings` convention and the M11/P7 D2 precedent of "env var,
    not a config-dict key".
-5. Teardown: a caller blocked on admission must be released by `Stop` — the `_spaceGate`
-   already does this for `_space` and the new gate needs the same treatment, *before* the
-   seal/flush, or `Stop`'s monotonicity argument (`FlushQueuedSubmissions`, `:1246-1261`)
-   breaks.
+5. Teardown: a caller blocked on admission must be released by `Stop`, and by
+   `AbandonOnThreadFailure`.
+
+   ⚠ **CORRECTED — the original text of this item was wrong twice over, and the Critic
+   established it is worse than first reported.** It read: *"the `_spaceGate` already does
+   this for `_space` and the new gate needs the same treatment, **before** the seal/flush,
+   or `Stop`'s monotonicity argument (`FlushQueuedSubmissions`, `:1246-1261`) breaks."*
+   Both halves fail:
+   - **The ordering is wrong, and following it would break teardown.** `Stop` seals the
+     queue **first** and cancels the gate **after** (`_queueSealed = true` under `_gate`,
+     then `_spaceGate.Cancel()`), precisely so the submission the cancel wakes observes the
+     seal and takes the **teardown bypass** instead of faulting. Cancelling before the seal
+     inverts that: the woken submission reaches `AppendQueuedAsync`'s
+     `catch (ObjectDisposedException) when (_queueSealed)` filter with the filter **false**,
+     so it is faulted rather than appended — regressing the M11/P3.2 §F2 behaviour that
+     makes a send whose caller already returned reach the core.
+   - **The stated reason is wrong.** `Stop`'s monotonicity argument rests on the **seal**
+     (checked under `_gate` by `SubmitQueued`, so `_queued` can only decrease), not on the
+     gate cancellation — and admission release does not feed back into the queue at all,
+     because a released-but-refused caller **throws** rather than re-entering `SubmitQueued`.
+
+   The correct requirement is simply: the admission wait must be woken by teardown on both
+   paths, in `Stop` **after** the seal and unconditionally in `AbandonOnThreadFailure` — the
+   latter per M11/P3.2 S5's reasoning that a waiter must be released by an **explicit event**,
+   never by permit arithmetic the triggering failure may already have corrupted.
+
+6. **Peak in-flight population** (needed to size the sweep in §8.3): it is
+   `min(MaxAdmittedRecords, MaxAccumulatedRecords)` plus the teardown bypass — **≈1000 at
+   today's defaults**, since `BatchChunk` is far smaller than the accumulator's own cap.
+   ⚠ It is **not** `cap + BatchChunk`; that was an Actor claim the Critic refuted. Bounded,
+   and structurally the same overshoot `_space` already has.
 
 **Option D is the right long-term answer and should be recorded, not built here.** Java bounds
 by bytes; a record count is workload-fragile (§4, finding 2). But it is Mode B and a separate
@@ -545,15 +589,34 @@ Proposed addition to §A1, alongside the existing "Submission order is call orde
 > with M11/P3.2's queue path bypassed, the identical bloat reappeared in the node chain
 > (M11/P3.3 §2.3). The bound belongs on **admission**, covering every route.
 >
-> ⚠ **A blocking admission does not need a fair primitive.** `SemaphoreSlim`'s documented
-> lack of waiter ordering is a problem for an *async* admission (one caller can have many
-> parked sends) and moot for a *blocking* one (a caller has at most one in flight, so its own
-> sends cannot invert). Do not add a fairness mechanism to justify a blocking gate.
+> **On expiry, fault the `Task` — do not throw.** The bound's timeout is Java's
+> buffer-exhaustion case, and Java does **not** throw from `send()` there:
+> `BufferExhaustedException` extends `TimeoutException` → `RetriableException` →
+> `ApiException`, and `KafkaProducer.doSend`'s `catch (ApiException)` fires the callback with
+> the `-1` placeholder `RecordMetadata` and returns a **failed future**. So the admission
+> timeout must fire the delivery callback and fault the returned `Task` with a **retriable**
+> error, leaving only the *precondition* throws (disposed, already-cancelled token)
+> synchronous. ⚠ Reuse the existing failure-placeholder machinery rather than constructing a
+> placeholder: `TopicPartition`'s ctor rejects a negative partition and the placeholder's is
+> `-1`, so a hand-rolled construction throws *inside* the callback's no-throw swallow
+> boundary and makes the callback **silently absent** — green everywhere, invisible to any
+> success-only test (the M14/P1 trap).
+>
+> ⚠ **A blocking admission does not need a fair primitive — for ORDERING. It is NOT fair for
+> STARVATION, and that difference is real.** `SemaphoreSlim`'s documented lack of waiter
+> ordering cannot invert a single caller's own sends under a blocking admission (that caller
+> has at most one send in flight), so no fairness mechanism is needed to make **ordering**
+> hold, and adding one to justify the gate is still wrong. But Java's `BufferPool` maintains a
+> genuinely **FIFO-fair** waiter queue while `SemaphoreSlim` can **barge**, so a parked caller
+> can be starved into a spurious `max.block.ms` expiry under contention. That is an accepted,
+> **documented deviation** (M11/P3.3, finding 72.3), not parity: after the expiry rule above,
+> its worst outcome is a retriable failed future plus a delivery callback — exactly what Java
+> produces on genuine exhaustion. Record it at the admission site; do not let a comment claim
+> fairness parity.
 
 Also worth a one-line correction where §A1's anti-pattern list is cited: M11/P3.2's D1 table
 attributes a "managed sync-over-async prohibition" to §A1, which §A1 does not contain (§5).
-Whether to correct the archived P3.2 PLAN in place, or only to note it here, is **open
-decision D6** — archived phase records are normally immutable.
+**D6 is decided: a dated addendum** to the archived P3.2 PLAN, not an in-place edit.
 
 ---
 

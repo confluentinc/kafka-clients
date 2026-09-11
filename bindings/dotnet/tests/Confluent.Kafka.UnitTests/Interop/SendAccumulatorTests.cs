@@ -2281,16 +2281,26 @@ public sealed class SendAccumulatorTests
     // --------------------------------------- admission settings (M11/P3.3 D3) -------------------
 
     [Fact]
-    public void Settings_AdmissionDefaults_AreTheProvisionalCapAndKafkasMaxBlockMs()
+    public void Settings_AdmissionDefaults_AreTheMeasuredKneeAndKafkasMaxBlockMs()
     {
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>());
 
-        // PROVISIONAL — slice S2 replaces it with a value measured on this branch (§8.3). It is an
-        // order of magnitude above Python's 1000, which a sibling branch measured starving .NET to
-        // 96.9k msg/s, and it is deliberately NOT the same number as MaxAccumulatedRecords.
-        Assert.Equal(5000, settings.MaxAdmittedRecords);
+        // The knee MEASURED ON THIS BRANCH in slice S2 (§8.3): 1000 → 603.2k msg/s, p50 75 ms,
+        // 210 MB — best on every axis at once, with a sharp cliff below (500 → 43.6k msg/s) and
+        // monotonic latency/RSS growth above for no throughput gain.
+        Assert.Equal(1000, settings.MaxAdmittedRecords);
         Assert.Equal(60_000, settings.MaxBlockMs);
-        Assert.NotEqual(settings.MaxAccumulatedRecords, settings.MaxAdmittedRecords);
+
+        // ⚠ There is deliberately NO `Assert.NotEqual(MaxAccumulatedRecords, MaxAdmittedRecords)`
+        // here any more. It used to assert the two defaults differ, as a PROXY for D3's "the
+        // admission bound is not coupled to the accumulation bound" — and the measurement made the
+        // proxy false: the knee is 1000, which is also DefaultSlotThreshold, so the two defaults now
+        // coincide BY MEASUREMENT while remaining structurally independent (own field, own env
+        // variable, independently settable). A value-inequality assertion cannot express that, and
+        // re-scoping it would only re-break the next time either default moves. The decoupling is
+        // proved where it is actually observable — by MOVING one and watching the other stay put:
+        // Settings_AdmissionBound_IsNotCoupledToTheThreshold and
+        // Settings_AdmissionOverride_TakesEffect_AndIsItsOwnVariable.
     }
 
     [Fact]
@@ -2307,7 +2317,7 @@ public sealed class SendAccumulatorTests
 
         Assert.Equal(25, settings.SlotThreshold);
         Assert.Equal(25, settings.MaxAccumulatedRecords);
-        Assert.Equal(5000, settings.MaxAdmittedRecords);
+        Assert.Equal(1000, settings.MaxAdmittedRecords);
     }
 
     [Fact]
@@ -2338,7 +2348,7 @@ public sealed class SendAccumulatorTests
             [SendAccumulatorSettings.MaxAdmittedVariable] = raw,
         });
 
-        Assert.Equal(5000, settings.MaxAdmittedRecords);
+        Assert.Equal(1000, settings.MaxAdmittedRecords);
     }
 
     [Fact]

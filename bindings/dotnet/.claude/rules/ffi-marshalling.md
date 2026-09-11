@@ -305,6 +305,46 @@ starts neither thread. A per-send thread and a poll loop remain forbidden, verba
     queued the first submission, with **at most one** in flight per producer, and it
     does not poll — it awaits a permit and appends. A *dedicated thread* for it would
     breach the cap and is not the sanctioned shape.
+  - **A deferred submission path must be BOUNDED, and the bound must THROTTLE THE
+    CALLER.** A bound enforced by handing the record to a container — a queue, a
+    channel, a continuation parked on a semaphore — bounds the *container*, not the
+    number of records the client has accepted. Where `Send` returns the record's
+    delivery `Task` and the caller does not await admission (the shape this binding
+    ships — M11/P3.2 DV-1), an **asynchronous** admission wait **throttles nobody**:
+    the caller already has its receipt and has moved on. Measured twice, in the same
+    harness: M11/P6's `await _inflight.WaitAsync` gave 63.5k msg/s / 3.0 GB /
+    p50 10,001 ms; M11/P3.2's unbounded FIFO submission queue gave 583k msg/s /
+    2.04 GiB / p50 3,524 ms against 537k / 239 MB / 41 ms immediately before it. The
+    **synchronous, `max.block.ms`-bounded** wait is what throttles (M11/P7: 591.6k
+    msg/s / 127 MiB / p50 7 ms; M11/P3.3 on this branch: 578.6k msg/s / 219 MB /
+    p50 84 ms), and it is Java's own shape — `KafkaProducer.send()` blocks up to
+    `max.block.ms` once the accumulator is full.
+    ⚠ **Capping one container is NOT sufficient, and this was falsified rather than
+    argued:** with M11/P3.2's submission queue bypassed entirely, the identical bloat
+    reappeared in the node chain (p50 3,436 ms / 2.04 GiB — M11/P3.3 §2.3). The bound
+    belongs on **admission**, covering every route into the accumulator.
+    ⚠ **On expiry, fault the `Task` — do NOT throw.** The timeout is Java's
+    buffer-exhaustion case, and Java does not throw from `send()` there:
+    `BufferExhaustedException` extends `TimeoutException` → `RetriableException` →
+    `ApiException`, and `KafkaProducer.doSend`'s `catch (ApiException)` fires the
+    callback with the `-1` placeholder and returns a **failed future**. So fire the
+    delivery callback and fault the returned `Task` with a **retriable** error; only
+    the *precondition* throws (disposed producer, already-cancelled token) stay
+    synchronous. Reuse the existing failure-placeholder machinery — `TopicPartition`'s
+    ctor rejects a negative partition and the placeholder's is `-1`, so a hand-rolled
+    construction throws *inside* §A6 form C's no-throw swallow boundary and makes the
+    callback **silently absent** (the M14/P1 trap).
+    ⚠ **A blocking admission needs no fair primitive for ORDERING, and is NOT fair
+    against STARVATION.** `SemaphoreSlim`'s documented lack of waiter ordering cannot
+    invert one caller's own sends under a blocking admission (that caller has at most
+    one in flight), so no fairness mechanism is needed to make **ordering** hold, and
+    adding one to justify the gate is wrong. But Java's `BufferPool` keeps a genuinely
+    **FIFO-fair** waiter queue where `SemaphoreSlim` can **barge**, so a parked caller
+    can be starved into a spurious `max.block.ms` expiry under contention. That is an
+    accepted **documented deviation** (M11/P3.3 finding 72.3), not parity — after the
+    expiry rule above its worst outcome is a retriable failed future plus a delivery
+    callback, which is what Java produces on genuine exhaustion. Record it at the
+    admission site; never let a comment claim fairness parity.
   - FFI is callable from any .NET thread; the core serializes via the producer's
     internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
@@ -350,6 +390,16 @@ pump deadlock-free (the Sender runs on other worker threads).
     submissions, hanging that drain out to its bound). This is the same standard as the
     `SemaphoreSlim`-fairness warning above: an ordering claim must rest on a documented
     guarantee, not on how a primitive happens to behave on one target.
+  - A deferred submission path with **no depth bound** — the container is not the
+    bound, and a correctness-only suite cannot see this: every record is still
+    delivered, in order, exactly once, so the tests pass while the client bloats.
+  - Treating an **async** admission wait as a throttle where the caller does not await
+    admission (it is not one — measured twice), or capping **one** container and
+    calling the population bounded (it relocates, measured).
+  - Throwing synchronously on the admission timeout instead of faulting the `Task` and
+    firing the delivery callback; or hand-rolling the `-1` placeholder.
+  - A comment claiming the admission gate is **fair** — it is not; state the
+    starvation deviation instead.
 
 **Tests required:**
 
@@ -374,6 +424,22 @@ pump deadlock-free (the Sender runs on other worker threads).
   - **A queued submission whose token fires before it is appended cancels with the
     caller's token and is not sent** — asserted on the core's record count, not only
     on the awaiter's state.
+  - **Bounded acceptance under over-offer** (the M11/P3.3 DoD item). Flood the
+    submission path faster than it drains — with the batch thread held back — and
+    assert the population of **accepted-but-not-yet-forwarded** records stays within
+    its documented bound. Assert on the accumulator's own witnesses, not on a
+    behavioural proxy: the queue's depth alone is **not** the quantity of interest
+    (§A1's capping-one-container note), and a refusal-path counter can be zeroed by
+    teardown independently of the thing under test — which is why M11/P3.3's first
+    version of this test measured **0/8** and needed a second witness (the gate's own
+    `CurrentCount`). Drive it through **production's own entry points** (DoD §12), and
+    prove the mutation **in-suite** with **K=8 bursts and a fresh harness per rep**:
+    M11/P3.2 saw a guard fail **5/5 isolated** while the full suite passed **5/5**, so
+    a ratio without its regime is not evidence. Mutate fixture and production
+    **separately**.
+  - **The admission timeout fires the delivery callback and faults the `Task`** —
+    non-null placeholder metadata, a **retriable** error, and the callback asserted on
+    the expiry path specifically (not merely that the `Task` faulted).
 
 ---
 

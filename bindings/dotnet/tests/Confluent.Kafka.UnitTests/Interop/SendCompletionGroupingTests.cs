@@ -186,8 +186,16 @@ public sealed class SendCompletionGroupingTests
         Assert.Equal(1100, SendCompletionPump.DrainCap);
         Assert.Equal(ExpectedPasses, (Total + SendCompletionPump.DrainCap - 1) / SendCompletionPump.DrainCap);
 
+        // ⚠ maxAdmittedRecords MUST be raised explicitly, like every other bound this test lifts out
+        // of the way. Until M11/P3.3 S2 it was omitted and the DEFAULT happened to be 5000, which is
+        // > Total — so the test passed on an ACCIDENT of that default rather than on anything it
+        // states. When S2 set the measured default to 1000, admission throttled the 2000 records into
+        // TWO send_batch calls and the "ONE group" assertion below failed (Expected 1, Actual 2) —
+        // the test reporting a pump-splitting defect that did not exist. The subject here is the
+        // PUMP's group splitting, so every accumulator-side bound is raised past Total deliberately.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 5000, maxAccumulatedRecords: 100_000, batchWindowMs: 60_000, batchChunk: 5100));
+            slotThreshold: 5000, maxAccumulatedRecords: 100_000, batchWindowMs: 60_000, batchChunk: 5100,
+            maxAdmittedRecords: 100_000));
 
         Task<RecordMetadata>[] sends = harness.Append(Total);
         harness.DrainNow();

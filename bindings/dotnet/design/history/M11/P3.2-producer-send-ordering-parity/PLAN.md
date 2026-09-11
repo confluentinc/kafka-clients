@@ -1334,3 +1334,48 @@ git diff --stat HEAD -- src/ src/ffi/ confluent_kafka.h cbindgen.toml   # must b
   `HistoryCount`.
 - Every new test must name the mutation that makes it fail, and the Actor must have **run** that
   mutation. A test whose stated mutation does not fail it is not evidence.
+
+---
+
+## ADDENDUM 2026-09-11 — D1's rationale for rejecting option (b) was wrong on both clauses
+
+Added by the Manager during **M11/P3.3** (decision D6, approved: a dated addendum rather than an
+in-place edit, so the record of what this phase actually decided stays intact). **Nothing above is
+altered** — this only records that one rationale in the §D1 table does not hold, because M11/P3.3
+adopted the option it rejected and a third phase would otherwise inherit the error.
+
+The §D1 row rejected option **(b)** — *"post-append throttle blocking the caller inside `Send`"* —
+with: *"(b) is Python's exact sync shape but makes `Send` block a pool thread under saturation,
+contradicting §A1's managed sync-over-async prohibition and making the shipped design's throughput
+profile meaningless."* Both clauses fail:
+
+1. **"making the shipped design's throughput profile meaningless" — refuted by measurement.** The
+   sibling branch `prashah_dev_dotnet_binding_producer_tuned` had already measured exactly this
+   shape: **M11/P6**'s *async* acquire gave 63.5k msg/s / 3.0 GB / p50 10,001 ms, and **M11/P7**'s
+   **blocking** acquire gave **591.6k msg/s / 127 MiB / p50 7 ms** — above the ckd 2.15.0 baseline
+   (546.7k / 233 MB / 24 ms), not "meaningless". M11/P3.3 reproduced the effect on *this* branch:
+   578.6k msg/s / 219 MB / p50 84 ms, versus 583k / 2.04 GiB / p50 3,524 ms for the unbounded queue
+   this plan's D1 shipped instead.
+2. **"contradicting §A1's managed sync-over-async prohibition" — §A1 contains no such rule.** The
+   prohibition lives in **§B7** (*"Wrapping the sync variants … in a `Task.Run` per op"*) and in
+   `bindings/dotnet/CLAUDE.md §4`, and it means **blocking a thread on an asynchronous operation's
+   completion** (`.Result`, `GetAwaiter().GetResult()`, `Task.Run` + wait).
+   `SemaphoreSlim.Wait(timeout, token)` is a genuine *synchronous* primitive, not an async operation
+   being blocked on — and CLAUDE.md §4 draws precisely this distinction for the consumer's sync
+   `Seek`: *"a sync method calling the sync ABI **directly** (no `Task.Run`) is legitimate — not the
+   sync-over-async footgun."*
+
+**What this does NOT overturn.** D1's choice of **(a)** was still right *for this phase*: (a) fixes
+the ordering defect, and the ordering machinery it built — the `_queued != 0` routing predicate, the
+documented-FIFO `ConcurrentQueue`, the single-appender loop and its `Interlocked.Exchange` Dekker's
+handshake — is **kept in full** by M11/P3.3 and is load-bearing there. What (a) lacked was a **depth
+bound**, which nothing in this plan required; the blocking admission M11/P3.3 added sits *in front
+of* (a) rather than replacing it, and per-caller ordering then rests on a **stronger** argument (a
+blocking caller has at most one send in flight, so `SemaphoreSlim` unfairness cannot invert its own
+sends). The real cost of (b) that D1 gestured at — `Send` blocking the calling thread under
+saturation — is genuine and was escalated as its own user decision (M11/P3.3 D2, accepted).
+
+**The generalizable lesson, and why this addendum exists at all:** a decision table's rationale
+carries a **citation**, and a mis-citation is inherited silently by every later phase that reads the
+table as settled. Check the cited section actually says what the rationale claims before treating a
+rejection as closed. See `design/history/M11/P3.3-producer-send-admission-bound/PLAN.md` §5.

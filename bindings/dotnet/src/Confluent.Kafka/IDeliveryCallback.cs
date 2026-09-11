@@ -64,13 +64,17 @@ namespace Confluent.Kafka;
 /// <b>async</b> surface an invocation made away from the pump — any of the sites named above — can
 /// overlap one the pump is making, and two callers whose admission expires together enter it at the
 /// same instant. A single instance shared across <em>two</em> producers can also be entered from
-/// each producer's own pump. This is a recorded <b>divergence from Java</b> on both surfaces, where
-/// every <c>Callback</c> runs on the producer's single background I/O thread
-/// (<c>Callback.java:20-21</c>) and a user never has to make one thread-safe; see the §4
-/// delivery-callback divergence in the binding's <c>CLAUDE.md</c>. ⚠ These remarks used to give the
-/// async surface an unqualified per-producer non-concurrency guarantee, on the reasoning that the
-/// pump was the only thread firing them; the admission expiry falsified it (Critic 72 finding
-/// 72.10).
+/// each producer's own pump. See the §4 delivery-callback divergence in the binding's
+/// <c>CLAUDE.md</c>. ⚠ These remarks used to give the async surface an unqualified per-producer
+/// non-concurrency guarantee, on the reasoning that the pump was the only thread firing them; the
+/// admission expiry falsified it (Critic 72 finding 72.10). ⚠ They then justified the obligation by
+/// asserting Java runs <em>every</em> <c>Callback</c> on one background I/O thread so a Java user
+/// never has to make one thread-safe — also false, and the cited line does not say it:
+/// <c>Callback.java:20-21</c> reads "<em>generally</em> execute in the background I/O thread".
+/// <c>KafkaProducer.doSend</c>'s <c>catch (ApiException)</c> invokes the callback on the
+/// <b>application</b> thread while <c>ProducerBatch.completeFutureAndFireCallbacks</c> fires others
+/// on the Sender thread, so one shared <c>Callback</c> can be entered from two threads in Java too
+/// (finding 72.17). The obligation above stands on its own; it needs no claim about Java.
 /// Do not block on producer progress from inside it while it is running on the pump thread: that is
 /// the same thread that must resolve every other in-flight send.
 /// </para>

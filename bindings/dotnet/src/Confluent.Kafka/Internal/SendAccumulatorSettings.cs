@@ -79,19 +79,45 @@ internal readonly struct SendAccumulatorSettings
     internal const int DefaultBatchWindowMs = 10;
 
     /// <summary>
-    /// ⚠ <b>PROVISIONAL — M11/P3.3 slice S2 replaces this with a value measured on this branch</b>
-    /// (PLAN §8.3). It is <em>not</em> a measured knee here, and must not be cited as one.
+    /// The admission bound's default — <b>the measured knee on this branch</b> (M11/P3.3 slice S2,
+    /// PLAN §8.3). Replaces the provisional 5000 this phase shipped S1 with.
     /// </summary>
     /// <remarks>
-    /// The number comes from a sibling branch's sweep of the <em>same shape</em> of bound over a
-    /// <em>different</em> send path (M11/P7: cap 1000 → 96.9k msg/s "too tight — starves the
-    /// pipeline"; cap 5000 → 591.6k msg/s, p50 7 ms, 127 MiB; cap 10000 → 635.2k msg/s but p50
-    /// 13 ms). That branch sent one record per inline <c>Producer_send</c>; this one defers to a
-    /// batch thread, so its knee is unknown and the transferable part of that result is the
-    /// <em>shape</em> (a record count in the low thousands, an order of magnitude above Python's
-    /// 1000), not the value.
+    /// <para>
+    /// <b>The sweep</b> (local broker, async max-rate, 1 KiB values, 15 s measured, <c>acks=all</c>,
+    /// <c>batch.size</c> 1 MiB, <c>linger.ms</c> 5, at commit <c>1685e44d</c>):
+    /// </para>
+    /// <list type="table">
+    /// <item><term>500</term><description>43.6k msg/s · p50 22 ms · 85 MB — <b>starved</b></description></item>
+    /// <item><term>1000</term><description><b>603.2k msg/s · p50 75 ms · p99 99 ms · 210 MB · 418% CPU</b></description></item>
+    /// <item><term>2000</term><description>591.6k msg/s · p50 77 ms · 217 MB</description></item>
+    /// <item><term>5000</term><description>586.4k msg/s · p50 82 ms · 227 MB</description></item>
+    /// <item><term>10000</term><description>588.3k msg/s · p50 91 ms · 238 MB</description></item>
+    /// </list>
+    /// <para>
+    /// 1000 is best on <em>every</em> axis at once — highest throughput, lowest p50/p99, lowest RSS,
+    /// lowest CPU — and the cliff below it is sharp (500 loses 14× the throughput). Above it the
+    /// pipeline only deepens: latency and RSS rise monotonically for no throughput gain.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>This INVERTS the sibling branch's sweep, and the reason is the topology, not the
+    /// number.</b> M11/P7 measured cap 1000 as "too tight — starves the pipeline" (96.9k msg/s) and
+    /// 5000 as its knee. That branch blocked on an <em>inline</em> <c>Producer_send</c> per record,
+    /// so a tight bound stalled the caller before the core could buffer anything. Here the batch
+    /// thread keeps feeding the core, so the binding stops hoarding and the core's own
+    /// <c>buffer.memory</c> carries the pipeline depth — at cap 1000 the in-flight population is
+    /// ~48k records, only ~1000 of which sit in this binding. <b>A cap value is meaningful only
+    /// together with where the block sits relative to the core's buffer</b>; do not port one
+    /// between send paths.
+    /// </para>
+    /// <para>
+    /// That the measured value coincides with <see cref="DefaultSlotThreshold"/> is a result, not a
+    /// reuse: this bound keeps its own name and its own override
+    /// (<see cref="MaxAdmittedVariable"/>) per decision D3, and the two remain independently
+    /// settable — they bound different populations.
+    /// </para>
     /// </remarks>
-    internal const int DefaultMaxAdmittedRecords = 5000;
+    internal const int DefaultMaxAdmittedRecords = 1000;
 
     /// <summary>
     /// The Kafka default for <c>max.block.ms</c> — Java's
@@ -203,7 +229,7 @@ internal readonly struct SendAccumulatorSettings
     /// <remarks>
     /// Distinct from <see cref="MaxAccumulatedRecords"/> in both quantity and purpose, and the
     /// separation is decision D3 rather than an accident — see the type's remarks. Default
-    /// <see cref="DefaultMaxAdmittedRecords"/> (<b>provisional</b>).
+    /// <see cref="DefaultMaxAdmittedRecords"/>, the knee measured on this branch (M11/P3.3 S2).
     /// </remarks>
     internal int MaxAdmittedRecords { get; }
 
