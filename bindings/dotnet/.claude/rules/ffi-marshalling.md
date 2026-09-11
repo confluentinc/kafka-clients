@@ -857,11 +857,13 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
         reported: `get_all` has already reported for the **whole** batch, so
         the core *did* report completions, yet the indices not yet reached are faulted
         with no callback — and the duplicate-risk argument applies to that half. The
-        *before* half (a throw out of the `get_all` P/Invoke itself, or out of the
-        defensive bound check that precedes it — the per-batch allocation of the
-        marshalling arrays used to be a second trigger here and is **gone**, the arrays
-        being reused fields since M11/P3.1 §12.3) does **not** need an allocation
-        failure to be reachable: a stale or
+        *before* half (a throw out of the `get_all` P/Invoke itself — the per-batch
+        allocation of the marshalling arrays used to be a second trigger here and is
+        **gone**, the arrays being reused fields since M11/P3.1 §12.3; the defensive
+        bound check preceding the read used to be a third and is **gone** too, every
+        pass being bounded by the arrays' capacity since M11/P3.2 §3B.3's
+        oversized-group split made that check unreachable by construction) does **not**
+        need an allocation failure to be reachable: a stale or
         mismatched native surfaces an `EntryPointNotFoundException` from the pump's
         *first* batched read, so the "OOM-only, therefore theoretical" defence is
         unavailable for it. Neither half is a teardown path, so a residual clause that
@@ -1130,12 +1132,14 @@ defers the consumer's copy-out-vs-keep-alive).
         came *after* `get_all` reported, completions had arrived for **every** index,
         so the indices the batch loop never reached lose their delivery notification
         even though the core did report them. If it came *before* — from the `get_all`
-        P/Invoke itself against a stale native, or from the defensive bound check that
-        precedes it — nothing was reported and the whole batch loses it. (The batch
-        **setup** used to belong on this side too, when the three marshalling arrays
-        were allocated per batch outside the processing `try`; M11/P3.1 §12.3 made them
-        reused fields, so that trigger is gone.) So, unlike the pre-enqueue window
-        above, this residual is **not** OOM-only.
+        P/Invoke itself against a stale native — nothing was reported and the whole
+        batch loses it. (The batch **setup** used to belong on this side too, when the
+        three marshalling arrays were allocated per batch outside the processing `try`;
+        M11/P3.1 §12.3 made them reused fields, so that trigger is gone. The
+        **defensive bound check** preceding the read used to belong here as well;
+        M11/P3.2 §3B.3 splits an oversized group into sub-passes each bounded by the
+        arrays' capacity, so that check cannot fail and its trigger is gone too.) So,
+        unlike the pre-enqueue window above, this residual is **not** OOM-only.
     These are *non-teardown* members of §A6 form C's at-most-once boundary, and must
     be enumerated on the public surface alongside the teardown paths — the enumeration
     itself, with the counts and the comparisons between residuals, lives in one place
