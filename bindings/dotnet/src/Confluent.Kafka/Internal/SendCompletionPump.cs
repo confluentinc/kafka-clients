@@ -66,8 +66,9 @@ namespace Confluent.Kafka.Internal;
 /// <see cref="SendAccumulator"/> and returns; it is the <b>send-batch thread</b> that calls
 /// <c>send_batch</c> and blocks on a full core buffer, while the caller is bounded by the
 /// accumulator instead. "No managed bound is added" is likewise no longer true — the accumulator has
-/// its own (Python's <c>PRODUCER_MAX_ACCUMULATED_RECORDS</c>). The <b>sync</b> send still blocks its
-/// own caller inline, exactly as described before.
+/// its own (<see cref="SendAccumulatorSettings.MaxAdmittedRecords"/>, which the caller blocks on
+/// after its record is appended). The <b>sync</b> send still blocks its own caller inline, exactly
+/// as described before.
 /// </para>
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the

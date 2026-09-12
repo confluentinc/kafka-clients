@@ -139,9 +139,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
     private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
-    // The send-admission wait's bound: the user's `max.block.ms`, resolved ONCE at construction
-    // (M11/P3.3). Every other accumulator setting still comes from the environment, read when the
-    // accumulator is first created.
+    // The user's `max.block.ms`, resolved ONCE at construction (M11/P3.3). Every other accumulator
+    // setting still comes from the environment, read when the accumulator is first created.
+    //
+    // ⚠ SINCE M11/P3.4 NOTHING READS IT. The send-admission wait it used to bound has no timeout —
+    // the record is appended before the wait starts, so an expiry would have to strand an awaiter
+    // the caller was never handed (SendAccumulator.SubmitAdmitted). It is kept because it is a real
+    // Kafka producer key the core also honours, and dropping a documented knob is a user-visible
+    // change this phase did not own; the accumulator simply no longer consults it.
     //
     // ⚠ Read EAGERLY, and the producer retains no reference to the caller's config map (Critic 72
     // finding 72.9). It used to hold the IReadOnlyDictionary and let SendAccumulatorSettings read
@@ -1014,9 +1019,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             ThrowIfClosed();
             SendCompletionPump pump = _pump ??= new SendCompletionPump();
 
-            // The already-resolved `max.block.ms` is passed so the accumulator's admission wait is
-            // bounded by the user's own value rather than by a binding-invented number (M11/P3.3);
-            // every other setting still comes from the environment, read here.
+            // The already-resolved `max.block.ms` is still passed through (see _maxBlockMs for why
+            // it is retained although the admission wait no longer has a timeout); every other
+            // setting comes from the environment, read here.
             return _accumulator ??= new SendAccumulator(
                 _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment(_maxBlockMs));
         }
