@@ -82,10 +82,11 @@ public class KafkaException : Exception
     }
 
     /// <summary>
-    /// Initializes a new instance from the values copied out of a
-    /// <c>kafka_common_KafkaError_t</c> handle. Used by
-    /// <see cref="FromHandle(IntPtr)"/> — the only place a classified
-    /// <see cref="KafkaException"/> is constructed.
+    /// Initializes a new instance from an already-classified error: a code plus the
+    /// retriable / fatal flags. Used by <see cref="FromHandle(IntPtr)"/>, which copies
+    /// those values out of a <c>kafka_common_KafkaError_t</c> handle, and by the
+    /// binding's own classified failures, which carry the classification Java gives
+    /// the exception they stand in for.
     /// </summary>
     internal KafkaException(int code, string? message, bool isRetriable, bool isFatal)
         : base(message)

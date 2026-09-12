@@ -57,6 +57,9 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // add ~LargeValueSize bytes per send) or a Task-scoped pin.
     private const long PerSendBudgetBytes = 512;
 
+    // Repetitions before the BEST (lowest) result is taken — see the rationale at the use site.
+    private const int MeasurementAttempts = 4;
+
     [Fact]
     public async Task Send_PerRecordAllocation_HasNoValueSizedCopy()
     {
@@ -73,13 +76,29 @@ public sealed class PublicProducerSendAllocationBudgetTests
             await AwaitAll(warmup);
         }
 
-        long smallBytes = FireAndMeasure(producer, smallValue, key, out Task<RecordMetadata>[] smallSends);
-        await AwaitAll(smallSends);
+        // BEST OF N (M11/P3.1): the send accumulator charges a node allocation (or growth) to
+        // whichever caller thread needs a fresh node, so a drain landing inside a measured window
+        // makes that run pay for one. The minimum over matched small/large pairs is the drain-free
+        // measurement; a real value-sized copy would add ~LargeValueSize bytes to EVERY attempt.
+        long smallBytes = 0;
+        long largeBytes = 0;
+        long perSendMarginal = long.MaxValue;
+        for (int attempt = 0; attempt < MeasurementAttempts; attempt++)
+        {
+            long small = FireAndMeasure(producer, smallValue, key, out Task<RecordMetadata>[] smallSends);
+            await AwaitAll(smallSends);
 
-        long largeBytes = FireAndMeasure(producer, largeValue, key, out Task<RecordMetadata>[] largeSends);
-        await AwaitAll(largeSends);
+            long large = FireAndMeasure(producer, largeValue, key, out Task<RecordMetadata>[] largeSends);
+            await AwaitAll(largeSends);
 
-        long perSendMarginal = (largeBytes - smallBytes) / SendCount;
+            long marginal = (large - small) / SendCount;
+            if (marginal < perSendMarginal)
+            {
+                perSendMarginal = marginal;
+                smallBytes = small;
+                largeBytes = large;
+            }
+        }
 
         Assert.True(
             perSendMarginal <= PerSendBudgetBytes,
