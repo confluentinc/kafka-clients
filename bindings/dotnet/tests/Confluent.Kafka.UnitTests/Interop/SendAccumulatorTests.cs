@@ -636,20 +636,6 @@ public sealed class SendAccumulatorTests
         Assert.IsType<IndexOutOfRangeException>(failure.InnerException);
     }
 
-    /// <summary>
-    /// Asserts that <paramref name="send"/> was faulted by the batch thread's handler of last
-    /// resort after <c>InflateTheChainAccounting</c>'s injected over-release —
-    /// <see cref="KafkaException"/> wrapping a <see cref="SemaphoreFullException"/>, under a
-    /// deadline so a record that is never settled fails fast instead of hanging the run.
-    /// </summary>
-    private static async Task AssertSettledByTheOverRelease(Task<RecordMetadata> send)
-    {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => send, TimeSpan.FromSeconds(10)));
-        Assert.Equal("The producer send-batch thread failed to process a batch.", failure.Message);
-        Assert.IsType<SemaphoreFullException>(failure.InnerException);
-    }
-
     // ------------------------------------- Flush's accumulator drain and its expiry (§3.5) ------
 
     [Fact]
