@@ -1077,20 +1077,103 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
+    public async Task Admission_ParkedCaller_IsReleasedByStopsCancel_WhenTheBatchThreadCannotDrain()
+    {
+        // ⚠ THE DISCRIMINATOR FOR Stop'S _spaceGate.Cancel(), and it needs its own setup because the
+        // obvious one cannot fail. Under append-first the permit arithmetic normally releases every
+        // parked caller by itself: a parked caller implies the semaphore is at zero, which implies
+        // the chain holds at least as many records as there are parked callers, so the final drain's
+        // ReleaseAdmission wakes all of them — which is why deleting the Cancel leaves
+        // Admission_ParkedCaller_IsReleasedByStop_AndItsRecordIsStillSent green (measured: 8/8).
+        //
+        // The Cancel is load-bearing exactly when the batch thread CANNOT take another chain, so no
+        // release will ever come. That is reachable deterministically: closing the CORE producer
+        // makes send_batch reject every record per index, and CompleteNode fires the delivery
+        // callback for such a record ON THE BATCH THREAD, so a blocking callback parks that thread
+        // mid-drain. Refilling the bound behind it and then parking a caller leaves a send that only
+        // Stop's Cancel can release. Deleting that Cancel turns this red 8/8 in-suite.
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            maxAccumulatedRecords: 1000,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: 60_000));
+
+        Task<RecordMetadata>? held = null;
+        Task<RecordMetadata>[] filled = Array.Empty<Task<RecordMetadata>>();
+        Task<Task<RecordMetadata>>? admission = null;
+        try
+        {
+            harness.CloseCoreProducer();
+            held = harness.AppendOne(0x01, new BlockingDeliveryCallback(entered, release));
+            harness.ForceDrainWithoutWaiting();
+            Assert.True(
+                entered.Wait(s_deadline), "the batch thread never entered the delivery callback");
+
+            // That drain returned this record's permit before parking, so the bound is free again.
+            // Refill it: everything appended from here sits in a chain the parked thread will never
+            // take.
+            filled = harness.Append(2);
+            Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
+
+            admission = harness.AppendOneFromAnotherThread(0x02, CancellationToken.None);
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+            Assert.False(admission.IsCompleted, "the send returned although the bound was full");
+
+            bool drained = true;
+            TestTimeout.Run(
+                () => drained = harness.Accumulator.Stop(TimeSpan.FromSeconds(2)),
+                TimeSpan.FromSeconds(20));
+            Assert.False(drained, "the parked batch thread cannot have exited");
+
+            // THE ASSERTION: the caller is released although nothing released a permit.
+            await TestTimeout.Run(() => admission, TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            // Always release: the parked batch thread would otherwise hold the harness's own
+            // teardown, and the event it waits on is disposed on the way out of this method.
+            release.Set();
+        }
+
+        // The abandoned thread finishes its drain and exits on its own (it saw _closed), so every
+        // record still settles — faulted, because the core was closed before any of them was sent.
+        Assert.NotNull(admission);
+        Task<RecordMetadata> parked = await admission!;
+        Assert.NotNull(held);
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => held!, s_deadline));
+        foreach (Task<RecordMetadata> send in filled)
+        {
+            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => send, s_deadline));
+        }
+
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => parked, s_deadline));
+
+        harness.Dispose();
+    }
+
+    [Fact]
     public async Task Admission_ParkedCaller_IsReleasedByTheBatchThreadsFailureHandler_AndItsRecordIsSettled()
     {
         // The second teardown trigger: the batch thread DYING rather than being stopped. Its handler
         // must leave no caller parked and no awaiter unsettled, exactly as Stop does.
         //
-        // ⚠ WHAT THIS TEST DOES *NOT* ISOLATE, stated so a later reader does not over-read it. Under
-        // append-first the permit arithmetic alone already releases every parked caller on any
-        // successful take: a parked caller implies the semaphore is at zero, which implies the chain
-        // holds at least as many records as there are parked callers, so the take's
+        // ⚠ WHAT THIS TEST DOES *NOT* RELIABLY ISOLATE, stated so a later reader does not over-read
+        // it. Under append-first the permit arithmetic alone usually releases every parked caller on
+        // a successful take: a parked caller implies the semaphore is at zero, which implies the
+        // chain holds at least as many records as there are parked callers, so the take's
         // ReleaseAdmission wakes all of them. AbandonOnThreadFailure's unconditional
-        // _spaceGate.Cancel() therefore remains as defence for the case the arithmetic cannot serve
-        // — a caller that parks in the window between its own record being taken and the thread
-        // dying, and a release that throws — neither of which a broker-free injection can schedule.
-        // So this asserts the CONTRACT (released, settled, teardown completes), not the mechanism.
+        // _spaceGate.Cancel() covers what that cannot — a caller that parks in the window between
+        // its own record being taken and the thread dying, and a release that throws — and that
+        // window IS reachable here, but only by luck: deleting the Cancel turned the full net10.0
+        // suite red in 1 of 8 in-suite reps. So treat this as a deterministic CONTRACT assertion
+        // (released, settled, teardown completes) with occasional mechanism coverage. The
+        // deterministic mechanism guard is the Stop twin,
+        // Admission_ParkedCaller_IsReleasedByStopsCancel_WhenTheBatchThreadCannotDrain.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
             maxAccumulatedRecords: 1000,
