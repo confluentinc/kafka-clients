@@ -78,13 +78,10 @@ namespace Confluent.Kafka;
 /// <para>
 /// ⚠ <b><c>Send</c> BLOCKS the calling thread under sustained saturation</b> (M11/P3.3): once the
 /// producer holds its bound of records accepted but not yet handed to its send-batch thread, a send
-/// waits for capacity for up to the
-/// configured <c>max.block.ms</c>, and if the bound is still full then, the record is refused with
-/// a <b>retriable</b> <see cref="KafkaException"/> that faults the send's <see cref="Task"/> and
-/// fires its delivery callback — not thrown. Java's own <c>send()</c> contract on both halves, and
-/// what bounds this producer's memory and latency —
-/// <see cref="IAsyncProducer{TKey, TValue}"/> states it in full. The <b>synchronous</b> producer has
-/// no such window either.
+/// waits for capacity before returning. The record is appended <em>before</em> that wait (M11/P3.4),
+/// so saturation delays the call and never refuses the record. Java's own <c>send()</c> contract, and
+/// what bounds this producer's memory and latency — <see cref="IAsyncProducer{TKey, TValue}"/>
+/// states it in full. The <b>synchronous</b> producer has no such window either.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>

@@ -432,36 +432,30 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>Producer_send</c> inline with call-scoped <c>fixed</c> pins.
     /// </para>
     /// <para>
-    /// <b>M11/P3.2 — records reach <c>send_batch</c> in the order a caller called this method</b>
-    /// (§F1). Deferring the append opened a window in which a send that found capacity could
-    /// overtake one still waiting for it; the routing now runs through
-    /// <see cref="SendAccumulator.SubmitAdmitted"/> — the accumulator's own
-    /// <c>TrySubmitInline</c> / <c>SubmitQueued</c> pair, private since M11/P3.3 — which refuses the
-    /// inline path while anything is
-    /// queued ahead and appends everything queued from a single FIFO submitter. Java documents
-    /// ordering as preserved in the default configuration
-    /// (<c>ProducerConfig.java:274</c>), and the reorder happened <em>before</em> the core saw the
-    /// records, so no core-side setting could have restored it.
+    /// <b>M11/P3.2 / M11/P3.4 — records reach <c>send_batch</c> in the order a caller called this
+    /// method</b> (§F1). Deferring the append opened a window in which a send that found capacity
+    /// could overtake one still waiting for it. <see cref="SendAccumulator.SubmitAdmitted"/> now
+    /// closes it the anchor's own way — it <b>appends first</b>, under the accumulator's lock, and
+    /// only then waits on the bound — so a record's place in the chain is fixed by the call that
+    /// placed it and a waiting send cannot be overtaken. Java documents ordering as preserved in the
+    /// default configuration (<c>ProducerConfig.java:274</c>), and the reorder happened
+    /// <em>before</em> the core saw the records, so no core-side setting could have restored it.
     /// </para>
     /// <para>
     /// <b>M11/P3.3 — admission is bounded, and this method BLOCKS the calling thread when the bound
     /// is saturated.</b> Once the producer holds
     /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> records that have been accepted but
-    /// not yet handed to the batch thread, this call parks the caller for up to the configured
-    /// <c>max.block.ms</c>; if the bound is still saturated when that elapses, the record is refused
-    /// with a <b>retriable</b> <see cref="KafkaException"/> delivered through the returned
-    /// <see cref="Task{TResult}"/> — and through the delivery callback — rather than thrown, which is
-    /// Java's own outcome for buffer exhaustion (<c>KafkaProducer.java:1049-1061</c>; the citation
-    /// chain is at <see cref="SendAccumulator.SubmitAdmitted"/>). Blocking up to
-    /// <c>max.block.ms</c> is Java's shape too — <c>KafkaProducer.send()</c> blocks that long once
-    /// the accumulator is full — and it is the only thing that throttles: the caller is handed the
-    /// record's delivery
-    /// <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2 deviation DV-1), so an
-    /// asynchronous admission wait bounds a container while the accepted population grows without
-    /// limit (measured: 2.05 M records in flight, p50 3,524 ms, RSS 2.04 GiB). The bound covers
-    /// <b>both</b> submission routes, because capping one container only relocates the pile-up
-    /// (§2.3, measured). The <b>sync</b> <see cref="Send"/> has no such window — it hands the record
-    /// to the core inside the call and blocks on the core's own <c>buffer.memory</c>.
+    /// not yet handed to the batch thread, this call parks the caller until the batch thread's next
+    /// take frees capacity. Blocking is Java's shape — <c>KafkaProducer.send()</c> blocks once the
+    /// accumulator is full — and it is the only thing that throttles: the caller is handed the
+    /// record's delivery <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2
+    /// deviation DV-1), so an asynchronous admission wait bounds a container while the accepted
+    /// population grows without limit (measured: 2.05 M records in flight, p50 3,524 ms,
+    /// RSS 2.04 GiB). ⚠ Since M11/P3.4 that wait has <b>no timeout</b> and is not interrupted by
+    /// <paramref name="cancellationToken"/>: the record is already appended by then, so nothing may
+    /// make the call throw and strand an awaiter the caller has not been handed. The <b>sync</b>
+    /// <see cref="Send"/> has no such window — it hands the record to the core inside the call and
+    /// blocks on the core's own <c>buffer.memory</c>.
     /// </para>
     /// </summary>
     /// <remarks>
@@ -496,9 +490,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
     /// <c>Send(record)</c> path. It is invoked immediately before the returned
     /// <see cref="Task{TResult}"/> completes (decision D3) — on the pump thread for a record the core
-    /// accepted, on the batch thread for one the core rejected per-record, and on <em>this</em>
-    /// thread for a record refused by the <c>max.block.ms</c> admission expiry (M11/P3.3, the
-    /// Java-faithful buffer-exhausted outcome). A synchronous throw out
+    /// accepted, and on the batch thread for one the core rejected per-record. A synchronous throw out
     /// of this method fires <b>nothing</b> (decision D5), and under the accumulator every such throw
     /// is a case where the record never reached the core at all: the disposed guard (directly, and
     /// again inside <see cref="EnsureAccumulator"/> under its lock), the already-canceled token, a
@@ -506,14 +498,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// teardown closed it.
     /// </param>
     /// <param name="cancellationToken">
-    /// Best-effort cancellation of the .NET wait (no native abort). It also aborts the admission
-    /// wait above, in which case the record is <b>not</b> sent and the cancellation is reported
-    /// synchronously, carrying this token.
+    /// Best-effort cancellation of the .NET wait (no native abort). ⚠ It does <b>not</b> interrupt
+    /// the admission wait (M11/P3.4): by then the record is appended and may already have been sent,
+    /// so the token only marks the returned <see cref="Task{TResult}"/> canceled, through the
+    /// registration below.
     /// </param>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="OperationCanceledException">
-    /// <paramref name="cancellationToken"/> was already canceled, or fired while this send was
-    /// blocked on the admission bound.
+    /// <paramref name="cancellationToken"/> was already canceled when this method was called.
     /// </exception>
     internal Task<RecordMetadata> SendViaPump(
         SerializedProducerRecord record,
@@ -577,19 +569,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 TaskScheduler.Default);
         }
 
-        // Backpressure FIRST, pins second (§4.4/§4.6). Taking a permit before pinning is what keeps
-        // a blocked sender from holding pins while it waits — which would turn a bound on RECORDS
-        // into an unbounded pin window. Submit does the pinning and the append, and releases both
-        // the pins and the permit if the append is refused.
-        //
-        // ⚠ THE ROUTING DECISION IS THE ACCUMULATOR'S, NOT THIS METHOD'S (M11/P3.2 §F1). It used to
-        // read "permit? append inline : await a permit, then append", which let a later send that
-        // found capacity overtake an earlier one still waiting for it — the records then reached
-        // send_batch, and so the wire, out of call order. TrySubmitInline refuses the inline path
-        // while anything is queued ahead, and SubmitQueued puts this send behind it in a FIFO drained
-        // by a single appender. Both live on SendAccumulator so the test fixture routes through the
-        // same decision (DoD §12) — a fixture with its own copy of the rule would make the ordering
-        // test a proof about the fixture.
+        // APPEND FIRST, THROTTLE AFTER (M11/P3.4 — the anchor's own mechanism). SubmitAdmitted pins
+        // and appends under the accumulator's lock, then blocks this caller while the bound is
+        // saturated. That ordering is what makes submission order call order without a FIFO
+        // submission queue: a record's place is fixed before anyone can wait behind it. It also
+        // means a parked caller holds NO pins — they transferred to the node with the append —
+        // which is how the §4.4 invariant ("a blocked sender must not hold pins") is satisfied here.
+        // The decision lives on SendAccumulator so the test fixture routes through it (DoD §12).
         //
         // ⚠ THIS METHOD MUST NOT BECOME `async`. It has to stay synchronous so a serializer throw
         // (raised above this carrier, before the call) and the precondition throws above still
@@ -597,16 +583,15 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // AsyncKafkaProducer.SendValidated is deliberately not `async` either.
         //
         // ⚠ AND THE ADMISSION BOUND IS WHY THAT MATTERS RATHER THAN MERELY BEING TRUE (M11/P3.3).
-        // SubmitAdmitted can now BLOCK this caller's thread, for up to max.block.ms, when the
-        // producer already holds MaxAdmittedRecords records accepted but not yet handed to the
-        // batch thread (the permit comes back at TakeChainLocked, before send_batch runs, so the
-        // accepted-but-unsent POPULATION is larger than the bound by the in-flight chain — the
-        // overshoot arithmetic is at _admission). That is the fix:
-        // the caller does not await admission (it is handed the record's delivery Task), so an
-        // ASYNCHRONOUS admission wait throttles nobody and just parks continuations — measured at
-        // 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape this replaces measured
-        // 2.04 GiB / p50 3.5 s. A blocking SemaphoreSlim.Wait(timeout, token) is a genuine
-        // synchronous primitive, NOT an async operation being blocked on, so it is not the
+        // SubmitAdmitted BLOCKS this caller's thread when the producer already holds
+        // MaxAdmittedRecords records accepted but not yet handed to the batch thread (the permit
+        // comes back at TakeChainLocked, before send_batch runs, so the accepted-but-unsent
+        // POPULATION is larger than the bound by the in-flight chain — the arithmetic is at
+        // _admission). That is the fix: the caller does not await admission (it is handed the
+        // record's delivery Task), so an ASYNCHRONOUS admission wait throttles nobody and just parks
+        // continuations — measured at 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape
+        // this replaces measured 2.04 GiB / p50 3.5 s. A blocking SemaphoreSlim.Wait(token) is a
+        // genuine synchronous primitive, NOT an async operation being blocked on, so it is not the
         // sync-over-async footgun ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4
         // draws for the consumer's sync Seek. Making this method `async` to "await admission" would
         // break the synchronous-throw contract above AND reintroduce the defect.
@@ -622,21 +607,18 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // for those as well, which is why this note describes the paths rather than counting
             // them (Critic 72 finding 72.8; it used to open "Three synchronous failures"):
             //
-            //   * `cancellationToken` fired while this send was blocked on admission ->
-            //     OperationCanceledException carrying the CALLER's token;
-            //   * teardown closed the accumulator (either while blocked on admission, or between
-            //     the guards above and an inline append) -> ObjectDisposedException.
+            //   * teardown closed the accumulator between the guards above and the append ->
+            //     ObjectDisposedException out of SendAccumulator.Append.
             //
-            // ⚠ The max.block.ms expiry is NOT here. It faults `completion` and fires the delivery
-            // callback instead of throwing — Java's own outcome for buffer exhaustion
-            // (KafkaProducer.java:1049-1061); see SendAccumulator.SubmitAdmitted. That path
-            // therefore returns normally through the line below, and the disposing continuation
-            // chained to the now-faulted `completion` runs on its own.
+            // ⚠ NOTHING THROWS OUT OF THE ADMISSION WAIT ANY MORE (M11/P3.4). The wait runs AFTER
+            // the append, takes no timeout and ignores `cancellationToken`, and swallows the
+            // teardown cancellation — precisely so a record that IS in the chain cannot leave its
+            // caller holding an unreturned `completion`. So every path that reaches this `catch`
+            // appended nothing.
             //
-            // Each path that DOES throw leaves `completion` unsettled — or settled only by the
-            // registration below — so the disposing continuation chained to it may never run.
-            // Release the registration here instead; a send routed to the QUEUE and failed there is
-            // faulted through `completion` and so disposes it that way.
+            // Each such path leaves `completion` unsettled — or settled only by the registration
+            // below — so the disposing continuation chained to it may never run. Release the
+            // registration here instead.
             cancellationRegistration.Dispose();
             throw;
         }

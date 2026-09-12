@@ -61,40 +61,32 @@ namespace Confluent.Kafka;
 /// <para>
 /// ⚠ <b><c>Send</c> can BLOCK the calling thread under sustained saturation (M11/P3.3).</b> This
 /// producer accepts a bounded number of records that have not yet been handed to its send-batch
-/// thread; once that bound is reached, <c>Send</c> waits for capacity for up to the configured
-/// <c>max.block.ms</c> (default 60 s). Blocking that long is Java's own contract —
-/// <c>KafkaProducer.send()</c> blocks up to <c>max.block.ms</c> once its accumulator is full — and
-/// it is what keeps the client's memory and latency bounded: because
-/// the <see cref="Task{TResult}"/> returned here is the <em>record's delivery</em> future rather
-/// than an admission handle, a caller never awaits admission, so an asynchronous wait would
-/// throttle nobody. The bound is sized so that reaching it is rare in practice; a producer that
-/// hits it regularly is offering records faster than its cluster can accept them. The
-/// <b>synchronous</b> <see cref="IProducer{TKey, TValue}"/> has no such window — it hands each
-/// record to the core inside the call, where the core's own <c>buffer.memory</c> provides the
-/// backpressure.
+/// thread; once that bound is reached, <c>Send</c> waits for capacity before returning. Blocking is
+/// Java's own contract — <c>KafkaProducer.send()</c> blocks once its accumulator is full — and it is
+/// what keeps the client's memory and latency bounded: because the <see cref="Task{TResult}"/>
+/// returned here is the <em>record's delivery</em> future rather than an admission handle, a caller
+/// never awaits admission, so an asynchronous wait would throttle nobody. The bound is sized so that
+/// reaching it is rare in practice; a producer that hits it regularly is offering records faster than
+/// its cluster can accept them. The <b>synchronous</b> <see cref="IProducer{TKey, TValue}"/> has no
+/// such window — it hands each record to the core inside the call, where the core's own
+/// <c>buffer.memory</c> provides the backpressure.
 /// </para>
 /// <para>
-/// <b>If that wait expires, the record is refused the way Java refuses it: a failed future plus a
-/// callback, NOT a throw.</b> <c>Send</c> returns normally and the returned
-/// <see cref="Task{TResult}"/> faults with a <see cref="KafkaException"/> whose
-/// <see cref="KafkaException.IsRetriable"/> is <see langword="true"/>; any
-/// <see cref="IDeliveryCallback"/> supplied for that send fires first, with the placeholder
-/// metadata. Java's accumulator-memory wait throws <c>BufferExhaustedException</c>, which extends
-/// <c>TimeoutException</c> → <c>RetriableException</c> → <c>ApiException</c>, so it is caught by
-/// <c>doSend</c>'s <c>catch (ApiException)</c> (<c>KafkaProducer.java:1049-1061</c>), which fires
-/// the callback with the <c>-1</c> placeholder and returns a failed future without rethrowing. So
-/// the idiomatic <c>catch (KafkaException e) when (e.IsRetriable)</c> retry works here exactly as
-/// it does in Java. (⚠ Until this was corrected, the binding threw synchronously with
-/// <see cref="KafkaException.Code"/> <c>0</c> and <see cref="KafkaException.IsRetriable"/>
-/// <see langword="false"/>, and these remarks asserted that <em>was</em> Java's shape.)
+/// ⚠ <b>That wait has no timeout, and the record is ALREADY ACCEPTED before it starts (M11/P3.4).</b>
+/// <c>Send</c> appends the record to the producer's batch chain first and waits afterwards — the
+/// Python binding's order — so the wait throttles the <em>caller</em> and never decides the record's
+/// fate. Consequently <c>Send</c> does not refuse a record for saturation at all: it returns when
+/// capacity frees, or when the producer is closed underneath it (in which case the record is still
+/// sent by the closing producer's final drain). The only thing that ends the wait early is teardown.
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
 /// no <c>wakeup()</c>: a canceled <see cref="CancellationToken"/> cancels the returned
 /// <see cref="Task"/>'s .NET-side wait, but does not abort the in-flight native op — it
-/// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4). A token that fires
-/// while <c>Send</c> is blocked waiting for capacity <em>does</em> abort that wait, in which case
-/// the record is not sent at all.
+/// continues to completion (a host-idiom addition Java lacks; CLAUDE.md §4). ⚠ A token that fires
+/// while <c>Send</c> is blocked waiting for capacity does <b>not</b> abort that wait (M11/P3.4):
+/// the record is already accepted by then, so the token only cancels the returned
+/// <see cref="Task{TResult}"/>.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="IAsyncDisposable.DisposeAsync"/> is the primary path (graceful
@@ -126,12 +118,11 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <c>IProducer.Send</c> has no such window — it hands the record to the core inside the call.
     /// </para>
     /// <para>
-    /// ⚠ <b>Under sustained saturation this BLOCKS the calling thread, for up to the configured
-    /// <c>max.block.ms</c>; if the bound is still full when that elapses, the returned
-    /// <see cref="Task{TResult}"/> faults with a retriable <see cref="KafkaException"/> rather than
-    /// this call throwing one</b> — Java's own <c>send()</c> contract on both halves, and the only
-    /// thing that bounds an async producer whose caller never awaits admission. The type's remarks
-    /// state the contract in full; it applies to the <b>async</b> surface only.
+    /// ⚠ <b>Under sustained saturation this BLOCKS the calling thread until capacity frees</b> —
+    /// Java's own <c>send()</c> contract, and the only thing that bounds an async producer whose
+    /// caller never awaits admission. The record is appended before the wait starts, so saturation
+    /// delays the call rather than refusing the record. The type's remarks state the contract in
+    /// full; it applies to the <b>async</b> surface only.
     /// </para>
     /// </remarks>
     /// <param name="record">The record to publish.</param>
@@ -139,15 +130,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// Best-effort cancellation of the .NET wait. An already-canceled token throws
     /// <see cref="OperationCanceledException"/> before the send is enqueued; a token that fires
     /// afterwards cancels the returned <see cref="Task{TResult}"/> but does <b>not</b> abort the
-    /// in-flight native send (the producer has no <c>wakeup()</c>). A token that fires while this
-    /// call is blocked waiting for accumulator capacity aborts that wait instead, and the record is
-    /// then not sent at all.
+    /// in-flight native send (the producer has no <c>wakeup()</c>). ⚠ A token that fires while this
+    /// call is blocked waiting for accumulator capacity does <b>not</b> abort that wait — the record
+    /// is already accepted by then (M11/P3.4).
     /// </param>
     /// <returns>
     /// A task resolving with the published record's <see cref="RecordMetadata"/>, or faulting with
-    /// a <see cref="KafkaException"/> — including the <b>retriable</b> one that reports "the
-    /// producer's accumulator stayed full for the whole of the configured <c>max.block.ms</c>, so
-    /// this record was not accepted" (see the remarks).
+    /// a <see cref="KafkaException"/> carrying the delivery failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
@@ -185,16 +174,12 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/>, described in full there.
     /// </para>
     /// <para>
-    /// ⚠ <b>And it BLOCKS the calling thread under sustained saturation</b>, for up to the
-    /// configured <c>max.block.ms</c>, exactly as
+    /// ⚠ <b>And it BLOCKS the calling thread under sustained saturation</b>, exactly as
     /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> does — the bound is on
-    /// the producer, not on the overload. When that wait expires <paramref name="callback"/>
-    /// <b>does</b> fire, with the placeholder metadata and the retriable
-    /// <see cref="KafkaException"/> that also faults the returned <see cref="Task{TResult}"/> —
-    /// Java fires its <c>Callback</c> for exactly this condition
-    /// (<c>KafkaProducer.java:1049-1061</c>). What fires <b>no</b> callback is an exception
-    /// <em>thrown out of</em> this call, per <see cref="IDeliveryCallback"/>'s contract for a
-    /// synchronous throw.
+    /// the producer, not on the overload. Saturation does not refuse the record, so it produces no
+    /// <paramref name="callback"/> invocation of its own; the record's eventual delivery outcome
+    /// fires it as usual. What fires <b>no</b> callback is an exception <em>thrown out of</em> this
+    /// call, per <see cref="IDeliveryCallback"/>'s contract for a synchronous throw.
     /// </para>
     /// <para>
     /// <b>A null <paramref name="callback"/> is rejected (decision D8) — deliberately stricter than
