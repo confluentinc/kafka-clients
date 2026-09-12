@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Globalization;
 
 namespace Confluent.Kafka.Internal;
@@ -115,13 +114,6 @@ internal readonly struct SendAccumulatorSettings
     /// </remarks>
     internal const int DefaultMaxAdmittedRecords = 1000;
 
-    /// <summary>
-    /// The Kafka default for <c>max.block.ms</c> — Java's
-    /// <c>ProducerConfig.MAX_BLOCK_MS_CONFIG</c> default, which is what
-    /// <c>KafkaProducer.send()</c> blocks up to once the accumulator is full.
-    /// </summary>
-    internal const int DefaultMaxBlockMs = 60_000;
-
     internal const string ThresholdVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_THRESHOLD";
     internal const string WindowVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_WINDOW_MS";
     internal const string ChunkVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_CHUNK";
@@ -130,21 +122,13 @@ internal readonly struct SendAccumulatorSettings
     internal const string MaxAdmittedVariable = "CONFLUENT_KAFKA_PRODUCER_MAX_ADMITTED";
 
     /// <summary>
-    /// The Java dotted config key <see cref="MaxBlockMs"/> is read from. <b>A config-dict key, not
-    /// an environment variable</b> — unlike every other value here — because it is a real Kafka
-    /// producer config the core already knows, so reading it from the user's own config map is
-    /// honouring an existing knob rather than inventing new surface.
-    /// </summary>
-    internal const string MaxBlockMsKey = "max.block.ms";
-
-    /// <summary>
     /// Builds a settings value from explicit numbers — the "compose" half that
-    /// <see cref="FromEnvironment(int)"/>'s "read and validate" half feeds. Validation lives
+    /// <see cref="FromEnvironment"/>'s "read and validate" half feeds. Validation lives
     /// entirely there, so this constructor takes the values as given (the derived
     /// <see cref="SlotCapacity"/> and the chunk clamp still apply).
     /// </summary>
     /// <remarks>
-    /// The two M11/P3.3 parameters are <b>optional</b>, defaulting to the shipped values, so the
+    /// The M11/P3.3 admission parameter is <b>optional</b>, defaulting to the shipped value, so the
     /// ~35 existing test constructions keep expressing exactly what they express today (a test that
     /// says nothing about admission gets production's admission bound). A test that needs the bound
     /// to saturate passes <paramref name="maxAdmittedRecords"/> explicitly.
@@ -153,14 +137,12 @@ internal readonly struct SendAccumulatorSettings
         int slotThreshold,
         int batchWindowMs,
         int batchChunk,
-        int maxAdmittedRecords = DefaultMaxAdmittedRecords,
-        int maxBlockMs = DefaultMaxBlockMs)
+        int maxAdmittedRecords = DefaultMaxAdmittedRecords)
     {
         SlotThreshold = slotThreshold;
         SlotCapacity = slotThreshold + SlotCapacityHeadroom;
         BatchWindowMs = batchWindowMs;
         MaxAdmittedRecords = maxAdmittedRecords;
-        MaxBlockMs = maxBlockMs;
 
         // A chunk larger than a node is indistinguishable from a full node, because a chunk never
         // spans two nodes (§3.4). Clamping keeps the ceil(count / chunk) formula honest instead of
@@ -210,51 +192,19 @@ internal readonly struct SendAccumulatorSettings
     internal int MaxAdmittedRecords { get; }
 
     /// <summary>
-    /// The producer's <c>max.block.ms</c> as parsed from the user's config map
-    /// (<see cref="MaxBlockMsKey"/>), default <see cref="DefaultMaxBlockMs"/>.
+    /// Builds the settings for one producer, reading each environment override <b>once</b>. Called
+    /// per accumulator, so a process can host producers with different settings and a test can
+    /// change an override between constructions.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>It does NOT bound this binding's admission wait</b> — that wait has been untimed since
-    /// M11/P3.4 (see <see cref="MaxAdmittedRecords"/>), so nothing in the accumulator consults this
-    /// value. The key itself is <em>not</em> dead: <c>NativeProducer</c> forwards every config
-    /// entry verbatim, and the core honours <c>max.block.ms</c> for its own metadata waits and
-    /// transactional deadlines.
+    /// Nothing here is read from the producer's config map. <c>max.block.ms</c> used to be — it was
+    /// parsed into a <c>MaxBlockMs</c> property that bounded the send-admission wait — but M11/P3.4
+    /// made that wait untimed (see <see cref="MaxAdmittedRecords"/>), leaving the property with no
+    /// reader, so M11/P3.4 removed the property and its parse. The <b>key</b> is untouched and still
+    /// live: <c>NativeProducer</c> forwards every config entry verbatim, and the core honours
+    /// <c>max.block.ms</c> for its own metadata waits and transactional deadlines.
     /// </remarks>
-    internal int MaxBlockMs { get; }
-
-    /// <summary>
-    /// Builds the settings for one producer, reading each environment override <b>once</b> and
-    /// <see cref="MaxBlockMsKey"/> out of <paramref name="config"/>. Called per accumulator, so a
-    /// process can host producers with different settings and a test can change an override between
-    /// constructions.
-    /// </summary>
-    /// <param name="config">
-    /// The producer's own config map, or <see langword="null"/> for a producer built without one (a
-    /// <c>MockProducer</c>). Only <see cref="MaxBlockMsKey"/> is read from it; every other value
-    /// here comes from the environment.
-    /// </param>
-    /// <remarks>
-    /// <b>Production does not use this overload</b> — <c>NativeProducer</c> resolves
-    /// <see cref="MaxBlockMsKey"/> eagerly at construction (Critic 72 finding 72.9) and calls
-    /// <see cref="FromEnvironment(int)"/> with the resolved value, so it retains no reference to the
-    /// caller's dictionary. This overload is the composition of
-    /// <see cref="ReadMaxBlockMs(IReadOnlyDictionary{string, string}?)"/> with that one, kept so the
-    /// config-key parsing can be exercised end to end.
-    /// </remarks>
-    internal static SendAccumulatorSettings FromEnvironment(
-        IReadOnlyDictionary<string, string>? config = null) =>
-        FromEnvironment(ReadMaxBlockMs(config));
-
-    /// <summary>
-    /// Builds the settings for one producer from an <b>already-resolved</b> <c>max.block.ms</c>,
-    /// reading each environment override <b>once</b>. The production path — see
-    /// <see cref="FromEnvironment(IReadOnlyDictionary{string, string}?)"/>'s remarks.
-    /// </summary>
-    /// <param name="maxBlockMs">
-    /// The producer's <c>max.block.ms</c>, already read and validated by
-    /// <see cref="ReadMaxBlockMs(IReadOnlyDictionary{string, string}?)"/>.
-    /// </param>
-    internal static SendAccumulatorSettings FromEnvironment(int maxBlockMs)
+    internal static SendAccumulatorSettings FromEnvironment()
     {
         int threshold = ReadPositive(ThresholdVariable, DefaultSlotThreshold);
 
@@ -269,39 +219,7 @@ internal readonly struct SendAccumulatorSettings
         // a throughput cliff (D3). Its own constant, its own override.
         int maxAdmitted = ReadPositive(MaxAdmittedVariable, DefaultMaxAdmittedRecords);
 
-        return new SendAccumulatorSettings(threshold, window, chunk, maxAdmitted, maxBlockMs);
-    }
-
-    /// <summary>
-    /// Reads <see cref="MaxBlockMsKey"/> out of the producer's config map, falling back to
-    /// <see cref="DefaultMaxBlockMs"/> when it is absent, unparseable or negative. Called <b>once
-    /// per producer, at construction</b> (Critic 72 finding 72.9), so the binding neither retains
-    /// the caller's dictionary nor re-reads a value the caller may since have edited.
-    /// </summary>
-    /// <remarks>
-    /// The same ignore-rather-than-throw policy as the environment overrides above, for a stronger
-    /// reason: the core reads this key too, so a value it rejects will fail producer construction
-    /// there, with the core's own message — the binding must not pre-empt that with a worse one.
-    /// Non-negative rather than positive: Java's <c>max.block.ms</c> is <c>atLeast(0)</c>, and zero
-    /// is a meaningful "never block" rather than a typo.
-    /// </remarks>
-    internal static int ReadMaxBlockMs(IReadOnlyDictionary<string, string>? config)
-    {
-        if (config is null || !config.TryGetValue(MaxBlockMsKey, out string? raw))
-        {
-            return DefaultMaxBlockMs;
-        }
-
-        // long, then clamp: max.block.ms is a Java `long` config, so a value above int.MaxValue is
-        // legal there and must not read as a parse failure here. Clamping to int.MaxValue ms
-        // (~24 days) is indistinguishable from the unbounded wait the user asked for.
-        if (!long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed)
-            || parsed < 0)
-        {
-            return DefaultMaxBlockMs;
-        }
-
-        return (int)Math.Min(parsed, int.MaxValue);
+        return new SendAccumulatorSettings(threshold, window, chunk, maxAdmitted);
     }
 
     private static int ReadPositive(string variable, int fallback)

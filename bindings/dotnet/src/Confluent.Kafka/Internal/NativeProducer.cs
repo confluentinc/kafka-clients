@@ -139,30 +139,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
     private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
-    // The user's `max.block.ms`, resolved ONCE at construction (M11/P3.3). Every other accumulator
-    // setting still comes from the environment, read when the accumulator is first created.
-    //
-    // ⚠ SINCE M11/P3.4 NOTHING READS IT. The send-admission wait it used to bound has no timeout —
-    // the record is appended before the wait starts, so an expiry would have to strand an awaiter
-    // the caller was never handed (SendAccumulator.SubmitAdmitted). It is kept because it is a real
-    // Kafka producer key the core also honours, and dropping a documented knob is a user-visible
-    // change this phase did not own; the accumulator simply no longer consults it.
-    //
-    // ⚠ Read EAGERLY, and the producer retains no reference to the caller's config map (Critic 72
-    // finding 72.9). It used to hold the IReadOnlyDictionary and let SendAccumulatorSettings read
-    // the key inside EnsureAccumulator — i.e. on the first async send. IReadOnlyDictionary does not
-    // stop its owner mutating the underlying Dictionary, so a user editing their config map between
-    // constructing the producer and its first send silently changed the effective max.block.ms
-    // while the core had already been configured from the values read here; it also pinned the
-    // user's dictionary for the producer's lifetime. Every other key in the map is consumed eagerly
-    // in Create, so this one is now too. (The ENVIRONMENT overrides stay late-bound on purpose —
-    // SendAccumulatorSettings documents why — but a user config value is not in that class.)
-    private readonly int _maxBlockMs;
-
-    private NativeProducer(SafeProducerHandle handle, int maxBlockMs)
+    private NativeProducer(SafeProducerHandle handle)
     {
         _handle = handle;
-        _maxBlockMs = maxBlockMs;
     }
 
     /// <summary>
@@ -259,9 +238,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 "kafka_producer_KafkaProducer_new returned a null handle without an error.");
         }
 
-        // `max.block.ms` is read HERE, once, like every other key in the map (see _maxBlockMs); the
-        // map itself is not retained.
-        return new NativeProducer(handle, SendAccumulatorSettings.ReadMaxBlockMs(config));
+        // The config map is NOT retained: every entry was consumed above, verbatim, into the
+        // producer properties the core now owns.
+        return new NativeProducer(handle);
     }
 
     /// <summary>
@@ -279,9 +258,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // already wrapped by the marshaller (M2/P2). No out_error, no IsInvalid guard.
         SafeProducerHandle handle = NativeMethods.MockProducerNew(autoComplete);
 
-        // No config map: MockProducer_new takes none, so the accumulator's `max.block.ms` falls
-        // back to the Kafka default (60 s), exactly as it does for a real producer that omits it.
-        return new NativeProducer(handle, SendAccumulatorSettings.DefaultMaxBlockMs);
+        return new NativeProducer(handle);
     }
 
     /// <summary>The submit shape shared by the two void-result async peripherals.</summary>
@@ -1019,11 +996,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             ThrowIfClosed();
             SendCompletionPump pump = _pump ??= new SendCompletionPump();
 
-            // The already-resolved `max.block.ms` is still passed through (see _maxBlockMs for why
-            // it is retained although the admission wait no longer has a timeout); every other
-            // setting comes from the environment, read here.
+            // Every accumulator setting comes from the environment, read here. Nothing is taken
+            // from the producer's config map (SendAccumulatorSettings.FromEnvironment documents
+            // why `max.block.ms` no longer is).
             return _accumulator ??= new SendAccumulator(
-                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment(_maxBlockMs));
+                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment());
         }
     }
 

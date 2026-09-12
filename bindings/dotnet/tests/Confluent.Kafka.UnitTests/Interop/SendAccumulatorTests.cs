@@ -351,8 +351,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 10,
             batchChunk: 1100,
-            maxAdmittedRecords: 4,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 4));
         harness.Dispose();
 
         Assert.Equal(4, harness.Accumulator.AvailableAdmissions);
@@ -512,8 +511,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 8,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 8));
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         Task<RecordMetadata> send = harness.AppendOne(0x5A, callback);
@@ -735,8 +733,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 4,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 4));
 
         Task<RecordMetadata>[] filled = harness.Append(4);
         Assert.Equal(4, harness.Accumulator.AdmittedRecordCount);
@@ -799,8 +796,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: Cap,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: Cap));
 
         for (int round = 0; round < Rounds; round++)
         {
@@ -854,8 +850,7 @@ public sealed class SendAccumulatorTests
                 slotThreshold: 1000,
                 batchWindowMs: 60_000,
                 batchChunk: 1100,
-                maxAdmittedRecords: Cap,
-                maxBlockMs: 60_000));
+                maxAdmittedRecords: Cap));
 
             int peak = 0;
             Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Senders * PerSender];
@@ -957,8 +952,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 2,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
 
@@ -1006,8 +1000,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 2,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
 
@@ -1075,8 +1068,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 2,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 2));
 
         Task<RecordMetadata>? held = null;
         Task<RecordMetadata>[] filled = Array.Empty<Task<RecordMetadata>>();
@@ -1150,8 +1142,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 2,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
         Task<Task<RecordMetadata>> admission =
@@ -1216,8 +1207,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 2,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
         Task<Task<RecordMetadata>> admission =
@@ -1283,8 +1273,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 4,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 4));
         Task<RecordMetadata>? parked = null;
         try
         {
@@ -1336,8 +1325,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 2,
-            maxBlockMs: 60_000));
+            maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
         Task<Task<RecordMetadata>> admission =
@@ -1395,8 +1383,7 @@ public sealed class SendAccumulatorTests
             slotThreshold: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
-            maxAdmittedRecords: 32,
-            maxBlockMs: 60_000)))
+            maxAdmittedRecords: 32)))
         {
             TaskCompletionSource<RecordMetadata>[] created =
                 new TaskCompletionSource<RecordMetadata>[Sends];
@@ -1451,8 +1438,7 @@ public sealed class SendAccumulatorTests
                 slotThreshold: 1000,
                 batchWindowMs: 60_000,
                 batchChunk: 1100,
-                maxAdmittedRecords: 4,
-                maxBlockMs: 60_000));
+                maxAdmittedRecords: 4));
 
             List<int> observed = new List<int>(Burst);
             Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Burst];
@@ -1522,8 +1508,7 @@ public sealed class SendAccumulatorTests
                 slotThreshold: 1000,
                 batchWindowMs: 60_000,
                 batchChunk: 1100,
-                maxAdmittedRecords: 4,
-                maxBlockMs: 60_000));
+                maxAdmittedRecords: 4));
 
             List<int> observed = new List<int>(Senders * PerSender);
             Task<RecordMetadata>[] sends = new Task<RecordMetadata>[Senders * PerSender];
@@ -1600,7 +1585,7 @@ public sealed class SendAccumulatorTests
     // --------------------------------------- admission settings (M11/P3.3 D3) -------------------
 
     [Fact]
-    public void Settings_AdmissionDefaults_AreTheMeasuredKneeAndKafkasMaxBlockMs()
+    public void Settings_AdmissionDefault_IsTheMeasuredKnee()
     {
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>());
 
@@ -1608,7 +1593,6 @@ public sealed class SendAccumulatorTests
         // 210 MB — best on every axis at once, with a sharp cliff below (500 → 43.6k msg/s) and
         // monotonic latency/RSS growth above for no throughput gain.
         Assert.Equal(1000, settings.MaxAdmittedRecords);
-        Assert.Equal(60_000, settings.MaxBlockMs);
 
         // ⚠ There is deliberately NO `Assert.NotEqual(SlotThreshold, MaxAdmittedRecords)` here any
         // more. It used to assert the two defaults differ, as a PROXY for D3's "the admission bound
@@ -1668,66 +1652,6 @@ public sealed class SendAccumulatorTests
         });
 
         Assert.Equal(1000, settings.MaxAdmittedRecords);
-    }
-
-    [Fact]
-    public void Settings_MaxBlockMs_ComesFromTheConfigDict()
-    {
-        // The one value here read from the user's CONFIG rather than the environment, because it is
-        // a real Kafka producer key the core already knows — honouring an existing knob instead of
-        // inventing a binding-only one.
-        SendAccumulatorSettings settings = ReadSettingsWith(
-            new Dictionary<string, string?>(),
-            new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = "1234" });
-
-        Assert.Equal(1234, settings.MaxBlockMs);
-    }
-
-    [Fact]
-    public void Settings_MaxBlockMs_ZeroIsParsed_NotTreatedAsInvalid()
-    {
-        // Java's max.block.ms is atLeast(0), so ReadMaxBlockMs keeps zero instead of falling back to
-        // the default the way it does for "-1" (Settings_InvalidMaxBlockMs_FallsBackToKafkasDefault)
-        // — the non-negative-vs-positive boundary of the parse, which is all this value still
-        // decides: since M11/P3.4 nothing in the accumulator reads it, and the core reads the key
-        // from the config map for itself.
-        SendAccumulatorSettings settings = ReadSettingsWith(
-            new Dictionary<string, string?>(),
-            new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = "0" });
-
-        Assert.Equal(0, settings.MaxBlockMs);
-    }
-
-    [Theory]
-    [InlineData("not-a-number")]
-    [InlineData("")]
-    [InlineData("-1")]
-    public void Settings_InvalidMaxBlockMs_FallsBackToKafkasDefault(string raw)
-    {
-        // Ignored rather than thrown, for a stronger reason than the environment overrides: the
-        // core reads this key too, so a value it rejects fails producer construction there with the
-        // core's own message — the binding must not pre-empt that with a worse one.
-        SendAccumulatorSettings settings = ReadSettingsWith(
-            new Dictionary<string, string?>(),
-            new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = raw });
-
-        Assert.Equal(60_000, settings.MaxBlockMs);
-    }
-
-    [Fact]
-    public void Settings_MaxBlockMs_AboveIntRange_IsClampedRatherThanRejected()
-    {
-        // max.block.ms is a Java `long`, so a value above int.MaxValue is legal there and must not
-        // read as a parse failure here. int.MaxValue ms is ~24 days, indistinguishable from the
-        // unbounded wait the operator asked for.
-        SendAccumulatorSettings settings = ReadSettingsWith(
-            new Dictionary<string, string?>(),
-            new Dictionary<string, string>
-            {
-                [SendAccumulatorSettings.MaxBlockMsKey] = "9223372036854775807",
-            });
-
-        Assert.Equal(int.MaxValue, settings.MaxBlockMs);
     }
 
     /// <summary>
@@ -1829,9 +1753,7 @@ public sealed class SendAccumulatorTests
     /// restoring the previous values afterwards. The read itself is pure — no producer is
     /// constructed inside the window — so a concurrently-running test class cannot observe it.
     /// </summary>
-    private static SendAccumulatorSettings ReadSettingsWith(
-        Dictionary<string, string?> overrides,
-        IReadOnlyDictionary<string, string>? config = null)
+    private static SendAccumulatorSettings ReadSettingsWith(Dictionary<string, string?> overrides)
     {
         string[] all =
         {
@@ -1851,7 +1773,7 @@ public sealed class SendAccumulatorTests
 
         try
         {
-            return SendAccumulatorSettings.FromEnvironment(config);
+            return SendAccumulatorSettings.FromEnvironment();
         }
         finally
         {
@@ -1987,9 +1909,9 @@ public sealed class SendAccumulatorTests
         /// <remarks>
         /// ⚠ <b>It can BLOCK the calling thread INDEFINITELY</b>, exactly as production's
         /// <c>Send</c> does: a saturated admission bound parks the caller <em>untimed</em> until a
-        /// take returns permits, or until teardown cancels the gate (M11/P3.4). There is no
-        /// <c>maxBlockMs</c> escape hatch — supplying a short one would park this thread forever
-        /// just the same. Every test that saturates the bound on purpose must therefore drive this
+        /// take returns permits, or until teardown cancels the gate (M11/P3.4). The wait has no
+        /// timeout knob at all — <c>SendAccumulatorSettings</c> carries none, so there is nothing a
+        /// test could set to bound it. Every test that saturates the bound on purpose must drive this
         /// from its own <see cref="Task"/> — see <c>AppendOneFromAnotherThread</c> — or use
         /// <see cref="AppendWithoutAdmission"/>, which skips the wait entirely.
         /// </remarks>
