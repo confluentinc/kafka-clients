@@ -1604,7 +1604,7 @@ public sealed class SendAccumulatorTests
     public void Settings_InvalidAdmissionOverride_FallsBackToTheDefault(string raw)
     {
         // An operator escape hatch must not be able to fail producer construction — and a ZERO cap
-        // in particular would make every send block for max.block.ms and then fail.
+        // in particular would park every send on an untimed admission wait that nothing can release.
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
         {
             [SendAccumulatorSettings.MaxAdmittedVariable] = raw,
@@ -1627,10 +1627,13 @@ public sealed class SendAccumulatorTests
     }
 
     [Fact]
-    public void Settings_MaxBlockMs_ZeroIsHonoured_AndMeansNeverBlock()
+    public void Settings_MaxBlockMs_ZeroIsParsed_NotTreatedAsInvalid()
     {
-        // Java's max.block.ms is atLeast(0), so zero is a meaningful value rather than a typo: the
-        // fast path still admits when capacity is free, and a saturated bound fails at once.
+        // Java's max.block.ms is atLeast(0), so ReadMaxBlockMs keeps zero instead of falling back to
+        // the default the way it does for "-1" (Settings_InvalidMaxBlockMs_FallsBackToKafkasDefault)
+        // — the non-negative-vs-positive boundary of the parse, which is all this value still
+        // decides: since M11/P3.4 nothing in the accumulator reads it, and the core reads the key
+        // from the config map for itself.
         SendAccumulatorSettings settings = ReadSettingsWith(
             new Dictionary<string, string?>(),
             new Dictionary<string, string> { [SendAccumulatorSettings.MaxBlockMsKey] = "0" });
@@ -1917,19 +1920,21 @@ public sealed class SendAccumulatorTests
         }
 
         /// <summary>
-        /// Appends one record, queueing it behind the backpressure bound if it is full — through the
+        /// Appends one record and then parks on the admission bound if it is saturated — through the
         /// <b>same single entry point</b> <c>NativeProducer.SendViaPump</c> uses, so the admission
-        /// bound and the routing rule are both production's (DoD §12; M11/P3.2 §3.3, M11/P3.3 §7).
-        /// This fixture used to re-implement "permit-then-<c>Submit</c>, else
-        /// await-then-<c>Submit</c>", which would have left the ordering tests below proving a
-        /// property of the fixture rather than of the code.
+        /// bound is production's (DoD §12; M11/P3.3 §7, M11/P3.4). This fixture used to
+        /// re-implement "permit-then-<c>Submit</c>, else await-then-<c>Submit</c>", which would
+        /// have left the ordering tests below proving a property of the fixture rather than of the
+        /// code.
         /// </summary>
         /// <remarks>
-        /// ⚠ <b>It can BLOCK the calling thread</b> since M11/P3.3, exactly as production's
-        /// <c>Send</c> does: a saturated admission bound parks the caller for up to
-        /// <c>max.block.ms</c>. Every test that saturates the bound on purpose must therefore drive
-        /// this from its own <see cref="Task"/> (or supply a short <c>maxBlockMs</c>) rather than
-        /// from the xUnit test thread — see <c>AppendOneFromAnotherThread</c>.
+        /// ⚠ <b>It can BLOCK the calling thread INDEFINITELY</b>, exactly as production's
+        /// <c>Send</c> does: a saturated admission bound parks the caller <em>untimed</em> until a
+        /// take returns permits, or until teardown cancels the gate (M11/P3.4). There is no
+        /// <c>maxBlockMs</c> escape hatch — supplying a short one would park this thread forever
+        /// just the same. Every test that saturates the bound on purpose must therefore drive this
+        /// from its own <see cref="Task"/> — see <c>AppendOneFromAnotherThread</c> — or use
+        /// <see cref="AppendWithoutAdmission"/>, which skips the wait entirely.
         /// </remarks>
         internal Task<RecordMetadata> AppendOne(byte tag, IDeliveryCallback? callback = null) =>
             AppendOne(tag, callback, CancellationToken.None, out _);
@@ -1949,9 +1954,9 @@ public sealed class SendAccumulatorTests
             completion = NewCompletion();
             DeliveryRegistration? delivery = NewDelivery(callback);
 
-            // ONE call, production's own: SubmitAdmitted takes the admission permit (blocking when
-            // the bound is saturated) and then makes the inline-vs-queued routing decision. The
-            // fixture deliberately holds no copy of either rule.
+            // ONE call, production's own: SubmitAdmitted appends the record and then takes the
+            // admission permit, blocking when the bound is saturated. The fixture deliberately
+            // holds no copy of that rule.
             Accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
 
             return completion.Task;
@@ -1966,11 +1971,10 @@ public sealed class SendAccumulatorTests
         /// The <b>outer</b> task is the admission observable: it completes when
         /// <c>SubmitAdmitted</c> returns, or faults with whatever admission <em>threw</em> — which
         /// is the whole contract under test. The <b>inner</b> task is the record's own delivery
-        /// future. ⚠ Admission <b>expiry</b> does not fault the outer task: it is Java's
-        /// buffer-exhausted outcome, so the record's <em>inner</em> task is faulted and
-        /// <c>SubmitAdmitted</c> returns normally (Critic 72 finding 72.1). So a test of the expiry
-        /// awaits the outer task for the timing and the inner one for the failure; a test of
-        /// teardown or cancellation still awaits the outer one for both.
+        /// future. ⚠ Since M11/P3.4 the wait has no expiry at all, so the outer task completes only
+        /// when a take returns permits or teardown cancels the gate, and it carries no failure of
+        /// its own on either path; a test of teardown or cancellation awaits the outer one for the
+        /// release and the inner one for the record's fate.
         /// <para>
         /// <see cref="TaskFactory.StartNew{TResult}(Func{TResult}, CancellationToken, TaskCreationOptions, TaskScheduler)"/>
         /// rather than <see cref="Task.Run(Func{Task})"/> deliberately: <c>Task.Run</c> would

@@ -76,8 +76,10 @@ namespace Confluent.Kafka;
 /// <c>Send</c> appends the record to the producer's batch chain first and waits afterwards — the
 /// Python binding's order — so the wait throttles the <em>caller</em> and never decides the record's
 /// fate. Consequently <c>Send</c> does not refuse a record for saturation at all: it returns when
-/// capacity frees, or when the producer is closed underneath it (in which case the record is still
-/// sent by the closing producer's final drain). The only thing that ends the wait early is teardown.
+/// capacity frees, or when the producer is torn down underneath it — and teardown does not discard
+/// the record either, it is settled by the closing producer's own drain (sent by the final drain on
+/// a normal close; faulted if the send-batch thread itself failed). The only thing that ends the
+/// wait early is teardown.
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has

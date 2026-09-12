@@ -52,11 +52,11 @@ namespace Confluent.Kafka.Internal;
 /// with the Python-parity default.
 /// </para>
 /// <para>
-/// ⚠ <b>Two of these values have NO Python counterpart, and are the M11/P3.3 admission bound</b>
-/// (§7 option A): <see cref="MaxAdmittedRecords"/> and <see cref="MaxBlockMs"/>. Python needs
-/// neither, because its <c>send()</c> blocks the calling OS thread and so bounds the accepted
-/// population for free; .NET's <c>Send</c> returns a <see cref="System.Threading.Tasks.Task"/>
-/// and the caller does not await admission, so the bound has to be explicit.
+/// ⚠ <b>One of these values has NO Python counterpart, and is the M11/P3.3 admission bound</b>
+/// (§7 option A): <see cref="MaxAdmittedRecords"/>. Python needs none, because its <c>send()</c>
+/// blocks the calling OS thread and so bounds the accepted population for free; .NET's
+/// <c>Send</c> returns a <see cref="System.Threading.Tasks.Task"/> and the caller does not await
+/// admission, so the bound has to be explicit.
 /// </para>
 /// </remarks>
 internal readonly struct SendAccumulatorSettings
@@ -130,8 +130,8 @@ internal readonly struct SendAccumulatorSettings
     internal const string MaxAdmittedVariable = "CONFLUENT_KAFKA_PRODUCER_MAX_ADMITTED";
 
     /// <summary>
-    /// The Java dotted config key the admission wait is bounded by. <b>A config-dict key, not an
-    /// environment variable</b> — unlike every other value here — because it is a real Kafka
+    /// The Java dotted config key <see cref="MaxBlockMs"/> is read from. <b>A config-dict key, not
+    /// an environment variable</b> — unlike every other value here — because it is a real Kafka
     /// producer config the core already knows, so reading it from the user's own config map is
     /// honouring an existing knob rather than inventing new surface.
     /// </summary>
@@ -197,13 +197,11 @@ internal readonly struct SendAccumulatorSettings
 
     /// <summary>
     /// <b>The admission bound (M11/P3.3):</b> how many records may be <em>accepted by</em>
-    /// <c>Send</c> — so returned to the caller — while still waiting to be handed to the batch
-    /// thread. It covers <b>both</b> submission routes (the inline append and the FIFO submission
-    /// queue), because capping one container only relocates the pile-up into the other: with
-    /// M11/P3.2's queue path bypassed the identical bloat reappeared in the node chain
-    /// (M11/P3.3 §2.3, measured). Exceeding it makes the calling thread <b>wait</b>, bounded by
-    /// <see cref="MaxBlockMs"/> — Java's own shape, since <c>KafkaProducer.send()</c> blocks up to
-    /// <c>max.block.ms</c> once the accumulator is full.
+    /// <c>Send</c> — so returned to the caller — while still waiting to be taken by the batch
+    /// thread. Exceeding it makes the calling thread <b>wait</b>, <em>untimed</em>, until the batch
+    /// thread's next take returns the permits (M11/P3.4); nothing but teardown ends that wait
+    /// early, and it never decides the record's fate, because the record is appended before the
+    /// wait begins.
     /// </summary>
     /// <remarks>
     /// Default <see cref="DefaultMaxAdmittedRecords"/>, the knee measured on this branch
@@ -212,13 +210,16 @@ internal readonly struct SendAccumulatorSettings
     internal int MaxAdmittedRecords { get; }
 
     /// <summary>
-    /// How long a <c>Send</c> blocked on the admission bound waits before the record is refused
-    /// with a <b>retriable</b> <see cref="KafkaException"/> — delivered through the send's own
-    /// <c>Task</c> and its delivery callback, Java's buffer-exhausted outcome, rather than thrown.
-    /// The user's <c>max.block.ms</c> (<see cref="MaxBlockMsKey"/>), default
-    /// <see cref="DefaultMaxBlockMs"/>. Zero is legal and means "never block": the fast path still
-    /// admits when capacity is free, and a saturated bound refuses immediately.
+    /// The producer's <c>max.block.ms</c> as parsed from the user's config map
+    /// (<see cref="MaxBlockMsKey"/>), default <see cref="DefaultMaxBlockMs"/>.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <b>It does NOT bound this binding's admission wait</b> — that wait has been untimed since
+    /// M11/P3.4 (see <see cref="MaxAdmittedRecords"/>), so nothing in the accumulator consults this
+    /// value. The key itself is <em>not</em> dead: <c>NativeProducer</c> forwards every config
+    /// entry verbatim, and the core honours <c>max.block.ms</c> for its own metadata waits and
+    /// transactional deadlines.
+    /// </remarks>
     internal int MaxBlockMs { get; }
 
     /// <summary>
