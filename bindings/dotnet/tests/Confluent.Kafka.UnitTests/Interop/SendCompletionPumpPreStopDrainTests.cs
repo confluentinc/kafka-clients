@@ -84,7 +84,7 @@ public sealed class SendCompletionPumpPreStopDrainTests
         for (int round = 0; round < Rounds; round++)
         {
             Harness harness = new Harness(new SendAccumulatorSettings(
-                slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1000));
+                slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1000));
 
             // No DrainNow(): letting teardown do the drain is the whole point — it is what puts the
             // enqueue inside the window this slice closes.
@@ -144,7 +144,7 @@ public sealed class SendCompletionPumpPreStopDrainTests
 
         Harness harness = new Harness(
             () => new SendAccumulatorSettings(
-                slotThreshold: 2000, maxAccumulatedRecords: 100_000, batchWindowMs: 60_000, batchChunk: PerGroup),
+                slotThreshold: 2000, batchWindowMs: 60_000, batchChunk: PerGroup),
             autoComplete: false);
 
         try

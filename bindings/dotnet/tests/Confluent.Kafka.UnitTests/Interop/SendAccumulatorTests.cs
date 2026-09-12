@@ -56,7 +56,7 @@ public sealed class SendAccumulatorTests
         // can release these records. The bound is generous on purpose: the delay is uniform over
         // 0..window, and the assertion that matters is "the timer releases it at all".
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 20, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 20, batchChunk: 1100));
 
         Stopwatch elapsed = Stopwatch.StartNew();
         Task<RecordMetadata>[] sends = harness.Append(5);
@@ -77,7 +77,7 @@ public sealed class SendAccumulatorTests
         // these records. If the early signal (anchor :825-827) were missing, this would wait out
         // the 60 s window and blow the assertion below.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 8, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 8, batchWindowMs: 60_000, batchChunk: 1100));
 
         Stopwatch elapsed = Stopwatch.StartNew();
         Task<RecordMetadata>[] sends = harness.Append(8);
@@ -100,7 +100,7 @@ public sealed class SendAccumulatorTests
         // its own 16 sends — see the note in that file. An explicit 60 s window makes both halves
         // deterministic: nothing reaches the core until a drain, and the drain is what moves it.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         Task<RecordMetadata>[] sends = harness.Append(16);
 
@@ -122,7 +122,7 @@ public sealed class SendAccumulatorTests
         // identical to the anchor, which issues one call per node. Asserted by CALL COUNT, not by
         // "the records arrived", which any batching whatsoever would satisfy.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         Task<RecordMetadata>[] sends = harness.Append(50);
         harness.DrainNow();
@@ -141,7 +141,7 @@ public sealed class SendAccumulatorTests
         // load-bearing under an override"). 50 records at chunk 8 => ceil(50/8) == 7 calls, the last
         // one short.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 8));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 8));
 
         _ = harness.Append(50);
         harness.DrainNow();
@@ -161,7 +161,7 @@ public sealed class SendAccumulatorTests
         // ever carries more than one chunk, i.e. the loop is never "simplified" into a single
         // flattened call over the whole chain.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 4, maxAccumulatedRecords: 100_000, batchWindowMs: 10, batchChunk: 104));
+            slotThreshold: 4, batchWindowMs: 10, batchChunk: 104));
 
         Task<RecordMetadata>[] sends = harness.Append(500);
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
@@ -183,7 +183,7 @@ public sealed class SendAccumulatorTests
         // node; clamping keeps the ceil(count / chunk) formula honest rather than letting the
         // override read as a different mode.
         SendAccumulatorSettings settings = new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 10, batchChunk: 999_999);
+            slotThreshold: 1000, batchWindowMs: 10, batchChunk: 999_999);
 
         Assert.Equal(1100, settings.SlotCapacity);
         Assert.Equal(1100, settings.BatchChunk);
@@ -198,7 +198,7 @@ public sealed class SendAccumulatorTests
         // so a GC between Send and the drain must not move them. The window is long enough that the
         // collection provably lands inside it.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         Task<RecordMetadata>[] sends = harness.Append(32);
 
@@ -225,7 +225,6 @@ public sealed class SendAccumulatorTests
 
         Assert.Equal(1000, settings.SlotThreshold);      // PRODUCER_RECORD_SLOT_THRESHOLD
         Assert.Equal(1100, settings.SlotCapacity);       // (THRESHOLD + 100)
-        Assert.Equal(1000, settings.MaxAccumulatedRecords); // = SLOT_THRESHOLD
         Assert.Equal(10, settings.BatchWindowMs);        // the bare 10 ms literal
         Assert.Equal(1100, settings.BatchChunk);         // Python's effective per-call maximum
     }
@@ -236,30 +235,28 @@ public sealed class SendAccumulatorTests
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
         {
             [SendAccumulatorSettings.ThresholdVariable] = "40",
-            [SendAccumulatorSettings.MaxAccumulatedVariable] = "17",
             [SendAccumulatorSettings.WindowVariable] = "3",
             [SendAccumulatorSettings.ChunkVariable] = "9",
         });
 
         Assert.Equal(40, settings.SlotThreshold);
         Assert.Equal(140, settings.SlotCapacity);   // still threshold + 100
-        Assert.Equal(17, settings.MaxAccumulatedRecords);
         Assert.Equal(3, settings.BatchWindowMs);
         Assert.Equal(9, settings.BatchChunk);
     }
 
     [Fact]
-    public void Settings_BoundDefaultsToTheEffectiveThreshold_NotTheConstant()
+    public void Settings_ChunkDefaultsToTheEffectiveCapacity_NotTheConstant()
     {
-        // Python DEFINES the bound as the threshold, so lowering only the threshold must move the
-        // bound with it — otherwise the two silently decouple.
+        // The chunk default is derived from the EFFECTIVE threshold, so lowering only the threshold
+        // must move it too — otherwise an over-large chunk would silently span what is now a
+        // smaller node.
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
         {
             [SendAccumulatorSettings.ThresholdVariable] = "25",
         });
 
         Assert.Equal(25, settings.SlotThreshold);
-        Assert.Equal(25, settings.MaxAccumulatedRecords);
         Assert.Equal(125, settings.BatchChunk);   // and the chunk follows capacity
     }
 
@@ -321,7 +318,7 @@ public sealed class SendAccumulatorTests
         // still in the chain when Stop() runs — and every send must SETTLE (none left pending, which
         // is the shape that hangs an awaiting caller forever).
         Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         Task<RecordMetadata>[] sends = harness.Append(20);
         Assert.Equal(0, harness.Accumulator.SendBatchCallCount);
@@ -352,7 +349,6 @@ public sealed class SendAccumulatorTests
         // way. It is also the ONE assertion that would catch an append charging itself twice.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 10,
             batchChunk: 1100,
             maxAdmittedRecords: 4,
@@ -386,7 +382,7 @@ public sealed class SendAccumulatorTests
         // releasing pins the core may still be reading. It is "abandon it and let it finish", and the
         // assertion is that every record still settles.
         Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 10, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 10, batchChunk: 1100));
 
         Task<RecordMetadata>[] sends = harness.Append(8);
 
@@ -416,7 +412,7 @@ public sealed class SendAccumulatorTests
         // the sync send's sites, and ProducerSendBatchTests proves the ABI's per-index (future,
         // error) contract without ever reaching CompleteNode.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         harness.CloseCoreProducer();
 
@@ -463,7 +459,7 @@ public sealed class SendAccumulatorTests
         // enough to pin both halves — DrainedSendCount must equal the survivors and must not move
         // when the rejected batch drains.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         RecordingDeliveryCallback survivors = new RecordingDeliveryCallback();
         Task<RecordMetadata>[] accepted = harness.Append(4, survivors);
@@ -514,7 +510,6 @@ public sealed class SendAccumulatorTests
         // only by _inFlight.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 8,
@@ -574,7 +569,7 @@ public sealed class SendAccumulatorTests
         // itself failing — which is what TruncateDeliveriesOfPendingNode injects, and why it is a
         // truncation of THAT array rather than of Natives.
         Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 1100));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 1100));
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         Task<RecordMetadata>[] sends = harness.Append(3, callback);
@@ -752,7 +747,6 @@ public sealed class SendAccumulatorTests
         // at all since M11/P3.4 — so "parked" and "released" are both properties of the gate.
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 4,
@@ -817,7 +811,6 @@ public sealed class SendAccumulatorTests
         const int Rounds = 10;
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: Cap,
@@ -873,7 +866,6 @@ public sealed class SendAccumulatorTests
         {
             using Harness harness = new Harness(new SendAccumulatorSettings(
                 slotThreshold: 1000,
-                maxAccumulatedRecords: 1000,
                 batchWindowMs: 60_000,
                 batchChunk: 1100,
                 maxAdmittedRecords: Cap,
@@ -977,7 +969,6 @@ public sealed class SendAccumulatorTests
         // registration, one layer above this one — which is why the accumulator can ignore it here.
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 2,
@@ -1027,7 +1018,6 @@ public sealed class SendAccumulatorTests
         // assertion below pins: three, not two.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 2,
@@ -1097,7 +1087,6 @@ public sealed class SendAccumulatorTests
 
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 2,
@@ -1176,7 +1165,6 @@ public sealed class SendAccumulatorTests
         // Admission_ParkedCaller_IsReleasedByStopsCancel_WhenTheBatchThreadCannotDrain.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 2,
@@ -1236,7 +1224,6 @@ public sealed class SendAccumulatorTests
 
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 4,
@@ -1290,7 +1277,6 @@ public sealed class SendAccumulatorTests
         // calls it), driven here with explicit settings so the bound actually saturates.
         using Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 2,
@@ -1350,7 +1336,6 @@ public sealed class SendAccumulatorTests
         const int Sends = 8;
         using (Harness ordered = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
-            maxAccumulatedRecords: 1000,
             batchWindowMs: 60_000,
             batchChunk: 1100,
             maxAdmittedRecords: 32,
@@ -1407,7 +1392,6 @@ public sealed class SendAccumulatorTests
         {
             using Harness harness = new Harness(new SendAccumulatorSettings(
                 slotThreshold: 1000,
-                maxAccumulatedRecords: 1000,
                 batchWindowMs: 60_000,
                 batchChunk: 1100,
                 maxAdmittedRecords: 4,
@@ -1479,7 +1463,6 @@ public sealed class SendAccumulatorTests
         {
             using Harness harness = new Harness(new SendAccumulatorSettings(
                 slotThreshold: 1000,
-                maxAccumulatedRecords: 1000,
                 batchWindowMs: 60_000,
                 batchChunk: 1100,
                 maxAdmittedRecords: 4,
@@ -1570,46 +1553,46 @@ public sealed class SendAccumulatorTests
         Assert.Equal(1000, settings.MaxAdmittedRecords);
         Assert.Equal(60_000, settings.MaxBlockMs);
 
-        // ⚠ There is deliberately NO `Assert.NotEqual(MaxAccumulatedRecords, MaxAdmittedRecords)`
-        // here any more. It used to assert the two defaults differ, as a PROXY for D3's "the
-        // admission bound is not coupled to the accumulation bound" — and the measurement made the
-        // proxy false: the knee is 1000, which is also DefaultSlotThreshold, so the two defaults now
-        // coincide BY MEASUREMENT while remaining structurally independent (own field, own env
-        // variable, independently settable). A value-inequality assertion cannot express that, and
-        // re-scoping it would only re-break the next time either default moves. The decoupling is
-        // proved where it is actually observable — by MOVING one and watching the other stay put:
+        // ⚠ There is deliberately NO `Assert.NotEqual(SlotThreshold, MaxAdmittedRecords)` here any
+        // more. It used to assert the two defaults differ, as a PROXY for D3's "the admission bound
+        // is not coupled to the accumulation stage" — and the measurement made the proxy false: the
+        // knee is 1000, which is also DefaultSlotThreshold, so the two defaults now coincide BY
+        // MEASUREMENT while remaining structurally independent (own field, own env variable,
+        // independently settable). A value-inequality assertion cannot express that, and re-scoping
+        // it would only re-break the next time either default moves. The decoupling is proved where
+        // it is actually observable — by MOVING one and watching the other stay put:
         // Settings_AdmissionBound_IsNotCoupledToTheThreshold and
-        // Settings_AdmissionOverride_TakesEffect_AndIsItsOwnVariable.
+        // Settings_AdmissionOverride_TakesEffect.
     }
 
     [Fact]
     public void Settings_AdmissionBound_IsNotCoupledToTheThreshold()
     {
-        // ⚠ THE D3 ASSERTION. MaxAccumulatedRecords DEFAULTS TO the threshold, because Python
-        // defines it that way; the admission bound must not, because coupling the two is exactly
-        // what made Python's 1000 look transferable when the measurement says it is not. Lowering
-        // the threshold moves one and not the other.
+        // ⚠ THE D3 ASSERTION. The slot threshold and the chunk both follow the threshold override;
+        // the admission bound must not, because coupling it to Python's 1000 is exactly what made
+        // that value look transferable when the measurement says it is not. Lowering the threshold
+        // moves those and not this one.
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
         {
             [SendAccumulatorSettings.ThresholdVariable] = "25",
         });
 
         Assert.Equal(25, settings.SlotThreshold);
-        Assert.Equal(25, settings.MaxAccumulatedRecords);
+        Assert.Equal(125, settings.BatchChunk);
         Assert.Equal(1000, settings.MaxAdmittedRecords);
     }
 
     [Fact]
-    public void Settings_AdmissionOverride_TakesEffect_AndIsItsOwnVariable()
+    public void Settings_AdmissionOverride_TakesEffect()
     {
         SendAccumulatorSettings settings = ReadSettingsWith(new Dictionary<string, string?>
         {
-            [SendAccumulatorSettings.MaxAccumulatedVariable] = "17",
+            [SendAccumulatorSettings.ThresholdVariable] = "17",
             [SendAccumulatorSettings.MaxAdmittedVariable] = "321",
         });
 
-        // Separately named, so the two move independently — the observable form of D3.
-        Assert.Equal(17, settings.MaxAccumulatedRecords);
+        // Its own variable, so the two move independently — the observable form of D3.
+        Assert.Equal(17, settings.SlotThreshold);
         Assert.Equal(321, settings.MaxAdmittedRecords);
     }
 
@@ -1793,7 +1776,6 @@ public sealed class SendAccumulatorTests
         string[] all =
         {
             SendAccumulatorSettings.ThresholdVariable,
-            SendAccumulatorSettings.MaxAccumulatedVariable,
             SendAccumulatorSettings.WindowVariable,
             SendAccumulatorSettings.ChunkVariable,
             SendAccumulatorSettings.MaxAdmittedVariable,

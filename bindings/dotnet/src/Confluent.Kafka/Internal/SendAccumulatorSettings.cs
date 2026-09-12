@@ -56,11 +56,7 @@ namespace Confluent.Kafka.Internal;
 /// (§7 option A): <see cref="MaxAdmittedRecords"/> and <see cref="MaxBlockMs"/>. Python needs
 /// neither, because its <c>send()</c> blocks the calling OS thread and so bounds the accepted
 /// population for free; .NET's <c>Send</c> returns a <see cref="System.Threading.Tasks.Task"/>
-/// and the caller does not await admission, so the bound has to be explicit. They are
-/// <b>deliberately not</b> a reuse of <see cref="MaxAccumulatedRecords"/> (decision D3): that one
-/// bounds records <em>appended but not yet taken</em>, this one bounds records <em>accepted but
-/// not yet appended-and-taken</em>, and a sibling branch measured Python's 1000 starving .NET to
-/// 96.9k msg/s when the two were coupled.
+/// and the caller does not await admission, so the bound has to be explicit.
 /// </para>
 /// </remarks>
 internal readonly struct SendAccumulatorSettings
@@ -127,14 +123,10 @@ internal readonly struct SendAccumulatorSettings
     internal const int DefaultMaxBlockMs = 60_000;
 
     internal const string ThresholdVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_THRESHOLD";
-    internal const string MaxAccumulatedVariable = "CONFLUENT_KAFKA_PRODUCER_MAX_ACCUMULATED";
     internal const string WindowVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_WINDOW_MS";
     internal const string ChunkVariable = "CONFLUENT_KAFKA_PRODUCER_BATCH_CHUNK";
 
-    /// <summary>
-    /// The admission bound's own override — <b>separately named</b> from
-    /// <see cref="MaxAccumulatedVariable"/> because the two bound different populations (D3).
-    /// </summary>
+    /// <summary>The admission bound's own override.</summary>
     internal const string MaxAdmittedVariable = "CONFLUENT_KAFKA_PRODUCER_MAX_ADMITTED";
 
     /// <summary>
@@ -159,7 +151,6 @@ internal readonly struct SendAccumulatorSettings
     /// </remarks>
     internal SendAccumulatorSettings(
         int slotThreshold,
-        int maxAccumulatedRecords,
         int batchWindowMs,
         int batchChunk,
         int maxAdmittedRecords = DefaultMaxAdmittedRecords,
@@ -167,7 +158,6 @@ internal readonly struct SendAccumulatorSettings
     {
         SlotThreshold = slotThreshold;
         SlotCapacity = slotThreshold + SlotCapacityHeadroom;
-        MaxAccumulatedRecords = maxAccumulatedRecords;
         BatchWindowMs = batchWindowMs;
         MaxAdmittedRecords = maxAdmittedRecords;
         MaxBlockMs = maxBlockMs;
@@ -190,17 +180,6 @@ internal readonly struct SendAccumulatorSettings
     /// also the largest batch a single <c>send_batch</c> can carry.
     /// </summary>
     internal int SlotCapacity { get; }
-
-    /// <summary>
-    /// The backpressure bound: records appended but not yet taken by the batch thread (Python
-    /// <c>PRODUCER_MAX_ACCUMULATED_RECORDS</c>, which is <em>defined as</em> the threshold). Python's
-    /// own comment is the Java-faithfulness argument for having a stage-1 bound at all: <i>"once this
-    /// many records are accumulated but not yet taken by the send task, the producer is 'full' and
-    /// further enqueuing should wait until the send task drains a batch. One complete batch beyond
-    /// the one being filled — mirrors Java's <c>send()</c> blocking once <c>buffer.memory</c> is
-    /// full, applied here at batch granularity in front of the Rust accumulator."</i>
-    /// </summary>
-    internal int MaxAccumulatedRecords { get; }
 
     /// <summary>The free-running linger window in milliseconds (Python's bare 10 ms literal).</summary>
     internal int BatchWindowMs { get; }
@@ -227,9 +206,8 @@ internal readonly struct SendAccumulatorSettings
     /// <c>max.block.ms</c> once the accumulator is full.
     /// </summary>
     /// <remarks>
-    /// Distinct from <see cref="MaxAccumulatedRecords"/> in both quantity and purpose, and the
-    /// separation is decision D3 rather than an accident — see the type's remarks. Default
-    /// <see cref="DefaultMaxAdmittedRecords"/>, the knee measured on this branch (M11/P3.3 S2).
+    /// Default <see cref="DefaultMaxAdmittedRecords"/>, the knee measured on this branch
+    /// (M11/P3.3 S2).
     /// </remarks>
     internal int MaxAdmittedRecords { get; }
 
@@ -279,23 +257,18 @@ internal readonly struct SendAccumulatorSettings
     {
         int threshold = ReadPositive(ThresholdVariable, DefaultSlotThreshold);
 
-        // Python couples the bound to the threshold (PRODUCER_MAX_ACCUMULATED_RECORDS is *defined*
-        // as PRODUCER_RECORD_SLOT_THRESHOLD), so the default follows the effective threshold rather
-        // than the constant — otherwise lowering only the threshold would silently decouple them.
-        int maxAccumulated = ReadPositive(MaxAccumulatedVariable, threshold);
         // ReadPositive, not ReadNonNegative: a zero window would make the batch thread's wait loop
         // expire instantly on every iteration, i.e. a spin loop burning a core while idle. Python's
         // window is a compile-time 10 ms and has no zero form to be faithful to.
         int window = ReadPositive(WindowVariable, DefaultBatchWindowMs);
         int chunk = ReadPositive(ChunkVariable, threshold + SlotCapacityHeadroom);
 
-        // DELIBERATELY not derived from `threshold`, unlike `maxAccumulated` above: the admission
-        // bound answers a different question and coupling it to Python's 1000 is what the sibling
-        // branch's sweep measured as a throughput cliff (D3). Its own constant, its own override.
+        // DELIBERATELY not derived from `threshold`: the admission bound answers a different
+        // question and coupling it to Python's 1000 is what the sibling branch's sweep measured as
+        // a throughput cliff (D3). Its own constant, its own override.
         int maxAdmitted = ReadPositive(MaxAdmittedVariable, DefaultMaxAdmittedRecords);
 
-        return new SendAccumulatorSettings(
-            threshold, maxAccumulated, window, chunk, maxAdmitted, maxBlockMs);
+        return new SendAccumulatorSettings(threshold, window, chunk, maxAdmitted, maxBlockMs);
     }
 
     /// <summary>

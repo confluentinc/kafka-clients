@@ -72,7 +72,7 @@ public sealed class SendCompletionGroupingTests
         // coalesce consecutive queued groups up to DrainCap). One pass then carries the union, so
         // ProcessedBatchCount collapses toward 1 and LargestProcessedBatch becomes the total.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 8));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 8));
 
         Task<RecordMetadata>[] sends = harness.Append(50);
         harness.DrainNow();
@@ -116,7 +116,7 @@ public sealed class SendCompletionGroupingTests
 
         Harness harness = new Harness(
             () => new SendAccumulatorSettings(
-                slotThreshold: 2000, maxAccumulatedRecords: 100_000, batchWindowMs: 60_000, batchChunk: FirstGroup),
+                slotThreshold: 2000, batchWindowMs: 60_000, batchChunk: FirstGroup),
             autoComplete: false);
         try
         {
@@ -194,7 +194,7 @@ public sealed class SendCompletionGroupingTests
         // the test reporting a pump-splitting defect that did not exist. The subject here is the
         // PUMP's group splitting, so every accumulator-side bound is raised past Total deliberately.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 5000, maxAccumulatedRecords: 100_000, batchWindowMs: 60_000, batchChunk: 5100,
+            slotThreshold: 5000, batchWindowMs: 60_000, batchChunk: 5100,
             maxAdmittedRecords: 100_000));
 
         Task<RecordMetadata>[] sends = harness.Append(Total);
@@ -229,7 +229,7 @@ public sealed class SendCompletionGroupingTests
         // Mutation that must fail this: increment by 1 per dequeued group instead of by the group's
         // record count. The counter drops to 7.
         using Harness harness = new Harness(new SendAccumulatorSettings(
-            slotThreshold: 1000, maxAccumulatedRecords: 1000, batchWindowMs: 60_000, batchChunk: 8));
+            slotThreshold: 1000, batchWindowMs: 60_000, batchChunk: 8));
 
         Task<RecordMetadata>[] sends = harness.Append(50);
         harness.DrainNow();
