@@ -1141,14 +1141,11 @@ public sealed class SendAccumulatorTests
         // it. Under append-first the permit arithmetic alone usually releases every parked caller on
         // a successful take: a parked caller implies the semaphore is at zero, which implies the
         // chain holds at least as many records as there are parked callers, so the take's
-        // ReleaseAdmission wakes all of them. AbandonOnThreadFailure's unconditional
-        // _spaceGate.Cancel() covers what that cannot — a caller that parks in the window between
-        // its own record being taken and the thread dying, and a release that throws — and that
-        // window IS reachable here, but only by luck: deleting the Cancel turned the full net10.0
-        // suite red in 1 of 8 in-suite reps. So treat this as a deterministic CONTRACT assertion
-        // (released, settled, teardown completes) with occasional mechanism coverage. The
-        // deterministic mechanism guard is the Stop twin,
-        // Admission_ParkedCaller_IsReleasedByStopsCancel_WhenTheBatchThreadCannotDrain.
+        // ReleaseAdmission wakes all of them. So this is a deterministic CONTRACT assertion
+        // (released, settled, teardown completes) whose MECHANISM coverage is incidental — deleting
+        // AbandonOnThreadFailure's Cancel turned the full net10.0 suite red in only 1 of 8 in-suite
+        // reps. The deterministic guard for that Cancel is the twin below,
+        // Admission_ParkedCaller_IsReleasedByTheFailureHandlersCancel_WhenTheReleaseWakesNobody.
         Harness harness = new Harness(new SendAccumulatorSettings(
             slotThreshold: 1000,
             batchWindowMs: 60_000,
@@ -1187,6 +1184,80 @@ public sealed class SendAccumulatorTests
             "the failed batch thread did not exit");
         Func<object> refused = () => harness.AppendWithoutAdmission(0x84);
         Assert.Throws<ObjectDisposedException>(refused);
+
+        harness.Dispose();
+    }
+
+    [Fact]
+    public async Task Admission_ParkedCaller_IsReleasedByTheFailureHandlersCancel_WhenTheReleaseWakesNobody()
+    {
+        // ⚠ THE DISCRIMINATOR FOR AbandonOnThreadFailure'S _spaceGate.Cancel(), and — like Stop's
+        // twin above — it needs its own setup because the obvious one cannot fail. Under
+        // append-first the permit arithmetic normally releases every parked caller by itself, so
+        // the sibling test above only catches the deletion 1 rep in 8.
+        //
+        // The two obvious ways to deny that wake-up BOTH fail, and it is worth saying why:
+        //   * a parked caller forces the semaphore to 0, and the chain then holds at least as many
+        //     records as there are parked callers, so a truthful ReleaseAdmission always wakes them;
+        //   * InflateTheChainAccounting cannot be composed with a parked caller either —
+        //     SemaphoreSlim.Release(n) throws only when CurrentCount + n exceeds the ceiling, and
+        //     with the ceiling at int.MaxValue and CurrentCount pinned at 0 by the parked caller,
+        //     Release(int.MaxValue) SUCCEEDS and wakes it.
+        //
+        // The reachable case is the one the handler's own comment names: "a release that releases
+        // nothing". ReleaseAdmission is a no-op for count <= 0, and that guard is checked BEFORE the
+        // semaphore is touched, so a non-positive count is not mutually exclusive with a parked
+        // caller the way the throwing form is. Inject one and the take wakes nobody; the batch
+        // thread then dies inside SendNode, and its handler's unconditional Cancel is the ONLY
+        // thing left that can release the caller (the handler's own ReleaseAdmission gets 0, because
+        // the first take already zeroed the counter under _closed). Deleting that Cancel turns this
+        // red 8/8 in-suite.
+        Harness harness = new Harness(new SendAccumulatorSettings(
+            slotThreshold: 1000,
+            batchWindowMs: 60_000,
+            batchChunk: 1100,
+            maxAdmittedRecords: 2,
+            maxBlockMs: 60_000));
+
+        Task<RecordMetadata>[] filled = harness.Append(2);
+        Task<Task<RecordMetadata>> admission =
+            harness.AppendOneFromAnotherThread(0x92, CancellationToken.None);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        Assert.False(admission.IsCompleted, "the send returned although the bound was full");
+        Assert.Equal(3, harness.PendingCount());
+        Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
+
+        // (1) Kill the batch thread inside SendNode (the truncation injection — see its remarks for
+        // why it is the only escape SendNode's own catch leaves open).
+        harness.TruncateDeliveriesOfPendingNode(keep: 1);
+
+        // (2) And make the take's own ReleaseAdmission a no-op, so the parked caller is NOT woken on
+        // the way past. Without this line the release below hands back three permits and the test
+        // proves nothing about the Cancel.
+        harness.SetChainAccounting(-1);
+
+        harness.ForceDrainWithoutWaiting();
+
+        // THE ASSERTION, under a hard deadline so a caller that is never released FAILS rather than
+        // hanging the run. Nothing released a permit, before or after the failure.
+        await TestTimeout.Run(() => admission, s_deadline);
+        Task<RecordMetadata> parked = await admission;
+
+        // The gate did the releasing, so the permit accounting is still exactly where the injection
+        // left it — the direct witness that no release woke the caller.
+        Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
+
+        // And every record is still settled exactly once, the parked caller's included.
+        await AssertSettledByTheBatchThreadFailure(filled[0]);
+        await AssertSettledByTheBatchThreadFailure(filled[1]);
+        await AssertSettledByTheBatchThreadFailure(parked);
+
+        Assert.True(
+            harness.Accumulator.Stop(TimeSpan.FromSeconds(10)),
+            "the failed batch thread did not exit");
+        Func<object> refusedAfterFailure = () => harness.AppendWithoutAdmission(0x94);
+        Assert.Throws<ObjectDisposedException>(refusedAfterFailure);
 
         harness.Dispose();
     }
@@ -2027,13 +2098,39 @@ public sealed class SendAccumulatorTests
                 Accumulator.AvailableAdmissions > 0,
                 "the injection needs headroom on the admission semaphore, or the release absorbs it");
 
+            SetChainAccounting(int.MaxValue);
+        }
+
+        /// <summary>
+        /// <b>The injection for "a release that releases nothing"</b> — the second reachable form of
+        /// the hazard <c>AbandonOnThreadFailure</c>'s unconditional <c>_spaceGate.Cancel()</c> exists
+        /// for, and the one <see cref="InflateTheChainAccounting"/> cannot reach. Writes
+        /// <paramref name="value"/> straight into the accumulator's <c>_chainRecords</c> counter, so
+        /// the next <c>TakeChainLocked</c> hands <c>ReleaseAdmission</c> exactly that count.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A <b>non-positive</b> count makes <c>ReleaseAdmission</c> a no-op at its <c>count &gt; 0</c>
+        /// guard — it never touches the semaphore at all, so unlike the throwing (over-release) form
+        /// it is <em>not</em> mutually exclusive with a caller parked on that same semaphore. That is
+        /// what lets a test park a caller and then deny it the wake-up the permit arithmetic would
+        /// otherwise hand it for free.
+        /// </para>
+        /// <para>
+        /// <b>Caller's contract</b> (as for its two siblings): no drain may be possible yet, so the
+        /// write is not racing the batch thread.
+        /// </para>
+        /// </remarks>
+        /// <param name="value">The count the next take will report as owed back.</param>
+        internal void SetChainAccounting(int value)
+        {
             FieldInfo chainRecords = typeof(SendAccumulator).GetField(
                 "_chainRecords", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException(
                     "SendAccumulator no longer exposes a _chainRecords counter — this injection " +
                     "needs to be re-derived against the new shape rather than silently skipped.");
 
-            chainRecords.SetValue(Accumulator, int.MaxValue);
+            chainRecords.SetValue(Accumulator, value);
         }
 
         /// <summary>
