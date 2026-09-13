@@ -132,6 +132,74 @@ public sealed class SoakErrorClassificationTests
         Assert.Contains("Timeout waiting for the coordinator", reason, StringComparison.Ordinal);
     }
 
+    // ---------------------------------------------------------------------------
+    // 74.3 — a poll failure inside the shutdown window is not counted
+    // ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// ⚠ THE 74.3 GUARD. Python checks <c>if not self.run: break</c> <b>before</b>
+    /// <c>_classify_error</c> (<c>soakclient.py:1689-1691</c>). Without that ordering a
+    /// genuine broker error that merely resolves the poll inside the shutdown window is
+    /// counted as a consumer error — and possibly a disconnect or a coordinator move —
+    /// inflating the SUMMARY's <c>errors=</c> on an otherwise clean shutdown.
+    /// </summary>
+    [Fact]
+    public void APollFailureDuringShutdownIsSuppressed()
+    {
+        Assert.Equal(
+            SoakClient.PollFailureAction.Suppress,
+            SoakClient.ClassifyPollFailure(true, true, "NetworkException", 1, 20, out string reason));
+        Assert.Equal(string.Empty, reason);
+    }
+
+    /// <summary>
+    /// Suppression outranks the terminal bound. The run is ending anyway, and recording
+    /// a fatal reason here would turn a clean exit into
+    /// <see cref="SoakExitCodes.ConsumerWedged"/> — so an error that WOULD abort is
+    /// still suppressed once shutdown has been requested. This is the case a naive
+    /// "check the token last" fix would get wrong while still passing the test above.
+    /// </summary>
+    [Fact]
+    public void ShutdownSuppressesEvenAnOtherwiseTerminalFailure()
+    {
+        Assert.Equal(
+            SoakClient.PollFailureAction.Abort,
+            SoakClient.ClassifyPollFailure(false, true, "NetworkException", 20, 20, out _));
+
+        Assert.Equal(
+            SoakClient.PollFailureAction.Suppress,
+            SoakClient.ClassifyPollFailure(true, true, "NetworkException", 20, 20, out string reason));
+        Assert.Equal(string.Empty, reason);
+    }
+
+    /// <summary>
+    /// Outside the shutdown window the policy is unchanged — it still delegates to the
+    /// two-tier bound, so the fix added a case rather than replacing one.
+    /// </summary>
+    [Theory]
+    [InlineData(true, 1, 20, "Continue")]
+    [InlineData(true, 19, 20, "Continue")]
+    [InlineData(true, 20, 20, "Abort")]
+    [InlineData(false, 1, 20, "Continue")]
+    [InlineData(false, 2, 20, "Continue")]
+    [InlineData(false, 3, 20, "Abort")]
+    public void OutsideShutdownThePolicyIsTheTwoTierBound(bool retriable, int consecutive, int max, string expected)
+    {
+        Assert.Equal(
+            expected,
+            SoakClient.ClassifyPollFailure(false, retriable, "err", consecutive, max, out _).ToString());
+    }
+
+    [Fact]
+    public void AnAbortStillCarriesItsFatalReason()
+    {
+        Assert.Equal(
+            SoakClient.PollFailureAction.Abort,
+            SoakClient.ClassifyPollFailure(false, false, "TopicAuthorizationFailed", 3, 20, out string reason));
+        Assert.Contains("non-retriable", reason, StringComparison.Ordinal);
+        Assert.Contains("TopicAuthorizationFailed", reason, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheMetricTokenSurvivesPrometheusNameTranslation()
     {
