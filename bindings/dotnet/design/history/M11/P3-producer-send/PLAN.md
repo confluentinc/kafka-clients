@@ -130,6 +130,35 @@ should carry this deviation forward.
 
 ## 3 · The central decision — §A7 completion model (A / B / C)
 
+> ⚠ **SUPERSEDED IN PART by M11/P3.1** (user direction, 2026-09-07) —
+> `design/history/M11/P3.1-producer-python-alignment/PLAN.md`. **Nothing below is deleted; the
+> analysis stands as written and P3.1 reuses it rather than re-deriving it.** What changed:
+>
+> - **The A/B/C choice is no longer one choice for the whole producer — it is split by flavor.**
+>   The **sync** path keeps **Option C** exactly as recommended in §3.3. The **async** path moves
+>   to **Option A** (Python-style pull: a binding-side accumulator + a batch thread calling
+>   `Producer_send_batch`), so §2(c)'s "`ProducerRecord_t` mirror struct — needed **only** if
+>   Option A is chosen (it is not — §3)" and §4's matching decision are superseded *by this
+>   banner*, since both defer here.
+> - **The completion model is NOT superseded.** ffi §A7's pull pump (`SendCompletionPump` +
+>   batched `get_all`) remains the async flavor's completion engine, exactly as §6.3 describes;
+>   P3.1 moves only the async **send submission** side. (The sync producer, added later in
+>   M11/P4, has no pump at all — it blocks on `FutureRecordMetadata_get` — and is likewise
+>   untouched.) P3.1 does not reopen pull-vs-push, and **Option B remains rejected**.
+> - **Why, in one line:** §3.3's reasoning is still correct on the axes it weighed (pin window,
+>   hazard surface, code volume, throughput). It simply never weighed the axis that decided the
+>   reopening — the accepted Option-C residual that an inline `Producer_send` blocks the *caller*
+>   inside the coarse `Mutex<ProducerKind>` up to `max.block.ms` where a concurrent `close`
+>   cannot wake it (M11/P3.1 §2.2). Option A converts that into a managed, cancellable wait, and
+>   only **partially** (§3.6 of that plan). This is a user decision taken with the trade-offs
+>   surfaced, not a demonstration that §3.3 was wrong.
+> - **Two factual errors in the companion design note are corrected there**, not here (M11/P3.1
+>   §3.9): the pin primitive for `ReadOnlyMemory<byte>` and the exact end of the deferred pin
+>   window. Note §3.1's Option A sketch says "k/v pinned via long-lived `GCHandle.Alloc(Pinned)`"
+>   — for this binding's `ReadOnlyMemory<byte>?` key/value that is `ReadOnlyMemory<byte>.Pin()` →
+>   `MemoryHandle` instead; `GCHandle.Alloc(Pinned)` survives only for the interned topic and
+>   sentinel buffers.
+
 The producer ABI exposes **both** a pull surface (`Producer_send` → a future you block /
 poll via `get` / `get_all` / `is_done`) and a push surface (`Producer_send_async(…,
 callback, user_data)` fired on the core's dispatcher thread). So the completion model is a
@@ -260,6 +289,14 @@ queue):
 | In-repo precedent | Python `_confluentkafka.c` batch+poll threads (C-ext, not a shipped .NET pattern) | shipped consumer push bridge (§B7) + shipped producer peripherals over `OperationCompletionSource` | ffi §A7 Option A (documented); Python poll-thread is the conceptual sibling |
 
 ### 3.3 Preference: Option C — rationale
+
+> ⚠ **This recommendation was accepted for M11/P3 and is SUPERSEDED IN PART by M11/P3.1** — see
+> the banner at the head of §3. Short form: **still in force for the sync path**; the **async**
+> path adopts **Option A** by user direction; **Option B stays rejected**; the completion model
+> is untouched. Point 7 below ("A only with profiling evidence … Not recommended now") is the
+> specific sentence P3.1 overrides, and it does so on a **different axis** (the close /
+> backpressure residual, M11/P3.1 §2.2) rather than on the profiling evidence it asked for —
+> performance is measured *after* implementation there, per that plan's D3.
 
 We recommend **Option C**, and record **B** and **A** as documented alternatives.
 

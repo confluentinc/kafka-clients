@@ -41,43 +41,57 @@ namespace Confluent.Kafka;
 /// the background I/O thread so it should be fast" (<c>Callback.java:20-21</c>). The .NET
 /// analogue depends on which surface you sent through:
 /// <list type="bullet">
-/// <item><b>Async</b> (<see cref="IAsyncProducer{TKey, TValue}"/>) — on the producer's
-/// <b>send-completion pump thread</b>, the .NET counterpart of Java's I/O thread. It is a single
-/// thread <em>per producer</em>, so callbacks of <em>one</em> producer never run concurrently with
-/// each other, and a slow callback delays every other send's completion. Keep it short. (The
-/// guarantee is per-producer, so one callback instance shared across <em>two</em> producers can
-/// still be entered concurrently — one pump thread each.)</item>
+/// <item><b>Async</b> (<see cref="IAsyncProducer{TKey, TValue}"/>) — for a record whose
+/// core-reported completion the binding reads, on the producer's <b>send-completion pump
+/// thread</b>, the .NET counterpart of Java's I/O thread. There is one such thread per producer and
+/// it walks its completions one at a time, so the invocations it makes are serialized with respect
+/// to one another, and a slow callback there delays every other send's completion. Keep it short.
+/// Failure outcomes can be delivered from elsewhere: a record the core rejects as the batch is
+/// handed over is delivered from the producer's <b>send-batch thread</b>.</item>
 /// <item><b>Sync</b> (<see cref="IProducer{TKey, TValue}"/>) — <b>inline on the calling thread</b>,
 /// before <c>Send</c> returns or throws. The blocking send has no pump (it waits on the record's
-/// future itself), so there is no other thread to run it on — and therefore <b>no
-/// non-concurrency guarantee at all</b>. Concurrent <c>Send</c> on one producer is explicitly
-/// supported and deliberately unsynchronized (the Rust core's <c>Mutex</c> serializes, and a
-/// binding-side send lock is an ffi §A1 anti-pattern), so one <see cref="IDeliveryCallback"/>
-/// instance passed to <c>Send</c> from N threads <b>is</b> entered on N threads at once.
-/// <b>What this means for you: a callback instance you share across concurrent sync sends must
-/// itself be thread-safe</b> — synchronize any mutable state it touches (a per-send instance
-/// needs nothing). This is a recorded <b>divergence from Java</b>, where every <c>Callback</c>
-/// runs on the producer's single background I/O thread (<c>Callback.java:20-21</c>) and a user
-/// never has to make one thread-safe; see the §4 delivery-callback divergence in the binding's
-/// <c>CLAUDE.md</c>.</item>
+/// future itself), so there is no other thread to run it on. Concurrent <c>Send</c> on one producer
+/// is explicitly supported and deliberately unsynchronized (the Rust core's <c>Mutex</c>
+/// serializes, and a binding-side send lock is an ffi §A1 anti-pattern), so one
+/// <see cref="IDeliveryCallback"/> instance passed to <c>Send</c> from N threads <b>is</b> entered
+/// on N threads at once.</item>
 /// </list>
-/// Do not block on producer progress from inside it on the async surface: the pump thread it runs
-/// on is the same thread that must resolve every other in-flight send.
+/// <b>What this means for you: a callback instance you share across sends must itself be
+/// thread-safe</b> — synchronize any mutable state it touches (a per-send instance needs nothing).
+/// On the sync surface concurrent <c>Send</c> calls enter it on their own threads. On the
+/// <b>async</b> surface an invocation made away from the pump — the send-batch thread's
+/// per-record rejection — can overlap one the pump is making. A single instance shared across
+/// <em>two</em> producers can also be entered from each producer's own pump. See the §4
+/// delivery-callback divergence in the binding's <c>CLAUDE.md</c>. ⚠ These remarks used to give the
+/// async surface an unqualified per-producer non-concurrency guarantee, on the reasoning that the
+/// pump was the only thread firing them; the send-batch thread's site falsifies it (Critic 72
+/// finding 72.10). ⚠ They then justified the obligation by
+/// asserting Java runs <em>every</em> <c>Callback</c> on one background I/O thread so a Java user
+/// never has to make one thread-safe — also false, and the cited line does not say it:
+/// <c>Callback.java:20-21</c> reads "<em>generally</em> execute in the background I/O thread".
+/// <c>KafkaProducer.doSend</c>'s <c>catch (ApiException)</c> invokes the callback on the
+/// <b>application</b> thread while <c>ProducerBatch.completeFutureAndFireCallbacks</c> fires others
+/// on the Sender thread, so one shared <c>Callback</c> can be entered from two threads in Java too
+/// (finding 72.17). The obligation above stands on its own; it needs no claim about Java.
+/// Do not block on producer progress from inside it while it is running on the pump thread: that is
+/// the same thread that must resolve every other in-flight send.
 /// </para>
 /// <para>
-/// <b>Sending again from inside it IS supported</b> — the canonical retry-on-failure shape. On the
-/// async surface the reentrant send is queued and drained on the pump's next iteration (the pump
-/// holds no managed lock while the callback runs); on the sync surface the callback runs after the
-/// blocking wait has already returned. Both are covered by a regression test.
+/// <b>Sending again from inside it IS supported</b> — the canonical retry-on-failure shape — because
+/// no managed lock is held while the callback runs, wherever it runs. Where it runs on the pump
+/// thread the reentrant send is queued and drained by the accumulator as usual; on the sync surface
+/// the callback runs after the blocking wait has already returned. Both are covered by a regression
+/// test.
 /// </para>
 /// <para>
-/// <b>Tearing the producer down from inside it is NOT supported on the async surface.</b>
-/// <c>Close</c> / <c>Dispose</c> stop and <b>join</b> the send-completion pump thread — which is
-/// the very thread the callback is running on — so calling either from here asks that thread to
-/// wait for itself. Java guards the equivalent explicitly (its <c>close</c> detects being called
-/// from the sender thread and skips the join); this binding does not, and adding such a guard is
-/// out of scope here. Close the producer from the thread that owns it instead. This does not apply
-/// to the sync surface, where the callback runs on the caller's own thread.
+/// <b>Tearing the producer down from inside it is NOT supported while it is running on a thread the
+/// producer owns</b> — the async surface's send-completion pump or its send-batch thread.
+/// <c>Close</c> / <c>Dispose</c> stop and <b>join</b> both, so calling either from there asks a
+/// thread to wait for itself. Java guards the equivalent explicitly (its <c>close</c> detects being
+/// called from the sender thread and skips the join); this binding does not, and adding such a guard
+/// is out of scope here. Close the producer from the thread that owns it instead. Where the callback
+/// runs inline on a caller's own thread — the sync surface — that
+/// particular self-join does not arise, but the advice is unchanged.
 /// </para>
 /// <para>
 /// <b>Ordering — it runs BEFORE the send's result is observable (decision D3).</b> Java sets the
@@ -104,26 +118,35 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Which outcomes fire it, and which do not (decision D5).</b> The rule is: <b>a throw out of
 /// <c>Send</c> means no callback; a send whose core-reported completion the binding reads —
-/// successfully or not — fires it.</b> Java's <c>doSend</c> splits the same way: the terminal
+/// successfully or not — fires it.</b> Java's <c>doSend</c> splits
+/// the same way — by whether the failure is an <c>ApiException</c>, not by who produced it: the
+/// terminal
 /// <c>catch (InterruptedException / KafkaException / Exception)</c> clauses re-throw without
 /// invoking the callback (<c>KafkaProducer.java:1069-1081</c>), while an appended record's
 /// callback fires later on the I/O thread. Note the two halves of that rule are <em>not</em>
 /// complements: a record can be accepted by the core and still never have its completion read
-/// (the third entry below, and residual 4 under <b>Recorded residuals</b>). Concretely:
+/// (the third entry below, and residual 4 under <b>Recorded residuals</b>) — though on the
+/// <b>async</b> surface that no longer surfaces as a throw out of <c>Send</c>, because since
+/// M11/P3.1 the async <c>Send</c> hands the record to a binding-side accumulator and does not touch
+/// the core at all. Concretely:
 /// <list type="bullet">
 /// <item>a <see cref="System.ArgumentNullException"/> (null record or null callback), an
 /// <see cref="System.ObjectDisposedException"/> (closed producer), a
 /// <see cref="SerializationException"/> from a serializer, or a
-/// <see cref="System.OperationCanceledException"/> from an already-canceled token → <b>no
-/// callback</b> (nothing was sent). Java's <c>SerializationException</c> extends
+/// <see cref="System.OperationCanceledException"/> from a token that was already canceled →
+/// <b>no callback</b> (nothing was sent). Java's <c>SerializationException</c> extends
 /// <c>KafkaException</c>, not <c>ApiException</c>, so it too takes the throwing branch;</item>
-/// <item>a <see cref="KafkaException"/> raised <em>synchronously</em> by the send itself (the
-/// core rejected the record before accepting it) → <b>no callback</b>;</item>
-/// <item>an allocation failure — in practice an <see cref="System.OutOfMemoryException"/> — thrown
+/// <item>a <see cref="KafkaException"/> raised <em>synchronously</em> by the send itself — the core
+/// rejected the record before accepting it → <b>no callback</b>. Nothing was accepted, so nothing
+/// is owed;</item>
+/// <item>an unexpected failure — in practice an <see cref="System.OutOfMemoryException"/> — raised
 /// <em>after</em> the core accepted the record but before the binding could arrange to read its
 /// completion → <b>no callback</b>. Here the record <em>was</em> accepted and may still be
 /// delivered, so this outcome is neither "nothing was sent" nor "the core rejected
-/// it": it is a recorded <em>drop</em>, residual 4 below;</item>
+/// it": it is a recorded <em>drop</em>, residual 4 below. On the sync surface it throws out of
+/// <c>Send</c>; on the async surface it faults the returned
+/// <see cref="System.Threading.Tasks.Task{TResult}"/>, because the site is the send-batch
+/// thread;</item>
 /// <item>the record was accepted and the core later reported success → <b>fires</b> with the real
 /// metadata and a <see langword="null"/> exception;</item>
 /// <item>the record was accepted and the core later reported a delivery failure → <b>fires</b>
@@ -166,12 +189,26 @@ namespace Confluent.Kafka;
 /// <em>whole</em> batch, so the core <em>did</em> report these completions; the indices the pump had
 /// already reached fired normally and the rest are faulted with none. This is the sub-case that
 /// makes firing from the fault
-/// path unsafe (see below). <b>(b) Before</b> the read reported: the pump threw while setting the
-/// batch up, or out of the batched read itself, so no completion was ever in hand and the whole
-/// batch is faulted. This condition does <b>not</b> need an allocation failure to be reachable: a
+/// path unsafe (see below).
+/// ⚠ <b>Sub-case (a) NARROWED in M11/P3.2 (§3B, S3) — like (b), it did not vanish.</b> "The whole
+/// batch" used to mean whatever the pump's flat per-record queue happened to hold: up to 1100
+/// records drawn from arbitrarily many unrelated sends. The pump's unit is now <b>one
+/// <c>send_batch</c> call's</b> records, so one such event faults only records that were sent
+/// together — a bounded and <em>related</em> blast radius rather than an arbitrary mixture. The
+/// batched read itself is unchanged, and the synchronous surface still shares both conditions, so
+/// this stays a recorded residual rather than a closed one.
+/// <b>(b) Before</b> the read reported: the pump threw out of the batched
+/// read itself, so no completion was ever in hand and the whole batch is faulted. This condition
+/// does <b>not</b> need an allocation failure to be reachable: a
 /// native-side failure surfacing from the pump's first batched read, for example an
 /// <see cref="System.EntryPointNotFoundException"/> against a stale or mismatched native library,
 /// lands here.
+/// ⚠ <b>Sub-case (b) NARROWED in M11/P3.1 (§12.3) — it did not vanish.</b> It used to have two
+/// triggers: the batched read itself, and the pump throwing while <em>setting the batch up</em> (the
+/// three marshalling arrays, allocated per batch outside the processing <c>try</c>). Those arrays
+/// are now reused fields allocated once, so there is no pre-read allocation left to fail and that
+/// trigger is gone. The batched read remains, which is why this stays a recorded residual rather
+/// than a closed one.
 /// <b>This is the residual the synchronous surface shares, and it shares BOTH conditions</b>: that
 /// surface has the same narrow window for its own single record, between the blocking
 /// <c>get</c> reporting and the callback being invoked — reading that record's reported error can
@@ -179,20 +216,42 @@ namespace Confluent.Kafka;
 /// can fail for (b)'s reason too. What the synchronous surface does <em>not</em> have is a batch:
 /// there is nothing to set up and nothing to fault wholesale, so its throw simply propagates out of
 /// <c>Send</c>. That is why this is one residual and not two.</item>
-/// <item><b>An allocation failure between the core accepting the record and the send being handed
-/// to the completion pump</b> (async only) — in practice an
-/// <see cref="System.OutOfMemoryException"/>, constructing the send's awaiter or its cancellation
-/// registration. The record <em>was</em> accepted (the core returned a live future and no error)
-/// and may still be delivered, but the binding destroys that future unread and rethrows, so no
-/// completion is ever read. It is <em>not</em> a teardown path, and no completion had arrived — as
-/// in residuals 1 and 2, and as in residual 3's sub-case (b), where the pump's batch read had not
-/// reported either; residual 3's sub-case (a) is the <em>only</em> one where a completion had
-/// arrived. On the async surface this is the only residual that surfaces as a <b>throw out of
-/// <c>Send</c></b> rather than as a faulted <see cref="System.Threading.Tasks.Task{TResult}"/>,
-/// which is why the D5 outcome list above cannot attribute every no-callback throw to "nothing was
-/// sent". The synchronous surface has no window of this shape at all: it reads its own record's
-/// completion immediately, with nothing allocated in between. (What it does share is residual 3's
-/// window — see there.)</item>
+/// <item><b>An unexpected failure between the core accepting the record and the send being handed
+/// to the completion pump</b> (async only) — on the <b>send-batch thread</b>, between
+/// <c>send_batch</c> returning a live future for that index and the accumulator handing it over.
+/// In practice an <see cref="System.OutOfMemoryException"/> (the pump's queue growing), or a
+/// P/Invoke failure from a later chunk of the same node.
+/// ⚠ <b>M11/P3.2 (§3B, S3) WIDENED this residual's window and narrowed neither trigger — checked,
+/// not assumed.</b> The hand-over is now one <c>Enqueue</c> per <c>send_batch</c> call rather than
+/// one per record, and it runs after <em>every</em> chunk of the node has been sent (which is what
+/// keeps the pins released before any future reaches the pump). So both triggers survive, and the
+/// window they open now covers <b>all</b> of a call's accepted records rather than only the ones
+/// not yet individually handed over: a failure anywhere in a call's walk leaves that whole call's
+/// records untransferred. That is a change of <em>scope</em>, not of kind — same site, same
+/// condition, same reason — so it is recorded here rather than filed as a fifth residual. (Had the
+/// hand-over instead run immediately after each chunk's own <c>send_batch</c>, the later-chunk
+/// trigger would have gone away; it does not, and the narrowing is deliberately not written.)
+/// The record <em>was</em> accepted (the core
+/// returned a live future and no error) and may still be delivered, but the binding destroys that
+/// future unread, so no completion is ever read. It is <em>not</em> a teardown path, and no
+/// completion had arrived — as in residuals 1 and 2, and as in residual 3's sub-case (b), where the
+/// pump's batch read had not reported either; residual 3's sub-case (a) is the <em>only</em> one
+/// where a completion had arrived. The synchronous surface has no window of this shape at all: it
+/// reads its own record's completion immediately, with nothing in between. (What it does share is
+/// residual 3's window — see there.)
+/// <para>
+/// ⚠ <b>This residual's SITE moved in M11/P3.1 and its shape narrowed with it.</b> While the async
+/// send called the core inline, the window sat inside <c>Send</c> itself — so it surfaced as a
+/// <b>throw out of <c>Send</c></b> for a record the core had accepted, and it was the reason the D5
+/// outcome list could not attribute every no-callback throw to "nothing was sent". Since the send
+/// submission became deferred, <c>Send</c> no longer touches the core at all: it pins, appends to
+/// the accumulator and returns, so <b>every</b> throw out of the async <c>Send</c> is now a case
+/// where nothing reached the core. The window itself did not disappear — it moved onto the batch
+/// thread, where it faults the awaiter like residuals 1, 2 and 3 rather than throwing at the caller.
+/// A record that the accumulator accepted but that is abandoned <em>before</em> <c>send_batch</c>
+/// is deliberately <b>not</b> a residual: the core never saw it, so the binding faults it
+/// <em>and</em> fires the callback, which invents nothing and cannot duplicate.
+/// </para></item>
 /// </list>
 /// <b>The distinguishing axes, stated here and nowhere else.</b> This paragraph is the single
 /// place the residuals are compared with each other; the numbered notes in the code state each
@@ -205,10 +264,12 @@ namespace Confluent.Kafka;
 /// include bare P/Invokes, so an entry-point failure against a stale or mismatched native library
 /// reaches it too. By <em>what the core reported</em>: a
 /// completion had arrived only in residual 3's sub-case (a); residuals 1, 2, 4 and sub-case (b)
-/// never read one. By <em>how the send surfaces the failure</em>: residuals 1, 2 and 3 fault the
-/// send's <see cref="System.Threading.Tasks.Task{TResult}"/>, while residual 4 throws out of
-/// <c>Send</c> — and on the synchronous surface, which has no <c>Task</c>, residual 3's shared
-/// window throws out of <c>Send</c> too.
+/// never read one. By <em>how the send surfaces the failure</em>: on the <b>async</b> surface all
+/// four fault the send's <see cref="System.Threading.Tasks.Task{TResult}"/>, because none of their
+/// sites is on the caller's thread any more; on the <b>synchronous</b> surface, which has no
+/// <c>Task</c>, residual 3's shared window throws out of <c>Send</c> instead. By <em>which thread
+/// the site is on</em>: residuals 1 and 4 are the send-batch thread, residuals 2 and 3 the
+/// completion pump (and residual 3's shared window, the sync caller's own thread).
 /// </para>
 /// <para>
 /// None of the four is "fixed" by firing a fabricated notification, for two distinct reasons.
@@ -221,12 +282,14 @@ namespace Confluent.Kafka;
 /// record the core may yet deliver successfully.
 /// </para>
 /// <para>
-/// Residuals 1, 2 and 4 are async-surface only: the synchronous send has no queue and no pump, and
-/// it reads its own record's completion inline with nothing allocated in between. <b>Residual 3 is
+/// Residuals 1, 2 and 4 are async-surface only: the synchronous send has no accumulator, no queue
+/// and no pump, and it reads its own record's completion inline with nothing in between — it still
+/// calls the singular <c>Producer_send</c> on the caller's thread, which M11/P3.1 deliberately left
+/// unchanged. <b>Residual 3 is
 /// the one the synchronous surface shares</b>, in both of its conditions (see there). What is
-/// async-only <em>inside</em> residual 3 is sub-case (b)'s batch-setup half and the wholesale-fault
-/// site itself — the synchronous surface has no batch, so its own throw simply propagates out of
-/// <c>Send</c>. Residuals 1 and 2 match Python, whose <c>close()</c>
+/// async-only <em>inside</em> residual 3 is the wholesale-fault site itself — the synchronous surface
+/// has no batch, so its own throw simply propagates out of <c>Send</c>. (Sub-case (b)'s
+/// batch-setup half used to be listed here too; §12.3 removed that trigger.) Residuals 1 and 2 match Python, whose <c>close()</c>
 /// likewise cancels the pending futures without invoking <c>on_delivery</c>. Await your sends, or
 /// <c>Flush</c>, before closing if you need the notification.
 /// </para>
@@ -264,8 +327,9 @@ public interface IDeliveryCallback
     /// per record</b>, never twice, on any path. It is invoked <b>exactly once</b> for every record
     /// whose core-reported completion the binding reads and turns into the send's result: every
     /// normal outcome, success or failure, including a record whose awaiter had already been
-    /// canceled. It is <b>not</b> invoked where the binding faults a send <em>itself</em> instead of
-    /// reporting a core completion — a bounded set of residuals (teardown paths, plus
+    /// canceled. It is <b>not</b> invoked on the paths where the
+    /// binding faults a send <em>itself</em> for a reason Java has no callback for — a bounded set
+    /// of residuals (teardown paths, plus
     /// unexpected-failure windows before the send reaches the completion pump and on the pump
     /// itself), enumerated exhaustively under <b>Recorded residuals</b> in the remarks on
     /// <see cref="IDeliveryCallback"/>, which is also the one place they are compared with each
