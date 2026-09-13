@@ -42,6 +42,36 @@ internal static class SoakExitCodes
     /// re-authenticates and re-joins the group, so the supervisor should retry (bounded).
     /// </summary>
     internal const int ConsumerWedged = 4;
+
+    /// <summary>
+    /// The run's verdict as an exit code.
+    /// <para>
+    /// Message loss outranks everything else — it is the result the soak exists to
+    /// report — so it is checked <b>before</b> the fatal reason, matching Python's
+    /// <c>main()</c>. A wedged loop exits distinctly so the supervisor can restart it and
+    /// a human can see why in one line.
+    /// </para>
+    /// <para>
+    /// Extracted so the teardown path in <c>Program.Main</c> is a single call over a
+    /// tested function (74.1): the guard that keeps a throwing shutdown inside this
+    /// contract is worth nothing if the verdict it protects is computed by untested
+    /// inline branches.
+    /// </para>
+    /// </summary>
+    internal static int ExitCodeFor(long missedCount, string? fatalReason)
+    {
+        if (missedCount > 0)
+        {
+            return MessageLoss;
+        }
+
+        if (fatalReason is not null)
+        {
+            return ConsumerWedged;
+        }
+
+        return Ok;
+    }
 }
 
 /// <summary>

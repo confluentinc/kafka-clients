@@ -166,17 +166,19 @@ internal static class Program
             soak.RequestStop();
         });
 
-        // Initial resource sample, as the reference does before its loop: without it the
-        // first metrics window carries no memory/CPU gauges at all, because the sampler
-        // and the window roll on the same cadence.
-        soak.SampleResources();
-
         DateTime? deadline = options.RuntimeSeconds > 0
             ? DateTime.UtcNow.AddSeconds(options.RuntimeSeconds)
             : (DateTime?)null;
 
         try
         {
+            // Initial resource sample, as the reference does before its loop: without it
+            // the first metrics window carries no memory/CPU gauges at all, because the
+            // sampler and the window roll on the same cadence. Inside the try because
+            // SampleResources touches Process.Refresh / GC.GetTotalMemory, which Python's
+            // resource.getrusage() analog cannot throw from (74.1).
+            soak.SampleResources();
+
             while (!soak.StopToken.IsCancellationRequested)
             {
                 TimeSpan waitFor = TimeSpan.FromSeconds(10);
@@ -208,24 +210,41 @@ internal static class Program
         }
 
         shutdownStarted.Set();
-        await soak.TerminateAsync().ConfigureAwait(false);
-        exited.Set();
-        soak.Dispose();
 
-        // Message loss outranks everything else — it is the result the soak exists to
-        // report. A wedged loop exits distinctly so the supervisor can restart it and a
-        // human can see why in one line.
-        if (soak.MissedCount > 0)
+        // ⚠ 74.1 — the OUTER half of the shutdown guard. TerminateAsync has its own
+        // no-throw boundary around the metrics close (SoakClient.FinalizeMetrics), so
+        // this is the backstop for everything else on the teardown path: whatever
+        // happens, the process must exit with one of SoakExitCodes' five, because run.sh
+        // keys its restart policy off exactly those numbers. An escaping exception here
+        // would exit with the runtime's unhandled-exception code, which run.sh reads as
+        // an ordinary restartable failure — silently bypassing the never-restart and
+        // message-loss distinctions the contract encodes.
+        try
         {
-            return SoakExitCodes.MessageLoss;
+            await soak.TerminateAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("soakclient: shutdown failed: " + ex);
+        }
+        finally
+        {
+            // In the finally: the soak's work IS over even if teardown threw, so leaving
+            // `exited` unset would let the watchdog hard-exit ConsumerWedged 60 s later
+            // and overwrite a verdict that was already decided.
+            exited.Set();
         }
 
-        if (soak.FatalReason is not null)
+        try
         {
-            return SoakExitCodes.ConsumerWedged;
+            soak.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("soakclient: dispose failed: " + ex);
         }
 
-        return SoakExitCodes.Ok;
+        return SoakExitCodes.ExitCodeFor(soak.MissedCount, soak.FatalReason);
     }
 
     /// <summary>

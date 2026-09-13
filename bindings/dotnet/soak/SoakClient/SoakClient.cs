@@ -74,6 +74,16 @@ internal sealed class SoakClient : IDisposable
     /// </summary>
     internal const int NonRetriablePollFailureLimit = 3;
 
+    /// <summary>
+    /// How long shutdown waits for the queued delivery-accounting continuations to run
+    /// before giving up and reporting a possibly-short <c>delivered=</c> (74.4). Bounded
+    /// so a continuation that never runs cannot wedge shutdown.
+    /// </summary>
+    internal const int DeliveryDrainBoundMs = 5000;
+
+    /// <summary>Poll interval for the bounded drain above.</summary>
+    private const int DrainPollIntervalMs = 10;
+
     // Protocol error codes (src/common/protocol/errors.rs) used to classify the errors a
     // broker roll produces. Client-side errors (Wakeup, Timeout, ...) all report
     // UnknownServerError (-1), so they are classified by message instead.
@@ -127,6 +137,7 @@ internal sealed class SoakClient : IDisposable
     private long _deliveredCount;
     private long _deliveryErrorCount;
     private long _outstanding;
+    private long _pendingDeliveries;
     private long _msgCount;
     private long _msgDuplicateCount;
     private long _msgMissedCount;
@@ -382,6 +393,61 @@ internal sealed class SoakClient : IDisposable
         PollFailureIsTerminal(ErrorIsRetriable(ex), ErrorMessage(ex), consecutive, maxPollFailures, out fatalReason);
 
     /// <summary>
+    /// What the consumer loop does with a poll failure.
+    /// </summary>
+    internal enum PollFailureAction
+    {
+        /// <summary>Count it and keep polling.</summary>
+        Continue = 0,
+
+        /// <summary>Do not count it at all — shutdown is already under way (74.3).</summary>
+        Suppress = 1,
+
+        /// <summary>Count it, then end the run so the supervisor restarts it.</summary>
+        Abort = 2,
+    }
+
+    /// <summary>
+    /// The whole poll-failure policy, in one place, over the facts it depends on.
+    /// <para>
+    /// ⚠ 74.3 — the shutdown check comes <b>first</b>, mirroring Python's
+    /// <c>if not self.run: break</c> placed <i>before</i> <c>_classify_error</c>
+    /// (<c>soakclient.py:1689-1691</c>). The common cancellation path is already covered
+    /// by the typed <c>OperationCanceledException</c> catch at the call site (the binding
+    /// maps a token cancel to one even when the core reports the wakeup as an error), so
+    /// what this suppresses is the residual: a <i>genuine</i> broker error that happens to
+    /// resolve the poll inside the shutdown window. Without it that error increments
+    /// <c>consumer.error</c> — and possibly <c>consumer.disconnect</c> /
+    /// <c>consumer.coordinator_move</c> — inflating the SUMMARY's <c>errors=</c> on an
+    /// otherwise clean shutdown.
+    /// </para>
+    /// <para>
+    /// Note the ordering is what carries the behaviour: suppression must outrank the
+    /// terminal bound, so an error that would otherwise abort the run is still suppressed
+    /// once shutdown has been requested — the run is ending anyway, and a fatal reason
+    /// recorded there would turn a clean exit into <see cref="SoakExitCodes.ConsumerWedged"/>.
+    /// </para>
+    /// </summary>
+    internal static PollFailureAction ClassifyPollFailure(
+        bool stopRequested,
+        bool retriable,
+        string message,
+        int consecutive,
+        int maxPollFailures,
+        out string fatalReason)
+    {
+        fatalReason = string.Empty;
+        if (stopRequested)
+        {
+            return PollFailureAction.Suppress;
+        }
+
+        return PollFailureIsTerminal(retriable, message, consecutive, maxPollFailures, out fatalReason)
+            ? PollFailureAction.Abort
+            : PollFailureAction.Continue;
+    }
+
+    /// <summary>
     /// The decision itself, over the two facts it actually depends on. Split out so the
     /// retriable/non-retriable matrix is testable: the binding's <c>KafkaException</c>
     /// constructor that sets <c>Code</c> / <c>IsRetriable</c> is <c>internal</c> to
@@ -465,13 +531,92 @@ internal sealed class SoakClient : IDisposable
             _logger.Warning("producer: close failed: " + ErrorMessage(ex));
         }
 
+        // ⚠ 74.4 — join the delivery-accounting continuations BEFORE the final window.
+        // OnDelivery owns _deliveredCount / producer.drok / producer.drerr /
+        // producer.latency and runs as a thread-pool continuation, so Close() joining the
+        // pump only guarantees every Task is RESOLVED — not that its continuation has
+        // RUN. Without this the SUMMARY can print `produced=N delivered=N-k` on a
+        // perfectly clean shutdown (which reads as message loss to a human even with
+        // verdict=PASS), and any IncrCounter landing after _metrics.Close() is silently
+        // dropped. Python cannot have this: its flush() serves the delivery callbacks
+        // on the calling thread, so dr_cnt is complete before final_report().
+        //
+        // The producer loop has already completed (the WhenAll above), so no NEW
+        // continuation can be attached here — the count only falls, which is what makes
+        // the bounded wait terminate rather than livelock.
+        long undrained = await DrainCounterAsync(
+            () => Interlocked.Read(ref _pendingDeliveries),
+            TimeSpan.FromMilliseconds(DeliveryDrainBoundMs)).ConfigureAwait(false);
+        if (undrained > 0)
+        {
+            // Bounded on purpose: the shutdown watchdog is the backstop, never the
+            // normal path, so a continuation that never runs costs one log line and a
+            // slightly short SUMMARY rather than a wedged shutdown.
+            _logger.Warning(string.Format(
+                CultureInfo.InvariantCulture,
+                "producer: {0} delivery accounting continuation(s) did not run within {1} ms; "
+                + "the SUMMARY's delivered= may be short by that many",
+                undrained,
+                DeliveryDrainBoundMs));
+        }
+
         // Final resource usage and metrics window.
-        SampleResources();
-        _metrics.SetMeasurementEnd(SoakMetrics.NowMs());
-        _metrics.StopCollecting();
-        _metrics.WriteFinal();
-        _metrics.Close();
+        FinalizeMetrics(_metrics, SampleResources, _logger);
         FinalReport();
+    }
+
+    /// <summary>
+    /// Waits, bounded, for <paramref name="read"/> to reach zero; returns whatever it
+    /// still reads when the bound expires. Never throws and never waits longer than
+    /// <paramref name="bound"/> — the property that matters, since this runs on the
+    /// shutdown path where the only backstop is the hard-exit watchdog.
+    /// </summary>
+    internal static async Task<long> DrainCounterAsync(Func<long> read, TimeSpan bound)
+    {
+        double deadline = MonotonicSeconds() + bound.TotalSeconds;
+        long remaining = read();
+        while (remaining > 0 && MonotonicSeconds() < deadline)
+        {
+            await Task.Delay(DrainPollIntervalMs, CancellationToken.None).ConfigureAwait(false);
+            remaining = read();
+        }
+
+        return remaining;
+    }
+
+    /// <summary>
+    /// Closes the metrics pipeline down as a TOTAL no-throw boundary.
+    /// <para>
+    /// ⚠ 74.1 — the rollover thread's identical <c>WriteRecord(Rollover())</c> is
+    /// guarded and this one was not, so the exact failure that guard exists for (a full
+    /// disk — "entirely plausible on a two-week run") propagated out of <c>Main</c>:
+    /// <c>FinalReport()</c> never ran, so the run produced <b>no SUMMARY line at all</b>
+    /// — the soak's single adjudication output, lost on exactly the run that needs
+    /// explaining — and the process exited with the runtime's unhandled-exception code
+    /// rather than one of <see cref="SoakExitCodes"/>' five, bypassing the never-restart
+    /// / message-loss distinctions <c>run.sh</c>'s policy is built on.
+    /// </para>
+    /// <para>
+    /// The .NET port also added two throw sources Python's <c>get_rusage()</c> does not
+    /// have — <c>Process.Refresh()</c> and <c>GC.GetTotalMemory</c>, where
+    /// <c>resource.getrusage()</c> effectively cannot fail — which is why
+    /// <paramref name="sampleResources"/> is inside the guard and not before it.
+    /// </para>
+    /// </summary>
+    internal static void FinalizeMetrics(SoakMetrics metrics, Action sampleResources, SoakLogger logger)
+    {
+        try
+        {
+            sampleResources();
+            metrics.SetMeasurementEnd(SoakMetrics.NowMs());
+            metrics.StopCollecting();
+            metrics.WriteFinal();
+            metrics.Close();
+        }
+        catch (Exception ex)
+        {
+            logger.Error("metrics: final window failed, continuing to the verdict: " + ex.Message);
+        }
     }
 
     /// <summary>One-line verdict: only gaps are a hard failure.</summary>
@@ -704,6 +849,10 @@ internal sealed class SoakClient : IDisposable
             // it carries the per-send `sentAt` in the closure exactly as the Python lambda
             // does, AND OnDelivery reads task.Exception on the faulted path, which is what
             // marks it observed.
+            // Counted BEFORE the continuation is attached, released in OnDelivery's
+            // finally, so shutdown can tell "every Task resolved" (which Close() gives
+            // it) from "every accounting continuation RAN" (which it does not) — 74.4.
+            Interlocked.Increment(ref _pendingDeliveries);
             _ = task.ContinueWith(
                 completed => OnDelivery(completed, sentAt),
                 CancellationToken.None,
@@ -746,6 +895,13 @@ internal sealed class SoakClient : IDisposable
         catch (Exception ex)
         {
             _logger.Error("producer: delivery accounting failed: " + ex);
+        }
+        finally
+        {
+            // In the finally, and last: the drain's contract is "the accounting has run",
+            // so releasing before the counters are written would let the SUMMARY be read
+            // while this continuation is still updating it (74.4).
+            Interlocked.Decrement(ref _pendingDeliveries);
         }
     }
 
@@ -859,9 +1015,22 @@ internal sealed class SoakClient : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    PollFailureAction action = ClassifyPollFailure(
+                        _stop.IsCancellationRequested,
+                        ErrorIsRetriable(ex),
+                        ErrorMessage(ex),
+                        pollFailures + 1,
+                        _options.MaxPollFailures,
+                        out string fatalReason);
+
+                    if (action == PollFailureAction.Suppress)
+                    {
+                        break;
+                    }
+
                     ClassifyError("consumer: poll", ex);
                     pollFailures++;
-                    if (PollFailureIsTerminal(ex, pollFailures, _options.MaxPollFailures, out string fatalReason))
+                    if (action == PollFailureAction.Abort)
                     {
                         Volatile.Write(ref _fatalReason, fatalReason);
                         _logger.Fatal("consumer: " + fatalReason
