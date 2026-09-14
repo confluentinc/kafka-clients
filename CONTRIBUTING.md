@@ -50,7 +50,7 @@ Ahead of GA, we're rolling out tooling to make it easier to file well-structured
 
 If you use AI tools to help write code, docs, issues, or PR descriptions, see [AI_POLICY.md](AI_POLICY.md).
 
-If you used AI tools to prepare a contribution, please add one of the following commit trailers identifying the tool and version. This gives reviewers a clear signal of which tools are in use.
+If you used AI tools to prepare a contribution, you can add one of the following commit trailers identifying the tool and version. This gives reviewers a clear signal of which tools are in use, but it's optional.
 
 ```
 Co-Authored-By: <AI tool name and version>
