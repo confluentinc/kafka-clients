@@ -68,6 +68,21 @@ namespace Confluent.Kafka;
 /// a canceled token cancels the returned task's .NET-side wait but does not abort the in-flight
 /// native op.
 /// </para>
+/// <para>
+/// ⚠ <b>Do not mutate a record's key / value buffers after <c>Send</c> returns</b> (M11/P3.1
+/// decision D6). The async send is deferred — the binding borrows the serialized bytes until a
+/// background batch thread hands the record to the core — so a mutation in that window is visible
+/// on the wire. See <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full note.
+/// The <b>synchronous</b> producer has no such window.
+/// </para>
+/// <para>
+/// ⚠ <b><c>Send</c> BLOCKS the calling thread under sustained saturation</b> (M11/P3.3): once the
+/// producer holds its bound of records accepted but not yet handed to its send-batch thread, a send
+/// waits for capacity before returning. The record is appended <em>before</em> that wait (M11/P3.4),
+/// so saturation delays the call and never refuses the record. Java's own <c>send()</c> contract, and
+/// what bounds this producer's memory and latency — <see cref="IAsyncProducer{TKey, TValue}"/>
+/// states it in full. The <b>synchronous</b> producer has no such window either.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>

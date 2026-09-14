@@ -55,7 +55,7 @@ public sealed class SendCompletionPumpGateTests
 
             // delivery: null — the plain Send(record) shape. The delivery-callback carrier (M14/P1)
             // is deliberately NOT fired on this fault-in-place branch; see Enqueue's remarks.
-            pump.Enqueue(IntPtr.Zero, completion, delivery: null);
+            EnqueueOne(pump, completion);
 
             // Synchronously faulted: the gate is closed, so Enqueue never handed this to the loop.
             Assert.True(completion.Task.IsFaulted);
@@ -78,7 +78,7 @@ public sealed class SendCompletionPumpGateTests
             new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            pump.Enqueue(IntPtr.Zero, completion, delivery: null);
+            EnqueueOne(pump, completion);
             Assert.False(completion.Task.IsFaulted);
         }
         finally
@@ -100,4 +100,21 @@ public sealed class SendCompletionPumpGateTests
         // (the loop was left running by CloseGate, exactly as teardown needs it to be).
         pump.Stop();
     }
+
+    /// <summary>
+    /// Enqueues a one-record completion group — the pump's unit is a <c>send_batch</c> call
+    /// (M11/P3.2 §3B), so a single send is a group of one.
+    /// </summary>
+    /// <remarks>
+    /// The only change these tests needed for slice S3: <c>Enqueue</c>'s arity, which §8.3's
+    /// boundary table puts in scope. Every assertion above is untouched — the gate's semantics
+    /// (the <c>_stopLock</c>-guarded stopped-check and its fault-in-place branch) are explicitly
+    /// <b>out</b> of that scope.
+    /// </remarks>
+    private static void EnqueueOne(SendCompletionPump pump, TaskCompletionSource<RecordMetadata> completion) =>
+        pump.Enqueue(
+            new[] { IntPtr.Zero },
+            new[] { completion },
+            new DeliveryRegistration?[] { null },
+            count: 1);
 }
