@@ -12,7 +12,7 @@ This project is under active, early-stage development. Feature parity with the J
 
 - **Commits:** For now, merge access is limited to a small group of core maintainers, as is common for open-source projects, especially early ones.
 - **Community contributions:** Contributions from the community are welcome today through issues and pull requests. Expanding who can merge is a goal we will grow into as our tooling and review process mature.
-- **License:** The core library and language bindings are Apache 2.0.
+- **License:** The core library and language bindings are licensed under Apache 2.0.
 - **CLA:** Most contributions are accepted under the project's Apache 2.0 license without needing a separate agreement. For large contributions, we may ask you to sign a Contributor License Agreement.
 
 ## Where issues and pull requests go
