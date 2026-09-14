@@ -14,7 +14,7 @@ We don't restrict which tools you use to write code, including AI coding assista
 
 ## Disclosure
 
-We don't require you to disclose which tools you used. If AI assistance was substantial and relevant to understanding the change (for example, a large refactor or a generated first draft), a short note in the PR or issue description is helpful context for reviewers, but it's optional.
+We don't require you to disclose which tools you used. If AI assistance was substantial and relevant to understanding the change (for example, a large refactor or a generated first draft), a commit trailer in the PR (see CONTRIBUTING.md) is helpful context for reviewers, but it's optional.
 
 ## Why this approach
 
