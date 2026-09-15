@@ -873,13 +873,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeConfigsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = client.describe_configs(
+            futures = client.describe_configs(
                 _admin_config_resources(request.resources),
                 timeout=_admin_timeout(request),
                 include_synonyms=request.include_synonyms,
                 include_documentation=request.include_documentation,
             )
-            return _admin_describe_configs_response(outcomes)
+            return _admin_describe_configs_response(_resolve_admin_futures(futures))
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_configs raised")
             return apb.DescribeConfigsResponse(error=_kafka_error_to_proto(e))
@@ -889,12 +889,12 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = client.incremental_alter_configs(
+            futures = client.incremental_alter_configs(
                 _admin_alter_configs(request.configs),
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
             )
-            return _admin_void_response(outcomes, _admin_config_resource_key)
+            return _admin_void_response(_resolve_admin_futures(futures), _admin_config_resource_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("incremental_alter_configs raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
