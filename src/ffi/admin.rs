@@ -5073,6 +5073,27 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
     }
 }
 
+/// Destroys a `LogDirDescriptionMap` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_describe_log_dirs_async`]'s per-key callback. Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeLogDirsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeLogDirsResult_t`] and is freed by
+/// [`kafka_admin_DescribeLogDirsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `map` must be null or an owned handle from the `describe_log_dirs` per-key
+/// async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_destroy(map: *mut kafka_admin_LogDirDescriptionMap_t) {
+    if !map.is_null() {
+        unsafe { drop(Box::from_raw(map as *mut LogDirDescriptionMapInner)) };
+    }
+}
+
 /// Opaque handle to a `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
 #[repr(C)]
 pub struct kafka_admin_ReplicaLogDirInfo_t {
@@ -5165,6 +5186,27 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> i64 {
     unsafe { replica_log_dir_info_ref(info) }.future_offset_lag
+}
+
+/// Destroys a `ReplicaLogDirInfo` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`]'s per-key
+/// callback. Safe with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeReplicaLogDirsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeReplicaLogDirsResult_t`] and is freed by
+/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `info` must be null or an owned handle from the `describe_replica_log_dirs`
+/// per-key async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_destroy(info: *mut kafka_admin_ReplicaLogDirInfo_t) {
+    if !info.is_null() {
+        unsafe { drop(Box::from_raw(info as *mut ReplicaLogDirInfoInner)) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6617,14 +6659,38 @@ fn submit_describe_log_dirs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_describe_log_dirs_async`].
+/// Submits `describeLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_describe_log_dirs`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+fn submit_describe_log_dirs_entries(
+    admin: &dyn Admin,
+    brokers: &[i32],
+    options: DescribeLogDirsOptions,
+) -> Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> {
+    let result = admin.describe_log_dirs(brokers, options);
+    result.descriptions().iter().map(|(b, f)| (*b, f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_log_dirs_async`], fired **once per
+/// broker, as that broker's own future resolves** — independently of every
+/// other broker in the same call, matching Java's
+/// `Map<Integer, KafkaFuture<Map<String, LogDirDescription>>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeLogDirsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-broker failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// Exactly one of `value` / `error` is non-null; `value` is owned by the
+/// callback and must be freed with [`kafka_admin_LogDirDescriptionMap_destroy`]
+/// (**not** [`kafka_admin_DescribeLogDirsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`. A per-log-dir error (as opposed to a
+/// per-broker failure) still arrives inside `value` — see
+/// [`kafka_admin_LogDirDescription_error`].
+pub type kafka_admin_AdminClient_describe_log_dirs_callback_t = unsafe extern "C" fn(
+    i32, /* broker id */
+    *mut kafka_admin_LogDirDescriptionMap_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Queries the log directories of the given brokers, blocking until every
 /// per-broker future has resolved (synchronous).
@@ -6662,16 +6728,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
 /// Queries broker log directories asynchronously. See
 /// [`kafka_admin_AdminClient_describe_log_dirs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per broker,
+/// as that broker's future resolves**, not once for the whole batch — a fast
+/// or already-resolved broker is not held up by a slow or failing one. It is
+/// called exactly `count` times (once per requested broker id), but not
+/// always on the same thread. Per key, it normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns, for every key**, when the RPC cannot be submitted
+/// at all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// broker's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -6689,18 +6759,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let broker_ids = unsafe { read_i32s(brokers, count) };
+    let keys = broker_ids.clone();
     let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_log_dirs_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_describe_log_dirs_entries(a, &broker_ids, options)),
+            move |broker_id, outcome, ud| {
+                let (value, error) = match outcome {
+                    Ok(map) => (
+                        Box::into_raw(Box::new(LogDirDescriptionMapInner::new(&map)))
+                            as *mut kafka_admin_LogDirDescriptionMap_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(broker_id, value, error, ud);
             },
         )
     };
@@ -6916,15 +6992,36 @@ fn submit_alter_replica_log_dirs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_replica_log_dirs_async`].
+/// Submits `alterReplicaLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_alter_replica_log_dirs`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_alter_replica_log_dirs_entries(
+    admin: &dyn Admin,
+    replica_assignment: &HashMap<TopicPartitionReplica, String>,
+    options: AlterReplicaLogDirsOptions,
+) -> Vec<(TopicPartitionReplica, KafkaFuture<()>)> {
+    let result = admin.alter_replica_log_dirs(replica_assignment, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_replica_log_dirs_async`], fired **once per
+/// replica, as that replica's own future resolves** — independently of every
+/// other replica in the same call, matching Java's
+/// `Map<TopicPartitionReplica, KafkaFuture<Void>>` (`admin-client.md` §5),
+/// rather than waiting for the whole batch. The key is a
+/// `TopicPartitionReplica`, delivered as a topic name, a partition id and a
+/// broker id — like the synchronous result's `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_broker_id(i)` triple — rather than through a
+/// single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterReplicaLogDirsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-replica failure arrives inside
-/// `result`, not as `error`.
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. There is no value parameter: Java's per-replica
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value.
+/// A non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterReplicaLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, i32, i32, *mut kafka_common_Error_t, *mut c_void);
 
 /// Moves the given replicas to new log directories, blocking until every
 /// per-replica future has resolved (synchronous).
@@ -6965,16 +7062,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
 /// Moves replicas to new log directories asynchronously. See
 /// [`kafka_admin_AdminClient_alter_replica_log_dirs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per replica,
+/// as that replica's future resolves**, not once for the whole batch — a fast
+/// or already-resolved replica is not held up by a slow or failing one. It is
+/// called once per distinct `(topic, partition, broker id)` triple in the
+/// input (skipping entries with a NULL topic or NULL log dir), but not always
+/// on the same thread. Per key, it normally runs on the handle's dispatcher
+/// thread. It runs **synchronously on the calling thread, before this function
+/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// replica's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -6996,18 +7098,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
+    let keys: Vec<TopicPartitionReplica> = assignment.keys().cloned().collect();
     let options = AlterReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_replica_log_dirs_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_replica_log_dirs_entries(a, &assignment, options)),
+            move |replica, outcome, ud| {
+                let topic_c = to_cstring(replica.topic());
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(topic_c.as_ptr(), replica.partition(), replica.broker_id(), error, ud);
             },
         )
     };
@@ -7236,15 +7338,45 @@ fn submit_describe_replica_log_dirs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`].
+/// Submits `describeReplicaLogDirs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_describe_replica_log_dirs`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_describe_replica_log_dirs_entries(
+    admin: &dyn Admin,
+    replicas: &[TopicPartitionReplica],
+    options: DescribeReplicaLogDirsOptions,
+) -> Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> {
+    let result = admin.describe_replica_log_dirs(replicas, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_replica_log_dirs_async`], fired **once
+/// per replica, as that replica's own future resolves** — independently of
+/// every other replica in the same call, matching Java's
+/// `Map<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch. The key is
+/// a `TopicPartitionReplica`, delivered as a topic name, a partition id and a
+/// broker id — like the synchronous result's `_get_topic(i)` /
+/// `_get_partition(i)` / `_get_broker_id(i)` triple — rather than through a
+/// single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeReplicaLogDirsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-replica failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeReplicaLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_ReplicaLogDirInfo_destroy`] (**not**
+/// [`kafka_admin_DescribeReplicaLogDirsResult_destroy`], which is for the
+/// synchronous / flattened result only), and `error` with
+/// `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t = unsafe extern "C" fn(
+    *const c_char,
+    i32,
+    i32,
+    *mut kafka_admin_ReplicaLogDirInfo_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Queries the log directories of the given replicas, blocking until every
 /// per-replica future has resolved (synchronous).
@@ -7285,16 +7417,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
 /// Queries replica log directories asynchronously. See
 /// [`kafka_admin_AdminClient_describe_replica_log_dirs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per replica,
+/// as that replica's future resolves**, not once for the whole batch — a fast
+/// or already-resolved replica is not held up by a slow or failing one. It is
+/// called once per requested replica (skipping entries with a NULL topic), but
+/// not always on the same thread. Per key, it normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns, for every key**, when the RPC cannot be submitted
+/// at all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// replica's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -7315,18 +7451,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
     user_data: *mut c_void,
 ) {
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
+    let keys = replicas.clone();
     let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_replica_log_dirs_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_describe_replica_log_dirs_entries(a, &replicas, options)),
+            move |replica, outcome, ud| {
+                let topic_c = to_cstring(replica.topic());
+                let (value, error) = match outcome {
+                    Ok(info) => (
+                        Box::into_raw(Box::new(ReplicaLogDirInfoInner::new(&info)))
+                            as *mut kafka_admin_ReplicaLogDirInfo_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), replica.partition(), replica.broker_id(), value, error, ud);
             },
         )
     };
@@ -24523,6 +24666,165 @@ mod tests {
         assert_eq!(resource_type, topic_id);
         assert_eq!(name.as_deref(), Some("zero-op-topic"));
         assert!(!had_error, "an alter with no ops on an existing topic succeeds");
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -- Phase C (Log dirs family): describeLogDirs / alterReplicaLogDirs /
+    // describeReplicaLogDirs per-key callback delivery ----------------------
+    //
+    // Reuses Phase A/B's `admin_async_per_key_op` mechanism verbatim; only the
+    // OUTER per-broker/per-replica delivery changes here. The inner
+    // `LogDirDescriptionMap_t`/`ReplicaLogDirInfo_t` value handles are the
+    // same types the pre-existing flattened sync result already used
+    // (`LogDirDescriptionMapInner`/`ReplicaLogDirInfoInner`, tested above at
+    // `log_dir_description_map_sorts_by_path` /
+    // `replica_log_dir_info_carries_both_log_dirs`), just delivered
+    // individually and owned instead of embedded and borrowed.
+
+    #[test]
+    fn destroying_a_null_log_dirs_per_key_value_handle_is_a_no_op() {
+        unsafe {
+            kafka_admin_LogDirDescriptionMap_destroy(std::ptr::null_mut());
+            kafka_admin_ReplicaLogDirInfo_destroy(std::ptr::null_mut());
+        }
+    }
+
+    // The same temporal-independence property as
+    // `admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one`
+    // (Phase A) and `describe_configs_async_delivers_a_resolved_resource_without_
+    // waiting_on_a_pending_one` (Phase B), but exercised through
+    // `describeLogDirs`' actual key (broker id, `i32`) and value
+    // (`HashMap<String, LogDirDescription>`) types. `MockAdminClient` resolves
+    // every future synchronously (see the Phase A comment on the generic
+    // test), so this drives two hand-built `KafkaFutureImpl` instances
+    // directly, exactly as the Phase A/B precedents do, rather than proving
+    // only structural (dict-of-Futures) independence.
+    #[test]
+    fn describe_log_dirs_async_delivers_a_resolved_broker_without_waiting_on_a_pending_one() {
+        // Broker 0 is already complete when submitted; broker 1 is
+        // deliberately never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<HashMap<String, LogDirDescription>> = KafkaFutureImpl::new();
+        fast.complete(HashMap::new());
+        let slow: KafkaFutureImpl<HashMap<String, LogDirDescription>> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, Result<HashMap<String, LogDirDescription>, Error>)>();
+        let entries = vec![(0i32, fast.future()), (1i32, slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![0i32, 1i32],
+                move |_a: &dyn Admin| Ok(entries),
+                move |broker, result: Result<HashMap<String, LogDirDescription>, Error>, _ud: *mut c_void| {
+                    tx.send((broker, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two brokers before
+        // delivering either (reintroducing `join_map_results`), this would
+        // hang until the test harness's own timeout, since broker 1 never
+        // completes. A bounded `recv_timeout` turns that into a fast,
+        // explicit failure instead.
+        let (broker, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved broker must be delivered without waiting on the pending one");
+        assert_eq!(broker, 0);
+        assert!(result.unwrap().is_empty());
+
+        // Broker 1 is still pending, so nothing further should arrive promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending broker must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view
+        // registered above share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
+        drop(slow);
+    }
+
+    // A broker with ZERO log dirs (no topic replicas assigned to it) is the
+    // degenerate per-key value shape: `LogDirDescriptionMapInner::new` on an
+    // empty `HashMap` still produces a valid (zero-entry) handle, so the
+    // per-key callback must still fire for that broker rather than silently
+    // dropping it. Unlike COMMENTS.66's Configs-family bug (a C row-flattening
+    // step that produced ZERO ROWS for an empty collection, upgrading a
+    // data-loss bug into a hang), `describeLogDirs` never flattens to rows at
+    // the C-marshaling layer -- the per-broker value comes directly from the
+    // Rust admin core's `HashMap<String, LogDirDescription>`, so an empty map
+    // is just an empty map, not an absent one. This test exercises that path
+    // end-to-end through a real `MockAdminClient` (which seeds an empty entry
+    // per requested broker even when no topic references it -- see
+    // `MockAdminClient::describe_log_dirs`'s `unwrapped.entry(broker).or_default()`)
+    // rather than asserting it only at the unit level.
+    #[test]
+    fn describe_log_dirs_async_resolves_a_broker_with_zero_log_dirs() {
+        let admin = kafka_admin_MockAdminClient_new(2);
+        assert!(!admin.is_null());
+
+        let brokers = [0i32, 1i32];
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, i32, bool)>);
+        extern "C" fn on_describe(
+            broker_id: i32,
+            value: *mut kafka_admin_LogDirDescriptionMap_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                ctx.0.send((broker_id, -1, true)).unwrap();
+                return;
+            }
+            assert!(!value.is_null(), "a broker with no log dirs must still deliver a value");
+            let count = unsafe { kafka_admin_LogDirDescriptionMap_count(value) };
+            unsafe { kafka_admin_LogDirDescriptionMap_destroy(value) };
+            ctx.0.send((broker_id, count, false)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_describe_log_dirs_async(
+                admin,
+                brokers.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        // Before a fix, a zero-element per-key value could be silently
+        // dropped or never delivered -- a bounded `recv_timeout` turns any
+        // regression of that kind into a fast, explicit failure instead of
+        // hanging the test process.
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (broker_id, count, had_error) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("every requested broker's callback must fire, not hang");
+            assert!(!had_error, "MockAdminClient never fails a describe_log_dirs broker");
+            seen.insert(broker_id, count);
+        }
+        assert_eq!(seen.len(), 2, "both brokers must have delivered exactly once");
+        // Neither broker has any topic assigned to it, so both report zero
+        // log dirs -- the degenerate empty-value case this test targets.
+        assert_eq!(seen[&0], 0);
+        assert_eq!(seen[&1], 0);
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));
