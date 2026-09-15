@@ -13771,6 +13771,27 @@ pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const
     unsafe { acl_binding_ref(binding) }.permission_type
 }
 
+/// Destroys an `AclBinding` handle **owned** by a per-key async callback
+/// ([`kafka_admin_AdminClient_create_acls_async`]). Safe with null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_CreateAclsResult_get_binding`] or
+/// [`kafka_admin_DescribeAclsResult_get_binding`] or
+/// [`kafka_admin_DeleteAclsResult_get_binding`] — those are borrowed from
+/// their owning flattened result handle and are freed when that handle is
+/// destroyed instead.
+///
+/// # Safety
+///
+/// `binding` must be null or an owned handle from the `create_acls` per-key
+/// async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBinding_destroy(binding: *mut kafka_common_AclBinding_t) {
+    if !binding.is_null() {
+        unsafe { drop(Box::from_raw(binding as *mut AclBindingInner)) };
+    }
+}
+
 /// Opaque handle to an `AclBindingFilter` (Java's
 /// `org.apache.kafka.common.acl.AclBindingFilter`).
 ///
@@ -13942,6 +13963,26 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
     filter: *const kafka_common_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.permission_type
+}
+
+/// Destroys an `AclBindingFilter` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_delete_acls_async`]). Safe with null
+/// (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_DeleteAclsResult_get_filter`] — that one is borrowed from its
+/// owning [`kafka_admin_DeleteAclsResult_t`] and is freed when that handle is
+/// destroyed instead.
+///
+/// # Safety
+///
+/// `filter` must be null or an owned handle from the `delete_acls` per-key
+/// async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_AclBindingFilter_destroy(filter: *mut kafka_common_AclBindingFilter_t) {
+    if !filter.is_null() {
+        unsafe { drop(Box::from_raw(filter as *mut AclBindingFilterInner)) };
+    }
 }
 
 /// Opaque handle to a `ClientQuotaEntity` (Java's
@@ -14217,6 +14258,87 @@ unsafe fn read_acl_bindings(
         });
     }
     Ok(out)
+}
+
+/// Raw `(resource_type, resource_name, pattern_type, principal, host,
+/// operation, permission_type)` tuple: the per-key identity used for
+/// `createAcls`'s [`admin_async_per_key_op`] fan-out.
+///
+/// `AclBinding`'s constructor validates its constituent `ResourcePattern` /
+/// `AccessControlEntry` (rejecting e.g. an ANY resource type — see
+/// [`read_acl_binding_at`]), so a malformed row cannot be represented as a
+/// real `AclBinding`. But every requested row still needs an identity for the
+/// per-key fan-out (its doc comment: every key in `keys` gets exactly one
+/// callback, even when the whole submission fails). This tuple echoes the
+/// row's raw C values without validating them, so it round-trips
+/// byte-for-byte through the delivered key even for a row Java's constructors
+/// would reject — matching what a caller that built its own key from the same
+/// raw values (as the Python binding does) would expect to see. Not a public
+/// type: private to this file's marshaling layer, analogous to the existing
+/// `type Row = (...)` alias below.
+type AclBindingKey = (i32, String, i32, String, String, i32, i32);
+
+/// Converts an already-validated [`AclBinding`] to its [`AclBindingKey`] raw
+/// form, for matching against [`read_acl_binding_keys`]'s output.
+fn acl_binding_key(binding: &AclBinding) -> AclBindingKey {
+    let pattern = binding.pattern();
+    let entry = binding.entry();
+    (
+        i32::from(pattern.resource_type().code()),
+        pattern.name().to_string(),
+        i32::from(pattern.pattern_type().code()),
+        entry.principal().to_string(),
+        entry.host().to_string(),
+        i32::from(entry.operation().code()),
+        i32::from(entry.permission_type().code()),
+    )
+}
+
+/// Reads `count` rows of parallel arrays into [`AclBindingKey`]s, tolerant of
+/// a NULL string entry (kept as an empty string) so every requested row still
+/// gets an identity even when [`read_acl_bindings`]'s validated parse fails on
+/// this or another row. See [`AclBindingKey`] for why this must not go through
+/// `AclBinding`'s validating constructors.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries; string entries must be
+/// NULL or valid C strings.
+#[allow(clippy::too_many_arguments)]
+unsafe fn read_acl_binding_keys(
+    resource_types: *const i32,
+    resource_names: *const *const c_char,
+    pattern_types: *const i32,
+    principals: *const *const c_char,
+    hosts: *const *const c_char,
+    operations: *const i32,
+    permission_types: *const i32,
+    count: i32,
+) -> Vec<AclBindingKey> {
+    let n = count.max(0) as usize;
+    if resource_types.is_null()
+        || resource_names.is_null()
+        || pattern_types.is_null()
+        || principals.is_null()
+        || hosts.is_null()
+        || operations.is_null()
+        || permission_types.is_null()
+    {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|index| {
+            (
+                unsafe { *resource_types.add(index) },
+                unsafe { optional_string_at(resource_names, index) }.unwrap_or_default(),
+                unsafe { *pattern_types.add(index) },
+                unsafe { optional_string_at(principals, index) }.unwrap_or_default(),
+                unsafe { optional_string_at(hosts, index) }.unwrap_or_default(),
+                unsafe { *operations.add(index) },
+                unsafe { *permission_types.add(index) },
+            )
+        })
+        .collect()
 }
 
 /// Builds one [`AclBindingFilter`] from scalar fields.
@@ -14541,6 +14663,20 @@ fn submit_create_acls(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Submits `createAcls`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_create_acls`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+/// Keyed by [`AclBindingKey`] rather than `AclBinding` directly, converted via
+/// [`acl_binding_key`], so it matches [`read_acl_binding_keys`]'s output type.
+fn submit_create_acls_entries(
+    admin: &dyn Admin,
+    acls: &[AclBinding],
+    options: CreateAclsOptions,
+) -> Vec<(AclBindingKey, KafkaFuture<()>)> {
+    let result = admin.create_acls(acls, options);
+    result.values().iter().map(|(b, f)| (acl_binding_key(b), f.clone())).collect()
+}
+
 /// Submits `describeAcls` and returns its single listing future.
 fn submit_describe_acls(
     admin: &dyn Admin,
@@ -14561,6 +14697,22 @@ fn submit_delete_acls(
     let entries: Vec<(AclBindingFilter, KafkaFuture<FilterResults>)> =
         result.values().iter().map(|(f, fut)| (f.clone(), fut.clone())).collect();
     KafkaFuture::join_map_results(entries)
+}
+
+/// Submits `deleteAcls`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_delete_acls`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+/// Unlike `createAcls`'s key, `AclBindingFilter` is infallible to construct
+/// (see [`build_acl_binding_filter`]), so `filters` itself already serves as
+/// the identity for [`admin_async_per_key_op`]'s fan-out — no raw-tuple key
+/// type is needed here.
+fn submit_delete_acls_entries(
+    admin: &dyn Admin,
+    filters: &[AclBindingFilter],
+    options: DeleteAclsOptions,
+) -> Vec<(AclBindingFilter, KafkaFuture<FilterResults>)> {
+    let result = admin.delete_acls(filters, options);
+    result.values().iter().map(|(f, fut)| (f.clone(), fut.clone())).collect()
 }
 
 /// Submits `describeClientQuotas` and returns its single whole-map future.
@@ -15006,6 +15158,137 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka
     }
 }
 
+/// Opaque handle to one filter's `DeleteAclsResult.FilterResults` — the
+/// **value** [`kafka_admin_AdminClient_delete_acls_async`]'s per-key callback
+/// delivers for a filter that matched zero or more ACLs.
+///
+/// `deleteAcls`'s per-filter future carries a *collection* (Java's
+/// `FilterResults.values(): List<FilterResult>`), so per `admin-client.md` §7
+/// it gets its own handle rather than flattening onto the callback's
+/// parameter list, mirroring the synchronous result's nested
+/// `results[i][j]` index level
+/// ([`kafka_admin_DeleteAclsResult_get_result_count`] /
+/// `_get_binding` / `_get_result_error`). Always **owned**: free it with
+/// [`kafka_admin_DeleteAclsFilterResults_destroy`].
+#[repr(C)]
+pub struct kafka_admin_DeleteAclsFilterResults_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DeleteAclsFilterResults_t`]: reuses
+/// [`DeleteAclsFilterResultInner`] — the same per-entry type the synchronous
+/// flattened result's `results: Vec<Vec<DeleteAclsFilterResultInner>>` field
+/// already holds — for one filter's row.
+struct DeleteAclsFilterResultsInner {
+    entries: Vec<DeleteAclsFilterResultInner>,
+}
+
+/// Boxes one filter's `FilterResults` as an owned
+/// [`kafka_admin_DeleteAclsFilterResults_t`], for
+/// [`kafka_admin_AdminClient_delete_acls_async`]'s per-key callback.
+fn box_delete_acls_filter_results(results: FilterResults) -> *mut kafka_admin_DeleteAclsFilterResults_t {
+    let entries = results
+        .values()
+        .iter()
+        .map(|r| DeleteAclsFilterResultInner {
+            binding: r.binding().map(AclBindingInner::new),
+            error: r.error().cloned().map(error_inner),
+        })
+        .collect();
+    Box::into_raw(Box::new(DeleteAclsFilterResultsInner { entries })) as *mut kafka_admin_DeleteAclsFilterResults_t
+}
+
+/// Casts a `*const kafka_admin_DeleteAclsFilterResults_t` to a reference.
+///
+/// # Safety
+///
+/// `results` must be a non-null owned handle from the `delete_acls` per-key
+/// async callback.
+unsafe fn delete_acls_filter_results_ref(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+) -> &'static DeleteAclsFilterResultsInner {
+    unsafe { &*(results as *const DeleteAclsFilterResultsInner) }
+}
+
+/// Returns how many ACLs this filter matched (the size of Java's
+/// `FilterResults.values()`).
+///
+/// # Safety
+///
+/// `results` must be a valid `delete_acls` per-key filter-results handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_count(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+) -> i32 {
+    unsafe { delete_acls_filter_results_ref(results) }.entries.len() as i32
+}
+
+/// Returns the ACL binding at `index` (borrowed, valid until this handle is
+/// destroyed), or null when that entry carries an exception instead, or
+/// `index` is out of range. Do not free it directly.
+///
+/// Exactly one of this and [`kafka_admin_DeleteAclsFilterResults_get_error`]
+/// is non-null for an in-range entry, mirroring Java's `FilterResult` holding
+/// exactly one of a binding or an exception.
+///
+/// # Safety
+///
+/// `results` must be a valid `delete_acls` per-key filter-results handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_get_binding(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+    index: i32,
+) -> *const kafka_common_AclBinding_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { delete_acls_filter_results_ref(results) }.entries.get(index as usize) {
+        Some(entry) => match &entry.binding {
+            Some(binding) => binding.as_ptr(),
+            None => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the exception for the entry at `index` (borrowed), or null when
+/// that entry carries a deleted binding instead, or `index` is out of range.
+/// Do not destroy it directly.
+///
+/// # Safety
+///
+/// `results` must be a valid `delete_acls` per-key filter-results handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_get_error(
+    results: *const kafka_admin_DeleteAclsFilterResults_t,
+    index: i32,
+) -> *const kafka_common_Error_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match unsafe { delete_acls_filter_results_ref(results) }.entries.get(index as usize) {
+        Some(entry) => error_ptr(entry.error.as_ref()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Destroys a `delete_acls` per-key filter-results handle, invalidating every
+/// borrowed sub-handle obtained from it (its bindings). Safe with null
+/// (no-op).
+///
+/// # Safety
+///
+/// `results` must be null or a valid `delete_acls` per-key filter-results
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeleteAclsFilterResults_destroy(
+    results: *mut kafka_admin_DeleteAclsFilterResults_t,
+) {
+    if !results.is_null() {
+        unsafe { drop(Box::from_raw(results as *mut DeleteAclsFilterResultsInner)) };
+    }
+}
+
 /// Opaque handle to a flattened `DescribeClientQuotasResult`.
 #[repr(C)]
 pub struct kafka_admin_DescribeClientQuotasResult_t {
@@ -15302,14 +15585,22 @@ fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
     CreateAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_create_acls_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_create_acls_async`], fired **once per binding, as
+/// that binding's own future resolves** — independently of every other
+/// binding in the same call, matching Java's `Map<AclBinding,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch. The key is delivered as an owned
+/// [`kafka_common_AclBinding_t`] handle — the same opaque type
+/// [`kafka_admin_CreateAclsResult_get_binding`] returns borrowed from the
+/// synchronous result — which the callback must free with
+/// [`kafka_common_AclBinding_destroy`].
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_CreateAclsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-binding failure arrives inside
-/// `result`, not as `error`.
+/// There is no value parameter: Java's per-binding future is
+/// `KafkaFuture<Void>`, so a null `error` *is* the success value. A non-null
+/// `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_create_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_AclBinding_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Creates ACL bindings, blocking until every per-binding future has resolved
 /// (synchronous).
@@ -15385,19 +15676,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 /// Creates ACL bindings asynchronously. See
 /// [`kafka_admin_AdminClient_create_acls`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL resource name, principal or
-/// host entry, or an enum code Java's `ResourcePattern` /
+/// Unlike the synchronous entry point, the callback fires **once per binding,
+/// as that binding's future resolves**, not once for the whole batch — a fast
+/// or already-resolved binding is not held up by a slow or failing one. It is
+/// called exactly `count` times, but not always on the same thread. Per key,
+/// it normally runs on the handle's dispatcher thread. It runs **synchronously
+/// on the calling thread, before this function returns, for every key**, when
+/// the RPC cannot be submitted at all (a NULL `admin` handle, a NULL resource
+/// name, principal or host entry, or an enum code Java's `ResourcePattern` /
 /// `AccessControlEntry` constructor rejects). And it runs on a **tokio worker
 /// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
+/// a given binding's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in the
+/// callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
 /// # Safety
@@ -15420,6 +15715,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     callback: kafka_admin_AdminClient_create_acls_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_acl_bindings`'s validated per-row parse
+    // (see `AclBindingKey`), so every requested row still gets its own
+    // callback via `admin_async_per_key_op`'s fan-out even when that parse
+    // fails.
+    let keys = unsafe {
+        read_acl_binding_keys(
+            resource_types,
+            resource_names,
+            pattern_types,
+            principals,
+            hosts,
+            operations,
+            permission_types,
+            count,
+        )
+    };
     let acls = unsafe {
         read_acl_bindings(
             resource_types,
@@ -15434,16 +15745,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     };
     let options = create_acls_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_create_acls(a, &acls?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_create_acls_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
+            keys,
+            move |a| Ok(submit_create_acls_entries(a, &acls?, options)),
+            move |key, outcome, ud| {
+                let (rt, name, pt, principal, host, op, perm) = key;
+                let handle = AclBindingInner {
+                    resource_type: rt,
+                    resource_name_c: to_cstring(&name),
+                    pattern_type: pt,
+                    principal_c: to_cstring(&principal),
+                    host_c: to_cstring(&host),
+                    operation: op,
+                    permission_type: perm,
                 };
-                callback(result, error, ud);
+                let key_ptr = Box::into_raw(Box::new(handle)) as *mut kafka_common_AclBinding_t;
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(key_ptr, error, ud);
             },
         )
     };
@@ -15601,14 +15921,32 @@ fn delete_acls_options(timeout_ms: i32) -> DeleteAclsOptions {
     DeleteAclsOptions::new().timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_delete_acls_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_delete_acls_async`], fired **once per filter, as
+/// that filter's own future resolves** — independently of every other filter
+/// in the same call, matching Java's `Map<AclBindingFilter,
+/// KafkaFuture<FilterResults>>` (`admin-client.md` §5), rather than waiting
+/// for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DeleteAclsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-filter failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_delete_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// The key is delivered as an owned [`kafka_common_AclBindingFilter_t`]
+/// handle — the same opaque type [`kafka_admin_DeleteAclsResult_get_filter`]
+/// returns borrowed from the synchronous result — which the callback must
+/// free with [`kafka_common_AclBindingFilter_destroy`]. Exactly one of
+/// `value` / `error` is non-null: `value` is the filter's own future failing
+/// (nothing was deleted for it) mapping to
+/// [`kafka_admin_DeleteAclsResult_get_error`]'s condition, while a non-null
+/// `value` is an owned [`kafka_admin_DeleteAclsFilterResults_t`] — the per-ACL
+/// results this filter matched, mirroring
+/// [`kafka_admin_DeleteAclsResult_get_result_count`] /
+/// `_get_binding` / `_get_result_error`'s nested index level — which must be
+/// freed with [`kafka_admin_DeleteAclsFilterResults_destroy`]. `error` must be
+/// freed with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_delete_acls_callback_t = unsafe extern "C" fn(
+    *mut kafka_common_AclBindingFilter_t,
+    *mut kafka_admin_DeleteAclsFilterResults_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Deletes the ACL bindings matching each filter, blocking until every
 /// per-filter future has resolved (synchronous).
@@ -15666,18 +16004,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 /// Deletes ACL bindings asynchronously. See
 /// [`kafka_admin_AdminClient_delete_acls`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
-/// a panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per filter,
+/// as that filter's future resolves**, not once for the whole batch — a fast
+/// or already-resolved filter is not held up by a slow or failing one. It is
+/// called exactly `count` times, but not always on the same thread. Per key,
+/// it normally runs on the handle's dispatcher thread. It runs **synchronously
+/// on the calling thread, before this function returns, for every key**, when
+/// the RPC cannot be submitted at all (a NULL `admin` handle). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when a given filter's result arrives. Destroying the
+/// handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be
+/// serialised on one thread, nor in request order. Do not hold a lock across
+/// this call and re-acquire it in the callback, and publish everything the
+/// callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -15699,6 +16041,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     callback: kafka_admin_AdminClient_delete_acls_callback_t,
     user_data: *mut c_void,
 ) {
+    // `AclBindingFilter` is infallible to construct (see
+    // `build_acl_binding_filter`), so the same `filters` vec doubles as the
+    // `keys` argument — no separate raw-key extraction needed here, unlike
+    // `create_acls_async`.
     let filters = unsafe {
         read_acl_binding_filters(
             resource_types,
@@ -15711,18 +16057,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
             count,
         )
     };
+    let keys = filters.clone();
     let options = delete_acls_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_delete_acls(a, &filters, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_acls_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_delete_acls_entries(a, &filters, options)),
+            move |filter, outcome, ud| {
+                let key_ptr = Box::into_raw(Box::new(AclBindingFilterInner::new(&filter)))
+                    as *mut kafka_common_AclBindingFilter_t;
+                let (value, error) = match outcome {
+                    Ok(results) => (box_delete_acls_filter_results(results), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(key_ptr, value, error, ud);
             },
         )
     };
@@ -26588,6 +26938,385 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "removeAll mode has no per-member key, so the callback must never fire"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase F (ACLs/quotas/features family): createAcls, deleteAcls.
+    // -----------------------------------------------------------------------
+
+    fn acl_binding_for_test(name: &str) -> AclBinding {
+        AclBinding::new(
+            ResourcePattern::new(ResourceType::Topic, name.to_string(), PatternType::Literal).unwrap(),
+            AccessControlEntry::new("User:alice", "*", AclOperation::All, AclPermissionType::Allow).unwrap(),
+        )
+    }
+
+    /// Genuine temporal-independence test (per the launcher brief's
+    /// requirement): two hand-built `KafkaFutureImpl<()>` instances driven
+    /// directly through `admin_async_per_key_op`, one already resolved and
+    /// one deliberately never completed, prove the already-resolved binding
+    /// is delivered without waiting on the pending one — not merely that the
+    /// result is dict-of-futures shaped. Mirrors
+    /// `describe_configs_async_delivers_a_resolved_resource_without_waiting_on_a_pending_one`.
+    #[test]
+    fn create_acls_async_delivers_a_resolved_binding_without_waiting_on_a_pending_one() {
+        use crate::common::kafka_future::KafkaFutureImpl;
+
+        let binding_a = acl_binding_for_test("topic-a");
+        let binding_b = acl_binding_for_test("topic-b");
+        let key_a = acl_binding_key(&binding_a);
+        let key_b = acl_binding_key(&binding_b);
+
+        let fast: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        fast.complete(());
+        let slow: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(AclBindingKey, Result<(), Error>)>();
+        let entries = vec![(key_a.clone(), fast.future()), (key_b.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![key_a.clone(), key_b.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: AclBindingKey, result: Result<(), Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        let (key, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved binding must be delivered without waiting on the pending one");
+        assert_eq!(key, key_a);
+        assert!(result.is_ok());
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending binding must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// Same temporal-independence property as above, exercised through
+    /// `deleteAcls`'s actual key (`AclBindingFilter`) and value
+    /// (`FilterResults`) types, whose per-filter future carries a real
+    /// collection rather than `Void`.
+    #[test]
+    fn delete_acls_async_delivers_a_resolved_filter_without_waiting_on_a_pending_one() {
+        use crate::common::kafka_future::KafkaFutureImpl;
+
+        let filter_a = acl_binding_for_test("topic-a").to_filter();
+        let filter_b = acl_binding_for_test("topic-b").to_filter();
+
+        let fast: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
+        fast.complete(FilterResults::new(vec![FilterResult::new(
+            Some(acl_binding_for_test("topic-a")),
+            None,
+        )]));
+        let slow: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(AclBindingFilter, Result<FilterResults, Error>)>();
+        let entries = vec![(filter_a.clone(), fast.future()), (filter_b.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![filter_a.clone(), filter_b.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |filter: AclBindingFilter, result: Result<FilterResults, Error>, _ud: *mut c_void| {
+                    tx.send((filter, result)).unwrap();
+                },
+            );
+        }
+
+        let (filter, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved filter must be delivered without waiting on the pending one");
+        assert_eq!(filter, filter_a);
+        assert_eq!(result.unwrap().values().len(), 1);
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending filter must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.createAcls` throws `UnsupportedOperationException`
+    /// synchronously, `MockAdminClient.java:806-808`): both bindings must
+    /// each get exactly one callback, and the delivered
+    /// `kafka_common_AclBinding_t` key must round-trip every field.
+    #[test]
+    fn create_acls_async_reports_the_real_unsupported_error_per_binding() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let pattern_id = i32::from(PatternType::Literal.code());
+        let op_id = i32::from(AclOperation::All.code());
+        let perm_id = i32::from(AclPermissionType::Allow.code());
+        let resource_types = [topic_id, topic_id];
+        let pattern_types = [pattern_id, pattern_id];
+        let operations = [op_id, op_id];
+        let permission_types = [perm_id, perm_id];
+        let (_names_owned, name_ptrs) = c_array(&["ca-topic-a", "ca-topic-b"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice", "User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*", "*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(kafka_common_AclBinding_resource_name(key)) }
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(
+                unsafe { kafka_common_AclBinding_resource_type(key) },
+                i32::from(ResourceType::Topic.code())
+            );
+            assert_eq!(
+                unsafe { CStr::from_ptr(kafka_common_AclBinding_principal(key)) }.to_string_lossy(),
+                "User:alice"
+            );
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both bindings must get exactly one callback, not hang");
+            seen.insert(name, message);
+        }
+        assert_eq!(seen.len(), 2, "both bindings must have delivered exactly once");
+        assert_eq!(seen["ca-topic-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["ca-topic-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.deleteAcls` throws `UnsupportedOperationException`
+    /// synchronously, `MockAdminClient.java:816-818`): the value handle must
+    /// stay null on a filter-level error, and the filter key must round-trip.
+    #[test]
+    fn delete_acls_async_reports_the_real_unsupported_error_per_filter() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let any_pattern = i32::from(PatternType::Any.code());
+        let any_op = i32::from(AclOperation::Any.code());
+        let any_perm = i32::from(AclPermissionType::Any.code());
+        let resource_types = [topic_id];
+        let pattern_types = [any_pattern];
+        let operations = [any_op];
+        let permission_types = [any_perm];
+        let (_names_owned, name_ptrs) = c_array(&["da-topic-a"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_delete(
+            key: *mut kafka_common_AclBindingFilter_t,
+            value: *mut kafka_admin_DeleteAclsFilterResults_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            assert_eq!(
+                unsafe { CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(key)) }.to_string_lossy(),
+                "da-topic-a"
+            );
+            assert!(value.is_null(), "MockAdminClient never succeeds deleteAcls");
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBindingFilter_destroy(key) };
+            unsafe { kafka_admin_DeleteAclsFilterResults_destroy(value) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_delete_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                1,
+                -1,
+                on_delete,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the filter must get exactly one callback");
+        assert_eq!(message.as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// Every requested binding still gets exactly one callback — with the
+    /// *same* submission error — when one row's enum combination makes the
+    /// whole `read_acl_bindings` parse fail (`AclBinding`'s constructors
+    /// validate). The raw `AclBindingKey` must round-trip both rows' fields
+    /// unchanged, proving `read_acl_binding_keys` is a faithful echo of the
+    /// input even for the row Java's constructors would reject.
+    #[test]
+    fn create_acls_async_reports_the_same_submission_error_to_every_binding_when_one_row_is_invalid() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let any_type = i32::from(ResourceType::Any.code()); // rejected by ResourcePattern::new
+        let pattern_id = i32::from(PatternType::Literal.code());
+        let op_id = i32::from(AclOperation::All.code());
+        let perm_id = i32::from(AclPermissionType::Allow.code());
+        let resource_types = [topic_id, any_type];
+        let pattern_types = [pattern_id, pattern_id];
+        let operations = [op_id, op_id];
+        let permission_types = [perm_id, perm_id];
+        let (_names_owned, name_ptrs) = c_array(&["ca-valid", "ca-invalid"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice", "User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*", "*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(kafka_common_AclBinding_resource_name(key)) }
+                .to_string_lossy()
+                .into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both rows must get exactly one callback even though the whole parse fails");
+            seen.insert(name, message);
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "both rows must have delivered exactly once, keyed by their own raw resource name"
+        );
+        let error_a = seen["ca-valid"]
+            .as_deref()
+            .expect("row 0 must report the shared submission error");
+        let error_b = seen["ca-invalid"]
+            .as_deref()
+            .expect("row 1 must report the shared submission error");
+        assert_eq!(error_a, error_b, "both rows must report the exact same submission error");
+        assert!(
+            error_a.contains("resourceType must not be ANY"),
+            "the error must be the real ResourcePattern validation message, got: {error_a}"
         );
 
         unsafe {
