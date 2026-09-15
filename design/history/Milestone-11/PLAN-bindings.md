@@ -471,6 +471,54 @@ Java as possible."* That resolves D1–D3.
   (borrowed from a flattened `*Result_t` vs. owned from the per-key callback).
   The **synchronous** entry points for both RPCs are unaffected, per the same
   rule as the topics addendum.
+
+  **Addendum (2026-09-15, Phase C) — also superseded for the Log-dirs-family
+  `_async` entry points.** `kafka_admin_AdminClient_describe_log_dirs_async`,
+  `_alter_replica_log_dirs_async` and `_describe_replica_log_dirs_async` now
+  fire their callback once per **broker id** (`describeLogDirs`) or per
+  **replica** (`alterReplicaLogDirs`/`describeReplicaLogDirs`), independently,
+  via the same `admin_async_per_key_op` mechanism, reusing the Topics/Configs
+  addenda's reasoning verbatim. Notes specific to this family:
+    - `describeLogDirs`'s key is a plain broker id (`i32`), delivered as a
+      single scalar parameter, no composite-key handling needed.
+    - `alterReplicaLogDirs`/`describeReplicaLogDirs`'s key is a
+      `TopicPartitionReplica` — a *three*-part composite key — delivered as
+      `(topic: *const char, partition: i32, broker_id: i32)`, extending the
+      Configs addendum's two-part `ConfigResource` precedent by one field and
+      matching how the pre-existing *flattened*
+      `AlterReplicaLogDirsResult`/`DescribeReplicaLogDirsResult` accessors
+      already expose this same key (`_get_topic`/`_get_partition`/
+      `_get_broker_id`).
+    - Per §D2's fifth rule (mint a handle when the element itself contains a
+      collection), `describeLogDirs`'s per-broker value
+      (`Map<String, LogDirDescription>`) already had a nested handle
+      (`kafka_admin_LogDirDescriptionMap_t`) minted for the flattened sync
+      result path. Phase C changes only the OUTER per-broker delivery; that
+      inner handle type is reused as-is, just delivered individually and
+      owned (a new `kafka_admin_LogDirDescriptionMap_destroy`) instead of
+      embedded and borrowed inside a `kafka_admin_DescribeLogDirsResult_t` —
+      the same dual-provenance pattern as `kafka_admin_Config_t` /
+      `kafka_admin_Config_destroy` in the Phase B addendum.
+      `kafka_admin_ReplicaLogDirInfo_t` gets the same treatment
+      (`kafka_admin_ReplicaLogDirInfo_destroy`).
+    - `describeReplicaLogDirs` against `MockAdminClient` has a pre-existing,
+      Java-faithful quirk (`MockAdminClient.describeReplicaLogDirs` skips a
+      replica of a topic it does not know entirely, rather than reporting an
+      error for it — `MockAdminClient.java:1112`) that, combined with the
+      per-key `Future`-dict-returned-immediately contract, means such a
+      replica's `Future` never resolves under the mock (no native callback is
+      ever fired for it, since the Rust core never creates an entry for it).
+      This is NOT a bug introduced by Phase C's FFI marshaling — unlike
+      COMMENTS.66's Configs-family finding, there is no C-level row-flattening
+      step here to lose the key at — it is Java's own mock's behavior,
+      documented and tested (`bindings/python/test/unit/test_admin.py`'s
+      `test_describe_replica_log_dirs_omits_unknown_topics`) as a "stays
+      pending forever under the mock, bounded-wait provable" caveat, since
+      Python cannot know upfront which requested keys the native layer will
+      actually resolve. Against a real broker every requested key always
+      resolves (`KafkaAdminClient.java:3066-3068`, `:3141-3145`).
+  The **synchronous** entry points for all three RPCs are unaffected, per the
+  same rule as the Topics/Configs addenda.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
