@@ -38,21 +38,32 @@
 //!
 //! - a **bare (synchronous)** entry point that submits the RPC and blocks until
 //!   every per-key future has resolved, writing one flattened result handle; and
-//! - an **`_async`** entry point that submits the RPC, returns immediately, and
-//!   delivers the same flattened result handle through a C callback (see
-//!   *Callback thread* below).
+//! - an **`_async`** entry point that submits the RPC and returns immediately.
 //!
 //! In both cases the RPC method itself is invoked on the **calling** thread, so
 //! the request is enqueued as promptly as in Java; only the awaiting of the
 //! per-key futures moves to the tokio runtime.
 //!
+//! For most RPCs, the `_async` entry point delivers one flattened result handle
+//! through a single C callback once every key has resolved (see *Callback
+//! thread* below) — the same shape as the synchronous path, just non-blocking.
+//! For the topic-family RPCs (`create_topics`, `delete_topics` [by name and by
+//! id], `describe_topics` [by name and by id], `create_partitions`,
+//! `delete_records`), the `_async` entry point instead fires its callback
+//! **once per key, independently, as that key's own future resolves** —
+//! matching Java's per-key `KafkaFuture` semantics exactly, so a fast or
+//! already-resolved key is not held up by a slow or failing one. See each
+//! entry point's own doc comment and its per-key callback typedef for the
+//! exact shape; `admin_async_per_key_op` is the shared mechanism.
+//!
 //! # Callback thread
 //!
-//! Every `_async` entry point fires its callback **exactly once**, but not
-//! always on the same thread:
+//! Every `_async` entry point fires its callback **exactly once per key** (for
+//! the topic-family RPCs above) **or exactly once for the whole batch** (every
+//! other RPC), but not always on the same thread:
 //!
-//! - Normally, on the handle's **dispatcher thread**, after the RPC's futures
-//!   have resolved.
+//! - Normally, on the handle's **dispatcher thread**, after the relevant
+//!   future(s) have resolved.
 //! - **Synchronously, on the calling thread, before the entry point returns**,
 //!   when the operation fails before it can be submitted: `admin` is NULL, or
 //!   argument marshaling fails (an unparseable base64 topic id passed to
@@ -60,7 +71,10 @@
 //!   `_describe_topics_by_ids_async`, or an unknown `AlterConfigOp.OpType` code
 //!   passed to `kafka_admin_AdminClient_incremental_alter_configs_async`). This
 //!   is plain bad input, not only a programming error, so a caller must not
-//!   assume the entry point has returned by the time the callback runs.
+//!   assume the entry point has returned by the time the callback runs. For a
+//!   per-key RPC this fan-out fires the callback once per requested key, all
+//!   with the same error — the caller already created one `Future`/`Promise`
+//!   per key and expects every one of them to resolve.
 //! - On a **tokio worker thread**, if the dispatcher's completion queue can no
 //!   longer be reached when the result arrives. Handle destruction does not
 //!   cause this: each async operation clones the sender before spawning and
@@ -81,7 +95,14 @@
 //! A flattened `kafka_admin_*Result_t` exposes `_count` / `_get_key(i)` /
 //! `_get_value(i)` / `_get_error(i)` / `_destroy`, so per-key data *and* per-key
 //! errors survive the boundary; only independent per-key *timing* is lost (which
-//! C cannot express without a `KafkaFuture` type).
+//! C cannot express without a `KafkaFuture` type). This still describes every
+//! **synchronous** entry point, and the `_async` entry points for every RPC
+//! outside the topic family above. For the topic family's `_async` entry
+//! points, per-key timing is *not* lost — that is the point of the per-key
+//! callback shape — so there is no flattened result handle on that path at
+//! all; each key's value (if any) arrives as its own small owned handle
+//! (`kafka_admin_TopicMetadataAndConfig_t` / `kafka_admin_TopicDescription_t` /
+//! `kafka_admin_DeletedRecords_t`), freed independently of any `*Result_t`.
 //!
 //! # Counts are never negative; absence is a separate predicate
 //!
@@ -127,7 +148,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::admin::{
@@ -852,6 +873,99 @@ where
     S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, Error>,
 {
     unsafe { admin_sync_future_op(admin, move |a| submit(a).map(|future| async move { future.get().await })) }
+}
+
+/// Async dispatch for a multi-key admin RPC that delivers **one callback per
+/// key, independently, as that key's own future resolves** — the reverse of
+/// [`admin_async_value_op`], which joins every key into one flattened result
+/// via `KafkaFuture::join_map_results` before firing a single callback for the
+/// whole batch. This is the Java-faithful shape: `Admin` RPCs hand back one
+/// `KafkaFuture<T>` per key (`admin-client.md` §5), and a caller may observe a
+/// fast or already-resolved key without waiting on a slow or failed one.
+///
+/// `submit` runs on the **calling** thread (inside the runtime context,
+/// exactly as Java's `Admin.createTopics(...)` enqueues its request on the
+/// caller's thread and returns immediately) and returns the RPC's per-key
+/// futures paired with the same key representation exposed to C — already
+/// stringified topic ids, etc. A `Vec` rather than a `HashMap`: entry order
+/// carries no meaning here (each key is delivered independently), a `Vec`
+/// just avoids requiring `K: Hash + Eq`.
+///
+/// On success, each entry's future gets its own [`KafkaFuture::when_complete`]
+/// registration — no join, no aggregate future, no waiting on other keys.
+/// `complete` runs once per key, **as that key resolves**, routed through the
+/// completion-dispatch queue exactly like every other async op (never invoked
+/// directly from inside `when_complete`'s own eager callback, which can run on
+/// the admin background task while admin-internal locks are held).
+///
+/// If `admin` is null or `submit` fails outright (the whole RPC could not be
+/// submitted — e.g. an unparseable base64 topic id), `complete` fires once
+/// **per key in `keys`**, synchronously on the calling thread, all with the
+/// same error. This keeps the "exactly one callback per key" contract total:
+/// the Python (or other C caller) binding already created one
+/// `Future`/`Promise` per key, from its own input, before making this call,
+/// and expects every one of them to resolve exactly once — a submission
+/// failure must not leave any of them pending forever.
+///
+/// # Safety
+///
+/// `admin` must be a valid handle from an admin-client constructor.
+unsafe fn admin_async_per_key_op<K, T, S, C>(
+    admin: *const kafka_admin_AdminClient_t,
+    user_data: *mut c_void,
+    keys: Vec<K>,
+    submit: S,
+    complete: C,
+) where
+    K: Send + 'static,
+    T: Clone + Send + Sync + 'static,
+    S: FnOnce(&dyn Admin) -> Result<Vec<(K, KafkaFuture<T>)>, Error>,
+    C: Fn(K, Result<T, Error>, *mut c_void) + Send + Sync + 'static,
+{
+    if admin.is_null() {
+        let err = Error::local_illegal_argument("admin handle must not be null");
+        for key in keys {
+            complete(key, Err(err.clone()), user_data);
+        }
+        return;
+    }
+    let h = unsafe { handle_ref(admin) };
+    // Kept alive across the `when_complete` registrations below, not just
+    // `submit`: `register_completion`'s default (combinator futures, never
+    // actually reached here — see the doc comment above) spawns a task and
+    // needs a runtime context to do so; `Completable`'s eager override (what
+    // every admin per-key future actually is) does not need one, but there is
+    // no reason to make that distinction load-bearing here.
+    let _guard = h.runtime.enter();
+    let entries = match submit(h.admin()) {
+        Ok(entries) => entries,
+        Err(e) => {
+            // The whole RPC could not be submitted: every requested key fails
+            // with the same error, inline on the calling thread — mirroring
+            // `admin_async_future_op`'s single-callback failure path, just
+            // fanned out over every key instead of firing once.
+            for key in keys {
+                complete(key, Err(e.clone()), user_data);
+            }
+            return;
+        },
+    };
+    let complete = Arc::new(complete);
+    // `SendUserData` wraps a raw pointer, not an owned resource: cloning the
+    // pointer value once per key mirrors how a multi-shot C callback is meant
+    // to reuse the same `user_data` across every invocation.
+    let ud_ptr = SendUserData(user_data).into_ptr();
+    for (key, future) in entries {
+        let tx = h.completion_tx.clone();
+        let complete = Arc::clone(&complete);
+        let ud = SendUserData(ud_ptr);
+        future.when_complete(move |result| {
+            let result = result.clone();
+            let ud = ud;
+            let job: CompletionJob = Box::new(move || complete(key, result, ud.into_ptr()));
+            enqueue_or_run_inline(&tx, job);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1990,6 +2104,27 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
     inner.configs.get(index as usize)
 }
 
+/// Destroys a `TopicMetadataAndConfig` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_create_topics_async`]'s per-key callback. Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_CreateTopicsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_CreateTopicsResult_t`] and is freed by
+/// [`kafka_admin_CreateTopicsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `mc` must be null or an owned handle from the `create_topics` per-key async
+/// callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_destroy(mc: *mut kafka_admin_TopicMetadataAndConfig_t) {
+    if !mc.is_null() {
+        unsafe { drop(Box::from_raw(mc as *mut TopicMetadataAndConfigInner)) };
+    }
+}
+
 /// Opaque handle to a `TopicPartitionInfo`.
 #[repr(C)]
 pub struct kafka_admin_TopicPartitionInfo_t {
@@ -2368,6 +2503,29 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation(
     index: i32,
 ) -> i32 {
     authorized_operation_at(unsafe { description_ref(description) }.authorized_operations.as_deref(), index)
+}
+
+/// Destroys a `TopicDescription` handle delivered **individually** by the
+/// `describe_topics` per-key async callbacks
+/// ([`kafka_admin_AdminClient_describe_topics_async`] /
+/// [`kafka_admin_AdminClient_describe_topics_by_ids_async`]). Safe with null
+/// (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeTopicsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeTopicsResult_t`] and is freed by
+/// [`kafka_admin_DescribeTopicsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `description` must be null or an owned handle from a `describe_topics`
+/// per-key async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicDescription_destroy(description: *mut kafka_admin_TopicDescription_t) {
+    if !description.is_null() {
+        unsafe { drop(Box::from_raw(description as *mut TopicDescriptionInner)) };
+    }
 }
 
 /// Opaque handle to a `TopicListing`.
@@ -3012,6 +3170,61 @@ pub struct kafka_admin_DeleteRecordsResult_t {
 /// for an out-of-range index. Real low watermarks are never negative.
 const UNKNOWN_LOW_WATERMARK: i64 = -1;
 
+/// Opaque handle to a `DeletedRecords`, delivered **individually** by
+/// [`kafka_admin_AdminClient_delete_records_async`]'s per-key callback.
+///
+/// The flattened, synchronous [`kafka_admin_DeleteRecordsResult_t`] path
+/// (above) inlines Java's `DeletedRecords` — whose only field is the low
+/// watermark — directly into its `_get_low_watermark(i)` accessor rather than
+/// minting a handle for a one-field type. The per-key async callback has no
+/// containing result handle to inline into, so it gets this minimal owned
+/// handle instead; both read the same underlying value.
+#[repr(C)]
+pub struct kafka_admin_DeletedRecords_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_DeletedRecords_t`].
+struct DeletedRecordsInner {
+    low_watermark: i64,
+}
+
+/// Casts a `*const kafka_admin_DeletedRecords_t` to a reference.
+///
+/// # Safety
+///
+/// `dr` must be a non-null pointer from the `delete_records` per-key async
+/// callback.
+unsafe fn deleted_records_ref(dr: *const kafka_admin_DeletedRecords_t) -> &'static DeletedRecordsInner {
+    unsafe { &*(dr as *const DeletedRecordsInner) }
+}
+
+/// Returns the partition's low watermark after the deletion (Java's
+/// `DeletedRecords.lowWatermark()`).
+///
+/// # Safety
+///
+/// `dr` must be a valid pointer from the `delete_records` per-key async
+/// callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeletedRecords_low_watermark(dr: *const kafka_admin_DeletedRecords_t) -> i64 {
+    unsafe { deleted_records_ref(dr) }.low_watermark
+}
+
+/// Destroys a `DeletedRecords` handle delivered by the `delete_records`
+/// per-key async callback. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `dr` must be null or an owned handle from the `delete_records` per-key
+/// async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DeletedRecords_destroy(dr: *mut kafka_admin_DeletedRecords_t) {
+    if !dr.is_null() {
+        unsafe { drop(Box::from_raw(dr as *mut DeletedRecordsInner)) };
+    }
+}
+
 /// Backing state for [`kafka_admin_DeleteRecordsResult_t`].
 ///
 /// The key is a `TopicPartition`, which C reads as a topic name plus a partition
@@ -3288,6 +3501,102 @@ fn submit_describe_topics_by_ids(
     Ok(KafkaFuture::join_map_results(entries))
 }
 
+// ---------------------------------------------------------------------------
+// RPC submission helpers — per-key (unjoined) variants
+//
+// Same `Admin` calls as above, but returning the per-key futures unjoined
+// (`Vec<(key, KafkaFuture<T>)>` instead of one `join_map_results`-aggregated
+// `KafkaFuture`), for `admin_async_per_key_op`'s independent-per-key delivery.
+// The synchronous/flattened path keeps using the `join_map_results` variants
+// above unchanged.
+// ---------------------------------------------------------------------------
+
+/// Submits `createTopics`, unjoined.
+fn submit_create_topics_entries(
+    admin: &dyn Admin,
+    new_topics: &[NewTopic],
+    options: CreateTopicsOptions,
+) -> Vec<(String, KafkaFuture<TopicMetadataAndConfig>)> {
+    let result = admin.create_topics(new_topics, options);
+    result.futures().iter().map(|(name, f)| (name.clone(), f.clone())).collect()
+}
+
+/// Submits `deleteTopics(TopicCollection.ofTopicNames(...))`, unjoined.
+fn submit_delete_topics_by_names_entries(
+    admin: &dyn Admin,
+    names: Vec<String>,
+    options: DeleteTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
+    let result = admin.delete_topics(TopicCollection::of_topic_names(names), options);
+    let values = result
+        .topic_name_values()
+        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
+    Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
+}
+
+/// Submits `deleteTopics(TopicCollection.ofTopicIds(...))`, unjoined. Keys are
+/// re-stringified (Java's `Uuid.toString()`) so the callback's key parameter
+/// is the same base64 string representation the caller passed in, matching
+/// the by-name variant's `String` key.
+fn submit_delete_topics_by_ids_entries(
+    admin: &dyn Admin,
+    ids: Vec<Uuid>,
+    options: DeleteTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
+    let result = admin.delete_topics(TopicCollection::of_topic_ids(ids), options);
+    let values = result
+        .topic_id_values()
+        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
+    Ok(values.iter().map(|(id, f)| (id.to_string(), f.clone())).collect())
+}
+
+/// Submits `describeTopics(TopicCollection.ofTopicNames(...))`, unjoined.
+fn submit_describe_topics_by_names_entries(
+    admin: &dyn Admin,
+    names: Vec<String>,
+    options: DescribeTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<TopicDescription>)>, Error> {
+    let result = admin.describe_topics(TopicCollection::of_topic_names(names), options);
+    let values = result
+        .topic_name_values()
+        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures"))?;
+    Ok(values.iter().map(|(name, f)| (name.clone(), f.clone())).collect())
+}
+
+/// Submits `describeTopics(TopicCollection.ofTopicIds(...))`, unjoined. Keys
+/// are re-stringified, as for `submit_delete_topics_by_ids_entries`.
+fn submit_describe_topics_by_ids_entries(
+    admin: &dyn Admin,
+    ids: Vec<Uuid>,
+    options: DescribeTopicsOptions,
+) -> Result<Vec<(String, KafkaFuture<TopicDescription>)>, Error> {
+    let result = admin.describe_topics(TopicCollection::of_topic_ids(ids), options);
+    let values = result
+        .topic_id_values()
+        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
+    Ok(values.iter().map(|(id, f)| (id.to_string(), f.clone())).collect())
+}
+
+/// Submits `createPartitions`, unjoined.
+fn submit_create_partitions_entries(
+    admin: &dyn Admin,
+    new_partitions: &HashMap<String, NewPartitions>,
+    options: CreatePartitionsOptions,
+) -> Vec<(String, KafkaFuture<()>)> {
+    let result = admin.create_partitions(new_partitions, options);
+    result.values().iter().map(|(name, f)| (name.clone(), f.clone())).collect()
+}
+
+/// Submits `deleteRecords`, unjoined.
+fn submit_delete_records_entries(
+    admin: &dyn Admin,
+    records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
+    options: DeleteRecordsOptions,
+) -> Vec<(TopicPartition, KafkaFuture<DeletedRecords>)> {
+    let result = admin.delete_records(records_to_delete, options);
+    result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect()
+}
+
 /// Writes a boxed result handle to `out_result` and returns null, or returns the
 /// boxed error and leaves `*out_result` untouched — the ownership contract every
 /// sync FFI entry point in this crate follows.
@@ -3372,30 +3681,45 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     unsafe { finish_sync(outcome, out_result, box_create_topics_result) }
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_create_topics_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_create_topics_async`], fired **once per topic, as
+/// that topic's own future resolves** — independently of every other topic in
+/// the same call, matching Java's `Map<String, KafkaFuture<TopicMetadataAndConfig>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_CreateTopicsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-topic failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_create_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `key` is the topic name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. Exactly one of `value` / `error`
+/// is non-null; `value` is owned by the callback and must be freed with
+/// [`kafka_admin_TopicMetadataAndConfig_destroy`] (**not**
+/// [`kafka_admin_CreateTopicsResult_destroy`], which is for the synchronous /
+/// flattened result only), and `error` with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_create_topics_callback_t = unsafe extern "C" fn(
+    *const c_char,
+    *mut kafka_admin_TopicMetadataAndConfig_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Creates topics asynchronously. See [`kafka_admin_AdminClient_create_topics`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch — a fast or
+/// already-resolved topic is not held up by a slow or failing one. It is
+/// called exactly `count` times (once per requested topic, minus NULL entries
+/// in `topics`), but not always on the same thread. Per key, it normally runs
+/// on the handle's dispatcher thread. It runs **synchronously on the calling
+/// thread, before this function returns, for every key**, when the RPC cannot
+/// be submitted at all (a NULL `admin` handle). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be
+/// reached when a given topic's result arrives. Destroying the handle does not
+/// cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys (or the same call's failure fan-out) are not guaranteed to
+/// be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
 ///
 /// # Safety
 ///
@@ -3412,18 +3736,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
     user_data: *mut c_void,
 ) {
     let new_topics = unsafe { read_new_topics(topics, count) };
+    let keys: Vec<String> = new_topics.iter().map(|t| t.name().to_string()).collect();
     let options = create_topics_options(timeout_ms, validate_only, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_create_topics(a, &new_topics, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_create_topics_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_create_topics_entries(a, &new_topics, options)),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let (value, error) = match outcome {
+                    Ok(metadata) => (
+                        Box::into_raw(Box::new(TopicMetadataAndConfigInner::new(&metadata)))
+                            as *mut kafka_admin_TopicMetadataAndConfig_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -3440,13 +3771,20 @@ fn delete_topics_options(timeout_ms: i32, retry_on_quota_violation: bool) -> Del
         .retry_on_quota_violation(retry_on_quota_violation)
 }
 
-/// Completion callback for the `delete_topics` async entry points.
+/// Per-key completion callback for the `delete_topics` async entry points,
+/// fired **once per topic, as that topic's own future resolves** —
+/// independently of every other topic in the same call. Shared by the
+/// by-names and by-ids variants (they are one Java method,
+/// `deleteTopics(TopicCollection)`, and produce the same result shape:
+/// `KafkaFuture<Void>` per key, so there is no value parameter — a null
+/// `error` *is* the success value, as for `create_partitions`).
 ///
-/// Shared by the by-names and by-ids variants (they are one Java method,
-/// `deleteTopics(TopicCollection)`, and produce the same result shape). Exactly
-/// one of `result` / `error` is non-null and the callback owns it.
+/// `key` is the topic name (by-names) or the base64 topic id (by-ids),
+/// borrowed and valid only for the duration of this call — copy it if you
+/// need to retain it. `error` is owned by the callback and must be freed with
+/// `kafka_common_Error_destroy`, or is null on success.
 pub type kafka_admin_AdminClient_delete_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes topics **by name** and blocks until every per-topic future has
 /// resolved (synchronous).
@@ -3484,16 +3822,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// Deletes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. It is called
+/// exactly `count` times (minus NULL entries in `names`), but not always on
+/// the same thread. Per key, it normally runs on the handle's dispatcher
+/// thread. It runs **synchronously on the calling thread, before this function
+/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3512,18 +3853,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
     user_data: *mut c_void,
 ) {
     let topic_names = unsafe { read_strings(names, count) };
+    let keys = topic_names.clone();
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_delete_topics_by_names(a, topic_names, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_topics_result(outcomes, String::clone), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| submit_delete_topics_by_names_entries(a, topic_names, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -3562,17 +3903,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// Deletes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_delete_topics_by_ids`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. If any
+/// `topic_ids` entry is NULL or fails to parse as a base64 `Uuid`, the whole
+/// call fails and every key — the raw strings as passed in, not the parsed
+/// ids — gets that same error (mirroring Java's `Uuid.fromString`, which would
+/// throw before any `KafkaFuture` could be created). Otherwise it is called
+/// exactly `count` times, but not always on the same thread. Per key, it
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or an unparseable or NULL
-/// base64 topic id). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// the calling thread, before this function returns, for every key**, when the
+/// RPC cannot be submitted at all (a NULL `admin` handle, or the parse failure
+/// above). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given topic's result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3590,19 +3937,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids_async(
     callback: kafka_admin_AdminClient_delete_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // The raw strings, used as the fan-out key set if parsing fails below —
+    // Python's futures dict is keyed by these, not by the parsed `Uuid`s.
+    let keys = unsafe { read_strings(topic_ids, count) };
     let parsed = unsafe { read_uuids(topic_ids, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_delete_topics_by_ids(a, parsed?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_topics_result(outcomes, Uuid::to_string), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| submit_delete_topics_by_ids_entries(a, parsed?, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -3716,13 +4065,21 @@ fn describe_topics_options(
     }
 }
 
-/// Completion callback for the `describe_topics` async entry points.
+/// Per-key completion callback for the `describe_topics` async entry points,
+/// fired **once per topic, as that topic's own future resolves** —
+/// independently of every other topic in the same call. Shared by the
+/// by-names and by-ids variants (one Java method,
+/// `describeTopics(TopicCollection)`).
 ///
-/// Shared by the by-names and by-ids variants (one Java method,
-/// `describeTopics(TopicCollection)`). Exactly one of `result` / `error` is
-/// non-null and the callback owns it.
+/// `key` is the topic name (by-names) or the base64 topic id (by-ids),
+/// borrowed and valid only for the duration of this call — copy it if you
+/// need to retain it. Exactly one of `value` / `error` is non-null; `value` is
+/// owned by the callback and must be freed with
+/// [`kafka_admin_TopicDescription_destroy`] (**not**
+/// [`kafka_admin_DescribeTopicsResult_destroy`], which is for the synchronous
+/// / flattened result only), and `error` with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_admin_TopicDescription_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes topics **by name** and blocks until every per-topic future has
 /// resolved (synchronous). This is
@@ -3757,16 +4114,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// Describes topics **by name** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. It is called
+/// exactly `count` times (minus NULL entries in `names`), but not always on
+/// the same thread. Per key, it normally runs on the handle's dispatcher
+/// thread. It runs **synchronously on the calling thread, before this function
+/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3786,18 +4146,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
     user_data: *mut c_void,
 ) {
     let topic_names = unsafe { read_strings(names, count) };
+    let keys = topic_names.clone();
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_topics_by_names(a, topic_names, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_topics_result(outcomes, String::clone), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_topics_by_names_entries(a, topic_names, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let (value, error) = match outcome {
+                    Ok(description) => (
+                        Box::into_raw(Box::new(TopicDescriptionInner::new(&description)))
+                            as *mut kafka_admin_TopicDescription_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -3837,17 +4204,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// Describes topics **by id** asynchronously. See
 /// [`kafka_admin_AdminClient_describe_topics_by_ids`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or an unparseable or NULL
-/// base64 topic id). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. If any
+/// `topic_ids` entry is NULL or fails to parse as a base64 `Uuid`, the whole
+/// call fails and every key — the raw strings as passed in, not the parsed
+/// ids — gets that same error. Otherwise it is called exactly `count` times,
+/// but not always on the same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle, or the parse failure above). And
+/// it runs on a **tokio worker thread** if the dispatcher's completion queue
+/// can no longer be reached when a given topic's result arrives. Destroying
+/// the handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier callback.
+/// So callbacks for different keys are not guaranteed to be serialised on one
+/// thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3866,19 +4238,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids_async(
     callback: kafka_admin_AdminClient_describe_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    let keys = unsafe { read_strings(topic_ids, count) };
     let parsed = unsafe { read_uuids(topic_ids, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_topics_by_ids(a, parsed?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_topics_result(outcomes, Uuid::to_string), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_topics_by_ids_entries(a, parsed?, options),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let (value, error) = match outcome {
+                    Ok(description) => (
+                        Box::into_raw(Box::new(TopicDescriptionInner::new(&description)))
+                            as *mut kafka_admin_TopicDescription_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -3901,14 +4280,18 @@ fn create_partitions_options(
         .retry_on_quota_violation(retry_on_quota_violation)
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_create_partitions_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_create_partitions_async`], fired **once per
+/// topic, as that topic's own future resolves** — independently of every
+/// other topic in the same call. Java's per-topic future is
+/// `KafkaFuture<Void>`, so there is no value parameter — a null `error` *is*
+/// the success value, as for `delete_topics`.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_CreatePartitionsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-topic failure arrives inside
-/// `result`, not as `error`.
+/// `key` is the topic name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. `error` is owned by the callback
+/// and must be freed with `kafka_common_Error_destroy`, or is null on success.
 pub type kafka_admin_AdminClient_create_partitions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreatePartitionsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Increases the partition count of the given topics, blocking until every
 /// per-topic future has resolved (synchronous).
@@ -3959,16 +4342,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
 /// Increases the partition count of the given topics asynchronously. See
 /// [`kafka_admin_AdminClient_create_partitions`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per topic, as
+/// that topic's future resolves**, not once for the whole batch. It is called
+/// once per distinct topic in `topics` (skipping NULL-paired entries), but not
+/// always on the same thread. Per key, it normally runs on the handle's
+/// dispatcher thread. It runs **synchronously on the calling thread, before
+/// this function returns, for every key**, when the RPC cannot be submitted at
+/// all (a NULL `admin` handle). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// topic's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -3990,18 +4376,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
     user_data: *mut c_void,
 ) {
     let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
+    let keys: Vec<String> = specs.keys().cloned().collect();
     let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_create_partitions(a, &specs, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_create_partitions_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_create_partitions_entries(a, &specs, options)),
+            move |name, outcome, ud| {
+                let name_c = to_cstring(&name);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -4011,14 +4397,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
 // deleteRecords
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_delete_records_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_delete_records_async`], fired **once per
+/// partition, as that partition's own future resolves** — independently of
+/// every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<DeletedRecords>>`. The key is a
+/// `TopicPartition`, delivered as a topic name plus a partition id — like the
+/// synchronous result's `_get_topic(i)` / `_get_partition(i)` pair — rather
+/// than through a single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DeleteRecordsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
-/// `result`, not as `error`.
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_DeletedRecords_destroy`], and `error` with
+/// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_delete_records_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteRecordsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, i32, *mut kafka_admin_DeletedRecords_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes the records before the given offset of each partition, blocking until
 /// every per-partition future has resolved (synchronous).
@@ -4066,16 +4460,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
 /// Deletes records asynchronously. See
 /// [`kafka_admin_AdminClient_delete_records`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// Unlike the synchronous entry point, the callback fires **once per
+/// partition, as that partition's future resolves**, not once for the whole
+/// batch. It is called once per distinct `(topic, partition)` pair in the
+/// input (skipping NULL-topic entries), but not always on the same thread. Per
+/// key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given partition's result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -4096,18 +4494,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
     user_data: *mut c_void,
 ) {
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
+    let keys: Vec<TopicPartition> = records.keys().cloned().collect();
     let options = DeleteRecordsOptions::new().timeout_ms(option_timeout(timeout_ms));
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_delete_records(a, &records, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_delete_records_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_delete_records_entries(a, &records, options)),
+            move |tp, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let (value, error) = match outcome {
+                    Ok(deleted) => (
+                        Box::into_raw(Box::new(DeletedRecordsInner { low_watermark: deleted.low_watermark() }))
+                            as *mut kafka_admin_DeletedRecords_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), tp.partition(), value, error, ud);
             },
         )
     };
