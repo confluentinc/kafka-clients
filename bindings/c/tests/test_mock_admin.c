@@ -2205,27 +2205,28 @@ static void test_mock_admin_describe_log_dirs(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Per-key async result (Phase C): the callback now fires once per broker,
+ * independently, rather than once for the whole batch - see
+ * `admin_async_per_key_op` / `kafka_admin_AdminClient_describe_log_dirs_callback_t`. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
-    int32_t log_dir_count;
+    atomic_int error_count;
+    atomic_int value_count;
+    int32_t last_broker_id;
+    int32_t last_log_dir_count;
 } describe_log_dirs_async_result_t;
 
-static void on_describe_log_dirs(kafka_admin_DescribeLogDirsResult_t *result,
+static void on_describe_log_dirs(int32_t broker_id, kafka_admin_LogDirDescriptionMap_t *value,
                                  kafka_common_Error_t *error, void *user_data) {
     describe_log_dirs_async_result_t *r = (describe_log_dirs_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_DescribeLogDirsResult_count(result);
-        const kafka_admin_LogDirDescriptionMap_t *map =
-            kafka_admin_DescribeLogDirsResult_get_value(result, 0);
-        r->log_dir_count = map ? kafka_admin_LogDirDescriptionMap_count(map) : -1;
-        kafka_admin_DescribeLogDirsResult_destroy(result);
+    r->last_broker_id = broker_id;
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        r->last_log_dir_count = kafka_admin_LogDirDescriptionMap_count(value);
+        kafka_admin_LogDirDescriptionMap_destroy(value);
     }
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -2238,25 +2239,55 @@ static void test_mock_admin_describe_log_dirs_async(void) {
     const int32_t brokers[1] = {0};
     describe_log_dirs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_describe_log_dirs_async(admin, brokers, 1, -1,
                                                     on_describe_log_dirs, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
-    TEST_ASSERT_EQUAL_INT32(1, r.log_dir_count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT32(0, r.last_broker_id);
+    TEST_ASSERT_EQUAL_INT32(1, r.last_log_dir_count);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
-static void test_mock_admin_describe_log_dirs_async_null_handle(void) {
+/* Two brokers, one unknown: proves independent per-key delivery and that an
+ * empty per-key value (the unknown broker's zero-log-dir map) still resolves
+ * its own callback rather than hanging - mirroring the sync
+ * `test_mock_admin_describe_log_dirs` above. */
+static void test_mock_admin_describe_log_dirs_async_two_brokers(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "ld-async2", 1, 1);
+
+    const int32_t brokers[2] = {0, 7};
     describe_log_dirs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_describe_log_dirs_async(NULL, NULL, 0, -1, on_describe_log_dirs, &r);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_log_dirs_async(admin, brokers, 2, -1,
+                                                    on_describe_log_dirs, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* A NULL handle must still honor the callback obligation, with an error, once
+ * per requested key (Phase A's mechanism note: an EMPTY key set fans out over
+ * zero keys regardless of admin validity, so the input here must be
+ * non-empty to actually observe the fan-out). */
+static void test_mock_admin_describe_log_dirs_async_null_handle(void) {
+    const int32_t brokers[1] = {0};
+    describe_log_dirs_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_log_dirs_async(NULL, brokers, 1, -1, on_describe_log_dirs, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
 // ---- alterReplicaLogDirs / describeReplicaLogDirs --------------------------
@@ -2393,23 +2424,28 @@ static void test_mock_admin_describe_replica_log_dirs(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Per-key async result (Phase C): the callback now fires once per replica,
+ * independently, rather than once for the whole batch. There is no value
+ * parameter: Java's per-replica future is `KafkaFuture<Void>`, so a null
+ * error *is* the success value. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    char last_topic[64];
+    int32_t last_partition;
+    int32_t last_broker_id;
 } alter_replica_async_result_t;
 
-static void on_alter_replica_log_dirs(kafka_admin_AlterReplicaLogDirsResult_t *result,
+static void on_alter_replica_log_dirs(const char *topic, int32_t partition, int32_t broker_id,
                                       kafka_common_Error_t *error, void *user_data) {
     alter_replica_async_result_t *r = (alter_replica_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_AlterReplicaLogDirsResult_count(result);
-        kafka_admin_AlterReplicaLogDirsResult_destroy(result);
+    if (topic != NULL) {
+        strncpy(r->last_topic, topic, sizeof(r->last_topic) - 1);
     }
+    r->last_partition = partition;
+    r->last_broker_id = broker_id;
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -2426,50 +2462,59 @@ static void test_mock_admin_alter_replica_log_dirs_async(void) {
 
     alter_replica_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_alter_replica_log_dirs_async(
         admin, topics, partitions, broker_ids, log_dirs, 1, -1, on_alter_replica_log_dirs, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("mv-async", r.last_topic);
+    TEST_ASSERT_EQUAL_INT32(0, r.last_partition);
+    TEST_ASSERT_EQUAL_INT32(0, r.last_broker_id);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error, once
+ * per requested key (see the describe_log_dirs null-handle test above for why
+ * the input must be non-empty). */
 static void test_mock_admin_alter_replica_log_dirs_async_null_handle(void) {
+    const char *topics[1] = {"mv-async"};
+    const int32_t partitions[1] = {0};
+    const int32_t broker_ids[1] = {0};
+    const char *log_dirs[1] = {"/tmp/kafka-logs"};
+
     alter_replica_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_alter_replica_log_dirs_async(NULL, NULL, NULL, NULL, NULL, 0, -1,
-                                                         on_alter_replica_log_dirs, &r);
+    atomic_init(&r.error_count, 0);
+    kafka_admin_AdminClient_alter_replica_log_dirs_async(
+        NULL, topics, partitions, broker_ids, log_dirs, 1, -1, on_alter_replica_log_dirs, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
 }
 
+/* Per-key async result (Phase C): the callback now fires once per replica,
+ * independently, rather than once for the whole batch. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    atomic_int value_count;
     int has_current_dir;
 } describe_replica_async_result_t;
 
-static void on_describe_replica_log_dirs(kafka_admin_DescribeReplicaLogDirsResult_t *result,
+static void on_describe_replica_log_dirs(const char *topic, int32_t partition,
+                                         int32_t broker_id, kafka_admin_ReplicaLogDirInfo_t *value,
                                          kafka_common_Error_t *error, void *user_data) {
+    (void)topic;
+    (void)partition;
+    (void)broker_id;
     describe_replica_async_result_t *r = (describe_replica_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_DescribeReplicaLogDirsResult_count(result);
-        const kafka_admin_ReplicaLogDirInfo_t *info =
-            kafka_admin_DescribeReplicaLogDirsResult_get_value(result, 0);
-        r->has_current_dir =
-            info != NULL &&
-            kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(info) != NULL;
-        kafka_admin_DescribeReplicaLogDirsResult_destroy(result);
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        r->has_current_dir = kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(value) != NULL;
+        kafka_admin_ReplicaLogDirInfo_destroy(value);
     }
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -2485,26 +2530,35 @@ static void test_mock_admin_describe_replica_log_dirs_async(void) {
 
     describe_replica_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_describe_replica_log_dirs_async(
         admin, topics, partitions, broker_ids, 1, -1, on_describe_replica_log_dirs, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
     TEST_ASSERT_TRUE(r.has_current_dir);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error, once
+ * per requested key (see the describe_log_dirs null-handle test above for why
+ * the input must be non-empty). */
 static void test_mock_admin_describe_replica_log_dirs_async_null_handle(void) {
+    const char *topics[1] = {"drld-async"};
+    const int32_t partitions[1] = {0};
+    const int32_t broker_ids[1] = {0};
+
     describe_replica_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_describe_replica_log_dirs_async(NULL, NULL, NULL, NULL, 0, -1,
-                                                            on_describe_replica_log_dirs, &r);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_replica_log_dirs_async(
+        NULL, topics, partitions, broker_ids, 1, -1, on_describe_replica_log_dirs, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
 /* A NULL out_result means the caller does not want the result, so the handle is
@@ -6447,6 +6501,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_client_metrics_resources_async_null_handle);
     RUN_TEST(test_mock_admin_describe_log_dirs);
     RUN_TEST(test_mock_admin_describe_log_dirs_async);
+    RUN_TEST(test_mock_admin_describe_log_dirs_async_two_brokers);
     RUN_TEST(test_mock_admin_describe_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_partial_failure);
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_async);
