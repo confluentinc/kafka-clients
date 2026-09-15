@@ -4383,7 +4383,12 @@ static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObje
     if (!PyArg_ParseTuple(args, "KOiiO", &h, &spec, &timeout_ms, &validate_only, &cb)) return NULL;
 
     // spec is a sequence of one row per operation:
-    // (resource_type:int, resource_name:str, config_name:str, value:str|None, op_type:int).
+    // (resource_type:int, resource_name:str, config_name:str|None, value:str|None, op_type:int).
+    // A row with config_name=None is the sentinel `read_alter_config_ops`
+    // recognizes as "register this resource with no op contributed" - how a
+    // resource whose op list is empty still reaches the native layer and gets
+    // a real per-key future/callback, matching Java's `configs.keySet()`
+    // iteration (`_incremental_alter_configs_keys_and_spec`'s docstring).
     Py_ssize_t n = PySequence_Size(spec);
     if (n < 0) return NULL;
     int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
@@ -4400,8 +4405,9 @@ static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObje
         PyObject* item = PySequence_GetItem(spec, i);  // new ref
         int t = 0; int op = 0;
         const char* resource = NULL; const char* key = NULL; const char* value = NULL;
-        // "z" accepts None for the value, which is what DELETE sends.
-        int ok = item && PyArg_ParseTuple(item, "isszi", &t, &resource, &key, &value, &op);
+        // "z" accepts None for both `key` (the no-op sentinel) and `value`
+        // (what DELETE sends).
+        int ok = item && PyArg_ParseTuple(item, "iszzi", &t, &resource, &key, &value, &op);
         Py_XDECREF(item);
         if (!ok) {
             PyMem_Free(types); PyMem_Free(resources); PyMem_Free(keys);

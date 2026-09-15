@@ -1729,6 +1729,38 @@ static void test_mock_admin_incremental_alter_configs_set_then_delete(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* COMMENTS.66.md finding 1 regression test: a resource with an EMPTY op list
+ * (no rows at all naming it) is invisible to the native layer and its Future
+ * would never resolve on the Python side. The fix: a row with a non-NULL
+ * resource name but a NULL config name ("the sentinel") registers the
+ * resource with zero contributed ops, both on the sync (flattened-result)
+ * path and the async (per-key-callback) path. This test drives BOTH paths
+ * directly through the C ABI, since the sentinel is a wire-representation
+ * fix, not a Python-only one. */
+static void test_mock_admin_incremental_alter_configs_empty_op_list_resource(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "empty-ops-topic", 1, 1);
+
+    /* Sync: a single sentinel row (config_name == NULL) for a resource that
+     * has no real op row at all. */
+    const int32_t types[1] = {RESOURCE_TYPE_TOPIC};
+    const char *resources[1] = {"empty-ops-topic"};
+    const char *keys[1] = {NULL};
+    const char *values[1] = {NULL};
+    const int32_t ops[1] = {-1}; /* unused: no config name means no op to parse */
+
+    kafka_admin_AlterConfigsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_incremental_alter_configs(
+        admin, types, resources, keys, values, ops, 1, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterConfigsResult_count(result));
+    TEST_ASSERT_EQUAL_STRING("empty-ops-topic", kafka_admin_AlterConfigsResult_get_key_name(result, 0));
+    TEST_ASSERT_NULL(kafka_admin_AlterConfigsResult_get_error(result, 0));
+    kafka_admin_AlterConfigsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 static void test_mock_admin_incremental_alter_configs_partial_failure(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "alter-ok", 1, 1);
@@ -1881,6 +1913,37 @@ static void test_mock_admin_incremental_alter_configs_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.success_count));
+}
+
+/* COMMENTS.66.md finding 1 regression test, async path: before the fix, a
+ * resource with no rows naming it at all would never appear in
+ * `distinct_config_resources`'s fan-out, so the callback would never fire and
+ * a caller's Future would hang forever. A single sentinel row (config_name ==
+ * NULL) registers the resource with zero ops. `wait_for` turns a
+ * reintroduced hang into a bounded, explicit test failure instead of an
+ * actual process hang. */
+static void test_mock_admin_incremental_alter_configs_async_empty_op_list_resource(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "async-empty-ops-topic", 1, 1);
+
+    const int32_t types[1] = {RESOURCE_TYPE_TOPIC};
+    const char *resources[1] = {"async-empty-ops-topic"};
+    const char *keys[1] = {NULL};
+    const char *values[1] = {NULL};
+    const int32_t ops[1] = {-1}; /* unused: no config name means no op to parse */
+
+    alter_configs_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.success_count, 0);
+    kafka_admin_AdminClient_incremental_alter_configs_async(
+        admin, types, resources, keys, values, ops, 1, -1, false, on_alter_configs, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.success_count));
+
+    kafka_admin_AdminClient_destroy(admin);
 }
 
 // ---- listConfigResources ---------------------------------------------------
@@ -6369,11 +6432,13 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_configs_async_partial_failure);
     RUN_TEST(test_mock_admin_describe_configs_async_null_handle);
     RUN_TEST(test_mock_admin_incremental_alter_configs_set_then_delete);
+    RUN_TEST(test_mock_admin_incremental_alter_configs_empty_op_list_resource);
     RUN_TEST(test_mock_admin_incremental_alter_configs_partial_failure);
     RUN_TEST(test_mock_admin_incremental_alter_configs_bad_op_type);
     RUN_TEST(test_mock_admin_incremental_alter_configs_async);
     RUN_TEST(test_mock_admin_incremental_alter_configs_async_bad_op_type);
     RUN_TEST(test_mock_admin_incremental_alter_configs_async_null_handle);
+    RUN_TEST(test_mock_admin_incremental_alter_configs_async_empty_op_list_resource);
     RUN_TEST(test_mock_admin_list_config_resources);
     RUN_TEST(test_mock_admin_list_config_resources_async);
     RUN_TEST(test_mock_admin_list_config_resources_async_null_handle);

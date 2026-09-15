@@ -782,6 +782,59 @@ def test_incremental_alter_configs_set_then_delete():
         assert {e.name for e in config.entries} == {"segment.ms"}
 
 
+def test_incremental_alter_configs_empty_op_list_resolves_not_hangs():
+    """COMMENTS.66.md finding 1 regression test: a resource mapped to an
+    EMPTY AlterConfigOp list must still get a resolved Future, not one that
+    hangs forever. Before the fix, `_incremental_alter_configs_keys_and_spec`
+    flattened `{resource: []}` into zero C rows, so the resource was invisible
+    to `read_alter_config_ops`/`distinct_config_resources` and its
+    pre-registered Future was never completed -- a real hang, discoverable
+    here as a `.result(timeout=...)` TimeoutError if it regresses. Bounded
+    `timeout=5.0` turns a reintroduced hang into a fast, explicit failure
+    instead of hanging the test process."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "empty-ops-topic")
+        resource = ConfigResource(ConfigResourceType.TOPIC, "empty-ops-topic")
+
+        futures = admin.incremental_alter_configs({resource: []})
+        assert list(futures) == [resource]
+        # An alter with no ops on an existing topic is a legal no-op in Java
+        # (KafkaAdminClient.incrementalAlterConfigs iterates configs.keySet()
+        # regardless of op-list length) and in the mock (apply_alter_ops with
+        # an empty slice is a no-op loop), so it succeeds.
+        assert futures[resource].result(timeout=5.0) is None
+
+        # Mixed batch: one DIFFERENT resource with real ops, one with none -
+        # both must resolve independently, and the empty-ops one must not be
+        # dropped just because it shares the batch with a real row.
+        _created(admin, "with-ops-topic")
+        other = ConfigResource(ConfigResourceType.TOPIC, "with-ops-topic")
+        futures = admin.incremental_alter_configs({
+            resource: [],
+            other: [AlterConfigOp(ConfigEntry("retention.ms", "5000", False, False, False), OpType.SET)],
+        })
+        assert set(futures) == {resource, other}
+        assert futures[resource].result(timeout=5.0) is None
+        assert futures[other].result(timeout=5.0) is None
+        config = admin.describe_configs([other])[other].result(timeout=5.0)
+        assert config.get("retention.ms").value == "5000"
+
+
+async def test_async_incremental_alter_configs_empty_op_list_resolves_not_hangs():
+    """Async counterpart of test_incremental_alter_configs_empty_op_list_resolves_not_hangs."""
+    admin = AsyncMockAdminClient(1)
+    try:
+        create_futures = await admin.create_topics([NewTopic("async-empty-ops-topic", 1, 1)])
+        await create_futures["async-empty-ops-topic"]
+
+        resource = ConfigResource(ConfigResourceType.TOPIC, "async-empty-ops-topic")
+        futures = await admin.incremental_alter_configs({resource: []})
+        assert list(futures) == [resource]
+        assert await asyncio.wait_for(futures[resource], timeout=5.0) is None
+    finally:
+        await admin.close()
+
+
 def test_incremental_alter_configs_partial_failure():
     with MockAdminClient(1) as admin:
         _created(admin, "alter-ok")

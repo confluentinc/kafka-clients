@@ -4631,9 +4631,17 @@ unsafe fn read_replicas(
 /// row `i` applies `(config_names[i] -> config_values[i], op_types[i])` to the
 /// resource `(resource_type_codes[i], resource_names[i])`. Rows for the same
 /// resource are grouped, keeping their relative order (Java applies a
-/// resource's ops in iteration order). A row with a NULL resource name or a NULL
-/// config name is skipped; a NULL *value* is meaningful and becomes Java's null
-/// value (which is what `DELETE` sends).
+/// resource's ops in iteration order). A row with a NULL resource name is
+/// skipped entirely. A row with a non-NULL resource name but a NULL config
+/// name registers that resource in the output map with **no** op contributed —
+/// this is how a resource whose Java `Collection<AlterConfigOp>` is empty
+/// still reaches `Admin::incremental_alter_configs` (which, like Java's
+/// `configs.keySet()`, iterates every map key regardless of whether its op
+/// list is empty) instead of silently vanishing from the request the way a
+/// zero-row resource otherwise would. `.or_default()` is idempotent, so this
+/// row may appear anywhere relative to the resource's real op rows without
+/// changing the result. A NULL *value* on a real op row is meaningful and
+/// becomes Java's null value (which is what `DELETE` sends).
 ///
 /// # Errors
 ///
@@ -4658,8 +4666,17 @@ unsafe fn read_alter_config_ops(
     }
     for i in 0..n {
         let resource_name_ptr = unsafe { *resource_names.add(i) };
+        if resource_name_ptr.is_null() {
+            continue;
+        }
+        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name_ptr = unsafe { *config_names.add(i) };
-        if resource_name_ptr.is_null() || config_name_ptr.is_null() {
+        if config_name_ptr.is_null() {
+            // Explicit "no-op" row: registers the resource (possibly with an
+            // already-populated entry from an earlier real op row) without
+            // contributing an AlterConfigOp. See the doc comment above.
+            out.entry(ConfigResource::new(resource_type, resource_name)).or_default();
             continue;
         }
         let op_code = unsafe { *op_type_codes.add(i) };
@@ -4669,8 +4686,6 @@ unsafe fn read_alter_config_ops(
         let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
             Error::local_illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
-        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
-        let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
         let value = if config_values.is_null() {
             None
@@ -5956,9 +5971,14 @@ pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
 /// `(resource_types[i], resource_names[i])`. Rows naming the same resource are
 /// grouped in order. `resource_types` hold `ConfigResource.Type.id()` codes and
 /// `op_types` hold `AlterConfigOp.OpType.id()` codes (0 = SET, 1 = DELETE,
-/// 2 = APPEND, 3 = SUBTRACT). A row with a NULL resource name or config name is
-/// skipped; a NULL `config_values` entry is the null value DELETE uses. An
-/// unknown op-type code fails the whole call with an illegal-argument error.
+/// 2 = APPEND, 3 = SUBTRACT). A row with a NULL resource name is skipped
+/// entirely; a row with a non-NULL resource name but a NULL config name
+/// registers that resource with **no** op from this row — the way to include a
+/// resource whose Java `Collection<AlterConfigOp>` is empty, since Java itself
+/// creates a future for every map key regardless of whether its op list is
+/// empty. A NULL `config_values` entry (on a row that does carry a config
+/// name) is the null value DELETE uses. An unknown op-type code fails the
+/// whole call with an illegal-argument error.
 ///
 /// On success writes a [`kafka_admin_AlterConfigsResult_t`] to `*out_result`
 /// (free it with [`kafka_admin_AlterConfigsResult_destroy`]) and returns null.
@@ -24369,5 +24389,144 @@ mod tests {
         // completing it is the whole point of the test, so it is simply left
         // to drop uncompleted here.
         drop(slow);
+    }
+
+    // COMMENTS.66.md finding 1: a resource mapped to an EMPTY `AlterConfigOp`
+    // list produced zero C rows (`for resource, ops in configs.items() for op
+    // in ops`), so it was invisible to `read_alter_config_ops` and never
+    // reached `admin_async_per_key_op`'s success-path callback loop, even
+    // though its `Future` was still pre-registered in the returned dict -
+    // a permanent hang, not a Java-faithful resolution. Fixed by recognizing
+    // a row with a non-NULL resource name but a NULL config name as an
+    // explicit "register this resource, no op" sentinel, matching Java's
+    // `configs.keySet()` iteration (`KafkaAdminClient.java:2870`), which
+    // creates a future for every key regardless of op-list length.
+
+    /// Direct unit test of the marshaling fix: a sentinel row (non-NULL
+    /// resource name, NULL config name) registers its resource in
+    /// `read_alter_config_ops`'s output map with an empty op list, rather
+    /// than being skipped like a row with a NULL resource name.
+    #[test]
+    fn read_alter_config_ops_registers_a_zero_op_resource_via_the_sentinel_row() {
+        let topic_id = i32::from(ConfigResourceType::Topic.id());
+        let resource_types = [topic_id, topic_id, topic_id];
+        let (_resources_owned, resource_ptrs) = c_array(&["topic-a", "topic-b", "topic-a"]);
+        // Row 0: a real SET op on "topic-a". Row 1: the sentinel for
+        // "topic-b" (no op contributed). Row 2: a NULL *resource* name, which
+        // is still a full skip, unaffected by this change.
+        let (_configs_owned, config_ptrs) = c_array_opt(&[Some("retention.ms"), None, Some("ignored")]);
+        let (_values_owned, value_ptrs) = c_array_opt(&[Some("1000"), None, None]);
+        let op_types = [0i32, 0i32, 0i32]; // SET; irrelevant for the sentinel/skipped rows.
+        // Overwrite row 2's resource name with NULL directly (c_array can't
+        // express a NULL entry).
+        let mut resource_ptrs = resource_ptrs;
+        resource_ptrs[2] = std::ptr::null();
+
+        let result = unsafe {
+            read_alter_config_ops(
+                resource_types.as_ptr(),
+                resource_ptrs.as_ptr(),
+                config_ptrs.as_ptr(),
+                value_ptrs.as_ptr(),
+                op_types.as_ptr(),
+                3,
+            )
+        }
+        .unwrap();
+
+        let topic_a = ConfigResource::new(ConfigResourceType::Topic, "topic-a".to_string());
+        let topic_b = ConfigResource::new(ConfigResourceType::Topic, "topic-b".to_string());
+        assert_eq!(result.len(), 2, "row 2's NULL resource name must still be a full skip");
+        assert_eq!(result[&topic_a].len(), 1, "topic-a keeps its one real op");
+        assert!(
+            result.contains_key(&topic_b),
+            "the sentinel row must register topic-b even though it contributes no op"
+        );
+        assert!(result[&topic_b].is_empty(), "the sentinel row contributes no AlterConfigOp");
+    }
+
+    /// End-to-end regression test for the same finding, through the actual
+    /// public async entry point and a real `MockAdminClient`: a resource with
+    /// an empty op list must get its `Future` resolved (not hang) exactly
+    /// like every other resource. Uses a bounded channel `recv_timeout` so a
+    /// reintroduced version of the bug fails fast instead of hanging the test
+    /// process.
+    #[test]
+    fn incremental_alter_configs_async_resolves_a_zero_op_resource() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        // The mock only accepts an alter for a topic that exists.
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"zero-op-topic".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        let topic_id = i32::from(ConfigResourceType::Topic.id());
+        let resource_types = [topic_id];
+        let (_resources_owned, resource_ptrs) = c_array(&["zero-op-topic"]);
+        // The sentinel row this fix introduces: no config name, no value.
+        let config_ptrs: [*const c_char; 1] = [std::ptr::null()];
+        let value_ptrs: [*const c_char; 1] = [std::ptr::null()];
+        let op_types = [-1i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, Option<String>, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, Option<String>, bool)>);
+        extern "C" fn on_alter(
+            resource_type: i32,
+            resource_name: *const c_char,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = if resource_name.is_null() {
+                None
+            } else {
+                Some(unsafe { CStr::from_ptr(resource_name) }.to_string_lossy().into_owned())
+            };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            }
+            ctx.0.send((resource_type, name, had_error)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_incremental_alter_configs_async(
+                admin,
+                resource_types.as_ptr(),
+                resource_ptrs.as_ptr(),
+                config_ptrs.as_ptr(),
+                value_ptrs.as_ptr(),
+                op_types.as_ptr(),
+                1,
+                -1,
+                false,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        // Before the fix, this resource never reached `admin_async_per_key_op`
+        // at all, so the callback would never fire and this would hang until
+        // the test harness's own timeout. A bounded `recv_timeout` turns that
+        // into a fast, explicit failure instead.
+        let (resource_type, name, had_error) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the zero-op resource's callback must fire, not hang");
+        assert_eq!(resource_type, topic_id);
+        assert_eq!(name.as_deref(), Some("zero-op-topic"));
+        assert!(!had_error, "an alter with no ops on an existing topic succeeds");
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
     }
 }

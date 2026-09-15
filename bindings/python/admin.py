@@ -2584,22 +2584,32 @@ class _AdminBase:
 
         Java iterates ``configs.keySet()`` (`KafkaAdminClient.java:2870`), so
         every resource key gets a future regardless of whether its op list is
-        empty. Known limitation shared with the pre-existing synchronous
-        path: the C spec is one row per *operation*
-        (`read_alter_config_ops` builds its map purely from rows), so a
-        resource with an EMPTY op list produces zero rows and is invisible
-        to the native layer - unlike the synchronous path (where that
-        resource was merely missing from the result dict), the ``Future``
-        this async path pre-builds for it would then never resolve. This is
-        a pre-existing gap in the row-based wire representation, not
-        introduced or fixed by this phase.
+        empty. The C spec is otherwise one row per *operation*
+        (`read_alter_config_ops` builds its map from rows), so a resource
+        with an EMPTY op list would produce zero rows and be invisible to the
+        native layer - a ``Future`` that never resolves, unlike the
+        synchronous path (where that resource was merely missing from the
+        result dict) or Java (which still completes it from the real
+        response). A resource with no ops gets one explicit sentinel row
+        instead - `(type, name, None, None, -1)`, `config_name=None` - which
+        `read_alter_config_ops` recognizes as "register this resource, no op
+        contributed" rather than "skip this row" (a NULL row requires a NULL
+        *resource* name to be skipped; a NULL config name alone is the
+        sentinel). This makes the resource reach `Admin.incremental_alter_configs`
+        and get a real per-key callback exactly like every other resource,
+        matching Java.
         """
         keys = list(configs.keys())
-        spec = [(int(resource.resource_type), str(resource.name),
-                 str(op.config_entry.name),
-                 None if op.config_entry.value is None else str(op.config_entry.value),
-                 int(op.op_type))
-                for resource, ops in configs.items() for op in ops]
+        spec = []
+        for resource, ops in configs.items():
+            if not ops:
+                spec.append((int(resource.resource_type), str(resource.name), None, None, -1))
+                continue
+            for op in ops:
+                spec.append((int(resource.resource_type), str(resource.name),
+                             str(op.config_entry.name),
+                             None if op.config_entry.value is None else str(op.config_entry.value),
+                             int(op.op_type)))
         return keys, spec
 
     def _close_spec(self, timeout):
