@@ -6249,18 +6249,20 @@ static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, P
 // every drain below is unreachable from the test suite. Their Py_BuildValue
 // arity is instead checked statically by `cargo xtask check-bindings`, and the
 // field *order* by review against the matching `_to_*` unpacker in admin.py.
+//
+// createAcls / deleteAcls / alterClientQuotas fire once PER KEY, independently
+// (Phase F of the per-key-callback reversal), unlike the still-joined
+// describeAcls / describeClientQuotas above and below - each has a single
+// future for the whole call in Java, so nothing here changes for them. Their
+// trampolines are defined further below (after `acl_binding_to_py` /
+// `acl_binding_filter_to_py` / `client_quota_entity_to_py`, which they reuse
+// to decode the owned per-key handle they each receive).
 // ---------------------------------------------------------------------------
 
-static void admin_create_acls_trampoline(kafka_admin_CreateAclsResult_t* r,
-                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_acls_trampoline(kafka_admin_DescribeAclsResult_t* r,
                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_acls_trampoline(kafka_admin_DeleteAclsResult_t* r,
-                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_client_quotas_trampoline(kafka_admin_DescribeClientQuotasResult_t* r,
                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_client_quotas_trampoline(kafka_admin_AlterClientQuotasResult_t* r,
-                                                 kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- ACL request marshaling -------------------------------------------------
 
@@ -6382,6 +6384,60 @@ static PyObject* client_quota_entity_to_py(const kafka_common_ClientQuotaEntity_
     return pairs;
 }
 
+// createAcls: the key is delivered as an owned kafka_common_AclBinding_t
+// handle - reuse acl_binding_to_py (already used by the synchronous drain
+// path, on a *borrowed* handle there) to extract its seven fields as a tuple,
+// then destroy the now-owned handle here, since this is its only consumer.
+static void admin_create_acls_trampoline(kafka_common_AclBinding_t* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* key_tuple = acl_binding_to_py(key);
+    kafka_common_AclBinding_destroy(key);
+    PyObject* r = PyObject_CallFunction(cb, "OK", key_tuple,
+        (unsigned long long)(uintptr_t)error);
+    Py_XDECREF(key_tuple);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteAcls: the key is an owned kafka_common_AclBindingFilter_t handle
+// (destroyed here); the value, when present, is an owned
+// kafka_admin_DeleteAclsFilterResults_t handle passed through as an int for
+// `DeleteAclsFilterResults_drain` (below) to drain+destroy - mirroring how
+// every other per-key value handle in this file crosses the boundary.
+static void admin_delete_acls_trampoline(kafka_common_AclBindingFilter_t* key,
+    kafka_admin_DeleteAclsFilterResults_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* key_tuple = acl_binding_filter_to_py(key);
+    kafka_common_AclBindingFilter_destroy(key);
+    PyObject* r = PyObject_CallFunction(cb, "OKK", key_tuple,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    Py_XDECREF(key_tuple);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// alterClientQuotas: the key is an owned kafka_common_ClientQuotaEntity_t
+// handle - reuse client_quota_entity_to_py (also used by the synchronous
+// drain path on a borrowed handle) then destroy it here.
+static void admin_alter_client_quotas_trampoline(kafka_common_ClientQuotaEntity_t* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* key_tuple = client_quota_entity_to_py(key);
+    kafka_common_ClientQuotaEntity_destroy(key);
+    PyObject* r = PyObject_CallFunction(cb, "OK", key_tuple,
+        (unsigned long long)(uintptr_t)error);
+    Py_XDECREF(key_tuple);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
 // ---- submits ----------------------------------------------------------------
 
 static PyObject* py_Admin_create_acls_async(PyObject* self, PyObject* args) {
@@ -6390,7 +6446,9 @@ static PyObject* py_Admin_create_acls_async(PyObject* self, PyObject* args) {
 
     acl_arrays_t a;
     if (build_acl_arrays(acls, 0, &a) < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per binding (Java's per-key KafkaFuture), not
+    // one for the whole batch - see admin_create_acls_trampoline.
+    admin_incref_n(cb, a.count);
     kafka_admin_AdminClient_create_acls_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
         a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
@@ -6418,7 +6476,9 @@ static PyObject* py_Admin_delete_acls_async(PyObject* self, PyObject* args) {
 
     acl_arrays_t a;
     if (build_acl_arrays(filters, 1, &a) < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per filter (Java's per-key KafkaFuture), not
+    // one for the whole batch - see admin_delete_acls_trampoline.
+    admin_incref_n(cb, a.count);
     kafka_admin_AdminClient_delete_acls_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
         a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
@@ -6566,7 +6626,14 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
     }
 
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per requested row - Java's per-entity
+        // future map collapses a duplicate entity, but the native `keys` for
+        // the fan-out is built from these raw rows, not deduplicated by
+        // entity (see admin_async_per_key_op / read_client_quota_entity_keys
+        // in src/ffi/admin.rs), so the increment count is the row count `n`,
+        // not the (possibly smaller) distinct-entity count the Python
+        // `futures` dict holds.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_alter_client_quotas_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h,
             (const char* const* const*)entity_types, (const char* const* const*)entity_names,
@@ -6587,27 +6654,17 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
 }
 
 // ---- drains -----------------------------------------------------------------
-
-// {binding_tuple: error_or_None}
-static PyObject* py_CreateAclsResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_CreateAclsResult_t* r = (kafka_admin_CreateAclsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_CreateAclsResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_CreateAclsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key = acl_binding_to_py(kafka_admin_CreateAclsResult_get_binding(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_CreateAclsResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_CreateAclsResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_CreateAclsResult_destroy(r);
-    return d;
-}
+//
+// CreateAclsResult_drain / DeleteAclsResult_drain / AlterClientQuotasResult_drain
+// (the whole-batch joined-callback drains for createAcls / deleteAcls /
+// alterClientQuotas) are gone: Phase F moved those three RPCs to per-key
+// delivery, so admin.py no longer calls them — see
+// admin_create_acls_trampoline / admin_delete_acls_trampoline /
+// admin_alter_client_quotas_trampoline above and DeleteAclsFilterResults_drain
+// below for their replacements. The flattened `kafka_admin_CreateAclsResult_t`
+// / `kafka_admin_DeleteAclsResult_t` / `kafka_admin_AlterClientQuotasResult_t`
+// C types themselves are unchanged — they still back the synchronous (blocking)
+// FFI entry points, which this Python binding never calls directly.
 
 // [binding_tuple] — a plain list, because describeAcls has one future for the
 // whole call and so no key to hang an error on.
@@ -6630,44 +6687,29 @@ static PyObject* py_DescribeAclsResult_drain(PyObject* self, PyObject* args) {
     return list;
 }
 
-// {filter_tuple: (error_or_None, [(binding_or_None, error_or_None)])}
-//
-// Two levels, because Java's FilterResults holds one FilterResult per matched
-// ACL and each carries either a binding or its own exception. The outer error
-// is the filter's future failing, which is a different thing.
-static PyObject* py_DeleteAclsResult_drain(PyObject* self, PyObject* args) {
+// [(binding_or_None, error_or_None)] — drains+destroys the owned
+// kafka_admin_DeleteAclsFilterResults_t handle delete_acls's per-key async
+// callback delivers as its value (Phase F), one row per ACL the filter
+// matched. Same per-row shape as the synchronous flattened result's nested
+// `results[i][j]` index level, just for a single filter.
+static PyObject* py_DeleteAclsFilterResults_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_DeleteAclsResult_t* r = (kafka_admin_DeleteAclsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_DeleteAclsResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_DeleteAclsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        int32_t rn = kafka_admin_DeleteAclsResult_get_result_count(r, i);
-        PyObject* results = PyList_New(rn < 0 ? 0 : rn);
-        if (results == NULL) { Py_DECREF(d); kafka_admin_DeleteAclsResult_destroy(r); return NULL; }
-        for (int32_t j = 0; j < rn; j++) {
-            PyObject* b = acl_binding_to_py(kafka_admin_DeleteAclsResult_get_binding(r, i, j));
-            PyObject* e =
-                borrowed_error_to_py(kafka_admin_DeleteAclsResult_get_result_error(r, i, j));
-            PyObject* row = error_value_pair(e, b);
-            if (row == NULL) {
-                Py_DECREF(results); Py_DECREF(d);
-                kafka_admin_DeleteAclsResult_destroy(r); return NULL;
-            }
-            PyList_SET_ITEM(results, j, row);
+    kafka_admin_DeleteAclsFilterResults_t* r = (kafka_admin_DeleteAclsFilterResults_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DeleteAclsFilterResults_count(r);
+    PyObject* list = PyList_New(n < 0 ? 0 : n);
+    if (list == NULL) { kafka_admin_DeleteAclsFilterResults_destroy(r); return NULL; }
+    for (int32_t j = 0; j < n; j++) {
+        PyObject* b = acl_binding_to_py(kafka_admin_DeleteAclsFilterResults_get_binding(r, j));
+        PyObject* e = borrowed_error_to_py(kafka_admin_DeleteAclsFilterResults_get_error(r, j));
+        PyObject* row = error_value_pair(e, b);
+        if (row == NULL) {
+            Py_DECREF(list); kafka_admin_DeleteAclsFilterResults_destroy(r); return NULL;
         }
-        PyObject* key = acl_binding_filter_to_py(kafka_admin_DeleteAclsResult_get_filter(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_DeleteAclsResult_get_error(r, i));
-        PyObject* value = error_value_pair(err, results);
-        if (!key || !value || PyDict_SetItem(d, key, value) < 0) {
-            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
-            kafka_admin_DeleteAclsResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(value);
+        PyList_SET_ITEM(list, j, row);
     }
-    kafka_admin_DeleteAclsResult_destroy(r);
-    return d;
+    kafka_admin_DeleteAclsFilterResults_destroy(r);
+    return list;
 }
 
 // {entity_pairs: [(quota_key, quota_value)]}
@@ -6713,46 +6755,38 @@ static PyObject* py_DescribeClientQuotasResult_drain(PyObject* self, PyObject* a
     return d;
 }
 
-// {entity_pairs: error_or_None}
-static PyObject* py_AlterClientQuotasResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_AlterClientQuotasResult_t* r = (kafka_admin_AlterClientQuotasResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_AlterClientQuotasResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_AlterClientQuotasResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key =
-            client_quota_entity_to_py(kafka_admin_AlterClientQuotasResult_get_entity(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_AlterClientQuotasResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_AlterClientQuotasResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_AlterClientQuotasResult_destroy(r);
-    return d;
-}
-
 // ---------------------------------------------------------------------------
 // B5b — SCRAM, delegation tokens and features
 //
-// Java's MockAdminClient throws for the two SCRAM RPCs
-// (MockAdminClient.java:1251-1259), so the success branch of those two drains
-// is unreachable from the test suite; their Py_BuildValue arity is checked
-// statically by `cargo xtask check-bindings` and their field order by review
+// Java's MockAdminClient throws for describeUserScramCredentials
+// (MockAdminClient.java:1251-1254), so the success branch of that drain is
+// unreachable from the test suite; its Py_BuildValue arity is checked
+// statically by `cargo xtask check-bindings` and its field order by review
 // against the matching `_to_*` unpacker in admin.py. The mock *does* implement
 // the four delegation-token RPCs and both feature RPCs, so those drains are
 // exercised end to end by test_admin.py.
+//
+// alterUserScramCredentials / updateFeatures fire once PER KEY, independently
+// (Phase F), each keyed by a plain string (user / feature name) delivered
+// borrowed - same shape as deleteConsumerGroups' group id
+// (admin_delete_consumer_groups_trampoline) - so there is no handle to decode
+// or destroy here, unlike createAcls/deleteAcls/alterClientQuotas above.
 // ---------------------------------------------------------------------------
 
 static void admin_describe_user_scram_credentials_trampoline(
     kafka_admin_DescribeUserScramCredentialsResult_t* r,
     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_user_scram_credentials_trampoline(
-    kafka_admin_AlterUserScramCredentialsResult_t* r,
-    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+static void admin_alter_user_scram_credentials_trampoline(const char* user,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", user, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
 static void admin_create_delegation_token_trampoline(kafka_admin_CreateDelegationTokenResult_t* r,
                                                      kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_renew_delegation_token_trampoline(kafka_admin_RenewDelegationTokenResult_t* r,
@@ -6763,8 +6797,15 @@ static void admin_describe_delegation_token_trampoline(kafka_admin_DescribeDeleg
                                                        kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_features_trampoline(kafka_admin_DescribeFeaturesResult_t* r,
                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_update_features_trampoline(kafka_admin_UpdateFeaturesResult_t* r,
-                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_update_features_trampoline(const char* feature,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", feature, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- value converters -------------------------------------------------------
 
@@ -6944,7 +6985,13 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
         has_salts[i] = salt_obj != Py_None;
     }
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per requested row - two rows naming the
+        // same user are passed through rather than deduplicated (Java's
+        // per-user future map collapses them into one outcome, but the
+        // native `keys` for the fan-out still has one raw entry per row; see
+        // read_scram_user_keys in src/ffi/admin.rs), so the increment count
+        // is the row count `n`.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_alter_user_scram_credentials_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, users, is_deletions, mechanisms, iterations,
             passwords, password_lens, salts, salt_lens, has_salts, (int32_t)n, timeout_ms,
@@ -7049,7 +7096,10 @@ static PyObject* py_Admin_update_features_async(PyObject* self, PyObject* args) 
         upgrade_types[i] = (int32_t)upgrade_type;
     }
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per feature (Java's per-key KafkaFuture),
+        // not one for the whole batch - see admin_update_features_trampoline.
+        // `rows` comes from a Python dict's keys, already unique.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_update_features_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, features, max_version_levels, upgrade_types,
             (int32_t)n, timeout_ms, validate_only ? true : false, admin_update_features_trampoline,
@@ -7139,29 +7189,10 @@ static PyObject* py_DescribeUserScramCredentialsResult_drain(PyObject* self, PyO
     return d;
 }
 
-// {user: error_or_None}
-static PyObject* py_AlterUserScramCredentialsResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_AlterUserScramCredentialsResult_t* r =
-        (kafka_admin_AlterUserScramCredentialsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_AlterUserScramCredentialsResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_AlterUserScramCredentialsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key =
-            PyUnicode_FromString(kafka_admin_AlterUserScramCredentialsResult_get_user(r, i));
-        PyObject* err =
-            borrowed_error_to_py(kafka_admin_AlterUserScramCredentialsResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_AlterUserScramCredentialsResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_AlterUserScramCredentialsResult_destroy(r);
-    return d;
-}
+// AlterUserScramCredentialsResult_drain (the whole-batch joined-callback
+// drain) is gone: Phase F moved alterUserScramCredentials to per-key
+// delivery, keyed by a plain string with no handle to drain at all — see
+// admin_alter_user_scram_credentials_trampoline above.
 
 // One token tuple.
 static PyObject* py_CreateDelegationTokenResult_drain(PyObject* self, PyObject* args) {
@@ -7272,26 +7303,10 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
     return out;
 }
 
-// {feature: error_or_None}
-static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_UpdateFeaturesResult_t* r = (kafka_admin_UpdateFeaturesResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_UpdateFeaturesResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_UpdateFeaturesResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key = PyUnicode_FromString(kafka_admin_UpdateFeaturesResult_get_feature(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_UpdateFeaturesResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_UpdateFeaturesResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_UpdateFeaturesResult_destroy(r);
-    return d;
-}
+// UpdateFeaturesResult_drain (the whole-batch joined-callback drain) is gone:
+// Phase F moved updateFeatures to per-key delivery, keyed by a plain string
+// with no handle to drain at all — see admin_update_features_trampoline
+// above.
 
 // ---------------------------------------------------------------------------
 // B6 — producers and transactions
@@ -7906,29 +7921,25 @@ static PyMethodDef ProducerNativeMethods[] = {
      py_RemoveMembersFromConsumerGroupResult_drain, METH_VARARGS,
      "Drain+destroy a RemoveMembersFromConsumerGroupResult handle into a dict"},
     {"Admin_create_acls_async", py_Admin_create_acls_async, METH_VARARGS,
-     "Async createAcls; cb(result_int, error_int)"},
+     "Async createAcls; cb(key_tuple, error_int) once per binding"},
     {"Admin_describe_acls_async", py_Admin_describe_acls_async, METH_VARARGS,
      "Async describeAcls; cb(result_int, error_int)"},
     {"Admin_delete_acls_async", py_Admin_delete_acls_async, METH_VARARGS,
-     "Async deleteAcls; cb(result_int, error_int)"},
+     "Async deleteAcls; cb(key_tuple, value_int, error_int) once per filter"},
     {"Admin_describe_client_quotas_async", py_Admin_describe_client_quotas_async, METH_VARARGS,
      "Async describeClientQuotas; cb(result_int, error_int)"},
     {"Admin_alter_client_quotas_async", py_Admin_alter_client_quotas_async, METH_VARARGS,
-     "Async alterClientQuotas; cb(result_int, error_int)"},
-    {"CreateAclsResult_drain", py_CreateAclsResult_drain, METH_VARARGS,
-     "Drain+destroy a CreateAclsResult handle into a dict"},
+     "Async alterClientQuotas; cb(key_tuple, error_int) once per entity"},
     {"DescribeAclsResult_drain", py_DescribeAclsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeAclsResult handle into a list"},
-    {"DeleteAclsResult_drain", py_DeleteAclsResult_drain, METH_VARARGS,
-     "Drain+destroy a DeleteAclsResult handle into a dict"},
+    {"DeleteAclsFilterResults_drain", py_DeleteAclsFilterResults_drain, METH_VARARGS,
+     "Drain+destroy a DeleteAclsFilterResults handle (deleteAcls's per-key value) into a list"},
     {"DescribeClientQuotasResult_drain", py_DescribeClientQuotasResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeClientQuotasResult handle into a dict"},
-    {"AlterClientQuotasResult_drain", py_AlterClientQuotasResult_drain, METH_VARARGS,
-     "Drain+destroy an AlterClientQuotasResult handle into a dict"},
     {"Admin_describe_user_scram_credentials_async", py_Admin_describe_user_scram_credentials_async,
      METH_VARARGS, "Async describeUserScramCredentials; cb(result_int, error_int)"},
     {"Admin_alter_user_scram_credentials_async", py_Admin_alter_user_scram_credentials_async,
-     METH_VARARGS, "Async alterUserScramCredentials; cb(result_int, error_int)"},
+     METH_VARARGS, "Async alterUserScramCredentials; cb(user, error_int) once per user"},
     {"Admin_create_delegation_token_async", py_Admin_create_delegation_token_async, METH_VARARGS,
      "Async createDelegationToken; cb(result_int, error_int)"},
     {"Admin_renew_delegation_token_async", py_Admin_renew_delegation_token_async, METH_VARARGS,
@@ -7940,13 +7951,11 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_describe_features_async", py_Admin_describe_features_async, METH_VARARGS,
      "Async describeFeatures; cb(result_int, error_int)"},
     {"Admin_update_features_async", py_Admin_update_features_async, METH_VARARGS,
-     "Async updateFeatures; cb(result_int, error_int)"},
+     "Async updateFeatures; cb(feature, error_int) once per feature"},
     {"MockAdminClient_set_feature_levels", py_MockAdminClient_set_feature_levels, METH_VARARGS,
      "Mock: seed the feature-level maps; returns error_int"},
     {"DescribeUserScramCredentialsResult_drain", py_DescribeUserScramCredentialsResult_drain,
      METH_VARARGS, "Drain+destroy a DescribeUserScramCredentialsResult handle into a dict"},
-    {"AlterUserScramCredentialsResult_drain", py_AlterUserScramCredentialsResult_drain,
-     METH_VARARGS, "Drain+destroy an AlterUserScramCredentialsResult handle into a dict"},
     {"CreateDelegationTokenResult_drain", py_CreateDelegationTokenResult_drain, METH_VARARGS,
      "Drain+destroy a CreateDelegationTokenResult handle into a token tuple"},
     {"RenewDelegationTokenResult_drain", py_RenewDelegationTokenResult_drain, METH_VARARGS,
@@ -7957,8 +7966,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Drain+destroy a DescribeDelegationTokenResult handle into a list"},
     {"DescribeFeaturesResult_drain", py_DescribeFeaturesResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeFeaturesResult handle into (finalized, epoch, supported)"},
-    {"UpdateFeaturesResult_drain", py_UpdateFeaturesResult_drain, METH_VARARGS,
-     "Drain+destroy an UpdateFeaturesResult handle into a dict"},
     {"Admin_describe_producers_async", py_Admin_describe_producers_async, METH_VARARGS,
      "Async describeProducers; cb(result_int, error_int)"},
     {"Admin_describe_transactions_async", py_Admin_describe_transactions_async, METH_VARARGS,

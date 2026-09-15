@@ -29,12 +29,13 @@ C has no ``KafkaFuture``, so most RPCs deliver one flattened result handle
 carrying a value *and* an error per key, and this module drains it into a plain
 dict whose values are either the result object or a :class:`KafkaError`.
 
-The Topics-, Configs-, Log-dirs-, Partitions/offsets- and Consumer-groups-
-family RPCs below are the exception: their native callback fires **once per
-key, independently, as that key's own future resolves** — matching Java's
-per-key ``KafkaFuture`` exactly rather than joining every key into one
-flattened batch — so these nineteen return a dict of **Futures** immediately,
-before any key has necessarily completed, rather than a dict of
+The Topics-, Configs-, Log-dirs-, Partitions/offsets-, Consumer-groups- and
+ACLs/quotas/features-family RPCs below are the exception: their native
+callback fires **once per key, independently, as that key's own future
+resolves** — matching Java's per-key ``KafkaFuture`` exactly rather than
+joining every key into one flattened batch — so these twenty-four return a
+dict of **Futures** immediately, before any key has necessarily completed,
+rather than a dict of
 already-resolved values:
 
 * ``create_topics`` -> ``{topic_name: Future[TopicMetadataAndConfig]}``
@@ -92,6 +93,29 @@ already-resolved values:
   ``IllegalArgumentException`` **synchronously**, before any ``KafkaFuture``
   exists, so this raises :class:`KafkaError` synchronously too rather than
   returning anything.
+* ``create_acls`` -> ``{AclBinding: Future[None]}`` (per-binding future is
+  ``KafkaFuture<Void>``, so a result of ``None`` means success). A binding
+  with an ``ANY``/``MATCH`` field Java's ``ResourcePattern`` /
+  ``AccessControlEntry`` constructors reject fails that binding's own
+  ``Future`` rather than raising from the call.
+* ``delete_acls`` -> ``{AclBindingFilter: Future[[DeletedAcl]]}``. A filter
+  whose own request failed (nothing was deleted for it) raises through its
+  ``Future``; otherwise it resolves to the ACLs the filter matched, each of
+  which either was deleted or carries its own exception, as Java's
+  ``FilterResult`` does.
+* ``alter_client_quotas`` -> ``{ClientQuotaEntity: Future[None]}``. Two
+  alterations of the same entity make every entity's ``Future`` in that call
+  raise the *same* error (the request is rejected before it reaches the
+  broker — a deliberate C-layer-stricter deviation from Java, which sends
+  both and only its own local future map, never observed here, collapses).
+* ``alter_user_scram_credentials`` -> ``{user: Future[None]}``
+* ``update_features`` -> ``{feature: Future[None]}``. An empty map returns an
+  **empty dict**, against both a mock and a real client: unlike Java's
+  ``KafkaAdminClient.updateFeatures``, which throws
+  ``IllegalArgumentException`` for one, there is no per-call callback slot
+  left to report that rejection through when there are zero features to key
+  a ``Future`` on — a documented limitation of the per-key async entry point,
+  not a Java-faithful "yields an empty result".
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -127,10 +151,10 @@ per-key failure there likewise does not raise — only a whole-call failure does
 
 For the already-drained dicts above, a per-key failure therefore does **not**
 raise; iterate the dict and check for ``KafkaError`` values. Only a whole-call
-failure raises. For the nineteen Topics-, Configs-, Log-dirs-,
-Partitions/offsets- and Consumer-groups-family RPCs (dicts of ``Future``s), a
-per-key failure raises from *that key's* ``Future.result()`` instead — see
-above.
+failure raises. For the twenty-four Topics-, Configs-, Log-dirs-,
+Partitions/offsets-, Consumer-groups- and ACLs/quotas/features-family RPCs
+(dicts of ``Future``s), a per-key failure raises from *that key's*
+``Future.result()`` instead — see above.
 """
 
 import asyncio
@@ -2109,11 +2133,6 @@ def _to_acl_binding_filter(raw):
     return None if raw is None else AclBindingFilter(*raw)
 
 
-def _to_create_acls(raw):
-    """{binding_tuple: error} -> {AclBinding: None | KafkaError}"""
-    return {_to_acl_binding(key): _to_error(error) for key, error in raw.items()}
-
-
 def _to_describe_acls(raw):
     """[binding_tuple] -> [AclBinding]
 
@@ -2124,23 +2143,16 @@ def _to_describe_acls(raw):
     return [_to_acl_binding(row) for row in raw]
 
 
-def _to_delete_acls(raw):
-    """{filter_tuple: (error, [(error, binding_tuple)])}
-    -> {AclBindingFilter: KafkaError | [DeletedAcl]}
-
-    A filter whose own future failed maps to that error; otherwise it maps to
-    the ACLs it matched, each of which either was deleted or carries its own
-    exception. The two levels are Java's, not an invention: ``FilterResults``
-    holds one ``FilterResult`` per matched ACL.
+def _drain_delete_acls_filter_results(value):
+    """Drain+destroy a standalone ``DeleteAclsFilterResults`` handle delivered
+    by ``delete_acls``'s per-key async callback (Phase F) into
+    ``[DeletedAcl]``: one entry per ACL the filter matched, each of which
+    either was deleted or carries its own exception. Same per-row shape as
+    the RPC's own ``FilterResults``, which the old joined-callback whole-dict
+    ``_to_delete_acls`` converter (removed) used to build inline.
     """
-    out = {}
-    for key, (error, results) in raw.items():
-        filter_key = _to_acl_binding_filter(key)
-        if error is not None:
-            out[filter_key] = _to_error(error)
-        else:
-            out[filter_key] = [DeletedAcl(_to_acl_binding(b), _to_error(e)) for e, b in results]
-    return out
+    return [DeletedAcl(_to_acl_binding(b), _to_error(e))
+            for e, b in _lib.DeleteAclsFilterResults_drain(value)]
 
 
 def _to_client_quota_entity(raw):
@@ -2152,11 +2164,6 @@ def _to_describe_client_quotas(raw):
     """{entity_pairs: [(quota_key, value)]}
     -> {ClientQuotaEntity: {quota_key: float}}"""
     return {_to_client_quota_entity(key): dict(quotas) for key, quotas in raw.items()}
-
-
-def _to_alter_client_quotas(raw):
-    """{entity_pairs: error} -> {ClientQuotaEntity: None | KafkaError}"""
-    return {_to_client_quota_entity(key): _to_error(error) for key, error in raw.items()}
 
 
 def _to_kafka_principal(raw):
@@ -2630,6 +2637,63 @@ class _AdminBase:
                 self._resolve_keyed_value, futures[(topic, partition)], value, error, convert)
         return cb
 
+    def _keyed_acl_binding_void_cb(self, futures, loop=None):
+        """Builds the `cb(key_tuple, error)` native callback for `create_acls`
+        (Phase F), whose key is an `AclBinding` delivered as its seven-field
+        tuple - mirrors `_keyed_config_resource_void_cb`'s pattern of
+        rebuilding a compound key from the native callback's raw fields."""
+        if loop is None:
+            def cb(key_tuple, error):
+                self._resolve_keyed_void(futures[_to_acl_binding(key_tuple)], error)
+            return cb
+
+        def cb(key_tuple, error):
+            key = _to_acl_binding(key_tuple)
+            if loop.is_closed():
+                self._free_keyed_void(error)
+                return
+            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+        return cb
+
+    def _keyed_acl_binding_filter_value_cb(self, futures, loop=None):
+        """Builds the `cb(key_tuple, value, error)` native callback for
+        `delete_acls` (Phase F), whose key is an `AclBindingFilter` delivered
+        as its seven-field tuple and whose value, when present, is an owned
+        `DeleteAclsFilterResults` handle drained by
+        `_drain_delete_acls_filter_results`."""
+        if loop is None:
+            def cb(key_tuple, value, error):
+                self._resolve_keyed_value(futures[_to_acl_binding_filter(key_tuple)], value, error,
+                                          _drain_delete_acls_filter_results)
+            return cb
+
+        def cb(key_tuple, value, error):
+            key = _to_acl_binding_filter(key_tuple)
+            if loop.is_closed():
+                self._free_keyed_value(value, error, _drain_delete_acls_filter_results)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[key], value, error,
+                _drain_delete_acls_filter_results)
+        return cb
+
+    def _keyed_client_quota_entity_void_cb(self, futures, loop=None):
+        """Builds the `cb(key_pairs, error)` native callback for
+        `alter_client_quotas` (Phase F), whose key is a `ClientQuotaEntity`
+        delivered as its `(entity_type, entity_name_or_None)` pairs."""
+        if loop is None:
+            def cb(key_pairs, error):
+                self._resolve_keyed_void(futures[_to_client_quota_entity(key_pairs)], error)
+            return cb
+
+        def cb(key_pairs, error):
+            key = _to_client_quota_entity(key_pairs)
+            if loop.is_closed():
+                self._free_keyed_void(error)
+                return
+            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+        return cb
+
     # ---- per-key request builders (Phase A) --------------------------------
     #
     # Build the `spec` the C layer parses plus the deduplicated `{key: ...}`
@@ -3040,13 +3104,16 @@ class _AdminBase:
                  int(f.operation), int(f.permission_type))
                 for f in filters]
 
-    def _create_acls_spec(self, acls, timeout):
-        rows = self._acl_binding_rows(acls)
-        ms = _ms(timeout)
-        drain = _lib.CreateAclsResult_drain
-        return (lambda cb: _lib.Admin_create_acls_async(self._h, rows, ms, cb),
-                self._resolve_value(drain, _to_create_acls),
-                self._free_value(drain))
+    def _create_acls_keys_and_spec(self, acls):
+        """De-duplicate `acls`, since an `AclBinding` IS its own key - no
+        extra per-row data would be lost, unlike `alter_client_quotas`'s
+        entity+ops alterations. Matches `_string_keyed_names`'s pattern, and
+        avoids the raw C per-key fan-out's generic fallback for a repeated
+        key (`admin_async_per_key_op`'s claimed-entries mask), mirroring the
+        Rust core's own `Entry::Vacant`-based dedup in
+        `KafkaAdminClient::create_acls`."""
+        deduped = list(dict.fromkeys(acls))
+        return deduped, self._acl_binding_rows(deduped)
 
     def _describe_acls_spec(self, acl_filter, timeout):
         row = self._acl_filter_rows([acl_filter])[0]
@@ -3057,13 +3124,11 @@ class _AdminBase:
                 self._resolve_value(drain, _to_describe_acls),
                 self._free_value(drain))
 
-    def _delete_acls_spec(self, filters, timeout):
-        rows = self._acl_filter_rows(filters)
-        ms = _ms(timeout)
-        drain = _lib.DeleteAclsResult_drain
-        return (lambda cb: _lib.Admin_delete_acls_async(self._h, rows, ms, cb),
-                self._resolve_value(drain, _to_delete_acls),
-                self._free_value(drain))
+    def _delete_acls_keys_and_spec(self, filters):
+        """Same reasoning as `_create_acls_keys_and_spec`, for
+        `AclBindingFilter`."""
+        deduped = list(dict.fromkeys(filters))
+        return deduped, self._acl_filter_rows(deduped)
 
     @staticmethod
     def _quota_filter_rows(quota_filter):
@@ -3109,14 +3174,18 @@ class _AdminBase:
                  [(str(o.key), None if o.value is None else float(o.value)) for o in a.ops])
                 for a in entries]
 
-    def _alter_client_quotas_spec(self, entries, timeout, validate_only):
-        rows = self._quota_alteration_rows(entries)
-        ms = _ms(timeout)
-        drain = _lib.AlterClientQuotasResult_drain
-        return (lambda cb: _lib.Admin_alter_client_quotas_async(
-                    self._h, rows, ms, validate_only, cb),
-                self._resolve_value(drain, _to_alter_client_quotas),
-                self._free_value(drain))
+    def _alter_client_quotas_keys_and_spec(self, entries):
+        """`entries`' distinct entities become the futures dict's keys - an
+        alteration's entity IS its key, but its `ops` are per-row, non-key
+        data that a dedup must not silently drop. Unlike
+        `_create_acls_keys_and_spec` this does NOT deduplicate the spec sent
+        to the native layer: a genuinely repeated entity across `entries`
+        must still reach `read_client_quota_alterations` so it is rejected
+        with its real per-row message (`admin-client.md`'s "the C layer is
+        stricter" deviation), rather than being silently coalesced here.
+        """
+        keys = list(dict.fromkeys(a.entity for a in entries))
+        return keys, self._quota_alteration_rows(entries)
 
 
     # ---- B5b: SCRAM, delegation tokens and features ------------------------
@@ -3182,13 +3251,16 @@ class _AdminBase:
                 self._resolve_value(drain, _to_describe_user_scram_credentials),
                 self._free_value(drain))
 
-    def _alter_user_scram_credentials_spec(self, alterations, timeout):
-        rows = self._scram_alteration_rows(alterations)
-        ms = _ms(timeout)
-        drain = _lib.AlterUserScramCredentialsResult_drain
-        return (lambda cb: _lib.Admin_alter_user_scram_credentials_async(self._h, rows, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+    def _alter_user_scram_credentials_keys_and_spec(self, alterations):
+        """`alterations`' distinct usernames become the futures dict's keys -
+        a user IS a plain string, unlike `alter_client_quotas`'s compound
+        entity key, so the caller can already match a returned Future by name
+        even when the Rust core collapses two rows naming the same user into
+        one outcome (`kafka_admin_AdminClient_alter_user_scram_credentials`'s
+        own doc: two rows are passed through, not rejected, unlike
+        `alter_client_quotas`'s duplicate-entity rejection)."""
+        keys = list(dict.fromkeys(str(a.user) for a in alterations))
+        return keys, self._scram_alteration_rows(alterations)
 
     def _create_delegation_token_spec(self, renewers, owner, max_lifetime_ms, timeout):
         rows = self._principal_rows(renewers)
@@ -3243,14 +3315,10 @@ class _AdminBase:
                 self._resolve_value(drain, _to_feature_metadata),
                 self._free_value(drain))
 
-    def _update_features_spec(self, feature_updates, timeout, validate_only):
-        rows = self._feature_update_rows(feature_updates)
-        ms = _ms(timeout)
-        drain = _lib.UpdateFeaturesResult_drain
-        return (lambda cb: _lib.Admin_update_features_async(
-                    self._h, rows, ms, bool(validate_only), cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+    def _update_features_keys_and_spec(self, feature_updates):
+        """`feature_updates`' keys are already unique (a plain dict); the
+        spec is the flattened per-feature rows the C extension unpacks."""
+        return list(feature_updates.keys()), self._feature_update_rows(feature_updates)
 
     # ---- B6: producers and transactions ------------------------------------
     @staticmethod
@@ -3889,16 +3957,21 @@ class Admin(_AdminBase):
 
     def create_acls(self, acls, timeout=None):
         """Create ``acls`` (an iterable of :class:`AclBinding`). Returns
-        ``{AclBinding: None | KafkaError}``.
+        ``{AclBinding: Future[None]}`` immediately; each binding's ``Future``
+        resolves independently.
 
         A binding with an ``ANY`` resource type, operation or permission type,
-        or an ``ANY`` or ``MATCH`` pattern type, raises before the request is
-        sent — Java's ``ResourcePattern`` and ``AccessControlEntry``
+        or an ``ANY`` or ``MATCH`` pattern type, fails that binding's
+        ``Future`` -- Java's ``ResourcePattern`` and ``AccessControlEntry``
         constructors reject those, and they are what
         :class:`AclBindingFilter` is for.
         """
         self._check_closed()
-        return self._run_sync(*self._create_acls_spec(acls, timeout))
+        keys, rows = self._create_acls_keys_and_spec(acls)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_create_acls_async(self._h, rows, ms, self._keyed_acl_binding_void_cb(futures))
+        return futures
 
     def describe_acls(self, acl_filter, timeout=None):
         """Describe the ACLs matching ``acl_filter`` (an
@@ -3915,15 +3988,21 @@ class Admin(_AdminBase):
     def delete_acls(self, filters, timeout=None):
         """Delete the ACLs matching each of ``filters`` (an iterable of
         :class:`AclBindingFilter`). Returns
-        ``{AclBindingFilter: KafkaError | [DeletedAcl]}``.
+        ``{AclBindingFilter: Future[[DeletedAcl]]}`` immediately; each
+        filter's ``Future`` resolves independently.
 
-        A filter maps to a ``KafkaError`` when its own request failed and
-        nothing was deleted for it, or to the ACLs it matched — each of which
-        either was deleted or carries its own exception, as Java's
-        ``FilterResult`` does.
+        A filter whose own request failed (nothing was deleted for it) raises
+        through its ``Future``; otherwise the ``Future`` resolves to the ACLs
+        it matched, each of which either was deleted or carries its own
+        exception, as Java's ``FilterResult`` does.
         """
         self._check_closed()
-        return self._run_sync(*self._delete_acls_spec(filters, timeout))
+        keys, rows = self._delete_acls_keys_and_spec(filters)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_delete_acls_async(
+            self._h, rows, ms, self._keyed_acl_binding_filter_value_cb(futures))
+        return futures
 
     def describe_client_quotas(self, quota_filter, timeout=None):
         """Describe the client quotas matching ``quota_filter`` (a
@@ -3937,16 +4016,24 @@ class Admin(_AdminBase):
 
     def alter_client_quotas(self, entries, timeout=None, validate_only=False):
         """Apply ``entries`` (an iterable of :class:`ClientQuotaAlteration`).
-        Returns ``{ClientQuotaEntity: None | KafkaError}``.
+        Returns ``{ClientQuotaEntity: Future[None]}`` immediately; each
+        entity's ``Future`` resolves independently.
 
         An op whose ``value`` is ``None`` removes that quota. Two alterations
-        of the same entity raise. Java accepts them -- it sends both and only
-        the future map collapses -- but the result crosses as a flat array, so
-        the caller could not tell which alteration the surviving outcome
-        describes; see ``read_client_quota_alterations``.
+        of the same entity make every entity's ``Future`` in this call raise
+        the *same* error: the request is rejected before it reaches the
+        broker at all (`read_client_quota_alterations` in the Rust core).
+        Java accepts them -- it sends both and only the future map collapses
+        -- but the result crosses as a flat array, so the caller could not
+        tell which alteration the surviving outcome describes.
         """
         self._check_closed()
-        return self._run_sync(*self._alter_client_quotas_spec(entries, timeout, validate_only))
+        keys, rows = self._alter_client_quotas_keys_and_spec(entries)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_client_quotas_async(
+            self._h, rows, ms, bool(validate_only), self._keyed_client_quota_entity_void_cb(futures))
+        return futures
 
     def describe_user_scram_credentials(self, users=None, timeout=None):
         """Describe SASL/SCRAM credentials. Returns
@@ -3964,10 +4051,15 @@ class Admin(_AdminBase):
     def alter_user_scram_credentials(self, alterations, timeout=None):
         """Apply ``alterations`` (:class:`UserScramCredentialUpsertion` and
         :class:`UserScramCredentialDeletion` objects). Returns
-        ``{user: None | KafkaError}``.
+        ``{user: Future[None]}`` immediately; each user's ``Future`` resolves
+        independently.
         """
         self._check_closed()
-        return self._run_sync(*self._alter_user_scram_credentials_spec(alterations, timeout))
+        keys, rows = self._alter_user_scram_credentials_keys_and_spec(alterations)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_user_scram_credentials_async(self._h, rows, ms, self._keyed_void_cb(futures))
+        return futures
 
     def create_delegation_token(self, renewers=None, owner=None, max_lifetime_ms=-1, timeout=None):
         """Create a delegation token. Returns a :class:`DelegationToken`.
@@ -4036,15 +4128,27 @@ class Admin(_AdminBase):
 
     def update_features(self, feature_updates, timeout=None, validate_only=False):
         """Apply ``feature_updates`` (``{feature: FeatureUpdate}``). Returns
-        ``{feature: None | KafkaError}``.
+        ``{feature: Future[None]}`` immediately; each feature's ``Future``
+        resolves independently.
 
-        Against a real client an empty map raises, as Java's
-        ``KafkaAdminClient.updateFeatures`` throws ``IllegalArgumentException``
-        for it; Java's ``MockAdminClient`` does not check, so against a mock it
-        yields an empty result.
+        An empty map returns an empty dict, against both a mock (Java's
+        ``MockAdminClient.updateFeatures`` does not check for one) and a real
+        client. Against a real client this is a narrower observable than
+        Java's ``KafkaAdminClient.updateFeatures``, which throws
+        ``IllegalArgumentException`` for an empty map: with zero features
+        there is no per-call callback slot left to report that rejection
+        through, so it is silently dropped rather than surfaced -- a
+        documented limitation of the per-key async entry point
+        (`kafka_admin_AdminClient_update_features_async`), not something this
+        binding can recover.
         """
         self._check_closed()
-        return self._run_sync(*self._update_features_spec(feature_updates, timeout, validate_only))
+        keys, rows = self._update_features_keys_and_spec(feature_updates)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_update_features_async(
+            self._h, rows, ms, bool(validate_only), self._keyed_void_cb(futures))
+        return futures
 
     def describe_producers(self, partitions, broker_id=None, timeout=None):
         """Describe the active producers of ``partitions`` (an iterable of
@@ -4532,33 +4636,69 @@ class AsyncAdmin(_AdminBase):
         return futures
 
     async def create_acls(self, acls, timeout=None):
+        """See :meth:`Admin.create_acls`. Returns
+        ``{AclBinding: Future[None]}`` immediately (no internal ``await``);
+        each binding's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._create_acls_spec(acls, timeout))
+        loop = asyncio.get_running_loop()
+        keys, rows = self._create_acls_keys_and_spec(acls)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_create_acls_async(
+            self._h, rows, ms, self._keyed_acl_binding_void_cb(futures, loop))
+        return futures
 
     async def describe_acls(self, acl_filter, timeout=None):
         self._check_closed()
         return await self._run_async(*self._describe_acls_spec(acl_filter, timeout))
 
     async def delete_acls(self, filters, timeout=None):
+        """See :meth:`Admin.delete_acls`. Returns
+        ``{AclBindingFilter: Future[[DeletedAcl]]}`` immediately (no internal
+        ``await``); each filter's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._delete_acls_spec(filters, timeout))
+        loop = asyncio.get_running_loop()
+        keys, rows = self._delete_acls_keys_and_spec(filters)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_delete_acls_async(
+            self._h, rows, ms, self._keyed_acl_binding_filter_value_cb(futures, loop))
+        return futures
 
     async def describe_client_quotas(self, quota_filter, timeout=None):
         self._check_closed()
         return await self._run_async(*self._describe_client_quotas_spec(quota_filter, timeout))
 
     async def alter_client_quotas(self, entries, timeout=None, validate_only=False):
+        """See :meth:`Admin.alter_client_quotas`. Returns
+        ``{ClientQuotaEntity: Future[None]}`` immediately (no internal
+        ``await``); each entity's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(
-            *self._alter_client_quotas_spec(entries, timeout, validate_only))
+        loop = asyncio.get_running_loop()
+        keys, rows = self._alter_client_quotas_keys_and_spec(entries)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_client_quotas_async(
+            self._h, rows, ms, bool(validate_only),
+            self._keyed_client_quota_entity_void_cb(futures, loop))
+        return futures
 
     async def describe_user_scram_credentials(self, users=None, timeout=None):
         self._check_closed()
         return await self._run_async(*self._describe_user_scram_credentials_spec(users, timeout))
 
     async def alter_user_scram_credentials(self, alterations, timeout=None):
+        """See :meth:`Admin.alter_user_scram_credentials`. Returns
+        ``{user: Future[None]}`` immediately (no internal ``await``); each
+        user's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._alter_user_scram_credentials_spec(alterations, timeout))
+        loop = asyncio.get_running_loop()
+        keys, rows = self._alter_user_scram_credentials_keys_and_spec(alterations)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_user_scram_credentials_async(
+            self._h, rows, ms, self._keyed_void_cb(futures, loop))
+        return futures
 
     async def create_delegation_token(self, renewers=None, owner=None, max_lifetime_ms=-1,
                                       timeout=None):
@@ -4585,9 +4725,17 @@ class AsyncAdmin(_AdminBase):
         return await self._run_async(*self._describe_features_spec(node_id, timeout))
 
     async def update_features(self, feature_updates, timeout=None, validate_only=False):
+        """See :meth:`Admin.update_features`. Returns
+        ``{feature: Future[None]}`` immediately (no internal ``await``); each
+        feature's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(
-            *self._update_features_spec(feature_updates, timeout, validate_only))
+        loop = asyncio.get_running_loop()
+        keys, rows = self._update_features_keys_and_spec(feature_updates)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_update_features_async(
+            self._h, rows, ms, bool(validate_only), self._keyed_void_cb(futures, loop))
+        return futures
 
     async def describe_producers(self, partitions, broker_id=None, timeout=None):
         self._check_closed()

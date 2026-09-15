@@ -43,8 +43,8 @@ from admin import (
     _to_delegation_token, _to_describe_producers, _to_describe_transactions,
     _to_describe_user_scram_credentials, _to_feature_metadata, _to_fence_producers,
     _to_list_transactions,
-    _to_acl_binding, _to_acl_binding_filter, _to_alter_client_quotas, _to_create_acls,
-    _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
+    _to_acl_binding, _to_acl_binding_filter, _to_client_quota_entity,
+    _drain_delete_acls_filter_results, _to_describe_acls, _to_describe_client_quotas,
     _to_classic_group_description, _to_consumer_group_description,
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
     _to_group_offsets, _to_list_groups,
@@ -2129,12 +2129,17 @@ def _acl(name="topic-a", principal="User:alice"):
 
 
 def test_create_acls_reports_unsupported_per_binding():
+    """Phase F: `create_acls` returns a dict of Futures immediately, one per
+    binding, resolving independently — matching Java's per-key
+    `KafkaFuture<Void>` rather than an already-resolved dict."""
     with MockAdminClient(1) as admin:
         acls = [_acl("z-topic", "User:zoe"), _acl("a-topic", "User:alice")]
-        result = admin.create_acls(acls)
-        assert set(result) == set(acls)
-        for value in result.values():
-            assert str(value) == "Not implemented yet"
+        futures = admin.create_acls(acls)
+        assert set(futures) == set(acls)
+        for future in futures.values():
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
 
 
 def test_create_acls_round_trips_every_field_through_the_key():
@@ -2173,10 +2178,16 @@ def test_create_acls_round_trips_every_field_through_the_key():
 ])
 def test_create_acls_rejects_what_javas_constructors_reject(acl, message):
     """A binding is not a filter: ANY and MATCH are exactly the values Java's
-    `ResourcePattern` / `AccessControlEntry` constructors refuse."""
+    `ResourcePattern` / `AccessControlEntry` constructors refuse.
+
+    Phase F: the whole submission fails (the C layer never even calls
+    `admin.create_acls`), so every requested binding's own Future -- there is
+    exactly one here -- raises the same error, rather than the call raising
+    synchronously."""
     with MockAdminClient(1) as admin:
+        (future,) = admin.create_acls([acl]).values()
         with pytest.raises(KafkaError) as exc:
-            admin.create_acls([acl])
+            future.result(timeout=5)
         assert str(exc.value) == message
 
 
@@ -2223,21 +2234,25 @@ def test_acl_binding_filter_defaults_to_match_everything():
 def test_delete_acls_keeps_a_null_name_distinct_from_an_empty_one():
     """`None` means match-any; `""` filters on the empty name. Collapsing them
     would silently widen a filter, and the two must survive the round trip as
-    distinct dict keys."""
+    distinct dict keys.
+
+    Phase F: `delete_acls` returns a dict of Futures immediately, one per
+    filter, resolving independently."""
     with MockAdminClient(1) as admin:
         any_name = AclBindingFilter()
         empty_name = AclBindingFilter(ResourceType.TOPIC, "", PatternType.LITERAL, "", "",
                                       AclOperation.READ, AclPermissionType.ALLOW)
         assert any_name != empty_name
-        result = admin.delete_acls([any_name, empty_name])
-        assert set(result) == {any_name, empty_name}
-        for key, value in result.items():
-            # The mock fails each filter's own future, so each maps to that
-            # error rather than to a list of matched ACLs.
-            assert isinstance(value, KafkaError)
-            assert str(value) == "Not implemented yet"
+        futures = admin.delete_acls([any_name, empty_name])
+        assert set(futures) == {any_name, empty_name}
+        for future in futures.values():
+            # The mock fails each filter's own future, so each Future raises
+            # rather than resolving to a list of matched ACLs.
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
         # Read back off the returned keys, not the ones we sent.
-        by_name = {k.resource_name: k for k in result}
+        by_name = {k.resource_name: k for k in futures}
         assert by_name[None].principal is None
         assert by_name[""].principal == ""
 
@@ -2282,16 +2297,20 @@ def test_client_quota_filter_all_is_not_contains_only_nothing():
 
 
 def test_alter_client_quotas_reports_unsupported_per_entity():
+    """Phase F: `alter_client_quotas` returns a dict of Futures immediately,
+    one per entity, resolving independently."""
     with MockAdminClient(1) as admin:
         alice = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
         default_client = ClientQuotaEntity({ClientQuotaEntity.CLIENT_ID: None})
-        result = admin.alter_client_quotas([
+        futures = admin.alter_client_quotas([
             ClientQuotaAlteration(alice, [ClientQuotaOp("producer_byte_rate", 1024.0)]),
             ClientQuotaAlteration(default_client, [ClientQuotaOp("consumer_byte_rate", None)]),
         ])
-        assert set(result) == {alice, default_client}
-        for value in result.values():
-            assert str(value) == "Not implement yet"
+        assert set(futures) == {alice, default_client}
+        for future in futures.values():
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implement yet"
 
 
 def test_alter_client_quotas_keeps_the_default_entity_distinct():
@@ -2317,14 +2336,20 @@ def test_alter_client_quotas_rejects_a_duplicate_entity():
     alterations are sent and only the future map collapses
     (`KafkaAdminClient.java:4301-4313`) -- but the C result is a flat array
     built from that map, so the surviving outcome could not be attributed to
-    either row."""
+    either row.
+
+    Phase F: the whole submission fails, so the one distinct entity's own
+    Future -- `_alter_client_quotas_keys_and_spec` still only makes one dict
+    entry for the (deduplicated) repeated entity -- raises rather than the
+    call raising synchronously."""
     with MockAdminClient(1) as admin:
         entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
+        (future,) = admin.alter_client_quotas([
+            ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
+            ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
+        ]).values()
         with pytest.raises(KafkaError) as exc:
-            admin.alter_client_quotas([
-                ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
-                ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
-            ])
+            future.result(timeout=5)
         assert str(exc.value) == (
             "quota alteration at index 1 repeats an entity already altered by an earlier entry")
 
@@ -2390,26 +2415,22 @@ def test_to_acl_binding_filter_keeps_nulls_null():
     assert f.resource_name == "" and f.principal == "" and f.host == ""
 
 
-def test_to_delete_acls_separates_a_filter_failure_from_a_per_acl_failure():
-    """Java's FilterResult holds either a binding or an exception; the outer
-    error is the filter's own future failing, which is a different thing."""
-    failed_filter = (ResourceType.ANY, None, PatternType.ANY, None, None,
-                     AclOperation.ANY, AclPermissionType.ANY)
-    ok_filter = (ResourceType.TOPIC, "t", PatternType.LITERAL, None, None,
-                 AclOperation.ANY, AclPermissionType.ANY)
+def test_drain_delete_acls_filter_results_separates_a_deleted_acl_from_a_failed_one(monkeypatch):
+    """Java's FilterResult holds either a binding or an exception. Phase F
+    moved `delete_acls` to per-key delivery: a filter's own future failing is
+    now the per-key callback's `error` parameter directly (covered by
+    `test_delete_acls_keeps_a_null_name_distinct_from_an_empty_one`), and this
+    -- the per-ACL split inside a *successful* filter's value -- is exercised
+    against a canned native-drain result, since `MockAdminClient` always fails
+    the filter's own future before any per-ACL row could exist."""
     deleted = (ResourceType.TOPIC, "t", PatternType.LITERAL, "User:a", "*",
                AclOperation.READ, AclPermissionType.ALLOW)
-    raw = {
-        failed_filter: ((41, "cluster authorization failed", 0, 0), []),
-        ok_filter: (None, [(None, deleted), ((61, "security disabled", 0, 0), None)]),
-    }
-    out = _to_delete_acls(raw)
+    import _confluentkafka as _lib
+    monkeypatch.setattr(
+        _lib, "DeleteAclsFilterResults_drain",
+        lambda value: [(None, deleted), ((61, "security disabled", 0, 0), None)])
 
-    failed = out[_to_acl_binding_filter(failed_filter)]
-    assert isinstance(failed, KafkaError)
-    assert str(failed) == "cluster authorization failed"
-
-    results = out[_to_acl_binding_filter(ok_filter)]
+    results = _drain_delete_acls_filter_results(0)
     assert len(results) == 2
     assert results[0].binding == _to_acl_binding(deleted)
     assert results[0].error is None
@@ -2433,24 +2454,27 @@ def test_to_describe_client_quotas_rebuilds_the_entity_and_its_quota_map():
     assert pair.entries["client-id"] is None
 
 
-def test_to_alter_client_quotas_maps_none_to_success():
-    raw = {
-        (("user", "alice"),): None,
-        (("user", None),): (42, "invalid request", 0, 0),
-    }
-    out = _to_alter_client_quotas(raw)
-    assert out[ClientQuotaEntity({"user": "alice"})] is None
-    assert str(out[ClientQuotaEntity({"user": None})]) == "invalid request"
+def test_to_client_quota_entity_handles_a_multi_component_and_a_default_entity():
+    """`_to_client_quota_entity` is the single-item decoder `alter_client_quotas`'s
+    per-key callback (Phase F) rebuilds each dict key from -- was previously
+    also exercised indirectly through the now-removed whole-batch
+    `_to_alter_client_quotas` converter, pinned here directly instead. Also
+    covered indirectly (a single-component entity) by
+    `test_to_describe_client_quotas_rebuilds_the_entity_and_its_quota_map`."""
+    multi = _to_client_quota_entity((("user", "alice"), ("client-id", "app-1")))
+    assert multi == ClientQuotaEntity({"user": "alice", "client-id": "app-1"})
+    default_entity = _to_client_quota_entity((("user", None),))
+    assert default_entity == ClientQuotaEntity({"user": None})
+    assert default_entity.entries["user"] is None
 
 
-def test_to_create_acls_maps_none_to_success():
-    ok = (ResourceType.TOPIC, "a", PatternType.LITERAL, "User:a", "*",
-          AclOperation.READ, AclPermissionType.ALLOW)
-    bad = (ResourceType.TOPIC, "b", PatternType.LITERAL, "User:b", "*",
-           AclOperation.WRITE, AclPermissionType.DENY)
-    out = _to_create_acls({ok: None, bad: (61, "security disabled", 0, 0)})
-    assert out[_to_acl_binding(ok)] is None
-    assert str(out[_to_acl_binding(bad)]) == "security disabled"
+# test_to_create_acls_maps_none_to_success (removed): its target, the
+# whole-batch `_to_create_acls` converter, is gone now that `create_acls`
+# moved to per-key delivery (Phase F). Its coverage is subsumed by
+# `test_to_acl_binding_maps_the_seven_fields_in_order` (the surviving
+# single-item decoder `_keyed_acl_binding_void_cb` rebuilds each key from) and
+# `test_create_acls_reports_unsupported_per_binding` (the per-key error path,
+# end to end).
 
 
 def test_to_describe_acls_is_a_list_not_a_dict():
@@ -2778,16 +2802,19 @@ def test_describe_user_scram_credentials_raises():
 
 
 def test_alter_user_scram_credentials_reports_unsupported_per_user():
+    """Phase F: `alter_user_scram_credentials` returns a dict of Futures
+    immediately, one per user, resolving independently."""
     with MockAdminClient(1) as admin:
-        out = admin.alter_user_scram_credentials([
+        futures = admin.alter_user_scram_credentials([
             UserScramCredentialUpsertion(
                 "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b"pw"),
             UserScramCredentialDeletion("bob", ScramMechanism.SCRAM_SHA_512),
         ])
-        assert sorted(out) == ["alice", "bob"]
+        assert sorted(futures) == ["alice", "bob"]
         for user in ("alice", "bob"):
-            assert isinstance(out[user], KafkaError)
-            assert str(out[user]) == "Not implemented yet"
+            with pytest.raises(KafkaError) as exc:
+                futures[user].result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
 
 
 def test_alter_user_scram_credentials_passes_an_empty_password_through():
@@ -2798,17 +2825,17 @@ def test_alter_user_scram_credentials_passes_an_empty_password_through():
     # refuses all of them with "Not implemented yet", but the key set proves the
     # call was accepted and both rows were submitted.
     with MockAdminClient(1) as admin:
-        out = admin.alter_user_scram_credentials([
+        futures = admin.alter_user_scram_credentials([
             UserScramCredentialUpsertion(
                 "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b""),
             UserScramCredentialUpsertion(
                 "bob", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192), b"pw2"),
         ])
-        assert sorted(out) == ["alice", "bob"]
+        assert sorted(futures) == ["alice", "bob"]
         # The same row as a deletion needs no password at all.
-        out = admin.alter_user_scram_credentials(
+        futures = admin.alter_user_scram_credentials(
             [UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256)])
-        assert list(out) == ["alice"]
+        assert list(futures) == ["alice"]
 
 
 def test_alter_user_scram_credentials_accepts_an_explicitly_empty_salt():
@@ -2824,16 +2851,18 @@ def test_alter_user_scram_credentials_accepts_an_explicitly_empty_salt():
     # by read_scram_alterations_distinguishes_an_absent_salt_from_a_present_empty_one
     # in src/ffi/admin.rs.
     with MockAdminClient(1) as admin:
-        out = admin.alter_user_scram_credentials([
+        futures = admin.alter_user_scram_credentials([
             UserScramCredentialUpsertion(
                 "explicit-empty", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
                 b"pw", salt=b""),
             UserScramCredentialUpsertion(
                 "generated", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b"pw"),
         ])
-        assert sorted(out) == ["explicit-empty", "generated"]
+        assert sorted(futures) == ["explicit-empty", "generated"]
         for user in ("explicit-empty", "generated"):
-            assert str(out[user]) == "Not implemented yet"
+            with pytest.raises(KafkaError) as exc:
+                futures[user].result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
 
 
 def test_create_delegation_token_without_a_renewer_raises():
@@ -2919,40 +2948,56 @@ def test_describe_features_reports_seeded_levels():
 
 
 def test_update_features_applies_and_validates():
+    """Phase F: `update_features` returns a dict of Futures immediately, one
+    per feature, resolving independently."""
     with MockAdminClient(1) as admin:
         admin.set_feature_levels({"metadata.version": (17, 14, 21)})
         updates = {"metadata.version": FeatureUpdate(19, UpgradeType.UPGRADE)}
 
         # validate_only leaves the level alone.
-        assert admin.update_features(updates, validate_only=True) == {"metadata.version": None}
+        (future,) = admin.update_features(updates, validate_only=True).values()
+        assert future.result(timeout=5) is None
         assert (admin.describe_features().finalized_features["metadata.version"]
                 == FinalizedVersionRange(17, 17))
 
-        assert admin.update_features(updates) == {"metadata.version": None}
+        (future,) = admin.update_features(updates).values()
+        assert future.result(timeout=5) is None
         assert (admin.describe_features().finalized_features["metadata.version"]
                 == FinalizedVersionRange(19, 19))
 
         # Above the seeded maximum is a per-feature error, not a call failure.
-        out = admin.update_features({"metadata.version": FeatureUpdate(99, UpgradeType.UPGRADE)})
-        assert isinstance(out["metadata.version"], KafkaError)
-        assert str(out["metadata.version"]) == (
+        (future,) = admin.update_features(
+            {"metadata.version": FeatureUpdate(99, UpgradeType.UPGRADE)}).values()
+        with pytest.raises(KafkaError) as exc:
+            future.result(timeout=5)
+        assert str(exc.value) == (
             "Invalid update version 99 for feature metadata.version. Can't upgrade above 21")
 
 
 def test_update_features_rejects_what_javas_feature_update_constructor_rejects():
+    """Phase F: the whole submission fails (the C layer never even calls
+    `admin.update_features`), so the one requested feature's own Future
+    raises, rather than the call raising synchronously."""
     with MockAdminClient(1) as admin:
+        (future,) = admin.update_features(
+            {"metadata.version": FeatureUpdate(0, UpgradeType.UPGRADE)}).values()
         with pytest.raises(KafkaError) as exc:
-            admin.update_features({"metadata.version": FeatureUpdate(0, UpgradeType.UPGRADE)})
+            future.result(timeout=5)
         assert str(exc.value) == (
             "feature update at index 0: The upgradeType flag should be set to SAFE_DOWNGRADE or "
             "UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.")
 
+        (future,) = admin.update_features(
+            {"metadata.version": FeatureUpdate(-1, UpgradeType.UPGRADE)}).values()
         with pytest.raises(KafkaError) as exc:
-            admin.update_features({"metadata.version": FeatureUpdate(-1, UpgradeType.UPGRADE)})
+            future.result(timeout=5)
         assert str(exc.value) == "feature update at index 0: Cannot specify a negative version level."
 
         # Java's MockAdminClient does not check for an empty map (the real
-        # client does), so an empty request yields an empty result here.
+        # client does), so an empty request yields an empty result here -- and
+        # with zero keys there is no per-call callback slot for a real
+        # client's rejection to land in either (see `update_features`'s
+        # docstring), so this is not distinguishing mock from real here.
         assert admin.update_features({}) == {}
 
 
@@ -2962,9 +3007,10 @@ async def test_async_b5b_rpcs():
         with pytest.raises(KafkaError):
             await admin.describe_user_scram_credentials(["alice"])
 
-        out = await admin.alter_user_scram_credentials(
+        futures = await admin.alter_user_scram_credentials(
             [UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256)])
-        assert isinstance(out["alice"], KafkaError)
+        with pytest.raises(KafkaError):
+            await futures["alice"]
 
         token = await admin.create_delegation_token(renewers=[KafkaPrincipal("User", "alice")])
         assert token.token_info.owner.name == "alice"
@@ -2975,9 +3021,9 @@ async def test_async_b5b_rpcs():
         admin.set_feature_levels({"metadata.version": (17, 14, 21)})
         metadata = await admin.describe_features()
         assert metadata.finalized_features["metadata.version"] == FinalizedVersionRange(17, 17)
-        assert await admin.update_features(
-            {"metadata.version": FeatureUpdate(18, UpgradeType.UPGRADE)}) == {
-                "metadata.version": None}
+        futures = await admin.update_features(
+            {"metadata.version": FeatureUpdate(18, UpgradeType.UPGRADE)})
+        assert await futures["metadata.version"] is None
 
 
 # ---------------------------------------------------------------------------
