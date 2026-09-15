@@ -3351,18 +3351,84 @@ static void admin_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyGILState_Release(g);
 }
 
-static void admin_create_topics_trampoline(kafka_admin_CreateTopicsResult_t* r,
-                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_topics_trampoline(kafka_admin_DeleteTopicsResult_t* r,
-                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_topics_trampoline(kafka_admin_ListTopicsResult_t* r,
                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_topics_trampoline(kafka_admin_DescribeTopicsResult_t* r,
-                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_create_partitions_trampoline(kafka_admin_CreatePartitionsResult_t* r,
-                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_records_trampoline(kafka_admin_DeleteRecordsResult_t* r,
-                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// ---- per-key trampolines (Topics family; fire once per key) ----------------
+//
+// Unlike the whole-batch trampolines above (fire_handle_cb: exactly once per
+// call), these fire once PER KEY, independently, as that key's own future
+// resolves - mirroring Java's per-key KafkaFuture<T> (admin-client.md §5)
+// instead of joining every key into one flattened result.
+//
+// `key` (and `topic` for delete_records) is a transient, borrowed C string
+// per the Rust FFI's doc contract (valid only for this call), so it is copied
+// into a Python str immediately via the "s" format unit rather than crossing
+// as a pointer. `value`/`error` are owned handles, passed through as ints for
+// Python to drain/destroy via the matching *_drain function or
+// KafkaError._from_c, exactly like every other admin callback in this file.
+//
+// The Python wrapper functions below Py_INCREF(cb) once per key BEFORE
+// submitting (not once for the whole call, since these fire N times sharing
+// one `user_data`), matching this trampoline's one Py_DECREF(cb) per
+// invocation - see e.g. py_Admin_create_topics_async.
+
+static void admin_create_topics_trampoline(const char* key,
+    kafka_admin_TopicMetadataAndConfig_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_describe_topics_trampoline(const char* key,
+    kafka_admin_TopicDescription_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteTopics (by name and by id share this) / createPartitions: Java's
+// per-key future is KafkaFuture<Void>, so there is no value parameter.
+static void admin_delete_topics_trampoline(const char* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", key, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_create_partitions_trampoline(const char* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", key, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteRecords: the key is a TopicPartition, delivered as a topic name plus
+// a partition id rather than through a single opaque key handle.
+static void admin_delete_records_trampoline(const char* topic, int32_t partition,
+    kafka_admin_DeletedRecords_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siKK", topic, partition,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- constructors / lifecycle ----------------------------------------------
 
@@ -3589,6 +3655,19 @@ static kafka_admin_NewTopic_t** build_new_topics(PyObject* spec, Py_ssize_t* out
     return topics;
 }
 
+// Py_INCREF(cb) once per key about to be submitted, for the Topics-family
+// per-key async ops: the native callback fires `n` times sharing one
+// `user_data`/`cb`, each invocation doing exactly one Py_DECREF(cb) (see the
+// admin_*_trampoline functions above), so the total incref count must match
+// `n` exactly. The Python `admin` module is responsible for `n` already being
+// the deduplicated key count (matching how many times the Rust FFI will
+// actually invoke the callback) before calling into any of these wrappers.
+static void admin_incref_n(PyObject* cb, Py_ssize_t n) {
+    for (Py_ssize_t i = 0; i < n; i++) {
+        Py_INCREF(cb);
+    }
+}
+
 static PyObject* py_Admin_create_topics_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int timeout_ms;
     int validate_only; int retry_on_quota_violation; PyObject* cb;
@@ -3598,7 +3677,9 @@ static PyObject* py_Admin_create_topics_async(PyObject* self, PyObject* args) {
     Py_ssize_t count = 0;
     kafka_admin_NewTopic_t** topics = build_new_topics(spec, &count);
     if (topics == NULL) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per topic (Java's per-key KafkaFuture), not one
+    // for the whole batch - see admin_create_topics_trampoline.
+    admin_incref_n(cb, count);
     // The Rust side copies the NewTopics into owned values before returning, so
     // the handles can be freed as soon as the call returns.
     kafka_admin_AdminClient_create_topics_async(
@@ -3618,7 +3699,7 @@ static PyObject* py_Admin_delete_topics_async(PyObject* self, PyObject* args) {
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(names, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_topics_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, retry ? true : false, admin_delete_topics_trampoline, cb);
     PyMem_Free(arr);
@@ -3631,7 +3712,7 @@ static PyObject* py_Admin_delete_topics_by_ids_async(PyObject* self, PyObject* a
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(ids, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_topics_by_ids_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, retry ? true : false, admin_delete_topics_trampoline, cb);
     PyMem_Free(arr);
@@ -3656,7 +3737,7 @@ static PyObject* py_Admin_describe_topics_async(PyObject* self, PyObject* args) 
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(names, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_topics_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, include_ops ? true : false, partition_size_limit,
         admin_describe_topics_trampoline, cb);
@@ -3673,7 +3754,7 @@ static PyObject* py_Admin_describe_topics_by_ids_async(PyObject* self, PyObject*
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(ids, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_topics_by_ids_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, include_ops ? true : false, partition_size_limit,
         admin_describe_topics_trampoline, cb);
@@ -3772,7 +3853,7 @@ static PyObject* py_Admin_create_partitions_async(PyObject* self, PyObject* args
     kafka_admin_NewPartitions_t** specs = NULL;
     Py_ssize_t count = build_new_partitions(spec, &topics, &specs);
     if (count < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, count);
     // The Rust side copies the NewPartitions into owned values before returning,
     // so the handles can be freed as soon as the call returns.
     kafka_admin_AdminClient_create_partitions_async(
@@ -3810,7 +3891,7 @@ static PyObject* py_Admin_delete_records_async(PyObject* self, PyObject* args) {
         }
         topics[i] = t; partitions[i] = p; offsets[i] = (int64_t)off;
     }
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_records_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         topics, partitions, offsets, (int32_t)n, timeout_ms,
         admin_delete_records_trampoline, cb);
@@ -3965,6 +4046,44 @@ static PyObject* topic_description_to_py(const kafka_admin_TopicDescription_t* d
                          kafka_admin_TopicDescription_topic_id(d),
                          kafka_admin_TopicDescription_is_internal(d) ? 1 : 0,
                          partitions, operations);
+}
+
+// ---- standalone per-key value drains (Topics-family per-key async callbacks) -
+//
+// Unlike the *Result_drain functions below (which walk a flattened result
+// handle's N entries), these drain a SINGLE value handle delivered
+// individually by a per-key async callback (admin_create_topics_trampoline
+// and friends, above) - one topic's TopicMetadataAndConfig / TopicDescription,
+// or one partition's DeletedRecords - reusing the same *_to_py converters.
+
+// (topic_id, num_partitions, replication_factor, [config entries], embedded_error)
+static PyObject* py_TopicMetadataAndConfig_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_TopicMetadataAndConfig_t* mc = (kafka_admin_TopicMetadataAndConfig_t*)(uintptr_t)ptr;
+    PyObject* result = topic_metadata_to_py(mc);
+    kafka_admin_TopicMetadataAndConfig_destroy(mc);
+    return result;
+}
+
+// (name, topic_id, is_internal, [partition_info], [acl_operation_codes])
+static PyObject* py_TopicDescription_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_TopicDescription_t* d = (kafka_admin_TopicDescription_t*)(uintptr_t)ptr;
+    PyObject* result = topic_description_to_py(d);
+    kafka_admin_TopicDescription_destroy(d);
+    return result;
+}
+
+// low_watermark (Java's DeletedRecords has only this one field).
+static PyObject* py_DeletedRecords_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DeletedRecords_t* dr = (kafka_admin_DeletedRecords_t*)(uintptr_t)ptr;
+    long long low_watermark = kafka_admin_DeletedRecords_low_watermark(dr);
+    kafka_admin_DeletedRecords_destroy(dr);
+    return PyLong_FromLongLong(low_watermark);
 }
 
 // {topic_name: (error, metadata)}
@@ -7273,14 +7392,14 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_AdminClient_new", py_Admin_AdminClient_new, METH_VARARGS, "Create an AdminClient"},
     {"Admin_destroy", py_Admin_destroy, METH_VARARGS, "Destroy an admin-client handle"},
     {"Admin_close_async", py_Admin_close_async, METH_VARARGS, "Async close; cb(error_int)"},
-    {"Admin_create_topics_async", py_Admin_create_topics_async, METH_VARARGS, "Async createTopics; cb(result_int, error_int)"},
-    {"Admin_delete_topics_async", py_Admin_delete_topics_async, METH_VARARGS, "Async deleteTopics by name; cb(result_int, error_int)"},
-    {"Admin_delete_topics_by_ids_async", py_Admin_delete_topics_by_ids_async, METH_VARARGS, "Async deleteTopics by id; cb(result_int, error_int)"},
+    {"Admin_create_topics_async", py_Admin_create_topics_async, METH_VARARGS, "Async createTopics; per-key cb(name, value_int, error_int), once per topic"},
+    {"Admin_delete_topics_async", py_Admin_delete_topics_async, METH_VARARGS, "Async deleteTopics by name; per-key cb(name, error_int), once per topic"},
+    {"Admin_delete_topics_by_ids_async", py_Admin_delete_topics_by_ids_async, METH_VARARGS, "Async deleteTopics by id; per-key cb(id, error_int), once per topic"},
     {"Admin_list_topics_async", py_Admin_list_topics_async, METH_VARARGS, "Async listTopics; cb(result_int, error_int)"},
-    {"Admin_describe_topics_async", py_Admin_describe_topics_async, METH_VARARGS, "Async describeTopics by name; cb(result_int, error_int)"},
-    {"Admin_describe_topics_by_ids_async", py_Admin_describe_topics_by_ids_async, METH_VARARGS, "Async describeTopics by id; cb(result_int, error_int)"},
-    {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; cb(result_int, error_int)"},
-    {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; cb(result_int, error_int)"},
+    {"Admin_describe_topics_async", py_Admin_describe_topics_async, METH_VARARGS, "Async describeTopics by name; per-key cb(name, value_int, error_int), once per topic"},
+    {"Admin_describe_topics_by_ids_async", py_Admin_describe_topics_by_ids_async, METH_VARARGS, "Async describeTopics by id; per-key cb(id, value_int, error_int), once per topic"},
+    {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; per-key cb(name, error_int), once per topic"},
+    {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; per-key cb(topic, partition, value_int, error_int), once per partition"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock: time out the next N requests; returns error_int"},
     {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets,
      METH_VARARGS, "Mock: seed beginning offsets; returns error_int"},
@@ -7292,6 +7411,9 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"DescribeTopicsResult_drain", py_DescribeTopicsResult_drain, METH_VARARGS, "Drain+destroy a DescribeTopicsResult handle into a dict"},
     {"CreatePartitionsResult_drain", py_CreatePartitionsResult_drain, METH_VARARGS, "Drain+destroy a CreatePartitionsResult handle into a dict"},
     {"DeleteRecordsResult_drain", py_DeleteRecordsResult_drain, METH_VARARGS, "Drain+destroy a DeleteRecordsResult handle into a dict"},
+    {"TopicMetadataAndConfig_drain", py_TopicMetadataAndConfig_drain, METH_VARARGS, "Drain+destroy a standalone TopicMetadataAndConfig handle (per-key create_topics callback) into a tuple"},
+    {"TopicDescription_drain", py_TopicDescription_drain, METH_VARARGS, "Drain+destroy a standalone TopicDescription handle (per-key describe_topics callbacks) into a tuple"},
+    {"DeletedRecords_drain", py_DeletedRecords_drain, METH_VARARGS, "Drain+destroy a DeletedRecords handle (per-key delete_records callback) into its low_watermark"},
     {"Admin_describe_cluster_async", py_Admin_describe_cluster_async, METH_VARARGS,
      "Async describeCluster; cb(result_int, error_int)"},
     {"Admin_describe_configs_async", py_Admin_describe_configs_async, METH_VARARGS,

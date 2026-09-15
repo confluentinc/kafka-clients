@@ -25,19 +25,42 @@ Design notes
 Per-key results
 ---------------
 Java returns one ``KafkaFuture<T>`` per key (per topic for ``createTopics``).
-C has no ``KafkaFuture``, so each RPC delivers one flattened result handle
+C has no ``KafkaFuture``, so most RPCs deliver one flattened result handle
 carrying a value *and* an error per key, and this module drains it into a plain
-dict whose values are either the result object or a :class:`KafkaError`:
+dict whose values are either the result object or a :class:`KafkaError`.
 
-* ``create_topics`` -> ``{topic_name: TopicMetadataAndConfig | KafkaError}``
-* ``delete_topics`` -> ``{topic_name: None | KafkaError}`` (Java's per-key
-  future is ``KafkaFuture<Void>``, so ``None`` means success)
-* ``describe_topics`` -> ``{topic_name: TopicDescription | KafkaError}``
+The Topics-family RPCs below are the exception: their native callback fires
+**once per key, independently, as that key's own future resolves** — matching
+Java's per-key ``KafkaFuture`` exactly rather than joining every key into one
+flattened batch — so these five return a dict of **Futures** immediately,
+before any key has necessarily completed, rather than a dict of already-
+resolved values:
+
+* ``create_topics`` -> ``{topic_name: Future[TopicMetadataAndConfig]}``
+* ``delete_topics`` / ``delete_topics_by_ids`` -> ``{topic_name_or_id: Future[None]}``
+  (Java's per-key future is ``KafkaFuture<Void>``, so a result of ``None``
+  means success)
+* ``describe_topics`` / ``describe_topics_by_ids`` ->
+  ``{topic_name_or_id: Future[TopicDescription]}``
+* ``create_partitions`` -> ``{topic_name: Future[None]}`` (per-topic future is
+  ``KafkaFuture<Void>``, so a result of ``None`` means success)
+* ``delete_records`` -> ``{(topic, partition): Future[DeletedRecords]}``
+
+A per-key failure surfaces as that key's own ``Future`` raising the
+:class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
+it does **not** affect any other key's ``Future``, and does **not** raise from
+the ``create_topics``/etc. call itself. The synchronous :class:`Admin` returns
+``concurrent.futures.Future`` objects and the asyncio-native :class:`AsyncAdmin`
+returns ``asyncio.Future`` objects — both non-blocking: the call returns as
+soon as every key's ``Future`` has been created, before any of them resolve
+(mirroring real ``confluent_kafka``'s ``AdminClient.create_topics()``, which
+`bindings/python/test/performance/performance_common.py` already assumes).
+
+Every other per-key RPC below still returns an already-drained dict, and a
+per-key failure there likewise does not raise — only a whole-call failure does:
+
 * ``list_topics`` -> ``{topic_name: TopicListing}`` (Java has a single future
   here, so a failure raises instead of appearing per key)
-* ``create_partitions`` -> ``{topic_name: None | KafkaError}`` (per-topic future
-  is ``KafkaFuture<Void>``, so ``None`` means success)
-* ``delete_records`` -> ``{(topic, partition): DeletedRecords | KafkaError}``
 * ``describe_configs`` -> ``{ConfigResource: Config | KafkaError}``
 * ``incremental_alter_configs`` -> ``{ConfigResource: None | KafkaError}``
   (per-resource future is ``KafkaFuture<Void>``, so ``None`` means success)
@@ -80,13 +103,17 @@ dict whose values are either the result object or a :class:`KafkaError`:
   ``list_client_metrics_resources`` -> ``[ClientMetricsResourceListing]``
   (single futures in Java, so a failure raises)
 
-A per-key failure therefore does **not** raise; iterate the dict and check for
-``KafkaError`` values. Only a whole-call failure raises.
+For the already-drained dicts above, a per-key failure therefore does **not**
+raise; iterate the dict and check for ``KafkaError`` values. Only a whole-call
+failure raises. For the five Topics-family RPCs (dicts of ``Future``s), a
+per-key failure raises from *that key's* ``Future.result()`` instead — see
+above.
 """
 
 import asyncio
 import datetime as _dt
 import threading
+from concurrent.futures import Future
 
 import _confluentkafka as _lib
 from consumer import Node, OffsetAndMetadata  # shared broker-node / committed-offset types
@@ -1808,17 +1835,14 @@ def _to_metadata(raw):
                                   _to_error(error))
 
 
-def _to_create_topics(raw):
-    """{name: (error, metadata)} -> {name: TopicMetadataAndConfig | KafkaError}"""
-    out = {}
-    for name, (error, metadata) in raw.items():
-        out[name] = _to_error(error) if error is not None else _to_metadata(metadata)
-    return out
-
-
-def _to_delete_topics(raw):
-    """{key: error} -> {key: None | KafkaError}"""
-    return {key: _to_error(error) for key, error in raw.items()}
+def _drain_metadata(value):
+    """Drain+destroy a standalone ``TopicMetadataAndConfig`` handle delivered
+    by ``create_topics``'s per-key async callback into a
+    :class:`TopicMetadataAndConfig`. Reuses ``_to_metadata``'s raw-tuple shape:
+    the C drain function returns the exact same tuple ``topic_metadata_to_py``
+    already produces for the flattened (synchronous) result path.
+    """
+    return _to_metadata(_lib.TopicMetadataAndConfig_drain(value))
 
 
 def _to_list_topics(raw):
@@ -1846,30 +1870,20 @@ def _to_description(raw):
                             None if operations is None else list(operations))
 
 
-def _to_describe_topics(raw):
-    """{key: (error, description)} -> {key: TopicDescription | KafkaError}"""
-    out = {}
-    for key, (error, description) in raw.items():
-        out[key] = _to_error(error) if error is not None else _to_description(description)
-    return out
-
-
-def _to_create_partitions(raw):
-    """{topic: error} -> {topic: None | KafkaError}
-
-    Same shape as ``delete_topics``: Java's per-topic future is
-    ``KafkaFuture<Void>``, so ``None`` means success.
+def _drain_description(value):
+    """Drain+destroy a standalone ``TopicDescription`` handle delivered by the
+    ``describe_topics``/``describe_topics_by_ids`` per-key async callbacks
+    into a :class:`TopicDescription`. Reuses ``_to_description``'s raw-tuple
+    shape, as ``_drain_metadata`` does for ``_to_metadata``.
     """
-    return {topic: _to_error(error) for topic, error in raw.items()}
+    return _to_description(_lib.TopicDescription_drain(value))
 
 
-def _to_delete_records(raw):
-    """{(topic, partition): (error, low_watermark)}
-    -> {(topic, partition): DeletedRecords | KafkaError}"""
-    out = {}
-    for key, (error, low_watermark) in raw.items():
-        out[key] = _to_error(error) if error is not None else DeletedRecords(low_watermark)
-    return out
+def _drain_deleted_records(value):
+    """Drain+destroy a ``DeletedRecords`` handle delivered by
+    ``delete_records``'s per-key async callback into a :class:`DeletedRecords`.
+    """
+    return DeletedRecords(_lib.DeletedRecords_drain(value))
 
 
 def _to_cluster_description(raw):
@@ -2372,32 +2386,147 @@ class _AdminBase:
                 drain(handle)  # drain destroys the handle
         return free
 
-    # ---- per-method specs: (submit, resolve, free) -------------------------
+    # ---- per-key resolve/free (Phase A: the Topics-family RPCs) ------------
+    #
+    # Unlike the whole-batch resolve/free pairs above (one flattened result),
+    # these RPCs' native callback fires once PER KEY, independently, as that
+    # key's own future resolves (module docstring, "Per-key results"). So each
+    # RPC method below builds a `{key: Future}` dict up front and returns it
+    # immediately, and the per-key native callback resolves one Future at a
+    # time via the helpers here - `_keyed_value_cb`/`_keyed_void_cb` build that
+    # callback, parameterized by `loop`: `None` for the synchronous Admin
+    # (concurrent.futures.Future is thread-safe, so the dispatcher thread
+    # resolves it directly) or the running event loop for AsyncAdmin
+    # (asyncio.Future is not, so delivery defers via call_soon_threadsafe,
+    # mirroring `_run_async`'s `_deliver` above).
+
+    @staticmethod
+    def _resolve_keyed_value(fut, value, error, convert):
+        """Resolve one per-key Future for a value-shaped RPC (create_topics,
+        describe_topics, delete_records).
+
+        `value`/`error` are owned handle ints from the native per-key
+        callback; exactly one is non-null. `convert` drains+destroys `value`
+        into the RPC's Python value type. Both handles are always
+        drained/destroyed here - even if `fut` was already cancelled or
+        resolved - so nothing leaks regardless of downstream future state,
+        mirroring producer.py's `_completion_to_python`.
+        """
+        if error:
+            exc, result = KafkaError._from_c(error), None
+        else:
+            exc, result = None, convert(value)
+        if fut.cancelled() or fut.done():
+            return
+        if exc is not None:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(result)
+
+    @staticmethod
+    def _free_keyed_value(value, error, convert):
+        """Release the owned handles from a per-key value callback without
+        resolving anything - used when there is no Future left to deliver to
+        (the async event loop is already closed)."""
+        if error:
+            _lib.KafkaError_destroy(error)
+        elif value:
+            convert(value)  # drains + destroys; the result is discarded
+
+    @staticmethod
+    def _resolve_keyed_void(fut, error):
+        """Resolve one per-key Future for a Void-shaped RPC (delete_topics,
+        create_partitions). A result of ``None`` means success, mirroring
+        every other ``KafkaFuture<Void>`` result in this module."""
+        exc = KafkaError._from_c(error) if error else None
+        if fut.cancelled() or fut.done():
+            return
+        if exc is not None:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(None)
+
+    @staticmethod
+    def _free_keyed_void(error):
+        if error:
+            _lib.KafkaError_destroy(error)
+
+    def _keyed_value_cb(self, futures, convert, loop=None):
+        """Builds the `cb(key, value, error)` native callback for a
+        value-shaped per-key RPC, resolving `futures[key]`."""
+        if loop is None:
+            def cb(key, value, error):
+                self._resolve_keyed_value(futures[key], value, error, convert)
+            return cb
+
+        def cb(key, value, error):
+            if loop.is_closed():
+                self._free_keyed_value(value, error, convert)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[key], value, error, convert)
+        return cb
+
+    def _keyed_void_cb(self, futures, loop=None):
+        """Builds the `cb(key, error)` native callback for a Void-shaped
+        per-key RPC, resolving `futures[key]`."""
+        if loop is None:
+            def cb(key, error):
+                self._resolve_keyed_void(futures[key], error)
+            return cb
+
+        def cb(key, error):
+            if loop.is_closed():
+                self._free_keyed_void(error)
+                return
+            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+        return cb
+
+    def _keyed_delete_records_cb(self, futures, loop=None):
+        """Builds the `cb(topic, partition, value, error)` native callback for
+        `delete_records`, whose key is a `(topic, partition)` pair rather than
+        a single string."""
+        if loop is None:
+            def cb(topic, partition, value, error):
+                self._resolve_keyed_value(
+                    futures[(topic, partition)], value, error, _drain_deleted_records)
+            return cb
+
+        def cb(topic, partition, value, error):
+            if loop.is_closed():
+                self._free_keyed_value(value, error, _drain_deleted_records)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[(topic, partition)], value, error,
+                _drain_deleted_records)
+        return cb
+
+    # ---- per-key request builders (Phase A) --------------------------------
+    #
+    # Build the `spec` the C layer parses plus the deduplicated `{key: ...}`
+    # shape used to construct the futures dict - shared between Admin and
+    # AsyncAdmin, which differ only in the Future type and delivery mechanism
+    # (see `_keyed_value_cb`/`_keyed_void_cb`/`_keyed_delete_records_cb`
+    # above). Deduplication ("last one wins" for a repeated key, mirroring
+    # Java's `Map<K, KafkaFuture>` for a batch with a duplicate) is required
+    # here, not optional: `admin_incref_n` in the C layer increfs the native
+    # callback once per entry in the request actually submitted, so the
+    # number of keys used to build the futures dict must equal the number of
+    # native callback invocations exactly.
+
+    @staticmethod
+    def _create_topics_keys_and_spec(new_topics):
+        deduped = {t.name: t for t in new_topics}
+        return list(deduped), [t._to_spec() for t in deduped.values()]
+
+    @staticmethod
+    def _string_keyed_names(topics):
+        return list(dict.fromkeys(str(t) for t in topics))
+
     def _close_spec(self, timeout):
         ms = _close_ms(timeout)
         return (lambda cb: _lib.Admin_close_async(self._h, ms, cb),
                 self._resolve_void, self._free_void)
-
-    def _create_topics_spec(self, new_topics, timeout, validate_only,
-                            retry_on_quota_violation):
-        spec = [t._to_spec() for t in new_topics]
-        ms = _ms(timeout)
-        drain = _lib.CreateTopicsResult_drain
-        return (lambda cb: _lib.Admin_create_topics_async(
-                    self._h, spec, ms, bool(validate_only),
-                    bool(retry_on_quota_violation), cb),
-                self._resolve_value(drain, _to_create_topics),
-                self._free_value(drain))
-
-    def _delete_topics_spec(self, topics, timeout, retry_on_quota_violation, by_ids):
-        names = [str(t) for t in topics]
-        ms = _ms(timeout)
-        fn = (_lib.Admin_delete_topics_by_ids_async if by_ids
-              else _lib.Admin_delete_topics_async)
-        drain = _lib.DeleteTopicsResult_drain
-        return (lambda cb: fn(self._h, names, ms, bool(retry_on_quota_violation), cb),
-                self._resolve_value(drain, _to_delete_topics),
-                self._free_value(drain))
 
     def _list_topics_spec(self, timeout, list_internal):
         ms = _ms(timeout)
@@ -2423,17 +2552,6 @@ class _AdminBase:
         """
         return [np._to_spec(topic) for topic, np in new_partitions.items()]
 
-    def _create_partitions_spec(self, new_partitions, timeout, validate_only,
-                                retry_on_quota_violation):
-        spec = self._create_partitions_rows(new_partitions)
-        ms = _ms(timeout)
-        drain = _lib.CreatePartitionsResult_drain
-        return (lambda cb: _lib.Admin_create_partitions_async(
-                    self._h, spec, ms, bool(validate_only),
-                    bool(retry_on_quota_violation), cb),
-                self._resolve_value(drain, _to_create_partitions),
-                self._free_value(drain))
-
     @staticmethod
     def _delete_records_rows(records_to_delete):
         """``{(topic, partition): RecordsToDelete}`` -> the
@@ -2445,14 +2563,6 @@ class _AdminBase:
         """
         return [(str(topic), int(partition), int(rtd.before_offset))
                 for (topic, partition), rtd in records_to_delete.items()]
-
-    def _delete_records_spec(self, records_to_delete, timeout):
-        spec = self._delete_records_rows(records_to_delete)
-        ms = _ms(timeout)
-        drain = _lib.DeleteRecordsResult_drain
-        return (lambda cb: _lib.Admin_delete_records_async(self._h, spec, ms, cb),
-                self._resolve_value(drain, _to_delete_records),
-                self._free_value(drain))
 
     def _describe_cluster_spec(self, timeout, include_authorized_operations,
                                include_fenced_brokers):
@@ -2588,19 +2698,6 @@ class _AdminBase:
         return (lambda cb: _lib.Admin_list_offsets_async(
                     self._h, spec, ms, int(isolation_level), cb),
                 self._resolve_value(drain, _to_list_offsets),
-                self._free_value(drain))
-
-    def _describe_topics_spec(self, topics, timeout, include_authorized_operations,
-                              partition_size_limit, by_ids):
-        names = [str(t) for t in topics]
-        ms = _ms(timeout)
-        limit = -1 if partition_size_limit is None else int(partition_size_limit)
-        fn = (_lib.Admin_describe_topics_by_ids_async if by_ids
-              else _lib.Admin_describe_topics_async)
-        drain = _lib.DescribeTopicsResult_drain
-        return (lambda cb: fn(self._h, names, ms,
-                              bool(include_authorized_operations), limit, cb),
-                self._resolve_value(drain, _to_describe_topics),
                 self._free_value(drain))
 
     def _list_groups_spec(self, group_states, protocol_types, types, timeout):
@@ -3185,65 +3282,110 @@ class Admin(_AdminBase):
 
     def create_topics(self, new_topics, timeout=None, validate_only=False,
                       retry_on_quota_violation=True):
-        """Create topics. Returns
-        ``{topic_name: TopicMetadataAndConfig | KafkaError}``."""
+        """Create topics. Returns ``{topic_name: Future[TopicMetadataAndConfig]}``
+        immediately; each topic's ``Future`` resolves independently as that
+        topic completes - a slow or failed topic does not hold up the others
+        (Java's per-key ``KafkaFuture``; see the module docstring)."""
         self._check_closed()
-        return self._run_sync(*self._create_topics_spec(
-            new_topics, timeout, validate_only, retry_on_quota_violation))
+        names, spec = self._create_topics_keys_and_spec(new_topics)
+        futures = {name: Future() for name in names}
+        ms = _ms(timeout)
+        _lib.Admin_create_topics_async(
+            self._h, spec, ms, bool(validate_only), bool(retry_on_quota_violation),
+            self._keyed_value_cb(futures, _drain_metadata))
+        return futures
+
+    def _delete_topics(self, topics, timeout, retry_on_quota_violation, by_ids):
+        names = self._string_keyed_names(topics)
+        futures = {name: Future() for name in names}
+        ms = _ms(timeout)
+        fn = (_lib.Admin_delete_topics_by_ids_async if by_ids
+              else _lib.Admin_delete_topics_async)
+        fn(self._h, names, ms, bool(retry_on_quota_violation),
+           self._keyed_void_cb(futures))
+        return futures
 
     def delete_topics(self, topics, timeout=None, retry_on_quota_violation=True):
-        """Delete topics by name. Returns ``{topic_name: None | KafkaError}``."""
+        """Delete topics by name. Returns ``{topic_name: Future[None]}``
+        immediately; each topic's ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._delete_topics_spec(
-            topics, timeout, retry_on_quota_violation, by_ids=False))
+        return self._delete_topics(topics, timeout, retry_on_quota_violation, by_ids=False)
 
     def delete_topics_by_ids(self, topic_ids, timeout=None,
                              retry_on_quota_violation=True):
         """Delete topics by base64 topic id. Returns
-        ``{topic_id: None | KafkaError}``."""
+        ``{topic_id: Future[None]}`` immediately; each topic's ``Future``
+        resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._delete_topics_spec(
-            topic_ids, timeout, retry_on_quota_violation, by_ids=True))
+        return self._delete_topics(topic_ids, timeout, retry_on_quota_violation, by_ids=True)
 
     def list_topics(self, timeout=None, list_internal=False):
         """List topics. Returns ``{topic_name: TopicListing}``."""
         self._check_closed()
         return self._run_sync(*self._list_topics_spec(timeout, list_internal))
 
+    def _describe_topics(self, topics, timeout, include_authorized_operations,
+                         partition_size_limit, by_ids):
+        names = self._string_keyed_names(topics)
+        futures = {name: Future() for name in names}
+        ms = _ms(timeout)
+        limit = -1 if partition_size_limit is None else int(partition_size_limit)
+        fn = (_lib.Admin_describe_topics_by_ids_async if by_ids
+              else _lib.Admin_describe_topics_async)
+        fn(self._h, names, ms, bool(include_authorized_operations), limit,
+           self._keyed_value_cb(futures, _drain_description))
+        return futures
+
     def describe_topics(self, topics, timeout=None,
                         include_authorized_operations=False,
                         partition_size_limit=None):
         """Describe topics by name. Returns
-        ``{topic_name: TopicDescription | KafkaError}``."""
+        ``{topic_name: Future[TopicDescription]}`` immediately; each topic's
+        ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._describe_topics_spec(
+        return self._describe_topics(
             topics, timeout, include_authorized_operations, partition_size_limit,
-            by_ids=False))
+            by_ids=False)
 
     def describe_topics_by_ids(self, topic_ids, timeout=None,
                                include_authorized_operations=False,
                                partition_size_limit=None):
         """Describe topics by base64 topic id. Returns
-        ``{topic_id: TopicDescription | KafkaError}``."""
+        ``{topic_id: Future[TopicDescription]}`` immediately; each topic's
+        ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._describe_topics_spec(
+        return self._describe_topics(
             topic_ids, timeout, include_authorized_operations, partition_size_limit,
-            by_ids=True))
+            by_ids=True)
 
     def create_partitions(self, new_partitions, timeout=None, validate_only=False,
                           retry_on_quota_violation=True):
         """Increase the partition counts of ``{topic_name: NewPartitions}``.
-        Returns ``{topic_name: None | KafkaError}`` (``None`` means success)."""
+        Returns ``{topic_name: Future[None]}`` immediately; each topic's
+        ``Future`` resolves independently (a result of ``None`` means
+        success)."""
         self._check_closed()
-        return self._run_sync(*self._create_partitions_spec(
-            new_partitions, timeout, validate_only, retry_on_quota_violation))
+        spec = self._create_partitions_rows(new_partitions)
+        futures = {str(name): Future() for name in new_partitions}
+        ms = _ms(timeout)
+        _lib.Admin_create_partitions_async(
+            self._h, spec, ms, bool(validate_only), bool(retry_on_quota_violation),
+            self._keyed_void_cb(futures))
+        return futures
 
     def delete_records(self, records_to_delete, timeout=None):
         """Delete records before the given offsets of
         ``{(topic, partition): RecordsToDelete}``. Returns
-        ``{(topic, partition): DeletedRecords | KafkaError}``."""
+        ``{(topic, partition): Future[DeletedRecords]}`` immediately; each
+        partition's ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._delete_records_spec(records_to_delete, timeout))
+        spec = self._delete_records_rows(records_to_delete)
+        futures = {(str(topic), int(partition)): Future()
+                   for topic, partition in records_to_delete}
+        ms = _ms(timeout)
+        _lib.Admin_delete_records_async(
+            self._h, spec, ms, self._keyed_delete_records_cb(futures))
+        return futures
 
     def describe_cluster(self, timeout=None, include_authorized_operations=False,
                          include_fenced_brokers=False):
@@ -3754,50 +3896,117 @@ class AsyncAdmin(_AdminBase):
 
     async def create_topics(self, new_topics, timeout=None, validate_only=False,
                             retry_on_quota_violation=True):
+        """Create topics. Returns ``{topic_name: Future[TopicMetadataAndConfig]}``
+        immediately (no internal ``await``); each topic's ``Future`` resolves
+        independently as that topic completes - a slow or failed topic does
+        not hold up the others (Java's per-key ``KafkaFuture``; see the module
+        docstring)."""
         self._check_closed()
-        return await self._run_async(*self._create_topics_spec(
-            new_topics, timeout, validate_only, retry_on_quota_violation))
+        loop = asyncio.get_running_loop()
+        names, spec = self._create_topics_keys_and_spec(new_topics)
+        futures = {name: loop.create_future() for name in names}
+        ms = _ms(timeout)
+        _lib.Admin_create_topics_async(
+            self._h, spec, ms, bool(validate_only), bool(retry_on_quota_violation),
+            self._keyed_value_cb(futures, _drain_metadata, loop))
+        return futures
+
+    async def _delete_topics(self, topics, timeout, retry_on_quota_violation, by_ids):
+        loop = asyncio.get_running_loop()
+        names = self._string_keyed_names(topics)
+        futures = {name: loop.create_future() for name in names}
+        ms = _ms(timeout)
+        fn = (_lib.Admin_delete_topics_by_ids_async if by_ids
+              else _lib.Admin_delete_topics_async)
+        fn(self._h, names, ms, bool(retry_on_quota_violation),
+           self._keyed_void_cb(futures, loop))
+        return futures
 
     async def delete_topics(self, topics, timeout=None, retry_on_quota_violation=True):
+        """Delete topics by name. Returns ``{topic_name: Future[None]}``
+        immediately (no internal ``await``); each topic's ``Future`` resolves
+        independently."""
         self._check_closed()
-        return await self._run_async(*self._delete_topics_spec(
-            topics, timeout, retry_on_quota_violation, by_ids=False))
+        return await self._delete_topics(topics, timeout, retry_on_quota_violation, by_ids=False)
 
     async def delete_topics_by_ids(self, topic_ids, timeout=None,
                                    retry_on_quota_violation=True):
+        """Delete topics by base64 topic id. Returns
+        ``{topic_id: Future[None]}`` immediately (no internal ``await``); each
+        topic's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._delete_topics_spec(
-            topic_ids, timeout, retry_on_quota_violation, by_ids=True))
+        return await self._delete_topics(topic_ids, timeout, retry_on_quota_violation, by_ids=True)
 
     async def list_topics(self, timeout=None, list_internal=False):
         self._check_closed()
         return await self._run_async(*self._list_topics_spec(timeout, list_internal))
 
+    async def _describe_topics(self, topics, timeout, include_authorized_operations,
+                               partition_size_limit, by_ids):
+        loop = asyncio.get_running_loop()
+        names = self._string_keyed_names(topics)
+        futures = {name: loop.create_future() for name in names}
+        ms = _ms(timeout)
+        limit = -1 if partition_size_limit is None else int(partition_size_limit)
+        fn = (_lib.Admin_describe_topics_by_ids_async if by_ids
+              else _lib.Admin_describe_topics_async)
+        fn(self._h, names, ms, bool(include_authorized_operations), limit,
+           self._keyed_value_cb(futures, _drain_description, loop))
+        return futures
+
     async def describe_topics(self, topics, timeout=None,
                               include_authorized_operations=False,
                               partition_size_limit=None):
+        """Describe topics by name. Returns
+        ``{topic_name: Future[TopicDescription]}`` immediately (no internal
+        ``await``); each topic's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_topics_spec(
+        return await self._describe_topics(
             topics, timeout, include_authorized_operations, partition_size_limit,
-            by_ids=False))
+            by_ids=False)
 
     async def describe_topics_by_ids(self, topic_ids, timeout=None,
                                      include_authorized_operations=False,
                                      partition_size_limit=None):
+        """Describe topics by base64 topic id. Returns
+        ``{topic_id: Future[TopicDescription]}`` immediately (no internal
+        ``await``); each topic's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_topics_spec(
+        return await self._describe_topics(
             topic_ids, timeout, include_authorized_operations, partition_size_limit,
-            by_ids=True))
+            by_ids=True)
 
     async def create_partitions(self, new_partitions, timeout=None, validate_only=False,
                                 retry_on_quota_violation=True):
+        """Increase the partition counts of ``{topic_name: NewPartitions}``.
+        Returns ``{topic_name: Future[None]}`` immediately (no internal
+        ``await``); each topic's ``Future`` resolves independently (a result
+        of ``None`` means success)."""
         self._check_closed()
-        return await self._run_async(*self._create_partitions_spec(
-            new_partitions, timeout, validate_only, retry_on_quota_violation))
+        loop = asyncio.get_running_loop()
+        spec = self._create_partitions_rows(new_partitions)
+        futures = {str(name): loop.create_future() for name in new_partitions}
+        ms = _ms(timeout)
+        _lib.Admin_create_partitions_async(
+            self._h, spec, ms, bool(validate_only), bool(retry_on_quota_violation),
+            self._keyed_void_cb(futures, loop))
+        return futures
 
     async def delete_records(self, records_to_delete, timeout=None):
+        """Delete records before the given offsets of
+        ``{(topic, partition): RecordsToDelete}``. Returns
+        ``{(topic, partition): Future[DeletedRecords]}`` immediately (no
+        internal ``await``); each partition's ``Future`` resolves
+        independently."""
         self._check_closed()
-        return await self._run_async(*self._delete_records_spec(records_to_delete, timeout))
+        loop = asyncio.get_running_loop()
+        spec = self._delete_records_rows(records_to_delete)
+        futures = {(str(topic), int(partition)): loop.create_future()
+                   for topic, partition in records_to_delete}
+        ms = _ms(timeout)
+        _lib.Admin_delete_records_async(
+            self._h, spec, ms, self._keyed_delete_records_cb(futures, loop))
+        return futures
 
     async def describe_cluster(self, timeout=None, include_authorized_operations=False,
                                include_fenced_brokers=False):
