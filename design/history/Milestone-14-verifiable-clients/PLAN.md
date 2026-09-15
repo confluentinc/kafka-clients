@@ -1,6 +1,9 @@
 # Milestone 14 — VerifiableProducer & VerifiableConsumer (system-test tools)
 
-**Status:** APPROVED (2026-09-15). Phase 1 COMPLETE (Actor/Critic 65; findings #1/#2 fixed, #3/#4/#5 accepted as documented deviations; all gates green, uncommitted). Phase 2 not started.
+**Status:** COMPLETE (2026-09-15), uncommitted (user commits). Both phases done via Actor/Critic 65.
+- Phase 1 (VerifiableProducer + ThroughputThrottler): findings #1/#2 fixed, #3/#4/#5 accepted as documented deviations.
+- Phase 2 (VerifiableConsumer + StringDeserializer): findings P2-1 (SIGTERM, both bins) / P2-3 fixed, P2-2/P2-4 accepted as documented deviations.
+All gates green: workspace build, `cargo test -p verifiable-clients` (57), `cargo test --lib`, format-check, clippy `-D warnings`.
 **Scope:** Rust only. No C FFI / Python / gRPC.
 **Java source:** Apache Kafka 4.3.1 (`kafka/` submodule at `26b251a`).
 **Agent numbers:** 65 (Actor 65 / Critic 65). Highest previously used is 64.
