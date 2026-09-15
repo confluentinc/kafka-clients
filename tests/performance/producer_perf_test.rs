@@ -22,7 +22,7 @@
 //! Two ways to run:
 //!
 //! * As part of the integration suite (short, asserted, Docker broker):
-//!   `cargo test --features integration-tests --test integration -- producer_perf_test --nocapture`
+//!   `cargo test --features integration-tests --test performance -- producer_perf_test --nocapture`
 //!   The in-suite defaults are short (10 s, 2 KiB values, ~100 msg/s) so the
 //!   run is quick and the latency budget is meaningful.
 //!
@@ -59,6 +59,7 @@
 //! | `SASL_USERNAME`        | (none)             | SASL username                              |
 //! | `SASL_PASSWORD`        | (none)             | SASL password                              |
 //! | `METRICS_FILE`         | `metrics.jsonl`    | Output file path                           |
+//! | `RESULTS_FILE`         | `results.json`     | Machine-readable summary file path         |
 //!
 //! The defaults marked `*` are overridden for the in-suite integration
 //! run (no `BOOTSTRAP_SERVERS`) to keep it short and latency-asserted:
@@ -71,7 +72,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use confluent_kafka::common::Metric;
 use confluent_kafka::common::serialization::ByteArraySerializer;
+use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -133,6 +136,7 @@ struct PerfTestConfig {
     sasl_username: Option<String>,
     sasl_password: Option<String>,
     metrics_file: String,
+    results_file: String,
 }
 
 impl PerfTestConfig {
@@ -192,6 +196,7 @@ impl PerfTestConfig {
             sasl_username: env_opt("SASL_USERNAME"),
             sasl_password: env_opt("SASL_PASSWORD"),
             metrics_file: env_or("METRICS_FILE", "metrics.jsonl"),
+            results_file: env_or("RESULTS_FILE", "results.json"),
         }
     }
 
@@ -788,31 +793,33 @@ async fn producer_perf_test() {
     // -- send loop --
     // Rate limiting: every `limit_rps` messages, sleep until the
     // next 1 s boundary (relative to the measured-interval start).
-    let mut next_check_time = Duration::from_secs(1);
+    // Pace in 100ms windows (LIMIT_RPS/10 messages per checkpoint), matching the
+    // C harness's checkpoint_interval = LIMIT_RPS / 10. Whole-second pacing would
+    // burst a full second's quota into the accumulator (overrunning buffer.memory
+    // at high rates) and measure burst queueing rather than steady-state latency.
+    let rate_checkpoint = (config.limit_rps / 10).max(1);
+    let mut next_check_time = Duration::from_millis(100);
 
     // Single completion task consuming futures over a channel (avoids per-message
-    // tokio::spawn cost): resolves each future, records latency, and verifies
-    // metadata.
+    // tokio::spawn cost): resolves each future, verifies metadata, and tracks
+    // in-flight / completed counts. Latency is NOT measured here — it is stamped
+    // in the delivery callback at ack time (see the send loop below), mirroring
+    // the C harness's `test_v2_dr` delivery-report callback. Measuring latency
+    // here would fold this task's own drain backlog into the reported number.
     use confluent_kafka::common::KafkaFuture;
     use confluent_kafka::producer::RecordMetadata;
     type FutureType = KafkaFuture<RecordMetadata>;
-    let (produce_calls_tx, mut produce_calls_rx) = tokio::sync::mpsc::unbounded_channel::<(FutureType, Instant)>();
-    let metrics_for_completion = Arc::clone(&metrics);
+    let (produce_calls_tx, mut produce_calls_rx) = tokio::sync::mpsc::unbounded_channel::<FutureType>();
     let completed_messages_for_completion = Arc::clone(&completed_messages);
     let in_flight_for_completion = Arc::clone(&in_flight);
     let verified_for_completion = Arc::clone(&verified);
-    let latency_hist_for_completion = Arc::clone(&latency_hist);
     let topic_for_completion = topic.clone();
     let do_verify = config.do_verify;
     let meas_end_completion = Arc::clone(&meas_end);
     let record_completed_calls_loop = tokio::spawn(async move {
-        let record_completed_calls = |result: Result<RecordMetadata, _>, start_time: Instant| {
+        let record_completed_calls = |result: Result<RecordMetadata, _>| {
             match result {
                 Ok(md) => {
-                    let latency_us = start_time.elapsed().as_micros() as u64;
-                    metrics_for_completion.record_success(latency_us, message_size);
-                    let ms = (latency_us / 1000) as usize;
-                    latency_hist_for_completion[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
                     // verify_record_metadata: !do_verify counts all; do_verify
                     // counts only when metadata is valid. On error neither branch
                     // increments `verified`, so `verified == completed` fails.
@@ -835,9 +842,9 @@ async fn producer_perf_test() {
         // whose per-poll cost grows with the set size and collapses throughput
         // at max rate. This keeps pace with the producer, so the unbounded
         // channel never deeply fills.
-        while let Some((produce_call, start_time)) = produce_calls_rx.recv().await {
+        while let Some(produce_call) = produce_calls_rx.recv().await {
             let result = produce_call.get_timeout(Duration::from_secs(60)).await;
-            record_completed_calls(result, start_time);
+            record_completed_calls(result);
         }
         // The channel is closed and drained: the response for the last message
         // sent has just been received, so mark the end of the measured interval.
@@ -859,24 +866,44 @@ async fn producer_perf_test() {
         let record: ProducerRecord<&[u8], &[u8]> =
             ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
 
+        // Stamp per-record latency in the delivery callback, fired at ack time by
+        // `complete_future_and_fire_callbacks` — the Rust analog of the C
+        // harness's `test_v2_dr` delivery-report callback. Latency is
+        // `start_time.elapsed()` measured at ack, so the completion task's own
+        // drain backlog can never inflate it. `record_success` (which also feeds
+        // the per-window messages_sent/bytes_sent throughput counters) and the
+        // cumulative summary histogram bump therefore run exactly once per
+        // record, here — NOT in the completion task.
         let start_time = Instant::now();
-        match producer.send(record, None).await {
+        let metrics_cb = Arc::clone(&metrics);
+        let latency_hist_cb = Arc::clone(&latency_hist);
+        let callback: Callback = Box::new(move |md, _err| {
+            // On success `md` is Some; on failure it is None (err is Some) and no
+            // latency is recorded, matching the completion task's Ok-only path.
+            if md.is_some() {
+                let latency_us = start_time.elapsed().as_micros() as u64;
+                metrics_cb.record_success(latency_us, message_size);
+                let ms = (latency_us / 1000) as usize;
+                latency_hist_cb[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        match producer.send(record, Some(callback)).await {
             Ok(produce_call) => {
                 messages_sent.fetch_add(1, Ordering::Relaxed);
                 in_flight.fetch_add(1, Ordering::Relaxed);
-                let _ = produce_calls_tx.send((produce_call, start_time));
+                let _ = produce_calls_tx.send(produce_call);
             },
             Err(e) => {
                 eprintln!("Send error: {e:?}");
             },
         }
 
-        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed).is_multiple_of(config.limit_rps) {
+        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed).is_multiple_of(rate_checkpoint) {
             let elapsed = test_start.elapsed();
             if elapsed < next_check_time {
                 tokio::time::sleep(next_check_time - elapsed).await;
             }
-            next_check_time += Duration::from_secs(1);
+            next_check_time += Duration::from_millis(100);
         }
     }
 
@@ -901,6 +928,18 @@ async fn producer_perf_test() {
     tokio::time::sleep(Duration::from_secs(POST_TEST_AWAIT_SECONDS)).await;
     should_stop.store(true, Ordering::Relaxed);
     let _ = metrics_task.await;
+
+    // Compression cross-check: print the producer's own compression-rate-avg
+    // (org.apache.kafka.clients.producer.internals.SenderMetricsRegistry) next
+    // to the harness's independently-measured logical throughput, so a
+    // compression run's wire-bytes estimate (achieved MiB/s / compression-rate)
+    // can be cross-checked against an out-of-band network-counter measurement.
+    // Must run before close() — metrics are torn down with the producer.
+    for (name, metric) in producer.metrics() {
+        if name.name() == "compression-rate-avg" {
+            println!("[METRIC] compression-rate-avg = {:?}", metric.metric_value());
+        }
+    }
 
     let _ = producer.close().await;
 
@@ -933,25 +972,33 @@ async fn producer_perf_test() {
         0.0
     };
 
-    // Average/max latency and p99 from the histogram (ms resolution).
-    let (lat_count, lat_sum_ms, max_latency_ms) = {
-        let (mut count, mut sum, mut max) = (0u64, 0u64, 0u64);
+    // Average/min/max latency and percentiles from the histogram (ms
+    // resolution).
+    let (lat_count, lat_sum_ms, min_latency_ms, max_latency_ms) = {
+        let (mut count, mut sum, mut min, mut max) = (0u64, 0u64, 0u64, 0u64);
         for (ms, b) in latency_hist.iter().enumerate() {
             let n = b.load(Ordering::Relaxed);
             if n > 0 {
+                if count == 0 {
+                    min = ms as u64;
+                }
                 count += n;
                 sum += ms as u64 * n;
                 max = ms as u64;
             }
         }
-        (count, sum, max)
+        (count, sum, min, max)
     };
     let avg_latency_ms = if lat_count > 0 {
         lat_sum_ms as f64 / lat_count as f64
     } else {
         0.0
     };
+    let p50_ms = percentile_from_hist(&latency_hist, 0.50);
+    let p90_ms = percentile_from_hist(&latency_hist, 0.90);
+    let p95_ms = percentile_from_hist(&latency_hist, 0.95);
     let p99_ms = percentile_from_hist(&latency_hist, 0.99);
+    let p999_ms = percentile_from_hist(&latency_hist, 0.999);
 
     println!();
     println!("Duration: {:.2} ms", measured_secs * 1000.0);
@@ -985,6 +1032,50 @@ async fn producer_perf_test() {
     println!("Max latency: {max_latency_ms} ms");
     println!("p99 latency: {p99_ms} ms");
     println!("Metrics written to: {}", config.metrics_file);
+
+    // Machine-readable summary, kept in sync with the other producer
+    // performance tests (same file name, keys and `latency_ms` shape as the
+    // consumer performance test's results.json; `client` identifies which
+    // implementation produced the file).
+    let results_json = format!(
+        concat!(
+            "{{\n",
+            "  \"test\": \"producer\",\n",
+            "  \"client\": \"rust\",\n",
+            "  \"topic\": \"{topic}\",\n",
+            "  \"messages_measured\": {messages},\n",
+            "  \"duration_s\": {duration:.2},\n",
+            "  \"throughput_msg_s\": {msg_rate:.2},\n",
+            "  \"throughput_mib_s\": {mib_rate:.2},\n",
+            "  \"latency_ms\": {{\"min\": {min}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
+            "\"p90\": {p90}, \"p95\": {p95}, \"p99\": {p99}, \"p999\": {p999}, ",
+            "\"max\": {max}}},\n",
+            "  \"cpu_avg_pct\": {cpu:.2},\n",
+            "  \"rss_avg_kib\": {rss:.2}\n",
+            "}}\n"
+        ),
+        // `topic` is the actual topic produced to (the in-suite Docker run
+        // creates a uniquely-prefixed one), not the TOPIC_NAME config default.
+        topic = topic,
+        messages = completed_messages,
+        duration = measured_secs,
+        msg_rate = msg_rate,
+        mib_rate = mib_rate,
+        min = min_latency_ms,
+        avg = avg_latency_ms,
+        p50 = p50_ms,
+        p90 = p90_ms,
+        p95 = p95_ms,
+        p99 = p99_ms,
+        p999 = p999_ms,
+        max = max_latency_ms,
+        cpu = avg_cpu,
+        rss = avg_rss_kib,
+    );
+    match std::fs::write(&config.results_file, results_json) {
+        Ok(()) => println!("Results summary written to: {}", config.results_file),
+        Err(e) => eprintln!("Failed to write {}: {e}", config.results_file),
+    }
 
     // === PERFORMANCE TARGET ASSERTIONS ===
     // verified == completed, completed == produced target, and the p99 latency
