@@ -18,8 +18,22 @@ path = "src/lib.rs"
 name = "verifiable_producer"
 path = "src/bin/verifiable_producer.rs"
 
+[[bin]]
+name = "verifiable_consumer"
+path = "src/bin/verifiable_consumer.rs"
+
 [dependencies]
 confluent-kafka-rust = { path = "../.." }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# VerifiableConsumer implements the client's `ConsumerRebalanceListener` and
+# `OffsetCommitCallback` traits, which are `#[async_trait]` in this repo, so the
+# tool must depend on async-trait to write those impls.
+async-trait = "0.1"
+
+[dev-dependencies]
+# Test-only: `ConsumerRecords::new` takes an `IndexMap`, so the
+# `on_records_received` offset-math unit tests build fixture record batches with
+# it. Not used by the shipped binaries. Same major version the client crate uses.
+indexmap = "2"

@@ -3051,7 +3051,9 @@ dependencies = [
 name = "verifiable-clients"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "confluent-kafka-rust",
+ "indexmap 2.14.0",
  "serde",
  "serde_json",
  "tokio",

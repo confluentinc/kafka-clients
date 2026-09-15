@@ -30,8 +30,8 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::Error;
-use verifiable_clients::ThroughputThrottler;
 use verifiable_clients::verifiable_producer::create_from_args;
+use verifiable_clients::{ThroughputThrottler, wait_for_shutdown_signal};
 
 /// Wall-clock milliseconds since the Unix epoch (Java `System.currentTimeMillis`).
 fn now_millis() -> i64 {
@@ -73,13 +73,16 @@ async fn run(args: &[String]) -> Result<(), Error> {
     let throttler = ThroughputThrottler::new(producer.throughput() as f64, start_ms);
 
     // Java can't use `Runtime.addShutdownHook`'s exact semantics here; CLAUDE.md
-    // §9 maps the JVM shutdown hook to a ctrl-c task that flips the stop flag.
-    // The producing loop observes the flag between iterations and stops.
+    // §9 maps the JVM shutdown hook to a signal task that flips the stop flag.
+    // Java's shutdown hook fires on both SIGINT and SIGTERM, and ducktape's
+    // clean shutdown of a verifiable client sends **SIGTERM** by default and
+    // then waits for the flush/close output, so we wait on either signal (see
+    // [`wait_for_shutdown_signal`]) rather than SIGINT alone. The producing loop
+    // observes the flag between iterations and stops.
     let stop = producer.stop_producing_handle();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            stop.store(true, Ordering::Release);
-        }
+        wait_for_shutdown_signal().await;
+        stop.store(true, Ordering::Release);
     });
 
     producer.run(&throttler).await;
