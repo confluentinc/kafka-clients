@@ -29,10 +29,10 @@ C has no ``KafkaFuture``, so most RPCs deliver one flattened result handle
 carrying a value *and* an error per key, and this module drains it into a plain
 dict whose values are either the result object or a :class:`KafkaError`.
 
-The Topics- and Configs-family RPCs below are the exception: their native
-callback fires **once per key, independently, as that key's own future
+The Topics-, Configs- and Log-dirs-family RPCs below are the exception: their
+native callback fires **once per key, independently, as that key's own future
 resolves** — matching Java's per-key ``KafkaFuture`` exactly rather than
-joining every key into one flattened batch — so these seven return a dict of
+joining every key into one flattened batch — so these ten return a dict of
 **Futures** immediately, before any key has necessarily completed, rather than
 a dict of already-resolved values:
 
@@ -49,6 +49,16 @@ a dict of already-resolved values:
 * ``incremental_alter_configs`` -> ``{ConfigResource: Future[None]}``
   (per-resource future is ``KafkaFuture<Void>``, so a result of ``None``
   means success)
+* ``describe_log_dirs`` -> ``{broker_id: Future[{log_dir: LogDirDescription}]}``
+* ``alter_replica_log_dirs`` -> ``{TopicPartitionReplica: Future[None]}``
+  (per-replica future is ``KafkaFuture<Void>``, so a result of ``None`` means
+  the move was accepted)
+* ``describe_replica_log_dirs`` -> ``{TopicPartitionReplica:
+  Future[ReplicaLogDirInfo]}``. Against ``MockAdminClient``, a replica of a
+  topic the cluster does not know never resolves — the mock silently omits it
+  from its own result rather than reporting an error (mirroring Java's own
+  ``MockAdminClient``), so no callback ever fires for that key. Against a real
+  broker every requested key always resolves.
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -65,12 +75,6 @@ per-key failure there likewise does not raise — only a whole-call failure does
 
 * ``list_topics`` -> ``{topic_name: TopicListing}`` (Java has a single future
   here, so a failure raises instead of appearing per key)
-* ``describe_log_dirs`` ->
-  ``{broker_id: {log_dir: LogDirDescription} | KafkaError}``
-* ``alter_replica_log_dirs`` ->
-  ``{TopicPartitionReplica: None | KafkaError}``
-* ``describe_replica_log_dirs`` ->
-  ``{TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}``
 * ``elect_leaders`` -> ``{(topic, partition): None | KafkaError}`` (Java's
   per-partition value is an ``Optional<Throwable>``, so ``None`` means that
   partition's election succeeded)
@@ -106,9 +110,9 @@ per-key failure there likewise does not raise — only a whole-call failure does
 
 For the already-drained dicts above, a per-key failure therefore does **not**
 raise; iterate the dict and check for ``KafkaError`` values. Only a whole-call
-failure raises. For the five Topics-family RPCs (dicts of ``Future``s), a
-per-key failure raises from *that key's* ``Future.result()`` instead — see
-above.
+failure raises. For the ten Topics-, Configs- and Log-dirs-family RPCs (dicts
+of ``Future``s), a per-key failure raises from *that key's* ``Future.result()``
+instead — see above.
 """
 
 import asyncio
@@ -1918,6 +1922,25 @@ def _to_config_resources(raw):
     return [ConfigResource(resource_type, name) for resource_type, name in raw]
 
 
+def _drain_log_dir_map(value):
+    """Drain+destroy a standalone LogDirDescriptionMap handle delivered by
+    ``describe_log_dirs``'s per-key async callback (Phase C) into
+    ``{log_dir: LogDirDescription}``. Reuses ``_to_log_dir_description``'s
+    raw-tuple shape, the same one the flattened (synchronous) result path
+    uses.
+    """
+    return {name: _to_log_dir_description(d)
+            for name, d in _lib.LogDirDescriptionMap_drain(value).items()}
+
+
+def _drain_replica_log_dir_info(value):
+    """Drain+destroy a standalone ReplicaLogDirInfo handle delivered by
+    ``describe_replica_log_dirs``'s per-key async callback (Phase C) into a
+    :class:`ReplicaLogDirInfo`.
+    """
+    return ReplicaLogDirInfo(*_lib.ReplicaLogDirInfo_drain(value))
+
+
 def _to_client_metrics_resources(raw):
     """[name] -> [ClientMetricsResourceListing]"""
     return [ClientMetricsResourceListing(name) for name in raw]
@@ -1934,33 +1957,6 @@ def _to_log_dir_description(raw):
         {(topic, partition): ReplicaInfo(size, offset_lag, bool(is_future))
          for topic, partition, size, offset_lag, is_future in replicas},
     )
-
-
-def _to_describe_log_dirs(raw):
-    """{broker: (error, {log_dir: description})}
-    -> {broker: {log_dir: LogDirDescription} | KafkaError}"""
-    out = {}
-    for broker, (error, log_dirs) in raw.items():
-        out[broker] = (_to_error(error) if error is not None
-                       else {name: _to_log_dir_description(d)
-                             for name, d in log_dirs.items()})
-    return out
-
-
-def _to_alter_replica_log_dirs(raw):
-    """{(topic, partition, broker): error}
-    -> {TopicPartitionReplica: None | KafkaError}"""
-    return {TopicPartitionReplica(*key): _to_error(error) for key, error in raw.items()}
-
-
-def _to_describe_replica_log_dirs(raw):
-    """{(topic, partition, broker): (error, info)}
-    -> {TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}"""
-    out = {}
-    for key, (error, info) in raw.items():
-        out[TopicPartitionReplica(*key)] = (_to_error(error) if error is not None
-                                            else ReplicaLogDirInfo(*info))
-    return out
 
 
 def _to_elect_leaders(raw):
@@ -2530,6 +2526,60 @@ class _AdminBase:
             loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
         return cb
 
+    def _keyed_broker_value_cb(self, futures, convert, loop=None):
+        """Builds the `cb(broker_id, value, error)` native callback for
+        `describe_log_dirs` (Phase C), whose key is a broker id (int)."""
+        if loop is None:
+            def cb(broker_id, value, error):
+                self._resolve_keyed_value(futures[broker_id], value, error, convert)
+            return cb
+
+        def cb(broker_id, value, error):
+            if loop.is_closed():
+                self._free_keyed_value(value, error, convert)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[broker_id], value, error, convert)
+        return cb
+
+    def _keyed_replica_void_cb(self, futures, loop=None):
+        """Builds the `cb(topic, partition, broker_id, error)` native callback
+        for `alter_replica_log_dirs` (Phase C), whose key is a
+        `TopicPartitionReplica` - mirrors `_keyed_delete_records_cb`'s
+        multi-param key handling, extended to the replica's 3-tuple."""
+        if loop is None:
+            def cb(topic, partition, broker_id, error):
+                key = TopicPartitionReplica(topic, partition, broker_id)
+                self._resolve_keyed_void(futures[key], error)
+            return cb
+
+        def cb(topic, partition, broker_id, error):
+            key = TopicPartitionReplica(topic, partition, broker_id)
+            if loop.is_closed():
+                self._free_keyed_void(error)
+                return
+            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+        return cb
+
+    def _keyed_replica_value_cb(self, futures, convert, loop=None):
+        """Builds the `cb(topic, partition, broker_id, value, error)` native
+        callback for `describe_replica_log_dirs` (Phase C), whose key is a
+        `TopicPartitionReplica`."""
+        if loop is None:
+            def cb(topic, partition, broker_id, value, error):
+                key = TopicPartitionReplica(topic, partition, broker_id)
+                self._resolve_keyed_value(futures[key], value, error, convert)
+            return cb
+
+        def cb(topic, partition, broker_id, value, error):
+            key = TopicPartitionReplica(topic, partition, broker_id)
+            if loop.is_closed():
+                self._free_keyed_value(value, error, convert)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[key], value, error, convert)
+        return cb
+
     # ---- per-key request builders (Phase A) --------------------------------
     #
     # Build the `spec` the C layer parses plus the deduplicated `{key: ...}`
@@ -2612,6 +2662,49 @@ class _AdminBase:
                              int(op.op_type)))
         return keys, spec
 
+    @staticmethod
+    def _describe_log_dirs_keys_and_spec(brokers):
+        """De-duplicate `brokers` by broker id; no per-key value beyond the
+        key itself, so the dedup direction doesn't matter (as for
+        `_string_keyed_names`/`_describe_configs_keys_and_spec`).
+
+        Deduplication is required, not optional, here too: the Rust core's
+        `describe_log_dirs` keys its per-broker future map on broker id
+        (`HashMap::insert`), so a duplicate broker id in the input collapses
+        to ONE native callback invocation, not one per occurrence -
+        `admin_incref_n` must match that, not the raw input length.
+        """
+        deduped = list(dict.fromkeys(int(b) for b in brokers))
+        return deduped, deduped
+
+    @staticmethod
+    def _alter_replica_log_dirs_keys_and_spec(replica_assignment):
+        """``{TopicPartitionReplica: log_dir}`` -> the per-replica key list
+        plus the ``(topic, partition, broker_id, log_dir)`` rows the C
+        extension unpacks. Already unique by construction (a dict's keys
+        cannot repeat), unlike `_describe_replica_log_dirs_keys_and_spec`
+        below, whose input is a plain collection.
+        """
+        keys = list(replica_assignment.keys())
+        spec = [(str(r.topic), int(r.partition), int(r.broker_id), str(log_dir))
+                for r, log_dir in replica_assignment.items()]
+        return keys, spec
+
+    @staticmethod
+    def _describe_replica_log_dirs_keys_and_spec(replicas):
+        """De-duplicate `replicas` (an iterable of `TopicPartitionReplica`) by
+        value; no per-key value beyond the key itself, so the dedup direction
+        doesn't matter (as for `_string_keyed_names`).
+
+        Deduplication is required, not optional: the Rust core's
+        `describe_replica_log_dirs` keys its per-replica future map on
+        `TopicPartitionReplica` (`HashMap::insert`), so a duplicate replica in
+        the input collapses to ONE native callback invocation - `admin_incref_n`
+        must match that, not the raw input length.
+        """
+        deduped = list(dict.fromkeys(replicas))
+        return deduped, [(str(r.topic), int(r.partition), int(r.broker_id)) for r in deduped]
+
     def _close_spec(self, timeout):
         ms = _close_ms(timeout)
         return (lambda cb: _lib.Admin_close_async(self._h, ms, cb),
@@ -2676,31 +2769,6 @@ class _AdminBase:
         drain = _lib.ListClientMetricsResourcesResult_drain
         return (lambda cb: _lib.Admin_list_client_metrics_resources_async(self._h, ms, cb),
                 self._resolve_value(drain, _to_client_metrics_resources),
-                self._free_value(drain))
-
-    def _describe_log_dirs_spec(self, brokers, timeout):
-        ids = [int(b) for b in brokers]
-        ms = _ms(timeout)
-        drain = _lib.DescribeLogDirsResult_drain
-        return (lambda cb: _lib.Admin_describe_log_dirs_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_describe_log_dirs),
-                self._free_value(drain))
-
-    def _alter_replica_log_dirs_spec(self, replica_assignment, timeout):
-        spec = [(str(r.topic), int(r.partition), int(r.broker_id), str(log_dir))
-                for r, log_dir in replica_assignment.items()]
-        ms = _ms(timeout)
-        drain = _lib.AlterReplicaLogDirsResult_drain
-        return (lambda cb: _lib.Admin_alter_replica_log_dirs_async(self._h, spec, ms, cb),
-                self._resolve_value(drain, _to_alter_replica_log_dirs),
-                self._free_value(drain))
-
-    def _describe_replica_log_dirs_spec(self, replicas, timeout):
-        spec = [(str(r.topic), int(r.partition), int(r.broker_id)) for r in replicas]
-        ms = _ms(timeout)
-        drain = _lib.DescribeReplicaLogDirsResult_drain
-        return (lambda cb: _lib.Admin_describe_replica_log_dirs_async(self._h, spec, ms, cb),
-                self._resolve_value(drain, _to_describe_replica_log_dirs),
                 self._free_value(drain))
 
     @staticmethod
@@ -3512,27 +3580,56 @@ class Admin(_AdminBase):
 
     def describe_log_dirs(self, brokers, timeout=None):
         """Query the log directories of ``brokers``. Returns
-        ``{broker_id: {log_dir: LogDirDescription} | KafkaError}``."""
+        ``{broker_id: Future[{log_dir: LogDirDescription}]}`` immediately;
+        each broker's ``Future`` resolves independently as that broker
+        completes - a fast or already-resolved broker is not held up by a
+        slow or failing one (Java's per-key ``KafkaFuture``; see the module
+        docstring)."""
         self._check_closed()
-        return self._run_sync(*self._describe_log_dirs_spec(brokers, timeout))
+        keys, spec = self._describe_log_dirs_keys_and_spec(brokers)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_describe_log_dirs_async(
+            self._h, spec, ms, self._keyed_broker_value_cb(futures, _drain_log_dir_map))
+        return futures
 
     def alter_replica_log_dirs(self, replica_assignment, timeout=None):
         """Move ``{TopicPartitionReplica: log_dir}`` to new log directories.
-        Returns ``{TopicPartitionReplica: None | KafkaError}``."""
+        Returns ``{TopicPartitionReplica: Future[None]}`` immediately; each
+        replica's ``Future`` resolves independently (a result of ``None``
+        means the move was accepted)."""
         self._check_closed()
-        return self._run_sync(*self._alter_replica_log_dirs_spec(
-            replica_assignment, timeout))
+        keys, spec = self._alter_replica_log_dirs_keys_and_spec(replica_assignment)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_replica_log_dirs_async(
+            self._h, spec, ms, self._keyed_replica_void_cb(futures))
+        return futures
 
     def describe_replica_log_dirs(self, replicas, timeout=None):
         """Query the log directories of ``replicas``
         (:class:`TopicPartitionReplica`). Returns
-        ``{TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}``.
+        ``{TopicPartitionReplica: Future[ReplicaLogDirInfo]}`` immediately;
+        each replica's ``Future`` resolves independently.
 
-        Replicas of a topic the cluster does not know are omitted, so the result
-        can be smaller than the request.
+        Against ``MockAdminClient``, a replica of a topic the cluster does not
+        know never resolves - the mock silently omits it from its own
+        internal result map (mirroring Java's ``MockAdminClient``, which does
+        the same: ``if (topicMetadata != null)``), so no per-key callback is
+        ever fired for that key. Its ``Future`` stays pending forever; do not
+        block on it without a timeout. Against a real broker this does not
+        happen: ``KafkaAdminClient`` seeds and completes a future for every
+        requested replica, reporting an unknown topic as *present* with a
+        null ``current_replica_log_dir`` instead.
         """
         self._check_closed()
-        return self._run_sync(*self._describe_replica_log_dirs_spec(replicas, timeout))
+        keys, spec = self._describe_replica_log_dirs_keys_and_spec(replicas)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_describe_replica_log_dirs_async(
+            self._h, spec, ms,
+            self._keyed_replica_value_cb(futures, _drain_replica_log_dir_info))
+        return futures
 
     def elect_leaders(self, election_type, partitions, timeout=None):
         """Elect leaders for ``partitions`` (an iterable of ``(topic,
@@ -4132,18 +4229,48 @@ class AsyncAdmin(_AdminBase):
         return await self._run_async(*self._list_client_metrics_resources_spec(timeout))
 
     async def describe_log_dirs(self, brokers, timeout=None):
+        """See :meth:`Admin.describe_log_dirs`. Returns
+        ``{broker_id: Future[{log_dir: LogDirDescription}]}`` immediately (no
+        internal ``await``); each broker's ``Future`` resolves
+        independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_log_dirs_spec(brokers, timeout))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._describe_log_dirs_keys_and_spec(brokers)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_describe_log_dirs_async(
+            self._h, spec, ms,
+            self._keyed_broker_value_cb(futures, _drain_log_dir_map, loop))
+        return futures
 
     async def alter_replica_log_dirs(self, replica_assignment, timeout=None):
+        """See :meth:`Admin.alter_replica_log_dirs`. Returns
+        ``{TopicPartitionReplica: Future[None]}`` immediately (no internal
+        ``await``); each replica's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._alter_replica_log_dirs_spec(
-            replica_assignment, timeout))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._alter_replica_log_dirs_keys_and_spec(replica_assignment)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_replica_log_dirs_async(
+            self._h, spec, ms, self._keyed_replica_void_cb(futures, loop))
+        return futures
 
     async def describe_replica_log_dirs(self, replicas, timeout=None):
+        """See :meth:`Admin.describe_replica_log_dirs`, including the
+        ``MockAdminClient`` never-resolves caveat for a replica of an unknown
+        topic. Returns ``{TopicPartitionReplica: Future[ReplicaLogDirInfo]}``
+        immediately (no internal ``await``); each replica's ``Future``
+        resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_replica_log_dirs_spec(
-            replicas, timeout))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._describe_replica_log_dirs_keys_and_spec(replicas)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_describe_replica_log_dirs_async(
+            self._h, spec, ms,
+            self._keyed_replica_value_cb(futures, _drain_replica_log_dir_info, loop))
+        return futures
 
     async def elect_leaders(self, election_type, partitions, timeout=None):
         """See :meth:`Admin.elect_leaders`. ``partitions`` is required; pass
