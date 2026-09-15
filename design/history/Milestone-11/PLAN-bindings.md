@@ -441,6 +441,36 @@ Java as possible."* That resolves D1–D3.
   other key in the same call), nor real `confluent_kafka`'s
   `AdminClient.create_topics()`, which this repo's own
   `bindings/python/test/performance/performance_common.py` already assumes.
+
+  **Addendum (2026-09-15, Phase B) — also superseded for the Configs-family
+  `_async` entry points.** `kafka_admin_AdminClient_describe_configs_async`
+  and `kafka_admin_AdminClient_incremental_alter_configs_async` now fire
+  their callback once per **resource** (`ConfigResource`), independently, via
+  the same `admin_async_per_key_op` mechanism, reusing the topics addendum's
+  reasoning verbatim. Two differences worth recording since this is the
+  mechanism's first reuse against a non-string key:
+    - `ConfigResource` is a composite key (a type code plus a name), delivered
+      as two parameters — `(resource_type: i32, resource_name: *const char)`
+      — rather than a single opaque key handle, matching how the pre-existing
+      *flattened* `DescribeConfigsResult`/`AlterConfigsResult` accessors
+      already expose this same key
+      (`kafka_admin_DescribeConfigsResult_get_key_type`/`_get_key_name`) —
+      the per-key callback did not invent a new representation for it.
+    - `incrementalAlterConfigs`'s C rows are one per *operation*
+      (`read_alter_config_ops`'s existing flattening — several config ops can
+      target the same resource), but Java's future is one per *resource*
+      (`KafkaAdminClient.java:2870`, iterating `configs.keySet()`). A new
+      `distinct_config_resources` helper de-dupes the flat rows down to the
+      resource set before fan-out, computed independently of the (fallible)
+      op-type parse so a bad op-type code still fans its error out over every
+      named resource rather than none. `describeConfigs`'s rows are already
+      one per resource, so it needs no such de-duplication.
+  `kafka_admin_Config_t` gains a standalone owned-handle destructor
+  (`kafka_admin_Config_destroy`), the Configs-family analog of
+  `kafka_admin_TopicMetadataAndConfig_destroy` — same dual-provenance pattern
+  (borrowed from a flattened `*Result_t` vs. owned from the per-key callback).
+  The **synchronous** entry points for both RPCs are unaffected, per the same
+  rule as the topics addendum.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
