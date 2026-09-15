@@ -13512,17 +13512,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// documentation), but not always on the same thread. Per key, it normally
 /// runs on the handle's dispatcher thread. It runs **synchronously on the
 /// calling thread, before this function returns, for every key**, when the
-/// RPC cannot be submitted at all (a NULL `admin` handle, a NULL `group_id`,
-/// or `remove_all` false with no group instance id supplied). And it runs on
-/// a **tokio worker thread** if the dispatcher's completion queue can no
-/// longer be reached when a given member's result arrives. Destroying the
-/// handle does not cause that — an outstanding operation holds its own
-/// sender, so it cannot disconnect the queue; what remains is a dispatcher
-/// thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks for different keys are not guaranteed to be
-/// serialised on one thread, nor in request order. Do not hold a lock across
-/// this call and re-acquire it in the callback, and publish everything the
-/// callback needs (including `user_data`) before calling rather than after.
+/// RPC cannot be submitted at all (a NULL `admin` handle or a NULL
+/// `group_id`). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given member's result
+/// arrives. Destroying the handle does not cause that — an outstanding
+/// operation holds its own sender, so it cannot disconnect the queue; what
+/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
+/// inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order. Do not
+/// hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
+///
+/// When `remove_all` is false and no group instance id is supplied, there is
+/// no per-member key at all (the same "no per-key slot" case
+/// `alter_consumer_group_offsets_async`/`delete_consumer_group_offsets_async`
+/// document), so the callback is never invoked — not even to report that the
+/// request could not be submitted. It does **not** fall into the
+/// "synchronously, for every key" case above, because there is no key for it
+/// to fire for.
 ///
 /// # Safety
 ///
