@@ -2561,6 +2561,36 @@ static void test_mock_admin_describe_replica_log_dirs_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
+/* COMMENTS.67 fixup: a replica of a topic the mock does not know is skipped
+ * entirely by `MockAdminClient::describe_replica_log_dirs` (no future is ever
+ * created for it - MockAdminClient.java:1112), so its callback must still
+ * fire exactly once, with an explicit error, rather than never firing at all
+ * (which, before the fix in `admin_async_per_key_op`, would have hung this
+ * test until the harness's own timeout). */
+static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "drld-known-async", 1, 1);
+
+    const char *topics[2] = {"drld-known-async", "drld-missing-async"};
+    const int32_t partitions[2] = {0, 0};
+    const int32_t broker_ids[2] = {0, 0};
+
+    describe_replica_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_replica_log_dirs_async(
+        admin, topics, partitions, broker_ids, 2, -1, on_describe_replica_log_dirs, &r);
+    /* Before the fix this would hang forever waiting for the unknown topic's
+     * callback (which never fired); the bounded wait_for() turns a
+     * regression back into a fast, explicit failure. */
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 /* A NULL out_result means the caller does not want the result, so the handle is
  * never built (see finish_sync). None of the B2 sync entry points may leak or
  * crash on that path. */
@@ -6508,6 +6538,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async);
+    RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_b2_null_out_result);
     RUN_TEST(test_mock_admin_elect_leaders_reports_unsupported);

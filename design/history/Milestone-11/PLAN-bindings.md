@@ -501,22 +501,45 @@ Java as possible."* That resolves D1–D3.
       `kafka_admin_Config_destroy` in the Phase B addendum.
       `kafka_admin_ReplicaLogDirInfo_t` gets the same treatment
       (`kafka_admin_ReplicaLogDirInfo_destroy`).
-    - `describeReplicaLogDirs` against `MockAdminClient` has a pre-existing,
-      Java-faithful quirk (`MockAdminClient.describeReplicaLogDirs` skips a
-      replica of a topic it does not know entirely, rather than reporting an
-      error for it — `MockAdminClient.java:1112`) that, combined with the
-      per-key `Future`-dict-returned-immediately contract, means such a
-      replica's `Future` never resolves under the mock (no native callback is
-      ever fired for it, since the Rust core never creates an entry for it).
-      This is NOT a bug introduced by Phase C's FFI marshaling — unlike
-      COMMENTS.66's Configs-family finding, there is no C-level row-flattening
-      step here to lose the key at — it is Java's own mock's behavior,
-      documented and tested (`bindings/python/test/unit/test_admin.py`'s
-      `test_describe_replica_log_dirs_omits_unknown_topics`) as a "stays
-      pending forever under the mock, bounded-wait provable" caveat, since
-      Python cannot know upfront which requested keys the native layer will
-      actually resolve. Against a real broker every requested key always
-      resolves (`KafkaAdminClient.java:3066-3068`, `:3141-3145`).
+    - `describeReplicaLogDirs` against `MockAdminClient` surfaced a real gap
+      in `admin_async_per_key_op` itself (COMMENTS.67): the mock
+      (`MockAdminClient.describeReplicaLogDirs`, mirroring Java's own mock's
+      `MockAdminClient.java:1112`) skips a replica of a topic it does not
+      know entirely, rather than reporting an error for it, so the Rust core
+      never creates a future for that key at all. Combined with the per-key
+      `Future`-dict-returned-immediately contract — every requested key
+      already has a caller-side `Future`/`Promise` before the native call
+      runs — that key's `Future` never resolved: an initial version of this
+      phase documented this as an accepted, Java-faithful mock limitation,
+      but a Critic review correctly rejected that framing. Java's own mock
+      never makes the "every key gets a `Future`" promise in the first
+      place — a missing key is simply absent from the returned `Map`,
+      detectable immediately by a Java caller — so the hang was entirely a
+      consequence of *this port's own wrapping design*, not something
+      inherited faithfully from Java.
+
+      **Fixed generically in `admin_async_per_key_op`**, not per-RPC: after
+      `submit` succeeds, any key present in the caller's `keys` list but
+      absent from the returned `entries` now gets an explicit synthetic
+      error (`Error::local_illegal_state`), fired synchronously before the
+      real entries are registered — extending the existing total-submission-
+      failure fan-out to also cover this partial-success gap. Since
+      `admin_async_per_key_op` is shared by every per-key RPC (Phases A-C so
+      far, D-G to come), this closes the gap for all of them at once; Phases
+      A and B's RPCs are unaffected in practice because none of their
+      `entries` builders can currently produce fewer entries than `keys`
+      (verified: full Rust/Python/C suites unchanged after the fix). The new
+      bound `K: PartialEq` on `admin_async_per_key_op` is satisfied by every
+      existing key type (`String`, `TopicPartition`, `ConfigResource`, `i32`,
+      `TopicPartitionReplica`), all already `Eq + Hash` for their `HashMap`
+      usage elsewhere.
+      `bindings/python/test/unit/test_admin.py`'s
+      `test_describe_replica_log_dirs_omits_unknown_topics` was rewritten
+      (COMMENTS.DONE.67) to assert the unknown-topic replica's `Future`
+      resolves with an explicit `KafkaError` within a bounded timeout,
+      replacing its old "proves the pending state" framing. Against a real
+      broker every requested key always resolves with a value regardless
+      (`KafkaAdminClient.java:3066-3068`, `:3141-3145`).
   The **synchronous** entry points for all three RPCs are unaffected, per the
   same rule as the Topics/Configs addenda.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.

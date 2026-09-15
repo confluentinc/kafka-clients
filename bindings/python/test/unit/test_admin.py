@@ -15,7 +15,6 @@
 """Test suite for the Python Kafka admin bindings (MockAdminClient-driven)."""
 
 import asyncio
-import concurrent.futures
 import datetime as _dt
 import gc
 import signal
@@ -1015,27 +1014,34 @@ def test_alter_replica_log_dirs_partial_failure():
         assert described.future_replica_log_dir == "/tmp/kafka-logs"
 
 
-def test_describe_replica_log_dirs_omits_unknown_topics():
-    """MockAdminClient.describeReplicaLogDirs skips replicas of unknown topics
-    entirely (`if (topicMetadata != null)`, MockAdminClient.java:1112) rather
-    than reporting an error - so, unlike every other per-key RPC, the *native
-    callback is never fired at all* for that key, and its ``Future`` stays
-    pending forever (the Rust-side `HashMap` never gains an entry for it, so
-    `admin_async_per_key_op` has nothing to iterate for that key - see
+def test_describe_replica_log_dirs_resolves_unknown_topics_with_an_explicit_error():
+    """COMMENTS.67.md: MockAdminClient.describeReplicaLogDirs skips replicas
+    of unknown topics entirely (`if (topicMetadata != null)`,
+    MockAdminClient.java:1112) rather than reporting an error for them - so,
+    unlike every other per-key RPC's mock behavior, the Rust core's per-key
+    future map never gains an entry for that key at all (see
     `MockAdminClient::describe_replica_log_dirs` in
     `src/admin/mock_admin_client.rs`).
 
-    This is mock-only. KafkaAdminClient seeds one future per requested replica
-    (`KafkaAdminClient.java:3066-3068`) and completes all of them (`:3141-3145`),
-    so against a real broker an unknown topic comes back *present*, with a null
-    `current_replica_log_dir`.
+    An initial version of this phase left such a key's ``Future`` pending
+    forever (Python pre-builds one ``Future`` per requested key before the
+    native call runs, and no native callback was ever fired for a key with no
+    corresponding entry). A Critic review correctly rejected "Java-faithful
+    mock behavior" as an excuse: Java's own mock never promises a ``Future``
+    per key in the first place - a Java caller sees the key simply absent
+    from the returned `Map`, not a hanging `Future`. The fix belongs in, and
+    was made in, the per-key delivery layer itself
+    (`admin_async_per_key_op` in `src/ffi/admin.rs`): any key present in the
+    request but absent from the admin core's response now resolves with an
+    explicit synthetic error instead of never firing at all.
 
-    Because the ``Future`` dict is returned immediately (Phase C's per-key
-    delivery contract), the caller cannot learn upfront which keys will
-    actually resolve - both keys are present in the returned dict, but only
-    `known`'s ``Future`` ever completes. Asserting `unknown`'s ``Future`` is
-    still pending after a bounded wait (rather than trying to force it to
-    resolve, which would hang) is what this test can honestly prove.
+    This is mock-only in the sense that the *scenario* (an unknown-topic
+    replica) only arises this way against `MockAdminClient` - KafkaAdminClient
+    seeds one future per requested replica (`KafkaAdminClient.java:3066-3068`)
+    and completes all of them (`:3141-3145`), so against a real broker an
+    unknown topic comes back *present*, with a null `current_replica_log_dir`,
+    never an error. The FIX (reporting a missing key with an explicit error)
+    is fully generic and applies to every per-key RPC, not just this one.
     """
     with MockAdminClient(1) as admin:
         _created(admin, "drld-topic")
@@ -1052,8 +1058,10 @@ def test_describe_replica_log_dirs_omits_unknown_topics():
         assert info.future_replica_log_dir is None
         assert info.future_replica_offset_lag == 0
 
-        with pytest.raises(concurrent.futures.TimeoutError):
-            futures[unknown].result(timeout=0.2)
+        # Before the fix this would hang forever; a bounded timeout turns any
+        # regression back to that state into a fast, explicit failure.
+        error = futures[unknown].exception(timeout=5.0)
+        assert isinstance(error, KafkaError)
 
 
 def test_config_resource_and_replica_are_usable_dict_keys():

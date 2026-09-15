@@ -907,6 +907,22 @@ where
 /// and expects every one of them to resolve exactly once — a submission
 /// failure must not leave any of them pending forever.
 ///
+/// The same total guarantee also covers a **partial** gap: if `submit`
+/// succeeds but its `entries` omits a key that was present in `keys` —
+/// `MockAdminClient::describe_replica_log_dirs` does this for a replica of a
+/// topic it doesn't know, mirroring Java's own mock's `continue`-before-
+/// creating-a-future guard — that key gets an explicit synthetic error,
+/// fired synchronously on the calling thread before the real entries are
+/// registered. Without this, such a key's future/Promise (already created by
+/// the caller from `keys`, per the contract above) would never receive a
+/// callback at all and stay pending forever: Java's own mock can get away
+/// with the omission because a Java caller sees the key simply absent from
+/// the returned `Map` (`results.get(key) == null`, detectable immediately) —
+/// there is no Java `Future` object to hang. This wrapper's "one
+/// `Future`/`Promise` created per key before the call returns" design has no
+/// equivalent escape hatch, so it must close the gap itself rather than
+/// reproduce Java's map-level omission as a hang.
+///
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
@@ -917,7 +933,7 @@ unsafe fn admin_async_per_key_op<K, T, S, C>(
     submit: S,
     complete: C,
 ) where
-    K: Send + 'static,
+    K: PartialEq + Send + 'static,
     T: Clone + Send + Sync + 'static,
     S: FnOnce(&dyn Admin) -> Result<Vec<(K, KafkaFuture<T>)>, Error>,
     C: Fn(K, Result<T, Error>, *mut c_void) + Send + Sync + 'static,
@@ -950,6 +966,32 @@ unsafe fn admin_async_per_key_op<K, T, S, C>(
             return;
         },
     };
+    // Any key present in `keys` but absent from `entries` can never receive a
+    // callback from the loop below (there is no future for it), so its
+    // caller-side Future/Promise would otherwise stay pending forever — see
+    // the doc comment above. `claimed` tracks which `entries` positions have
+    // already been matched to a `keys` occurrence (rather than removing from
+    // `entries`, which is still needed intact for the registration loop
+    // below): a key can legitimately repeat in `keys` (callers don't always
+    // dedupe, e.g. `describe_log_dirs`'s raw broker-id list), and each
+    // occurrence must independently either claim its own matching entry or be
+    // reported missing — a second occurrence of an already-claimed key must
+    // NOT silently count as present, or it would get no callback at all
+    // (`entries` has only the one real future for it).
+    let mut claimed = vec![false; entries.len()];
+    for key in keys {
+        let found = entries.iter().enumerate().position(|(i, (k, _))| !claimed[i] && *k == key);
+        match found {
+            Some(i) => claimed[i] = true,
+            None => complete(
+                key,
+                Err(Error::local_illegal_state(
+                    "the requested key was not present in the admin RPC's response",
+                )),
+                user_data,
+            ),
+        }
+    }
     let complete = Arc::new(complete);
     // `SendUserData` wraps a raw pointer, not an owned resource: cloning the
     // pointer value once per key mirrors how a multi-shot C callback is meant
@@ -24673,6 +24715,109 @@ mod tests {
         }
     }
 
+    // -- COMMENTS.67 fixup: a key absent from `entries` must not hang --------
+    //
+    // Critic finding: `MockAdminClient::describe_replica_log_dirs` `continue`s
+    // before creating a future for a replica of an unknown topic, so that key
+    // is entirely absent from `entries` on success (not merely resolved with
+    // an error). `admin_async_per_key_op` previously only fanned an explicit
+    // error out to every key in `keys` on a *total* submission failure; a key
+    // missing from an otherwise-successful `entries` got no callback at all —
+    // and since the Python/C caller had already created a Future for it (from
+    // `keys`, before this call even runs), that Future stayed pending forever.
+    // Fixed generically in `admin_async_per_key_op` itself (shared by every
+    // per-key RPC, Phases A-C so far), not by changing what
+    // `MockAdminClient::describe_replica_log_dirs` resolves to — Java's own
+    // mock has the identical omission, but a Java caller sees the key simply
+    // missing from the returned `Map`, not a `Future` that hangs.
+
+    #[test]
+    fn admin_async_per_key_op_reports_an_explicit_error_for_a_key_missing_from_entries() {
+        // "present" gets a real (already-resolved) future; "missing" is
+        // requested but never appears in `entries` at all — simulating
+        // `MockAdminClient::describe_replica_log_dirs`'s `continue`-before-
+        // creating-a-future guard for an unknown-topic replica.
+        let present: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        present.complete(7);
+        let entries = vec![("present".to_string(), present.future())];
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["present".to_string(), "missing".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        // Both keys must fire, bounded so a regression to "never fires" hangs
+        // the test fast instead of forever.
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, result) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both the present and the missing key must get exactly one callback");
+            seen.insert(key, result);
+        }
+        assert_eq!(seen.len(), 2, "each key must fire exactly once");
+        assert_eq!(seen["present"].as_ref().unwrap(), &7);
+        let missing_err = seen["missing"].as_ref().unwrap_err();
+        assert!(
+            !missing_err.message().is_empty(),
+            "the synthetic error for a missing key must carry an explanatory message"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    #[test]
+    fn admin_async_per_key_op_handles_a_repeated_key_where_only_one_occurrence_has_an_entry() {
+        // `keys` requests "dup" twice but `entries` only has one future for
+        // it: the second occurrence must be reported missing rather than
+        // silently treated as satisfied by the first occurrence's entry (which
+        // would leave it with no callback at all, since `entries` only fires
+        // once for "dup").
+        let dup: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        dup.complete(1);
+        let entries = vec![("dup".to_string(), dup.future())];
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Result<i32, Error>>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["dup".to_string(), "dup".to_string()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |_key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send(result).unwrap();
+                },
+            );
+        }
+
+        let mut oks = 0;
+        let mut errs = 0;
+        for _ in 0..2 {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("both occurrences must fire") {
+                Ok(_) => oks += 1,
+                Err(_) => errs += 1,
+            }
+        }
+        assert_eq!(oks, 1, "exactly one occurrence claims the real entry");
+        assert_eq!(errs, 1, "the other occurrence has no entry left to claim");
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
     // -- Phase C (Log dirs family): describeLogDirs / alterReplicaLogDirs /
     // describeReplicaLogDirs per-key callback delivery ----------------------
     //
@@ -24825,6 +24970,89 @@ mod tests {
         // log dirs -- the degenerate empty-value case this test targets.
         assert_eq!(seen[&0], 0);
         assert_eq!(seen[&1], 0);
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // COMMENTS.67 fixup, end to end: `describe_replica_log_dirs_async` against
+    // a real `MockAdminClient` with a replica of an unknown topic alongside a
+    // known one. Before the fix in `admin_async_per_key_op`, the unknown
+    // replica's callback never fired at all (the mock never creates a future
+    // for it — `MockAdminClient::describe_replica_log_dirs`'s `continue`
+    // guard), so this test would hang. Replaces the older
+    // `test_describe_replica_log_dirs_omits_unknown_topics` Python test's
+    // "proves the pending state" framing with "proves eventual resolution,
+    // with an explicit error."
+    #[test]
+    fn describe_replica_log_dirs_async_resolves_an_unknown_topic_replica_with_an_explicit_error() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"drld-known".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        let (_topics_owned, topic_ptrs) = c_array(&["drld-known", "drld-missing"]);
+        let partitions = [0i32, 0i32];
+        let broker_ids = [0i32, 0i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, bool)>);
+        extern "C" fn on_describe(
+            topic: *const c_char,
+            _partition: i32,
+            _broker_id: i32,
+            value: *mut kafka_admin_ReplicaLogDirInfo_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_ReplicaLogDirInfo_destroy(value) };
+            }
+            ctx.0.send((name, had_error)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_describe_replica_log_dirs_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                broker_ids.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (topic, had_error) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both the known and the unknown-topic replica must get exactly one callback, not hang");
+            seen.insert(topic, had_error);
+        }
+        assert_eq!(seen.len(), 2, "both replicas must have delivered exactly once");
+        assert!(!seen["drld-known"], "the known topic's replica resolves successfully");
+        assert!(
+            seen["drld-missing"],
+            "the unknown topic's replica must resolve with an explicit error, not hang forever"
+        );
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));

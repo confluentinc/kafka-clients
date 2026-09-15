@@ -55,10 +55,15 @@ a dict of already-resolved values:
   the move was accepted)
 * ``describe_replica_log_dirs`` -> ``{TopicPartitionReplica:
   Future[ReplicaLogDirInfo]}``. Against ``MockAdminClient``, a replica of a
-  topic the cluster does not know never resolves — the mock silently omits it
-  from its own result rather than reporting an error (mirroring Java's own
-  ``MockAdminClient``), so no callback ever fires for that key. Against a real
-  broker every requested key always resolves.
+  topic the cluster does not know resolves with a :class:`KafkaError`
+  (``LocalIllegalState``) rather than a :class:`ReplicaLogDirInfo`: the mock
+  itself omits such a replica from its own result (mirroring Java's own
+  ``MockAdminClient``), but this binding's per-key delivery layer
+  (``admin_async_per_key_op`` in ``src/ffi/admin.rs``) detects any key
+  present in the request but absent from the mock's response and reports it
+  as an explicit error instead of leaving its ``Future`` pending forever.
+  Against a real broker every requested key always resolves with a value
+  (a null current log dir for an unknown topic, not an error).
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -3613,14 +3618,17 @@ class Admin(_AdminBase):
         each replica's ``Future`` resolves independently.
 
         Against ``MockAdminClient``, a replica of a topic the cluster does not
-        know never resolves - the mock silently omits it from its own
-        internal result map (mirroring Java's ``MockAdminClient``, which does
-        the same: ``if (topicMetadata != null)``), so no per-key callback is
-        ever fired for that key. Its ``Future`` stays pending forever; do not
-        block on it without a timeout. Against a real broker this does not
-        happen: ``KafkaAdminClient`` seeds and completes a future for every
+        know resolves with a :class:`KafkaError` (``LocalIllegalState``)
+        rather than a :class:`ReplicaLogDirInfo`: the mock itself silently
+        omits such a replica from its own internal result map (mirroring
+        Java's ``MockAdminClient``, which does the same:
+        ``if (topicMetadata != null)``), but the native per-key delivery layer
+        (``admin_async_per_key_op``) detects the missing key and resolves its
+        ``Future`` with an explicit error instead of leaving it pending
+        forever. Against a real broker this case does not arise the same
+        way: ``KafkaAdminClient`` seeds and completes a future for every
         requested replica, reporting an unknown topic as *present* with a
-        null ``current_replica_log_dir`` instead.
+        null ``current_replica_log_dir`` instead of an error.
         """
         self._check_closed()
         keys, spec = self._describe_replica_log_dirs_keys_and_spec(replicas)
@@ -4258,7 +4266,7 @@ class AsyncAdmin(_AdminBase):
 
     async def describe_replica_log_dirs(self, replicas, timeout=None):
         """See :meth:`Admin.describe_replica_log_dirs`, including the
-        ``MockAdminClient`` never-resolves caveat for a replica of an unknown
+        ``MockAdminClient`` explicit-error caveat for a replica of an unknown
         topic. Returns ``{TopicPartitionReplica: Future[ReplicaLogDirInfo]}``
         immediately (no internal ``await``); each replica's ``Future``
         resolves independently."""
