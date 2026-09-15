@@ -686,6 +686,9 @@ def test_describe_cluster_call_failure_raises():
 # -- B2: describe_configs / incremental_alter_configs ------------------------
 
 def test_describe_configs_partial_failure():
+    """One resource succeeds, two fail, and every outcome survives as its own
+    Future - a per-key failure resolves only that key's Future, not the whole
+    call (Phase B: one native callback per resource, independently)."""
     with MockAdminClient(1) as admin:
         _created(admin, "cfg-topic")
         topic = ConfigResource(ConfigResourceType.TOPIC, "cfg-topic")
@@ -693,16 +696,17 @@ def test_describe_configs_partial_failure():
         broker = ConfigResource(ConfigResourceType.BROKER, "0")
         logger = ConfigResource(ConfigResourceType.BROKER_LOGGER, "0")
 
-        assert admin.incremental_alter_configs(
+        futures = admin.incremental_alter_configs(
             {topic: [AlterConfigOp(ConfigEntry("retention.ms", "60000", False, False, False),
-                                   OpType.SET)]})[topic] is None
+                                   OpType.SET)]})
+        assert futures[topic].result(timeout=5.0) is None
 
-        described = admin.describe_configs([topic, missing, broker, logger],
-                                           include_synonyms=True,
-                                           include_documentation=True)
-        assert set(described) == {topic, missing, broker, logger}
+        futures = admin.describe_configs([topic, missing, broker, logger],
+                                         include_synonyms=True,
+                                         include_documentation=True)
+        assert set(futures) == {topic, missing, broker, logger}
 
-        config = described[topic]
+        config = futures[topic].result(timeout=5.0)
         assert isinstance(config, Config)
         entry = config.get("retention.ms")
         assert entry.value == "60000"
@@ -716,15 +720,36 @@ def test_describe_configs_partial_failure():
         assert entry.is_default is False
         assert config.get("no.such.config") is None
 
-        assert isinstance(described[missing], KafkaError)
-        assert described[missing].code == UNKNOWN_TOPIC_OR_PARTITION
+        with pytest.raises(KafkaError) as excinfo:
+            futures[missing].result(timeout=5.0)
+        assert excinfo.value.code == UNKNOWN_TOPIC_OR_PARTITION
 
-        assert described[broker].get("default.replication.factor").value == "1"
+        assert futures[broker].result(timeout=5.0).get(
+            "default.replication.factor").value == "1"
 
         # BROKER_LOGGER hits getResourceDescription's default branch, which
         # throws UnsupportedOperationException("Not implemented yet").
-        assert isinstance(described[logger], KafkaError)
-        assert described[logger].code == UNSUPPORTED_VERSION
+        with pytest.raises(KafkaError) as excinfo:
+            futures[logger].result(timeout=5.0)
+        assert excinfo.value.code == UNSUPPORTED_VERSION
+
+
+def test_describe_configs_two_resources_resolve_independently():
+    """The defining property of Phase B's per-key delivery: each resource's
+    Future is gettable on its own, regardless of access order - mirrors
+    `test_create_topics_two_keys_resolve_independently`."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "cfg-first")
+        _created(admin, "cfg-second")
+        first = ConfigResource(ConfigResourceType.TOPIC, "cfg-first")
+        second = ConfigResource(ConfigResourceType.TOPIC, "cfg-second")
+
+        futures = admin.describe_configs([first, second])
+        # Deliberately read "second" before "first": order of access must not
+        # matter, and neither Future should be blocked on the other.
+        assert isinstance(futures[second].result(timeout=5.0), Config)
+        assert isinstance(futures[first].result(timeout=5.0), Config)
+        assert futures[first].done() and futures[second].done()
 
 
 def test_describe_configs_empty_batch():
@@ -738,20 +763,22 @@ def test_incremental_alter_configs_set_then_delete():
         resource = ConfigResource(ConfigResourceType.TOPIC, "alter-topic")
 
         # Two ops on one resource collapse to one result key.
-        result = admin.incremental_alter_configs({resource: [
+        futures = admin.incremental_alter_configs({resource: [
             AlterConfigOp(ConfigEntry("retention.ms", "1000", False, False, False), OpType.SET),
             AlterConfigOp(ConfigEntry("segment.ms", "2000", False, False, False), OpType.SET),
         ]})
-        assert result == {resource: None}
+        assert list(futures) == [resource]
+        assert futures[resource].result(timeout=5.0) is None
 
-        config = admin.describe_configs([resource])[resource]
+        config = admin.describe_configs([resource])[resource].result(timeout=5.0)
         assert {e.name for e in config.entries} == {"retention.ms", "segment.ms"}
 
         # DELETE carries a null value, which is what Java sends for a removal.
-        assert admin.incremental_alter_configs({resource: [
+        futures = admin.incremental_alter_configs({resource: [
             AlterConfigOp(ConfigEntry("retention.ms", None, False, False, False), OpType.DELETE),
-        ]})[resource] is None
-        config = admin.describe_configs([resource])[resource]
+        ]})
+        assert futures[resource].result(timeout=5.0) is None
+        config = admin.describe_configs([resource])[resource].result(timeout=5.0)
         assert {e.name for e in config.entries} == {"segment.ms"}
 
 
@@ -762,13 +789,14 @@ def test_incremental_alter_configs_partial_failure():
         missing = ConfigResource(ConfigResourceType.TOPIC, "alter-missing")
         entry = ConfigEntry("retention.ms", "1000", False, False, False)
 
-        result = admin.incremental_alter_configs({
+        futures = admin.incremental_alter_configs({
             ok: [AlterConfigOp(entry, OpType.SET)],
             missing: [AlterConfigOp(entry, OpType.SET)],
         })
-        assert result[ok] is None
-        assert isinstance(result[missing], KafkaError)
-        assert result[missing].code == UNKNOWN_TOPIC_OR_PARTITION
+        assert futures[ok].result(timeout=5.0) is None
+        with pytest.raises(KafkaError) as excinfo:
+            futures[missing].result(timeout=5.0)
+        assert excinfo.value.code == UNKNOWN_TOPIC_OR_PARTITION
 
 
 def test_incremental_alter_configs_unsupported_op_type_fails_that_resource():
@@ -777,23 +805,27 @@ def test_incremental_alter_configs_unsupported_op_type_fails_that_resource():
     with MockAdminClient(1) as admin:
         _created(admin, "append-topic")
         resource = ConfigResource(ConfigResourceType.TOPIC, "append-topic")
-        result = admin.incremental_alter_configs({resource: [
+        futures = admin.incremental_alter_configs({resource: [
             AlterConfigOp(ConfigEntry("cleanup.policy", "compact", False, False, False),
                           OpType.APPEND),
         ]})
-        assert isinstance(result[resource], KafkaError)
-        assert result[resource].code == INVALID_REQUEST
+        with pytest.raises(KafkaError) as excinfo:
+            futures[resource].result(timeout=5.0)
+        assert excinfo.value.code == INVALID_REQUEST
 
 
 def test_incremental_alter_configs_bad_op_type_raises():
     """An unknown AlterConfigOp.OpType code is a marshaling failure: the whole
-    call fails and the RPC is never submitted."""
+    call fails and the named resource's Future resolves with that error
+    (Phase B's per-key submission-failure fan-out), rather than the call
+    itself raising."""
     with MockAdminClient(1) as admin:
         resource = ConfigResource(ConfigResourceType.TOPIC, "whatever")
+        futures = admin.incremental_alter_configs({resource: [
+            AlterConfigOp(ConfigEntry("k", "v", False, False, False), 99),
+        ]})
         with pytest.raises(KafkaError) as excinfo:
-            admin.incremental_alter_configs({resource: [
-                AlterConfigOp(ConfigEntry("k", "v", False, False, False), 99),
-            ]})
+            futures[resource].result(timeout=5.0)
         assert "99" in str(excinfo.value)
 
 
@@ -829,10 +861,11 @@ def test_list_client_metrics_resources():
         # mock seeds clientMetricsConfigs.
         for name in ("cm-b", "cm-a"):
             resource = ConfigResource(ConfigResourceType.CLIENT_METRICS, name)
-            assert admin.incremental_alter_configs({resource: [
+            futures = admin.incremental_alter_configs({resource: [
                 AlterConfigOp(ConfigEntry("interval.ms", "1000", False, False, False),
                               OpType.SET),
-            ]})[resource] is None
+            ]})
+            assert futures[resource].result(timeout=5.0) is None
 
         listed = admin.list_client_metrics_resources()
         assert [r.name for r in listed] == ["cm-a", "cm-b"]  # sorted by name
@@ -948,15 +981,17 @@ async def test_async_describe_cluster_and_configs():
         assert len(described.nodes) == 2
 
         resource = ConfigResource(ConfigResourceType.BROKER, "0")
-        configs = await admin.describe_configs([resource])
-        assert configs[resource].get("default.replication.factor").value == "2"
+        futures = await admin.describe_configs([resource])
+        config = await futures[resource]
+        assert config.get("default.replication.factor").value == "2"
 
-        altered = await admin.incremental_alter_configs({resource: [
+        futures = await admin.incremental_alter_configs({resource: [
             AlterConfigOp(ConfigEntry("num.io.threads", "9", False, False, False), OpType.SET),
         ]})
-        assert altered == {resource: None}
-        configs = await admin.describe_configs([resource])
-        assert configs[resource].get("num.io.threads").value == "9"
+        assert await futures[resource] is None
+        futures = await admin.describe_configs([resource])
+        config = await futures[resource]
+        assert config.get("num.io.threads").value == "9"
     finally:
         await admin.close()
 
@@ -990,7 +1025,7 @@ def test_b2_handles_survive_gc_of_intermediate_objects():
         _created(admin, "gc-b2", 2, 1)
         resource = ConfigResource(ConfigResourceType.TOPIC, "gc-b2")
         cluster = admin.describe_cluster()
-        configs = admin.describe_configs([resource])[resource]
+        configs = admin.describe_configs([resource])[resource].result(timeout=5.0)
         log_dirs = admin.describe_log_dirs([0])[0]
         gc.collect()
         assert cluster.nodes[0].host == "localhost"
@@ -1465,12 +1500,18 @@ def test_offset_spec_factories_use_javas_sentinels():
 def _seed_group(admin, group_id):
     """Seed a group in the mock. `groupConfigs` is the only map
     `MockAdminClient.listGroups` reads (MockAdminClient.java:728-732), and
-    `incrementalAlterConfigs` on a GROUP resource is its only writer."""
+    `incrementalAlterConfigs` on a GROUP resource is its only writer.
+
+    `incremental_alter_configs` is per-key-Future (Phase B): the call itself
+    returns immediately with `{resource: Future[None]}`, so the seed is only
+    actually applied once that Future resolves.
+    """
     resource = ConfigResource(ConfigResourceType.GROUP, group_id)
-    assert admin.incremental_alter_configs({resource: [
+    futures = admin.incremental_alter_configs({resource: [
         AlterConfigOp(ConfigEntry("consumer.session.timeout.ms", "45000",
                                   False, False, False), OpType.SET)]
-    }) == {resource: None}
+    })
+    assert futures[resource].result() is None
 
 
 def test_list_groups_reports_seeded_groups():
@@ -1713,12 +1754,15 @@ def test_remove_members_requires_the_member_argument():
 
 async def _seed_group_async(admin, group_id):
     """`_seed_group` for the asyncio client: the RPC is a coroutine there, but
-    the mock driver stays synchronous on both."""
+    the mock driver stays synchronous on both. `incremental_alter_configs`
+    returns immediately with `{resource: Future[None]}` (no internal
+    `await`), so the seed's own Future must be awaited too."""
     resource = ConfigResource(ConfigResourceType.GROUP, group_id)
-    assert await admin.incremental_alter_configs({resource: [
+    futures = await admin.incremental_alter_configs({resource: [
         AlterConfigOp(ConfigEntry("consumer.session.timeout.ms", "45000",
                                   False, False, False), OpType.SET)]
-    }) == {resource: None}
+    })
+    assert await futures[resource] is None
 
 
 @pytest.mark.asyncio
