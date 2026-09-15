@@ -356,11 +356,7 @@ impl<K, V> KafkaProducer<K, V> {
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-    ) -> Result<Self, KafkaError>
-    where
-        K: 'static,
-        V: 'static,
-    {
+    ) -> Result<Self, KafkaError> {
         Self::from_config_impl(config, key_serializer, value_serializer, None)
     }
 
@@ -398,11 +394,7 @@ impl<K, V> KafkaProducer<K, V> {
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
         partitioner: Box<dyn Partitioner<K, V>>,
-    ) -> Result<Self, KafkaError>
-    where
-        K: 'static,
-        V: 'static,
-    {
+    ) -> Result<Self, KafkaError> {
         Self::from_config_impl(config, key_serializer, value_serializer, Some(partitioner))
     }
 
@@ -423,11 +415,7 @@ impl<K, V> KafkaProducer<K, V> {
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
         explicit_partitioner: Option<Box<dyn Partitioner<K, V>>>,
-    ) -> Result<Self, KafkaError>
-    where
-        K: 'static,
-        V: 'static,
-    {
+    ) -> Result<Self, KafkaError> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
         kafka_trace!(log_context, "Starting the Kafka producer");

@@ -681,11 +681,7 @@ impl ProducerConfig {
     /// `from_properties` has already rejected any value that is neither a
     /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches
     /// here.
-    pub(crate) fn resolve_partitioner<K, V>(&self) -> Option<Box<dyn Partitioner<K, V>>>
-    where
-        K: 'static,
-        V: 'static,
-    {
+    pub(crate) fn resolve_partitioner<K, V>(&self) -> Option<Box<dyn Partitioner<K, V>>> {
         match self.partitioner_class.as_deref() {
             Some(value) if Self::is_round_robin_partitioner(value) => Some(Box::new(RoundRobinPartitioner::new())),
             _ => None,
