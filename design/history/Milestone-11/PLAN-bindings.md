@@ -542,6 +542,57 @@ Java as possible."* That resolves D1–D3.
       (`KafkaAdminClient.java:3066-3068`, `:3141-3145`).
   The **synchronous** entry points for all three RPCs are unaffected, per the
   same rule as the Topics/Configs addenda.
+
+  **Addendum (2026-09-15, Phase D) — also superseded for the
+  Partitions/offsets-family `_async` entry points.**
+  `kafka_admin_AdminClient_alter_partition_reassignments_async` and
+  `_list_offsets_async` now fire their callback once per **partition**
+  (`TopicPartition`), independently, via the same `admin_async_per_key_op`
+  mechanism, reusing the Topics/Configs/Log-dirs addenda's reasoning
+  verbatim. Notes specific to this family:
+    - The key is a `TopicPartition` (a two-part composite: topic name plus
+      partition id), delivered as `(topic: *const char, partition: i32)` —
+      the same shape `delete_records` (Phase A) already established for this
+      exact key type — matching how the pre-existing *flattened*
+      `AlterPartitionReassignmentsResult`/`ListOffsetsResult` accessors
+      already expose it (`_get_topic`/`_get_partition`). No new key
+      representation was invented.
+    - `alterPartitionReassignments`'s per-partition future is
+      `KafkaFuture<Void>`, so its callback has no value parameter — the same
+      shape as `alter_replica_log_dirs` (Phase C).
+    - `listOffsets`'s per-partition future is `KafkaFuture<ListOffsetsResultInfo>`.
+      Per §D2's existing (already-minted) handle rule, the flattened sync
+      result already had a `kafka_admin_ListOffsetsResultInfo_t` handle type;
+      Phase D reuses `ListOffsetsResultInfoInner` as-is, just delivered
+      individually and owned (a new `kafka_admin_ListOffsetsResultInfo_destroy`)
+      instead of embedded and borrowed inside a `kafka_admin_ListOffsetsResult_t`
+      — the same dual-provenance pattern as `kafka_admin_Config_t` (Phase B)
+      and `kafka_admin_LogDirDescriptionMap_t` (Phase C).
+    - `listOffsets` is the first RPC in this file whose real (non-mock)
+      `Admin` implementation resolves its per-key futures through the
+      `AdminApiDriver`/`PartitionLeaderStrategy` machinery (`admin-client.md`
+      §2) rather than a single `Call` — partitions sharing a leader tend to
+      resolve together in practice on a real broker. This does not change
+      the per-key *contract* (`Admin::list_offsets` still returns one
+      `KafkaFuture` per partition, and `admin_async_per_key_op` still
+      registers one independent `when_complete` per entry); it only means a
+      genuinely independent completion *timing* between two partitions of
+      this RPC is harder to demonstrate end-to-end than for a `Call`-based
+      RPC. The direct `admin_async_per_key_op`-level Rust tests (driving two
+      hand-built `KafkaFutureImpl<ListOffsetsResultInfo>` instances, one
+      resolved and one left pending) are unaffected by this, since they
+      exercise the mechanism directly rather than through a real
+      leader-lookup round trip.
+    - Both RPCs' `keys` (for `admin_async_per_key_op`'s fan-out) are computed
+      independently of their respective fallible per-entry parses
+      (`read_reassignments`'s empty-replica-list check, `read_offset_specs`'s
+      sentinel check, and `list_offsets_options`'s isolation-level check) —
+      the same "keys computed independently of the fallible parse" pattern
+      `delete_topics_by_ids_entries` established in Phase A — so a
+      marshaling failure still fans an explicit error out to every requested
+      key rather than leaving any of them without a callback.
+  The **synchronous** entry points for both RPCs are unaffected, per the same
+  rule as the Topics/Configs/Log-dirs addenda.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
