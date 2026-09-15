@@ -14108,6 +14108,26 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
     }
 }
 
+/// Destroys a `ClientQuotaEntity` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_alter_client_quotas_async`]). Safe with
+/// null (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_AlterClientQuotasResult_get_entity`] — that one is borrowed
+/// from its owning [`kafka_admin_AlterClientQuotasResult_t`] and is freed when
+/// that handle is destroyed instead.
+///
+/// # Safety
+///
+/// `entity` must be null or an owned handle from the `alter_client_quotas`
+/// per-key async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_destroy(entity: *mut kafka_common_ClientQuotaEntity_t) {
+    if !entity.is_null() {
+        unsafe { drop(Box::from_raw(entity as *mut ClientQuotaEntityInner)) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // B5a — ACL and client-quota input marshaling and submission helpers
 //
@@ -14648,6 +14668,73 @@ unsafe fn read_client_quota_alterations(
     Ok(out)
 }
 
+/// Reads one ragged row of `(entity type, entity name)` pairs into a
+/// [`ClientQuotaEntity`], tolerant of a NULL type (skipped) or a repeated type
+/// within the row (last one wins) — unlike [`read_client_quota_entity`], this
+/// never fails, so it can supply an identity for
+/// [`admin_async_per_key_op`]'s per-key fan-out even for a row that
+/// [`read_client_quota_alterations`]'s validated parse rejects. `ClientQuotaEntity::new`
+/// itself does not validate (see its doc comment), so this needs no bypass —
+/// unlike [`AclBindingKey`], which exists because `AclBinding`'s constituents
+/// do validate.
+///
+/// # Safety
+///
+/// `types` must be non-null with `count` entries; `names` must be null or have
+/// `count` entries.
+unsafe fn read_client_quota_entity_infallible(
+    types: *const *const c_char,
+    names: *const *const c_char,
+    count: i32,
+) -> ClientQuotaEntity {
+    let n = count.max(0) as usize;
+    let mut entries: HashMap<String, Option<String>> = HashMap::with_capacity(n);
+    for index in 0..n {
+        if let Some(entity_type) = unsafe { optional_string_at(types, index) } {
+            let name = unsafe { optional_string_at(names, index) };
+            entries.insert(entity_type, name);
+        }
+    }
+    ClientQuotaEntity::new(entries)
+}
+
+/// Reads `count` ragged entity rows into [`ClientQuotaEntity`] keys, computed
+/// independently of [`read_client_quota_alterations`]'s validated (and
+/// duplicate-rejecting) parse — mirrors
+/// `alter_consumer_group_offsets_async`'s `read_topic_partitions`-as-keys
+/// pattern — so every requested row still gets a callback via
+/// [`admin_async_per_key_op`]'s fan-out even when that parse fails.
+///
+/// # Safety
+///
+/// Each array must be null, or have `count` entries, each of which is null or
+/// has the matching per-row count of entries.
+unsafe fn read_client_quota_entity_keys(
+    entity_types: *const *const *const c_char,
+    entity_names: *const *const *const c_char,
+    entity_counts: *const i32,
+    count: i32,
+) -> Vec<ClientQuotaEntity> {
+    let n = count.max(0) as usize;
+    if entity_types.is_null() || entity_counts.is_null() {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|row| {
+            let types = unsafe { *entity_types.add(row) };
+            if types.is_null() {
+                return ClientQuotaEntity::new(HashMap::new());
+            }
+            let names = if entity_names.is_null() {
+                std::ptr::null()
+            } else {
+                unsafe { *entity_names.add(row) }
+            };
+            unsafe { read_client_quota_entity_infallible(types, names, *entity_counts.add(row)) }
+        })
+        .collect()
+}
+
 /// Submits `createAcls` and returns the collect-all future over its per-binding
 /// futures.
 fn submit_create_acls(
@@ -14735,6 +14822,22 @@ fn submit_alter_client_quotas(
     let futures: Vec<(ClientQuotaEntity, KafkaFuture<()>)> =
         result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect();
     KafkaFuture::join_map_results(futures)
+}
+
+/// Submits `alterClientQuotas`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_alter_client_quotas`]; see the "RPC submission helpers — per-key
+/// (unjoined) variants" note above. `ClientQuotaEntity::new` does not
+/// validate, so `entries`' own entities (via [`read_client_quota_entity_keys`]
+/// for the `keys` argument) already serve as a real identity — no raw-tuple
+/// key type is needed here, unlike `createAcls`'s [`AclBindingKey`].
+fn submit_alter_client_quotas_entries(
+    admin: &dyn Admin,
+    entries: &[ClientQuotaAlteration],
+    options: AlterClientQuotasOptions,
+) -> Vec<(ClientQuotaEntity, KafkaFuture<()>)> {
+    let result = admin.alter_client_quotas(entries, options);
+    result.values().iter().map(|(e, f)| (e.clone(), f.clone())).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -16212,15 +16315,24 @@ fn alter_client_quotas_options(timeout_ms: i32, validate_only: bool) -> AlterCli
         .validate_only(validate_only)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_client_quotas_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_client_quotas_async`], fired **once per
+/// entity, as that entity's own future resolves** — independently of every
+/// other entity in the same call, matching Java's `Map<ClientQuotaEntity,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterClientQuotasResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-entity failure arrives inside
-/// `result`, not as `error`.
+/// The key is delivered as an owned [`kafka_common_ClientQuotaEntity_t`]
+/// handle — the same opaque type
+/// [`kafka_admin_AlterClientQuotasResult_get_entity`] returns borrowed from
+/// the synchronous result — which the callback must free with
+/// [`kafka_common_ClientQuotaEntity_destroy`].
+///
+/// There is no value parameter: Java's per-entity future is
+/// `KafkaFuture<Void>`, so a null `error` *is* the success value. A non-null
+/// `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterClientQuotasResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_ClientQuotaEntity_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Alters client quotas, blocking until every per-entity future has resolved
 /// (synchronous).
@@ -16308,19 +16420,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// Alters client quotas asynchronously. See
 /// [`kafka_admin_AdminClient_alter_client_quotas`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL entity type or op key, an
-/// alteration with no entity types, or a repeated entity type or entity). And
-/// it runs on a **tokio worker thread** if the dispatcher's completion queue
-/// can no longer be reached when the result arrives. Destroying the handle does
-/// not cause that — an outstanding operation holds its own sender, so it cannot
+/// Unlike the synchronous entry point, the callback fires **once per entity,
+/// as that entity's future resolves**, not once for the whole batch — a fast
+/// or already-resolved entity is not held up by a slow or failing one. It is
+/// called once per distinct entity in the input, but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, a NULL entity type or op key, an alteration with no entity types,
+/// or a repeated entity type or entity). And it runs on a **tokio worker
+/// thread** if the dispatcher's completion queue can no longer be reached
+/// when a given entity's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
 /// disconnect the queue; what remains is a dispatcher thread that terminated
-/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
-/// guaranteed to be serialised on one thread. Do not hold a lock across this
-/// call and re-acquire it in the callback, and publish everything the callback
-/// needs (including `user_data`) before calling rather than after.
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in
+/// the callback, and publish everything the callback needs (including
+/// `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -16344,6 +16461,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     callback: kafka_admin_AdminClient_alter_client_quotas_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_client_quota_alterations`'s validated
+    // (and duplicate-rejecting) parse, so every requested row still gets its
+    // own callback via `admin_async_per_key_op`'s fan-out even when that
+    // parse fails. `ClientQuotaEntity::new` does not validate, so this is a
+    // real entity, not a raw-tuple stand-in.
+    let keys = unsafe { read_client_quota_entity_keys(entity_types, entity_names, entity_counts, count) };
     let entries = unsafe {
         read_client_quota_alterations(
             entity_types,
@@ -16358,16 +16481,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     };
     let options = alter_client_quotas_options(timeout_ms, validate_only);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_client_quotas(a, &entries?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_client_quotas_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_client_quotas_entries(a, &entries?, options)),
+            move |entity, outcome, ud| {
+                let key_ptr = Box::into_raw(Box::new(ClientQuotaEntityInner::new(&entity)))
+                    as *mut kafka_common_ClientQuotaEntity_t;
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(key_ptr, error, ud);
             },
         )
     };
@@ -17334,6 +17457,37 @@ fn submit_alter_user_scram_credentials(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Reads `count` scram alteration user names, tolerant of a NULL entry (kept
+/// as an empty string) so every requested row still gets an identity for
+/// [`admin_async_per_key_op`]'s fan-out even when [`read_scram_alterations`]'s
+/// validated parse fails on a NULL user in an earlier or later row.
+///
+/// # Safety
+///
+/// `users` must be null, or have `count` entries.
+unsafe fn read_scram_user_keys(users: *const *const c_char, count: i32) -> Vec<String> {
+    let n = count.max(0) as usize;
+    if users.is_null() {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| unsafe { optional_string_at(users, i) }.unwrap_or_default())
+        .collect()
+}
+
+/// Submits `alterUserScramCredentials`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin`
+/// call as [`submit_alter_user_scram_credentials`]; see the "RPC submission
+/// helpers — per-key (unjoined) variants" note above.
+fn submit_alter_user_scram_credentials_entries(
+    admin: &dyn Admin,
+    alterations: &[UserScramCredentialAlteration],
+    options: AlterUserScramCredentialsOptions,
+) -> Vec<(String, KafkaFuture<()>)> {
+    let result = admin.alter_user_scram_credentials(alterations, options);
+    result.values().iter().map(|(user, f)| (user.clone(), f.clone())).collect()
+}
+
 /// Submits `createDelegationToken` and returns its single token future.
 fn submit_create_delegation_token(
     admin: &dyn Admin,
@@ -17401,6 +17555,42 @@ fn submit_update_features(
         .map(|(feature, f)| (feature.clone(), f.clone()))
         .collect();
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Reads `count` feature names, tolerant of a NULL entry (kept as an empty
+/// string) so every requested row still gets an identity for
+/// [`admin_async_per_key_op`]'s fan-out even when [`read_feature_updates`]'s
+/// validated parse fails on a NULL/duplicate feature or an invalid update in
+/// an earlier or later row.
+///
+/// # Safety
+///
+/// `features` must be null, or have `count` entries.
+unsafe fn read_feature_keys(features: *const *const c_char, count: i32) -> Vec<String> {
+    let n = count.max(0) as usize;
+    if features.is_null() {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| unsafe { optional_string_at(features, i) }.unwrap_or_default())
+        .collect()
+}
+
+/// Submits `updateFeatures`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_update_features`],
+/// including its client-side-validation `Err` path; see the "RPC submission
+/// helpers — per-key (unjoined) variants" note above.
+fn submit_update_features_entries(
+    admin: &dyn Admin,
+    feature_updates: &HashMap<String, FeatureUpdate>,
+    options: UpdateFeaturesOptions,
+) -> Result<Vec<(String, KafkaFuture<()>)>, Error> {
+    let result = admin.update_features(feature_updates, options)?;
+    Ok(result
+        .values()
+        .iter()
+        .map(|(feature, f)| (feature.clone(), f.clone()))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -17518,15 +17708,19 @@ fn alter_user_scram_credentials_options(timeout_ms: i32) -> AlterUserScramCreden
     AlterUserScramCredentialsOptions::new().timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_user_scram_credentials_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_user_scram_credentials_async`], fired
+/// **once per user, as that user's own future resolves** — independently of
+/// every other user in the same call, matching Java's `Map<String,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterUserScramCredentialsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-user failure arrives
-/// inside `result`, not as `error`.
+/// `user` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. There is no value parameter: Java's per-user
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
+/// non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Upserts and deletes SASL/SCRAM credentials, blocking until every per-user
 /// future has resolved (synchronous).
@@ -17634,19 +17828,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// Alters SASL/SCRAM credentials asynchronously. See
 /// [`kafka_admin_AdminClient_alter_user_scram_credentials`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle or a NULL user entry). And it runs
-/// on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding
-/// operation holds its own sender, so it cannot disconnect the queue; what
-/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
-/// inside an earlier callback. So callbacks are not guaranteed to be serialised
-/// on one thread. Do not hold a lock across this call and re-acquire it in the
-/// callback, and publish everything the callback needs (including `user_data`)
-/// before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per user, as
+/// that user's future resolves**, not once for the whole batch — a fast or
+/// already-resolved user is not held up by a slow or failing one. It is
+/// called once per distinct user in the input, but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle or a NULL user entry). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// user's result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally,
+/// i.e. a panic inside an earlier callback. So callbacks for different keys
+/// are not guaranteed to be serialised on one thread, nor in request order.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
 ///
 /// # Safety
 ///
@@ -17671,6 +17869,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     callback: kafka_admin_AdminClient_alter_user_scram_credentials_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_scram_alterations`'s validated parse
+    // (which fails the whole array on a NULL user), so every requested row
+    // still gets its own callback via `admin_async_per_key_op`'s fan-out even
+    // when that parse fails.
+    let keys = unsafe { read_scram_user_keys(users, count) };
     let alterations = unsafe {
         read_scram_alterations(
             users,
@@ -17687,16 +17890,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     };
     let options = alter_user_scram_credentials_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_user_scram_credentials(a, &alterations?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_user_scram_credentials_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_user_scram_credentials_entries(a, &alterations?, options)),
+            move |user, outcome, ud| {
+                let user_c = to_cstring(&user);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(user_c.as_ptr(), error, ud);
             },
         )
     };
@@ -18331,14 +18533,20 @@ fn update_features_options(timeout_ms: i32, validate_only: bool) -> UpdateFeatur
         .timeout_ms(option_timeout(timeout_ms))
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_update_features_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_update_features_async`], fired **once per
+/// feature, as that feature's own future resolves** — independently of every
+/// other feature in the same call, matching Java's `Map<String,
+/// KafkaFuture<Void>>` (`admin-client.md` §5), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_UpdateFeaturesResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-feature failure arrives inside
-/// `result`, not as `error`.
+/// `feature` is borrowed and valid only for the duration of this call — copy
+/// it if you need to retain it. There is no value parameter: Java's
+/// per-feature future is `KafkaFuture<Void>`, so a null `error` *is* the
+/// success value. A non-null `error` must be freed with
+/// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_update_features_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_UpdateFeaturesResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Applies feature updates, blocking until every per-feature future has
 /// resolved (synchronous).
@@ -18403,21 +18611,33 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 /// Applies feature updates asynchronously. See
 /// [`kafka_admin_AdminClient_update_features`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL or repeated feature name, a
-/// `FeatureUpdate` the constructor rejects, or — against a real client, not a
-/// mock — an empty update map, for which `KafkaAdminClient.updateFeatures`
-/// throws `IllegalArgumentException`). And it runs on a
-/// **tokio worker thread** if the dispatcher's completion queue can no longer
-/// be reached when the result arrives. Destroying the handle does not cause
-/// that — an outstanding operation holds its own sender, so it cannot
-/// disconnect the queue; what remains is a dispatcher thread that terminated
-/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
-/// guaranteed to be serialised on one thread. Do not hold a lock across this
-/// call and re-acquire it in the callback, and publish everything the callback
-/// needs (including `user_data`) before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per feature,
+/// as that feature's future resolves**, not once for the whole batch — a fast
+/// or already-resolved feature is not held up by a slow or failing one. It is
+/// called once per distinct feature in the input, but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, a NULL or repeated feature name, a `FeatureUpdate` the constructor
+/// rejects, or — against a real client, not a mock — an empty update map,
+/// for which `KafkaAdminClient.updateFeatures` throws
+/// `IllegalArgumentException`). And it runs on a **tokio worker thread** if
+/// the dispatcher's completion queue can no longer be reached when a given
+/// feature's result arrives. Destroying the handle does not cause that — an
+/// outstanding operation holds its own sender, so it cannot disconnect the
+/// queue; what remains is a dispatcher thread that terminated abnormally,
+/// i.e. a panic inside an earlier callback. So callbacks for different keys
+/// are not guaranteed to be serialised on one thread, nor in request order.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before
+/// calling rather than after.
+///
+/// When `count` is 0, there is no key at all — the callback is **never
+/// invoked** for this input, even though a real client's empty-map validation
+/// error exists (`KafkaAdminClient.updateFeatures`'s `IllegalArgumentException`
+/// for an empty update map): there is no per-call callback slot to report a
+/// whole-call failure through when zero keys were requested. Use the
+/// synchronous entry point to observe that outcome.
 ///
 /// # Safety
 ///
@@ -18436,19 +18656,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     callback: kafka_admin_AdminClient_update_features_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_feature_updates`'s validated (and
+    // duplicate-rejecting) parse, so every requested row still gets its own
+    // callback via `admin_async_per_key_op`'s fan-out even when that parse
+    // fails.
+    let keys = unsafe { read_feature_keys(features, count) };
     let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
     let options = update_features_options(timeout_ms, validate_only);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_update_features(a, &updates?, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_update_features_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| submit_update_features_entries(a, &updates?, options),
+            move |feature, outcome, ud| {
+                let feature_c = to_cstring(&feature);
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(feature_c.as_ptr(), error, ud);
             },
         )
     };
@@ -26947,7 +27171,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase F (ACLs/quotas/features family): createAcls, deleteAcls.
+    // Phase F (ACLs/quotas/features family): createAcls, deleteAcls,
+    // alterClientQuotas, alterUserScramCredentials, updateFeatures.
     // -----------------------------------------------------------------------
 
     fn acl_binding_for_test(name: &str) -> AclBinding {
@@ -27221,6 +27446,240 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("the filter must get exactly one callback");
         assert_eq!(message.as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.alterClientQuotas` throws
+    /// `UnsupportedOperationException` synchronously,
+    /// `MockAdminClient.java:1248-1250`): both entities must each get exactly
+    /// one callback, and the delivered `kafka_common_ClientQuotaEntity_t` key
+    /// must round-trip its (type, name) pair.
+    #[test]
+    fn alter_client_quotas_async_reports_the_real_unsupported_error_per_entity() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_types_owned, type_ptrs) = c_array(&["user", "user"]);
+        let entity_types_row_a = [type_ptrs[0]];
+        let entity_types_row_b = [type_ptrs[1]];
+        let entity_types: [*const *const c_char; 2] = [entity_types_row_a.as_ptr(), entity_types_row_b.as_ptr()];
+        let (_names_owned, name_ptrs) = c_array(&["acq-alice", "acq-bob"]);
+        let entity_names_row_a = [name_ptrs[0]];
+        let entity_names_row_b = [name_ptrs[1]];
+        let entity_names: [*const *const c_char; 2] = [entity_names_row_a.as_ptr(), entity_names_row_b.as_ptr()];
+        let entity_counts = [1i32, 1i32];
+        let (_op_keys_owned, op_key_ptrs) = c_array(&["producer_byte_rate", "producer_byte_rate"]);
+        let op_key_row_a = [op_key_ptrs[0]];
+        let op_key_row_b = [op_key_ptrs[1]];
+        let op_keys: [*const *const c_char; 2] = [op_key_row_a.as_ptr(), op_key_row_b.as_ptr()];
+        let op_values_row = [1000.0f64];
+        let op_values: [*const f64; 2] = [op_values_row.as_ptr(), op_values_row.as_ptr()];
+        let op_has_values_row = [true];
+        let op_has_values: [*const bool; 2] = [op_has_values_row.as_ptr(), op_has_values_row.as_ptr()];
+        let op_counts = [1i32, 1i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_alter(
+            key: *mut kafka_common_ClientQuotaEntity_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            assert_eq!(unsafe { kafka_common_ClientQuotaEntity_entry_count(key) }, 1);
+            assert_eq!(
+                unsafe { CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(key, 0)) }.to_string_lossy(),
+                "user"
+            );
+            let name = unsafe { CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(key, 0)) }
+                .to_string_lossy()
+                .into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_ClientQuotaEntity_destroy(key) };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_client_quotas_async(
+                admin,
+                entity_types.as_ptr(),
+                entity_names.as_ptr(),
+                entity_counts.as_ptr(),
+                op_keys.as_ptr(),
+                op_values.as_ptr(),
+                op_has_values.as_ptr(),
+                op_counts.as_ptr(),
+                2,
+                -1,
+                false,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both entities must get exactly one callback, not hang");
+            seen.insert(name, message);
+        }
+        assert_eq!(seen.len(), 2, "both entities must have delivered exactly once");
+        assert_eq!(seen["acq-alice"].as_deref(), Some("Not implement yet"));
+        assert_eq!(seen["acq-bob"].as_deref(), Some("Not implement yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`
+    /// (Java's `MockAdminClient.alterUserScramCredentials` throws
+    /// `UnsupportedOperationException` synchronously,
+    /// `MockAdminClient.java:1256-1259`): both users must each get exactly
+    /// one callback.
+    #[test]
+    fn alter_user_scram_credentials_async_reports_the_real_unsupported_error_per_user() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_users_owned, user_ptrs) = c_array(&["ausc-alice", "ausc-bob"]);
+        let is_deletions = [false, false];
+        let mechanism_id = i32::from(ScramMechanism::ScramSha256.r#type());
+        let mechanisms = [mechanism_id, mechanism_id];
+        let iterations = [4096i32, 4096i32];
+        let password_bytes = b"secret".to_vec();
+        let passwords: [*const u8; 2] = [password_bytes.as_ptr(), password_bytes.as_ptr()];
+        let password_lens = [password_bytes.len() as i32, password_bytes.len() as i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_alter(user: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(user) }.to_string_lossy().into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_user_scram_credentials_async(
+                admin,
+                user_ptrs.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+                -1,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (name, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both users must get exactly one callback, not hang");
+            seen.insert(name, message);
+        }
+        assert_eq!(seen.len(), 2, "both users must have delivered exactly once");
+        assert_eq!(seen["ausc-alice"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["ausc-bob"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end through the real async entry point and `MockAdminClient`,
+    /// whose `updateFeatures` has real in-memory validation logic (unlike the
+    /// four RPCs above): a single feature update against a fresh (unseeded)
+    /// mock, applying `SAFE_DOWNGRADE` to level 0, satisfies
+    /// `validate_feature_update`'s `cur(0) >= next(0)` / `min(0) <=
+    /// next(0) <= max(0)` checks and must deliver a **real success** (null
+    /// error), not a synthetic one — proving the per-key value path, not just
+    /// the per-key error path, for this family's one RPC with genuine mock
+    /// logic.
+    #[test]
+    fn update_features_async_delivers_the_real_success_for_a_single_feature() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_features_owned, feature_ptrs) = c_array(&["uf-feature"]);
+        let max_version_levels = [0i16];
+        let upgrade_types = [i32::from(UpgradeType::SafeDowngrade.code())];
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_update(_feature: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_update_features_async(
+                admin,
+                feature_ptrs.as_ptr(),
+                max_version_levels.as_ptr(),
+                upgrade_types.as_ptr(),
+                1,
+                -1,
+                false,
+                on_update,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the feature must get exactly one callback");
+        assert_eq!(
+            message, None,
+            "a valid SAFE_DOWNGRADE to level 0 against an unseeded mock must succeed"
+        );
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));
