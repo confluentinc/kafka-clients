@@ -411,6 +411,36 @@ Java as possible."* That resolves D1–D3.
   per-key error — and would recur in B4 and B6. Following Java's result shape
   is the more faithful reading, is what B3 shipped, and still lets a C caller
   reach every outcome Java can.)*
+
+  **Addendum (2026-09-15) — superseded for the Topics-family `_async` entry
+  points.** D2's "one flattened result handle per RPC, delivered through one
+  callback" is no longer the shape for the seven Topics-family async entry
+  points: `kafka_admin_AdminClient_create_topics_async`,
+  `_delete_topics_async`, `_delete_topics_by_ids_async`,
+  `_describe_topics_async`, `_describe_topics_by_ids_async`,
+  `_create_partitions_async`, `_delete_records_async`. Their callback now
+  fires **once per key, independently, as that key's own future resolves** —
+  restoring the per-key *timing* granularity this section's closing paragraph
+  said C had no way to convey (it does, once the callback itself is
+  per-key rather than per-batch). There is no flattened result handle on this
+  path at all; each key's value (if any) arrives as its own small owned
+  handle (`kafka_admin_TopicMetadataAndConfig_t` / `kafka_admin_TopicDescription_t`
+  / the new `kafka_admin_DeletedRecords_t`), freed independently of any
+  `*Result_t`. The **synchronous** entry points for these same seven RPCs are
+  unaffected — they still return one flattened `kafka_admin_*Result_t`, a
+  faithful translation of Java's synchronous-style `KafkaFuture.allOf(...).get()`
+  usage, per `admin-client.md` §1. Every other RPC's `_async` entry point is
+  also unaffected and still follows D2 as written above.
+
+  The shared mechanism (`admin_async_per_key_op` in `src/ffi/admin.rs`,
+  registering `KafkaFuture::when_complete` per key instead of joining via
+  `KafkaFuture::join_map_results`) is designed to extend to the remaining
+  per-key RPCs in later phases; see the plan this addendum was written
+  against for the phase list. Motivation: the joined shape did not match
+  Java's per-key `KafkaFuture` contract (a slow or failed key held up every
+  other key in the same call), nor real `confluent_kafka`'s
+  `AdminClient.create_topics()`, which this repo's own
+  `bindings/python/test/performance/performance_common.py` already assumes.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
