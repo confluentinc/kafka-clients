@@ -1599,33 +1599,38 @@ static void test_mock_admin_describe_configs_null_row_skipped(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase B: describe_configs_async fires once PER RESOURCE, independently, as
+ * that resource's own future resolves - not once for the whole batch (same
+ * shape as Phase A's create_topics_async). `error_count` / `value_count` are
+ * generic (any resource); the `_for_missing` / `_for_broker` fields pin the
+ * two specific resources this test cares about. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    atomic_int value_count;
     int32_t error_code_for_missing;
     int has_value_for_broker;
 } describe_configs_async_result_t;
 
-static void on_describe_configs(kafka_admin_DescribeConfigsResult_t *result,
-                                kafka_common_Error_t *error, void *user_data) {
+static void on_describe_configs(int32_t resource_type, const char *resource_name,
+                                kafka_admin_Config_t *value, kafka_common_Error_t *error,
+                                void *user_data) {
     describe_configs_async_result_t *r = (describe_configs_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_DescribeConfigsResult_count(result);
-        int32_t i = find_describe_configs_key(result, RESOURCE_TYPE_TOPIC, "async-missing");
-        const kafka_common_Error_t *e =
-            i >= 0 ? kafka_admin_DescribeConfigsResult_get_error(result, i) : NULL;
-        r->error_code_for_missing = e ? kafka_common_Error_code(e) : 0;
-        i = find_describe_configs_key(result, RESOURCE_TYPE_BROKER, "0");
-        r->has_value_for_broker =
-            i >= 0 && kafka_admin_DescribeConfigsResult_get_value(result, i) != NULL;
-        kafka_admin_DescribeConfigsResult_destroy(result);
-    }
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
+        if (resource_type == RESOURCE_TYPE_TOPIC && resource_name != NULL &&
+            strcmp(resource_name, "async-missing") == 0) {
+            r->error_code_for_missing = kafka_common_Error_code(error);
+        }
         kafka_common_Error_destroy(error);
+    }
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        if (resource_type == RESOURCE_TYPE_BROKER && resource_name != NULL &&
+            strcmp(resource_name, "0") == 0) {
+            r->has_value_for_broker = 1;
+        }
+        kafka_admin_Config_destroy(value);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -1637,27 +1642,39 @@ static void test_mock_admin_describe_configs_async_partial_failure(void) {
 
     describe_configs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_describe_configs_async(admin, types, names, 2, -1, false, false,
                                                    on_describe_configs, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(2, r.count);
+    /* Two resources -> two independent callback invocations. */
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
     TEST_ASSERT_EQUAL_INT32(UNKNOWN_TOPIC_OR_PARTITION_CODE, r.error_code_for_missing);
     TEST_ASSERT_TRUE(r.has_value_for_broker);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle fans the same error out over every requested resource, one
+ * callback per resource - the same cardinality as a successful submission, so
+ * a caller that already built one Future per resource still gets each one
+ * resolved. Needs a non-empty input: an empty request fans out over zero
+ * resources regardless of handle validity, so `NULL, 0` would never fire the
+ * callback at all. */
 static void test_mock_admin_describe_configs_async_null_handle(void) {
+    const int32_t types[2] = {RESOURCE_TYPE_TOPIC, RESOURCE_TYPE_BROKER};
+    const char *names[2] = {"a", "0"};
+
     describe_configs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_describe_configs_async(NULL, NULL, NULL, 0, -1, false, false,
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_configs_async(NULL, types, names, 2, -1, false, false,
                                                    on_describe_configs, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
 // ---- incrementalAlterConfigs ----------------------------------------------
@@ -1771,27 +1788,30 @@ static void test_mock_admin_incremental_alter_configs_bad_op_type(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase B: incremental_alter_configs_async fires once PER DISTINCT RESOURCE,
+ * independently, as that resource's own future resolves - not once per
+ * operation row and not once for the whole batch (`distinct_config_resources`
+ * de-dupes the flat per-operation rows down to Java's per-resource future
+ * set). There is no value parameter (Java's per-resource future is
+ * `KafkaFuture<Void>`), so a null `error` *is* the success value. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    atomic_int success_count;
     int32_t error_code_for_first;
 } alter_configs_async_result_t;
 
-static void on_alter_configs(kafka_admin_AlterConfigsResult_t *result,
+static void on_alter_configs(int32_t resource_type, const char *resource_name,
                              kafka_common_Error_t *error, void *user_data) {
     alter_configs_async_result_t *r = (alter_configs_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_AlterConfigsResult_count(result);
-        const kafka_common_Error_t *e = kafka_admin_AlterConfigsResult_get_error(result, 0);
-        r->error_code_for_first = e ? kafka_common_Error_code(e) : 0;
-        kafka_admin_AlterConfigsResult_destroy(result);
-    }
+    (void)resource_type;
+    (void)resource_name;
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
+        r->error_code_for_first = kafka_common_Error_code(error);
         kafka_common_Error_destroy(error);
+    } else {
+        atomic_fetch_add(&r->success_count, 1);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -1806,19 +1826,21 @@ static void test_mock_admin_incremental_alter_configs_async(void) {
 
     alter_configs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.success_count, 0);
     kafka_admin_AdminClient_incremental_alter_configs_async(
         admin, types, resources, keys, values, ops, 1, -1, false, on_alter_configs, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.success_count));
     TEST_ASSERT_EQUAL_INT32(UNKNOWN_TOPIC_OR_PARTITION_CODE, r.error_code_for_first);
     kafka_admin_AdminClient_destroy(admin);
 }
 
 /* Marshaling failures fire the callback inline, on the calling thread, before
- * the entry point returns — and never reach the mock. */
+ * the entry point returns — fanned out over the one named resource (computed
+ * independently of the bad op-type parse) — and never reach the mock. */
 static void test_mock_admin_incremental_alter_configs_async_bad_op_type(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const int32_t types[1] = {RESOURCE_TYPE_TOPIC};
@@ -1829,23 +1851,36 @@ static void test_mock_admin_incremental_alter_configs_async_bad_op_type(void) {
 
     alter_configs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.success_count, 0);
     kafka_admin_AdminClient_incremental_alter_configs_async(
         admin, types, resources, keys, values, ops, 1, -1, false, on_alter_configs, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired)); /* already fired, inline */
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.success_count));
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error,
+ * fanned out over the one named resource. Needs a non-empty input: an empty
+ * request fans out over zero resources regardless of handle validity, so
+ * `NULL, NULL, ..., 0` would never fire the callback at all. */
 static void test_mock_admin_incremental_alter_configs_async_null_handle(void) {
+    const int32_t types[1] = {RESOURCE_TYPE_TOPIC};
+    const char *resources[1] = {"whatever"};
+    const char *keys[1] = {"retention.ms"};
+    const char *values[1] = {"1"};
+    const int32_t ops[1] = {OP_TYPE_SET};
+
     alter_configs_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_incremental_alter_configs_async(NULL, NULL, NULL, NULL, NULL, NULL,
-                                                            0, -1, false, on_alter_configs, &r);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.success_count, 0);
+    kafka_admin_AdminClient_incremental_alter_configs_async(
+        NULL, types, resources, keys, values, ops, 1, -1, false, on_alter_configs, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.success_count));
 }
 
 // ---- listConfigResources ---------------------------------------------------
