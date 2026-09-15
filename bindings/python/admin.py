@@ -2507,16 +2507,31 @@ class _AdminBase:
     # shape used to construct the futures dict - shared between Admin and
     # AsyncAdmin, which differ only in the Future type and delivery mechanism
     # (see `_keyed_value_cb`/`_keyed_void_cb`/`_keyed_delete_records_cb`
-    # above). Deduplication ("last one wins" for a repeated key, mirroring
-    # Java's `Map<K, KafkaFuture>` for a batch with a duplicate) is required
-    # here, not optional: `admin_incref_n` in the C layer increfs the native
-    # callback once per entry in the request actually submitted, so the
-    # number of keys used to build the futures dict must equal the number of
-    # native callback invocations exactly.
+    # above). Deduplication is required here, not optional: `admin_incref_n`
+    # in the C layer increfs the native callback once per entry in the
+    # request actually submitted, so the number of keys used to build the
+    # futures dict must equal the number of native callback invocations
+    # exactly.
 
     @staticmethod
     def _create_topics_keys_and_spec(new_topics):
-        deduped = {t.name: t for t in new_topics}
+        """De-duplicate `new_topics` by name, FIRST occurrence wins.
+
+        Matches Java's `KafkaAdminClient.createTopics`
+        (`KafkaAdminClient.java:1782-1796`, which only ever inserts into its
+        per-topic future map via the vacant-entry branch) and this crate's
+        own `KafkaAdminClient::create_topics`
+        (`src/admin/kafka_admin_client.rs`, an `Entry::Vacant` check with the
+        same effect): a later `NewTopic` sharing an earlier one's name is
+        silently dropped, not merged or preferred. A plain
+        `{t.name: t for t in new_topics}` dict comprehension would be
+        LAST-occurrence-wins instead - the opposite rule - which would submit
+        the wrong spec for a duplicate name.
+        """
+        deduped = {}
+        for t in new_topics:
+            if t.name not in deduped:
+                deduped[t.name] = t
         return list(deduped), [t._to_spec() for t in deduped.values()]
 
     @staticmethod

@@ -426,39 +426,38 @@ static void test_mock_admin_new_topic_null_handling(void) {
 // createTopics (async)
 // ---------------------------------------------------------------------------
 
+/* Phase A: create_topics_async fires once PER KEY, independently, as that
+ * key's own future resolves - not once for the whole batch. `error_count` /
+ * `value_count` are generic (any key); the `_for_existing` / `_for_fresh`
+ * fields pin the two specific keys this test cares about. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    atomic_int value_count;
+    int had_error_for_existing;
     int32_t error_code_for_existing;
+    int had_value_for_fresh;
     int32_t partitions_for_fresh;
 } create_async_result_t;
 
-static void on_create(kafka_admin_CreateTopicsResult_t *result,
+static void on_create(const char *key, kafka_admin_TopicMetadataAndConfig_t *value,
                       kafka_common_Error_t *error, void *user_data) {
     create_async_result_t *r = (create_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_CreateTopicsResult_count(result);
-        int32_t i = find_create_key(result, "existing");
-        if (i >= 0) {
-            const kafka_common_Error_t *e =
-                kafka_admin_CreateTopicsResult_get_error(result, i);
-            r->error_code_for_existing = e ? kafka_common_Error_code(e) : 0;
-        }
-        int32_t j = find_create_key(result, "fresh-async");
-        if (j >= 0) {
-            const kafka_admin_TopicMetadataAndConfig_t *mc =
-                kafka_admin_CreateTopicsResult_get_value(result, j);
-            r->partitions_for_fresh =
-                mc ? kafka_admin_TopicMetadataAndConfig_num_partitions(mc) : -1;
-        }
-        kafka_admin_CreateTopicsResult_destroy(result);
-    }
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
+        if (key != NULL && strcmp(key, "existing") == 0) {
+            r->had_error_for_existing = 1;
+            r->error_code_for_existing = kafka_common_Error_code(error);
+        }
         kafka_common_Error_destroy(error);
+    }
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        if (key != NULL && strcmp(key, "fresh-async") == 0) {
+            r->had_value_for_fresh = 1;
+            r->partitions_for_fresh = kafka_admin_TopicMetadataAndConfig_num_partitions(value);
+        }
+        kafka_admin_TopicMetadataAndConfig_destroy(value);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -473,14 +472,18 @@ static void test_mock_admin_create_topics_async_partial_failure(void) {
 
     create_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_create_topics_async(admin, topics, 2, -1, false, false,
                                                 on_create, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(2, r.count);
+    /* Two keys -> two independent callback invocations. */
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
+    TEST_ASSERT_TRUE(r.had_error_for_existing);
     TEST_ASSERT_EQUAL_INT32(TOPIC_ALREADY_EXISTS_CODE, r.error_code_for_existing);
+    TEST_ASSERT_TRUE(r.had_value_for_fresh);
     TEST_ASSERT_EQUAL_INT32(3, r.partitions_for_fresh);
 
     kafka_admin_NewTopic_destroy(a);
@@ -488,14 +491,26 @@ static void test_mock_admin_create_topics_async_partial_failure(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* A NULL handle fans the same error out over every requested key, one
+ * callback per key - the same cardinality as a successful submission, so a
+ * caller that already built one Future per key still gets each one resolved. */
 static void test_mock_admin_create_topics_async_null_handle(void) {
+    kafka_admin_NewTopic_t *a = kafka_admin_NewTopic_new("a", 1, 1);
+    kafka_admin_NewTopic_t *b = kafka_admin_NewTopic_new("b", 1, 1);
+    const kafka_admin_NewTopic_t *topics[2] = {a, b};
+
     create_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_create_topics_async(NULL, NULL, 0, -1, false, false,
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_create_topics_async(NULL, topics, 2, -1, false, false,
                                                 on_create, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+
+    kafka_admin_NewTopic_destroy(a);
+    kafka_admin_NewTopic_destroy(b);
 }
 
 // ---------------------------------------------------------------------------
@@ -708,28 +723,27 @@ static void test_mock_admin_describe_topics_by_ids(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase A: describe_topics_async / describe_topics_by_ids_async fire once
+ * per key, independently. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    atomic_int value_count;
     int32_t partition_count;
 } describe_async_result_t;
 
-static void on_describe(kafka_admin_DescribeTopicsResult_t *result,
+static void on_describe(const char *key, kafka_admin_TopicDescription_t *value,
                         kafka_common_Error_t *error, void *user_data) {
     describe_async_result_t *r = (describe_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_DescribeTopicsResult_count(result);
-        const kafka_admin_TopicDescription_t *d =
-            kafka_admin_DescribeTopicsResult_get_value(result, 0);
-        r->partition_count = d ? kafka_admin_TopicDescription_partition_count(d) : -1;
-        kafka_admin_DescribeTopicsResult_destroy(result);
-    }
+    (void)key;
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
         kafka_common_Error_destroy(error);
+    }
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        r->partition_count = kafka_admin_TopicDescription_partition_count(value);
+        kafka_admin_TopicDescription_destroy(value);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -741,12 +755,13 @@ static void test_mock_admin_describe_topics_async(void) {
     const char *names[1] = {"async-described"};
     describe_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_describe_topics_async(admin, names, 1, -1, false, -1,
                                                   on_describe, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
     TEST_ASSERT_EQUAL_INT32(5, r.partition_count);
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -758,11 +773,13 @@ static void test_mock_admin_describe_topics_by_ids_async_bad_id(void) {
     const char *bad_ids[1] = {"###"};
     describe_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_describe_topics_by_ids_async(admin, bad_ids, 1, -1, false,
                                                          -1, on_describe, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -832,30 +849,24 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase A: delete_topics_async / delete_topics_by_ids_async fire once per
+ * key, independently. Java's per-key future is KafkaFuture<Void>, so the
+ * callback carries no value parameter - a null error is the success signal. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    int had_error_for_missing;
     int32_t error_code_for_missing;
 } delete_async_result_t;
 
-static void on_delete(kafka_admin_DeleteTopicsResult_t *result,
-                      kafka_common_Error_t *error, void *user_data) {
+static void on_delete(const char *key, kafka_common_Error_t *error, void *user_data) {
     delete_async_result_t *r = (delete_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_DeleteTopicsResult_count(result);
-        int32_t i = find_delete_key(result, "nope");
-        if (i >= 0) {
-            const kafka_common_Error_t *e =
-                kafka_admin_DeleteTopicsResult_get_error(result, i);
-            r->error_code_for_missing = e ? kafka_common_Error_code(e) : 0;
-        }
-        kafka_admin_DeleteTopicsResult_destroy(result);
-    }
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
+        if (key != NULL && strcmp(key, "nope") == 0) {
+            r->had_error_for_missing = 1;
+            r->error_code_for_missing = kafka_common_Error_code(error);
+        }
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -868,11 +879,12 @@ static void test_mock_admin_delete_topics_async(void) {
     const char *names[2] = {"gone-async", "nope"};
     delete_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_delete_topics_async(admin, names, 2, -1, false, on_delete, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(2, r.count);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_TRUE(r.had_error_for_missing);
     TEST_ASSERT_EQUAL_INT32(UNKNOWN_TOPIC_OR_PARTITION_CODE, r.error_code_for_missing);
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -882,11 +894,11 @@ static void test_mock_admin_delete_topics_by_ids_async(void) {
     const char *bad_ids[1] = {"@@@@"};
     delete_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_delete_topics_by_ids_async(admin, bad_ids, 1, -1, false,
                                                         on_delete, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -1020,27 +1032,22 @@ static void test_mock_admin_create_partitions_null_and_empty_handling(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase A: create_partitions_async fires once per key, independently. Java's
+ * per-key future is KafkaFuture<Void>, so the callback carries no value
+ * parameter. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
     int32_t error_code_for_first;
 } create_partitions_async_result_t;
 
-static void on_create_partitions(kafka_admin_CreatePartitionsResult_t *result,
-                                 kafka_common_Error_t *error, void *user_data) {
+static void on_create_partitions(const char *key, kafka_common_Error_t *error,
+                                 void *user_data) {
     create_partitions_async_result_t *r = (create_partitions_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_CreatePartitionsResult_count(result);
-        const kafka_common_Error_t *e =
-            kafka_admin_CreatePartitionsResult_get_error(result, 0);
-        r->error_code_for_first = e ? kafka_common_Error_code(e) : 0;
-        kafka_admin_CreatePartitionsResult_destroy(result);
-    }
+    (void)key;
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
+        r->error_code_for_first = kafka_common_Error_code(error);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -1054,28 +1061,36 @@ static void test_mock_admin_create_partitions_async(void) {
 
     create_partitions_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_create_partitions_async(admin, topics, specs, 1, -1, false,
                                                     true, on_create_partitions, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
     TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, r.error_code_for_first);
 
     kafka_admin_NewPartitions_destroy(np);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error -
+ * fanned out over every requested key (Phase A), not just once for the call. */
 static void test_mock_admin_create_partitions_async_null_handle(void) {
+    kafka_admin_NewPartitions_t *np1 = kafka_admin_NewPartitions_new(2, false);
+    kafka_admin_NewPartitions_t *np2 = kafka_admin_NewPartitions_new(3, false);
+    const char *topics[2] = {"a", "b"};
+    const kafka_admin_NewPartitions_t *specs[2] = {np1, np2};
+
     create_partitions_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_create_partitions_async(NULL, NULL, NULL, 0, -1, false, true,
+    atomic_init(&r.error_count, 0);
+    kafka_admin_AdminClient_create_partitions_async(NULL, topics, specs, 2, -1, false, true,
                                                     on_create_partitions, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+
+    kafka_admin_NewPartitions_destroy(np1);
+    kafka_admin_NewPartitions_destroy(np2);
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,28 +1180,35 @@ static void test_mock_admin_delete_records_empty_and_null_handling(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase A: delete_records_async fires once per key, independently. The key is
+ * a TopicPartition, delivered as a topic name plus a partition id rather than
+ * through a single opaque key handle. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    atomic_int value_count;
     int32_t error_code_for_first;
+    char topic_for_first[64];
+    int32_t partition_for_first;
 } delete_records_async_result_t;
 
-static void on_delete_records(kafka_admin_DeleteRecordsResult_t *result,
+static void on_delete_records(const char *topic, int32_t partition,
+                              kafka_admin_DeletedRecords_t *value,
                               kafka_common_Error_t *error, void *user_data) {
     delete_records_async_result_t *r = (delete_records_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_DeleteRecordsResult_count(result);
-        const kafka_common_Error_t *e =
-            kafka_admin_DeleteRecordsResult_get_error(result, 0);
-        r->error_code_for_first = e ? kafka_common_Error_code(e) : 0;
-        kafka_admin_DeleteRecordsResult_destroy(result);
+    if (topic != NULL) {
+        strncpy(r->topic_for_first, topic, sizeof(r->topic_for_first) - 1);
+        r->topic_for_first[sizeof(r->topic_for_first) - 1] = '\0';
     }
+    r->partition_for_first = partition;
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
+        r->error_code_for_first = kafka_common_Error_code(error);
         kafka_common_Error_destroy(error);
+    }
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        kafka_admin_DeletedRecords_destroy(value);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -1199,27 +1221,37 @@ static void test_mock_admin_delete_records_async(void) {
 
     delete_records_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_delete_records_async(admin, topics, partitions, offsets, 1,
                                                  -1, on_delete_records, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
     TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, r.error_code_for_first);
+    TEST_ASSERT_EQUAL_STRING("async-trim", r.topic_for_first);
+    TEST_ASSERT_EQUAL_INT32(0, r.partition_for_first);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error -
+ * fanned out over every requested key (Phase A), not just once for the call. */
 static void test_mock_admin_delete_records_async_null_handle(void) {
+    const char *topics[2] = {"a", "b"};
+    const int32_t partitions[2] = {0, 1};
+    const int64_t offsets[2] = {1, 2};
+
     delete_records_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_delete_records_async(NULL, NULL, NULL, NULL, 0, -1,
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_delete_records_async(NULL, topics, partitions, offsets, 2, -1,
                                                  on_delete_records, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
 // ---------------------------------------------------------------------------

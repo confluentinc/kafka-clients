@@ -301,6 +301,23 @@ def test_create_topics_two_keys_resolve_independently():
         assert futures["first"].done() and futures["second"].done()
 
 
+def test_create_topics_duplicate_name_first_spec_wins():
+    """A repeated topic name is de-duplicated FIRST-occurrence-wins, matching
+    Java's KafkaAdminClient.createTopics (KafkaAdminClient.java:1782-1796,
+    which only ever inserts a future via the vacant-entry branch) and this
+    crate's own KafkaAdminClient::create_topics (same Entry::Vacant check) -
+    NOT last-occurrence-wins, which a naive `{t.name: t for t in new_topics}`
+    dict comprehension would give."""
+    with MockAdminClient(3) as admin:
+        futures = admin.create_topics([
+            NewTopic("dup", 3, 1),
+            NewTopic("dup", 5, 1),
+        ])
+        assert list(futures) == ["dup"]
+        meta = futures["dup"].result(timeout=5.0)
+        assert meta.num_partitions == 3
+
+
 def test_create_topics_validate_only_option_is_accepted():
     with MockAdminClient(1) as admin:
         # Java's MockAdminClient.createTopics never reads its options argument

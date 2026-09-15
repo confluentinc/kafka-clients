@@ -24115,4 +24115,68 @@ mod tests {
             kafka_admin_UpdateFeaturesResult_destroy(std::ptr::null_mut());
         }
     }
+
+    // -- admin_async_per_key_op: temporal independence (Phase A) ------------
+    //
+    // `MockAdminClient` resolves every future synchronously, so a test built
+    // on it (the Python `test_create_topics_two_keys_resolve_independently`)
+    // can only prove *structural* independence (a dict of Futures, gettable
+    // in any order) - not that a slow/never-resolving key is genuinely
+    // incapable of blocking a fast one. Proving that requires controlling one
+    // key's completion timing directly, which needs a `KafkaFutureImpl` this
+    // test drives by hand rather than an `Admin` impl (the trait has 47
+    // methods; stubbing all of them just to control two futures would be far
+    // more code than the property being tested). `submit`'s `&dyn Admin`
+    // parameter is unused below - any concrete `Admin` will do to build a
+    // valid handle, so a `MockAdminClient` (already at hand) stands in.
+
+    use crate::common::kafka_future::KafkaFutureImpl;
+
+    #[test]
+    fn admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one() {
+        // "fast" is already complete when submitted; "slow" is deliberately
+        // never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        fast.complete(1);
+        let slow: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Result<i32, Error>)>();
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec!["fast".to_string(), "slow".to_string()],
+                move |_a: &dyn Admin| Ok(vec![("fast".to_string(), fast.future()), ("slow".to_string(), slow_future)]),
+                move |key: String, result: Result<i32, Error>, _ud: *mut c_void| {
+                    tx.send((key, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two keys before delivering
+        // either (reintroducing `join_map_results`), this would hang until the
+        // test harness's own timeout, since "slow" never completes. A bounded
+        // `recv_timeout` turns that hang into a fast, explicit failure instead.
+        let (key, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved key must be delivered without waiting on the pending one");
+        assert_eq!(key, "fast");
+        assert_eq!(result.unwrap(), 1);
+
+        // "slow" is still pending, so nothing further should arrive promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending key must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view registered
+        // above share one Arc<Completable>; `slow` never completing it is the
+        // whole point of the test, so it is simply left to drop uncompleted here.
+        drop(slow);
+    }
 }
