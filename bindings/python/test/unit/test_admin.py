@@ -47,7 +47,7 @@ from admin import (
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
-    _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
+    _to_list_consumer_group_offsets, _to_list_groups,
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_description,
     _to_partition_info,
@@ -1337,16 +1337,34 @@ def test_elect_leaders_rejects_bad_election_type():
 def test_alter_partition_reassignments_partial_failure():
     """The mock reassigns against its in-memory map
     (MockAdminClient.java:1141-1167). A partition it does not know fails with
-    UNKNOWN_TOPIC_OR_PARTITION per partition, so the call itself succeeds."""
+    UNKNOWN_TOPIC_OR_PARTITION per partition, so the call itself succeeds and
+    every outcome survives as its own Future (Phase D: one native callback per
+    partition, independently)."""
     with MockAdminClient(3) as admin:
         _created(admin, "ra-topic", num_partitions=1, replication_factor=3)
 
-        result = admin.alter_partition_reassignments({
+        futures = admin.alter_partition_reassignments({
             ("ra-topic", 0): NewPartitionReassignment([1, 2]),
             ("ra-missing", 0): NewPartitionReassignment([1, 2]),
         })
-        assert result[("ra-topic", 0)] is None
-        assert result[("ra-missing", 0)].code == UNKNOWN_TOPIC_OR_PARTITION
+        assert futures[("ra-topic", 0)].result(timeout=5.0) is None
+        assert futures[("ra-missing", 0)].exception(timeout=5.0).code == UNKNOWN_TOPIC_OR_PARTITION
+
+
+def test_alter_partition_reassignments_two_partitions_resolve_independently():
+    """Structural independence: both partitions' ``Future``s are gettable in
+    any order (``MockAdminClient`` resolves everything synchronously, so this
+    does not prove genuine temporal independence - see the Rust-level
+    `admin_async_per_key_op` tests in `src/ffi/admin.rs` for that)."""
+    with MockAdminClient(3) as admin:
+        _created(admin, "ra-indep", num_partitions=2, replication_factor=3)
+
+        futures = admin.alter_partition_reassignments({
+            ("ra-indep", 1): NewPartitionReassignment([1, 2]),
+            ("ra-indep", 0): NewPartitionReassignment([1, 2]),
+        })
+        assert futures[("ra-indep", 1)].result(timeout=5.0) is None
+        assert futures[("ra-indep", 0)].result(timeout=5.0) is None
 
 
 def test_list_partition_reassignments_round_trip():
@@ -1356,8 +1374,9 @@ def test_list_partition_reassignments_round_trip():
     is what catches a transposition between them."""
     with MockAdminClient(3) as admin:
         _created(admin, "lr-topic", num_partitions=1, replication_factor=3)
-        assert admin.alter_partition_reassignments({
-            ("lr-topic", 0): NewPartitionReassignment([1, 2])}) == {("lr-topic", 0): None}
+        futures = admin.alter_partition_reassignments({
+            ("lr-topic", 0): NewPartitionReassignment([1, 2])})
+        assert futures[("lr-topic", 0)].result(timeout=5.0) is None
 
         # `partitions=None` is Java's Optional.empty(): list everything.
         listed = admin.list_partition_reassignments()
@@ -1374,20 +1393,24 @@ def test_list_partition_reassignments_round_trip():
 
         # A None value is Java's empty Optional, which reverts the
         # reassignment (Admin.java:1142-1143).
-        assert admin.alter_partition_reassignments({("lr-topic", 0): None}) == {
-            ("lr-topic", 0): None}
+        futures = admin.alter_partition_reassignments({("lr-topic", 0): None})
+        assert futures[("lr-topic", 0)].result(timeout=5.0) is None
         assert admin.list_partition_reassignments() == {}
 
 
 def test_alter_partition_reassignments_rejects_empty_replicas():
     """An empty target-replica list is Java's
     `NewPartitionReassignment(List<Integer>)` IllegalArgumentException, not a
-    cancellation — the None value is the only way to cancel."""
+    cancellation — the None value is the only way to cancel. This is a
+    marshaling failure, so the named partition's Future resolves with that
+    error (the per-key submission-failure fan-out), rather than the call
+    itself raising."""
     with MockAdminClient(3) as admin:
         _created(admin, "ra-empty", num_partitions=1, replication_factor=3)
+        futures = admin.alter_partition_reassignments({
+            ("ra-empty", 0): NewPartitionReassignment([])})
         with pytest.raises(KafkaError) as exc:
-            admin.alter_partition_reassignments({
-                ("ra-empty", 0): NewPartitionReassignment([])})
+            futures[("ra-empty", 0)].result(timeout=5.0)
         assert str(exc.value) == (
             "reassignment for ra-empty-0 at index 0: Cannot create a new partition "
             "reassignment without any replicas")
@@ -1400,26 +1423,45 @@ def test_list_offsets_earliest_and_latest():
     from `endOffsets` (MockAdminClient.java:1220-1240). Asking for different
     specs on two partitions with different seeded offsets catches a transposed
     spec list. An unseeded partition reports -1 rather than Java's NPE on
-    unboxing a null Long, a divergence documented in the Rust mock."""
+    unboxing a null Long, a divergence documented in the Rust mock. Every
+    outcome survives as its own Future (Phase D: one native callback per
+    partition, independently)."""
     with MockAdminClient(1) as admin:
         _created(admin, "lo-topic", num_partitions=2)
         admin.update_beginning_offsets({("lo-topic", 0): 5, ("lo-topic", 1): 7})
         admin.update_end_offsets({("lo-topic", 0): 105, ("lo-topic", 1): 107})
 
-        result = admin.list_offsets({
+        futures = admin.list_offsets({
             ("lo-topic", 0): OffsetSpec.earliest(),
             ("lo-topic", 1): OffsetSpec.latest(),
             ("lo-unseeded", 0): OffsetSpec.max_timestamp(),
         })
-        info = result[("lo-topic", 0)]
+        info = futures[("lo-topic", 0)].result(timeout=5.0)
         assert isinstance(info, ListOffsetsResultInfo)
         assert info.offset == 5
         # The mock reports no timestamp and no leader epoch.
         assert info.timestamp == -1
         assert info.leader_epoch is None
 
-        assert result[("lo-topic", 1)].offset == 107
-        assert result[("lo-unseeded", 0)].offset == -1
+        assert futures[("lo-topic", 1)].result(timeout=5.0).offset == 107
+        assert futures[("lo-unseeded", 0)].result(timeout=5.0).offset == -1
+
+
+def test_list_offsets_two_partitions_resolve_independently():
+    """Structural independence: both partitions' ``Future``s are gettable in
+    any order (``MockAdminClient`` resolves everything synchronously, so this
+    does not prove genuine temporal independence - see the Rust-level
+    `admin_async_per_key_op` tests in `src/ffi/admin.rs` for that)."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "lo-indep", num_partitions=2)
+        admin.update_end_offsets({("lo-indep", 0): 5, ("lo-indep", 1): 107})
+
+        futures = admin.list_offsets({
+            ("lo-indep", 1): OffsetSpec.latest(),
+            ("lo-indep", 0): OffsetSpec.latest(),
+        })
+        assert futures[("lo-indep", 1)].result(timeout=5.0).offset == 107
+        assert futures[("lo-indep", 0)].result(timeout=5.0).offset == 5
 
 
 def test_list_offsets_timestamp_flag_is_load_bearing():
@@ -1434,20 +1476,23 @@ def test_list_offsets_timestamp_flag_is_load_bearing():
         _created(admin, "lo-ts", num_partitions=2)
         admin.update_beginning_offsets({("lo-ts", 0): 11})
 
-        result = admin.list_offsets({
+        futures = admin.list_offsets({
             ("lo-ts", 0): OffsetSpec.earliest(),
             ("lo-ts", 1): OffsetSpec.for_timestamp(OffsetSpec._EARLIEST),
         }, isolation_level=IsolationLevel.READ_COMMITTED)
-        assert result[("lo-ts", 0)].offset == 11
-        assert result[("lo-ts", 1)].code == UNSUPPORTED_VERSION
+        assert futures[("lo-ts", 0)].result(timeout=5.0).offset == 11
+        assert futures[("lo-ts", 1)].exception(timeout=5.0).code == UNSUPPORTED_VERSION
 
 
 def test_list_offsets_rejects_bad_isolation_level():
-    """Mirrors Java's `IsolationLevel.forId` IllegalArgumentException."""
+    """Mirrors Java's `IsolationLevel.forId` IllegalArgumentException - a
+    marshaling failure, so the named partition's Future resolves with that
+    error, rather than the call itself raising."""
     with MockAdminClient(1) as admin:
         _created(admin, "lo-bad")
+        futures = admin.list_offsets({("lo-bad", 0): OffsetSpec.latest()}, isolation_level=9)
         with pytest.raises(KafkaError) as exc:
-            admin.list_offsets({("lo-bad", 0): OffsetSpec.latest()}, isolation_level=9)
+            futures[("lo-bad", 0)].result(timeout=5.0)
         assert str(exc.value) == "Unknown isolation level 9"
 
 
@@ -1480,11 +1525,16 @@ def test_mock_offset_drivers_are_mock_only():
 
 
 async def test_async_b3_round_trip():
+    """alter_partition_reassignments / list_offsets return dicts of
+    ``asyncio.Future``s immediately (Phase D: one native callback per
+    partition, independently), like create_topics - each partition's own
+    ``Future`` must be awaited."""
     admin = AsyncMockAdminClient(3)
     try:
         await admin.create_topics([NewTopic("async-b3", 1, 3)])
-        assert await admin.alter_partition_reassignments({
-            ("async-b3", 0): NewPartitionReassignment([1, 2])}) == {("async-b3", 0): None}
+        reassign_futures = await admin.alter_partition_reassignments({
+            ("async-b3", 0): NewPartitionReassignment([1, 2])})
+        assert await reassign_futures[("async-b3", 0)] is None
 
         listed = await admin.list_partition_reassignments()
         assert listed[("async-b3", 0)].removing_replicas == [0]
@@ -1492,8 +1542,9 @@ async def test_async_b3_round_trip():
         # The mock drivers are plain sync methods, even on the async client:
         # they only mutate in-memory state, exactly as `timeout_next_request` does.
         admin.update_end_offsets({("async-b3", 0): 77})
-        offsets = await admin.list_offsets({("async-b3", 0): OffsetSpec.latest()})
-        assert offsets[("async-b3", 0)].offset == 77
+        offset_futures = await admin.list_offsets({("async-b3", 0): OffsetSpec.latest()})
+        offset_info = await offset_futures[("async-b3", 0)]
+        assert offset_info.offset == 77
     finally:
         await admin.close()
 
@@ -1514,7 +1565,10 @@ async def test_async_elect_leaders_call_failure_raises():
 
 def test_b3_handles_survive_gc_of_intermediate_objects():
     """Drained B3 results own no borrowed pointers, so they stay valid after the
-    result handle is destroyed and a GC pass runs."""
+    result handle is destroyed and a GC pass runs. `list_offsets`'s per-key
+    value (Phase D) is drained into a plain tuple eagerly, at resolution time
+    -  by the time this test's `gc.collect()` runs, nothing borrowed from the
+    native handle remains referenced."""
     with MockAdminClient(3) as admin:
         _created(admin, "gc-b3", num_partitions=1, replication_factor=3)
         admin.alter_partition_reassignments({
@@ -1522,31 +1576,28 @@ def test_b3_handles_survive_gc_of_intermediate_objects():
         admin.update_end_offsets({("gc-b3", 0): 3})
 
         listed = admin.list_partition_reassignments()
-        offsets = admin.list_offsets({("gc-b3", 0): OffsetSpec.latest()})
+        offset_future = admin.list_offsets({("gc-b3", 0): OffsetSpec.latest()})[("gc-b3", 0)]
+        offset_info = offset_future.result(timeout=5.0)
         gc.collect()
         assert listed[("gc-b3", 0)].replicas == [0, 1, 2]
-        assert offsets[("gc-b3", 0)].offset == 3
+        assert offset_info.offset == 3
 
 
 # -- direct converter coverage (unreachable through the mock) -----------------
-
-def test_to_list_offsets_maps_both_arms():
-    """The mock never reports a timestamp or a leader epoch, so the populated
-    arm is only reachable here. Distinct offset/timestamp/epoch values catch a
-    transposed tuple field."""
-    converted = _to_list_offsets({
-        ("t", 0): (None, (42, 1_700_000_000_000, 7)),
-        ("t", 1): (None, (5, -1, None)),
-        ("t", 2): ((3, "boom", False, False), None),
-    })
-    assert converted[("t", 0)].offset == 42
-    assert converted[("t", 0)].timestamp == 1_700_000_000_000
-    assert converted[("t", 0)].leader_epoch == 7
-    assert converted[("t", 1)].leader_epoch is None
-    error = converted[("t", 2)]
-    assert isinstance(error, KafkaError)
-    assert error.code == 3
-    assert str(error) == "boom"
+#
+# `_to_list_offsets` (the old whole-batch converter) no longer exists: Phase D
+# moved `list_offsets`'s per-key value decoding into the C extension's
+# `list_offsets_info_value_to_py` (shared by the flattened `ListOffsetsResult_drain`
+# and the new standalone `ListOffsetsResultInfo_drain`), so it is no longer
+# expressible as a pure-Python unit test over a synthetic dict - it requires a
+# live Rust handle, like `_drain_config`/`_drain_deleted_records`/
+# `_drain_replica_log_dir_info` before it (see those Phases' notes). The
+# populated-leader-epoch arm this test used to cover in isolation (the mock
+# never reports one, so it was already unreachable end-to-end before this
+# phase) is still covered at the Rust level by
+# `list_offsets_result_carries_value_and_error_per_partition`
+# (`src/ffi/admin.rs`), which exercises the identical `ListOffsetsResultInfoInner`
+# scalar-accessor logic the per-key path now also uses.
 
 
 def test_to_list_partition_reassignments_keeps_the_three_lists_apart():
