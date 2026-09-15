@@ -29,12 +29,12 @@ C has no ``KafkaFuture``, so most RPCs deliver one flattened result handle
 carrying a value *and* an error per key, and this module drains it into a plain
 dict whose values are either the result object or a :class:`KafkaError`.
 
-The Topics-family RPCs below are the exception: their native callback fires
-**once per key, independently, as that key's own future resolves** — matching
-Java's per-key ``KafkaFuture`` exactly rather than joining every key into one
-flattened batch — so these five return a dict of **Futures** immediately,
-before any key has necessarily completed, rather than a dict of already-
-resolved values:
+The Topics- and Configs-family RPCs below are the exception: their native
+callback fires **once per key, independently, as that key's own future
+resolves** — matching Java's per-key ``KafkaFuture`` exactly rather than
+joining every key into one flattened batch — so these seven return a dict of
+**Futures** immediately, before any key has necessarily completed, rather than
+a dict of already-resolved values:
 
 * ``create_topics`` -> ``{topic_name: Future[TopicMetadataAndConfig]}``
 * ``delete_topics`` / ``delete_topics_by_ids`` -> ``{topic_name_or_id: Future[None]}``
@@ -45,6 +45,10 @@ resolved values:
 * ``create_partitions`` -> ``{topic_name: Future[None]}`` (per-topic future is
   ``KafkaFuture<Void>``, so a result of ``None`` means success)
 * ``delete_records`` -> ``{(topic, partition): Future[DeletedRecords]}``
+* ``describe_configs`` -> ``{ConfigResource: Future[Config]}``
+* ``incremental_alter_configs`` -> ``{ConfigResource: Future[None]}``
+  (per-resource future is ``KafkaFuture<Void>``, so a result of ``None``
+  means success)
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -61,9 +65,6 @@ per-key failure there likewise does not raise — only a whole-call failure does
 
 * ``list_topics`` -> ``{topic_name: TopicListing}`` (Java has a single future
   here, so a failure raises instead of appearing per key)
-* ``describe_configs`` -> ``{ConfigResource: Config | KafkaError}``
-* ``incremental_alter_configs`` -> ``{ConfigResource: None | KafkaError}``
-  (per-resource future is ``KafkaFuture<Void>``, so ``None`` means success)
 * ``describe_log_dirs`` ->
   ``{broker_id: {log_dir: LogDirDescription} | KafkaError}``
 * ``alter_replica_log_dirs`` ->
@@ -1903,24 +1904,13 @@ def _to_full_config_entry(raw):
                        [ConfigSynonym(*s) for s in synonyms])
 
 
-def _to_describe_configs(raw):
-    """{(type, name): (error, [entry])} -> {ConfigResource: Config | KafkaError}"""
-    out = {}
-    for (resource_type, name), (error, entries) in raw.items():
-        resource = ConfigResource(resource_type, name)
-        out[resource] = (_to_error(error) if error is not None
-                         else Config([_to_full_config_entry(e) for e in entries]))
-    return out
-
-
-def _to_alter_configs(raw):
-    """{(type, name): error} -> {ConfigResource: None | KafkaError}
-
-    Java's per-resource future is ``KafkaFuture<Void>``, so ``None`` means
-    success.
+def _drain_config(value):
+    """Drain+destroy a standalone ``Config`` handle delivered by
+    ``describe_configs``'s per-key async callback into a :class:`Config`.
+    Reuses ``_to_full_config_entry``'s 9-tuple shape, the same one the
+    flattened (synchronous) result path uses.
     """
-    return {ConfigResource(resource_type, name): _to_error(error)
-            for (resource_type, name), error in raw.items()}
+    return Config([_to_full_config_entry(e) for e in _lib.Config_drain(value)])
 
 
 def _to_config_resources(raw):
@@ -2501,6 +2491,45 @@ class _AdminBase:
                 _drain_deleted_records)
         return cb
 
+    def _keyed_config_resource_value_cb(self, futures, convert, loop=None):
+        """Builds the `cb(resource_type, resource_name, value, error)` native
+        callback for `describe_configs` (Phase B), whose key is a
+        `ConfigResource` rather than a single string - mirrors
+        `_keyed_delete_records_cb`'s two-param key handling for
+        `(topic, partition)`."""
+        if loop is None:
+            def cb(resource_type, resource_name, value, error):
+                key = ConfigResource(resource_type, resource_name)
+                self._resolve_keyed_value(futures[key], value, error, convert)
+            return cb
+
+        def cb(resource_type, resource_name, value, error):
+            key = ConfigResource(resource_type, resource_name)
+            if loop.is_closed():
+                self._free_keyed_value(value, error, convert)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[key], value, error, convert)
+        return cb
+
+    def _keyed_config_resource_void_cb(self, futures, loop=None):
+        """Builds the `cb(resource_type, resource_name, error)` native
+        callback for `incremental_alter_configs` (Phase B), whose key is a
+        `ConfigResource`."""
+        if loop is None:
+            def cb(resource_type, resource_name, error):
+                key = ConfigResource(resource_type, resource_name)
+                self._resolve_keyed_void(futures[key], error)
+            return cb
+
+        def cb(resource_type, resource_name, error):
+            key = ConfigResource(resource_type, resource_name)
+            if loop.is_closed():
+                self._free_keyed_void(error)
+                return
+            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+        return cb
+
     # ---- per-key request builders (Phase A) --------------------------------
     #
     # Build the `spec` the C layer parses plus the deduplicated `{key: ...}`
@@ -2537,6 +2566,41 @@ class _AdminBase:
     @staticmethod
     def _string_keyed_names(topics):
         return list(dict.fromkeys(str(t) for t in topics))
+
+    @staticmethod
+    def _describe_configs_keys_and_spec(resources):
+        """De-duplicate `resources` by (type, name); no per-key value beyond
+        the key itself, so the dedup direction doesn't matter (as for
+        `_string_keyed_names`)."""
+        deduped = list(dict.fromkeys(
+            ConfigResource(r.resource_type, r.name) for r in resources))
+        return deduped, [(int(r.resource_type), str(r.name)) for r in deduped]
+
+    @staticmethod
+    def _incremental_alter_configs_keys_and_spec(configs):
+        """``{ConfigResource: [AlterConfigOp]}`` -> the per-resource key list
+        plus the flattened per-operation ``spec`` rows the C extension
+        unpacks.
+
+        Java iterates ``configs.keySet()`` (`KafkaAdminClient.java:2870`), so
+        every resource key gets a future regardless of whether its op list is
+        empty. Known limitation shared with the pre-existing synchronous
+        path: the C spec is one row per *operation*
+        (`read_alter_config_ops` builds its map purely from rows), so a
+        resource with an EMPTY op list produces zero rows and is invisible
+        to the native layer - unlike the synchronous path (where that
+        resource was merely missing from the result dict), the ``Future``
+        this async path pre-builds for it would then never resolve. This is
+        a pre-existing gap in the row-based wire representation, not
+        introduced or fixed by this phase.
+        """
+        keys = list(configs.keys())
+        spec = [(int(resource.resource_type), str(resource.name),
+                 str(op.config_entry.name),
+                 None if op.config_entry.value is None else str(op.config_entry.value),
+                 int(op.op_type))
+                for resource, ops in configs.items() for op in ops]
+        return keys, spec
 
     def _close_spec(self, timeout):
         ms = _close_ms(timeout)
@@ -2587,32 +2651,6 @@ class _AdminBase:
                     self._h, ms, bool(include_authorized_operations),
                     bool(include_fenced_brokers), cb),
                 self._resolve_value(drain, _to_cluster_description),
-                self._free_value(drain))
-
-    def _describe_configs_spec(self, resources, timeout, include_synonyms,
-                               include_documentation):
-        spec = [(int(r.resource_type), str(r.name)) for r in resources]
-        ms = _ms(timeout)
-        drain = _lib.DescribeConfigsResult_drain
-        return (lambda cb: _lib.Admin_describe_configs_async(
-                    self._h, spec, ms, bool(include_synonyms),
-                    bool(include_documentation), cb),
-                self._resolve_value(drain, _to_describe_configs),
-                self._free_value(drain))
-
-    def _incremental_alter_configs_spec(self, configs, timeout, validate_only):
-        # Java's Map<ConfigResource, Collection<AlterConfigOp>> flattens to one
-        # row per operation; the Rust side regroups them by resource.
-        spec = [(int(resource.resource_type), str(resource.name),
-                 str(op.config_entry.name),
-                 None if op.config_entry.value is None else str(op.config_entry.value),
-                 int(op.op_type))
-                for resource, ops in configs.items() for op in ops]
-        ms = _ms(timeout)
-        drain = _lib.AlterConfigsResult_drain
-        return (lambda cb: _lib.Admin_incremental_alter_configs_async(
-                    self._h, spec, ms, bool(validate_only), cb),
-                self._resolve_value(drain, _to_alter_configs),
                 self._free_value(drain))
 
     def _list_config_resources_spec(self, resource_types, timeout):
@@ -3416,17 +3454,32 @@ class Admin(_AdminBase):
     def describe_configs(self, resources, timeout=None, include_synonyms=False,
                          include_documentation=False):
         """Describe the configuration of ``resources`` (:class:`ConfigResource`).
-        Returns ``{ConfigResource: Config | KafkaError}``."""
+        Returns ``{ConfigResource: Future[Config]}`` immediately; each
+        resource's ``Future`` resolves independently as that resource
+        completes - a slow or failed resource does not hold up the others
+        (Java's per-key ``KafkaFuture``; see the module docstring)."""
         self._check_closed()
-        return self._run_sync(*self._describe_configs_spec(
-            resources, timeout, include_synonyms, include_documentation))
+        keys, spec = self._describe_configs_keys_and_spec(resources)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_describe_configs_async(
+            self._h, spec, ms, bool(include_synonyms), bool(include_documentation),
+            self._keyed_config_resource_value_cb(futures, _drain_config))
+        return futures
 
     def incremental_alter_configs(self, configs, timeout=None, validate_only=False):
         """Incrementally alter ``{ConfigResource: [AlterConfigOp]}``. Returns
-        ``{ConfigResource: None | KafkaError}`` (``None`` means success)."""
+        ``{ConfigResource: Future[None]}`` immediately; each resource's
+        ``Future`` resolves independently (a result of ``None`` means
+        success)."""
         self._check_closed()
-        return self._run_sync(*self._incremental_alter_configs_spec(
-            configs, timeout, validate_only))
+        keys, spec = self._incremental_alter_configs_keys_and_spec(configs)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_incremental_alter_configs_async(
+            self._h, spec, ms, bool(validate_only),
+            self._keyed_config_resource_void_cb(futures))
+        return futures
 
     def list_config_resources(self, resource_types=None, timeout=None):
         """List the cluster's config resources whose type is in
@@ -4031,14 +4084,33 @@ class AsyncAdmin(_AdminBase):
 
     async def describe_configs(self, resources, timeout=None, include_synonyms=False,
                                include_documentation=False):
+        """Describe the configuration of ``resources`` (:class:`ConfigResource`).
+        Returns ``{ConfigResource: Future[Config]}`` immediately (no internal
+        ``await``); each resource's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_configs_spec(
-            resources, timeout, include_synonyms, include_documentation))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._describe_configs_keys_and_spec(resources)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_describe_configs_async(
+            self._h, spec, ms, bool(include_synonyms), bool(include_documentation),
+            self._keyed_config_resource_value_cb(futures, _drain_config, loop))
+        return futures
 
     async def incremental_alter_configs(self, configs, timeout=None, validate_only=False):
+        """Incrementally alter ``{ConfigResource: [AlterConfigOp]}``. Returns
+        ``{ConfigResource: Future[None]}`` immediately (no internal
+        ``await``); each resource's ``Future`` resolves independently (a
+        result of ``None`` means success)."""
         self._check_closed()
-        return await self._run_async(*self._incremental_alter_configs_spec(
-            configs, timeout, validate_only))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._incremental_alter_configs_keys_and_spec(configs)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_incremental_alter_configs_async(
+            self._h, spec, ms, bool(validate_only),
+            self._keyed_config_resource_void_cb(futures, loop))
+        return futures
 
     async def list_config_resources(self, resource_types=None, timeout=None):
         self._check_closed()

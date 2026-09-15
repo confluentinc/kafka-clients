@@ -4250,10 +4250,37 @@ static PyObject* py_DeleteRecordsResult_drain(PyObject* self, PyObject* args) {
 
 static void admin_describe_cluster_trampoline(kafka_admin_DescribeClusterResult_t* r,
                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_configs_trampoline(kafka_admin_DescribeConfigsResult_t* r,
-                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_configs_trampoline(kafka_admin_AlterConfigsResult_t* r,
-                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// describeConfigs / incrementalAlterConfigs (Configs family; fire once per
+// resource, independently, as that resource's own future resolves) - see the
+// "per-key trampolines (Topics family...)" comment above for the shared
+// contract (transient borrowed strings copied via "s", owned handles passed
+// through as ints, one Py_INCREF(cb) per key before submitting to match one
+// Py_DECREF(cb) per invocation here).
+static void admin_describe_configs_trampoline(int32_t resource_type, const char* resource_name,
+    kafka_admin_Config_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "isKK", (int)resource_type, resource_name,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// incrementalAlterConfigs: Java's per-resource future is KafkaFuture<Void>,
+// so there is no value parameter (as for delete_topics/create_partitions).
+static void admin_alter_configs_trampoline(int32_t resource_type, const char* resource_name,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "isK", (int)resource_type, resource_name,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
 static void admin_list_config_resources_trampoline(kafka_admin_ListConfigResourcesResult_t* r,
                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_client_metrics_trampoline(kafka_admin_ListClientMetricsResourcesResult_t* r,
@@ -4304,7 +4331,10 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
     if (!PyArg_ParseTuple(args, "KOiiiO", &h, &spec, &timeout_ms, &synonyms, &documentation, &cb))
         return NULL;
 
-    // spec is a sequence of (resource_type:int, resource_name:str).
+    // spec is a sequence of (resource_type:int, resource_name:str), one row
+    // per resource (already deduplicated by the Python caller, which builds it
+    // from a Set<ConfigResource>-shaped input) - so the row count is exactly
+    // the number of times the per-key callback will fire.
     Py_ssize_t n = PySequence_Size(spec);
     if (n < 0) return NULL;
     int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
@@ -4320,12 +4350,32 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
         if (!ok) { PyMem_Free(types); PyMem_Free(names); return NULL; }
         types[i] = (int32_t)t; names[i] = name;
     }
-    Py_INCREF(cb);
+    // One callback invocation per resource (Java's per-key KafkaFuture), not
+    // one for the whole batch - see admin_describe_configs_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_configs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         types, names, (int32_t)n, timeout_ms, synonyms ? true : false,
         documentation ? true : false, admin_describe_configs_trampoline, cb);
     PyMem_Free(types); PyMem_Free(names);
     Py_RETURN_NONE;
+}
+
+// Counts the distinct (resource_type, resource_name) pairs among the first
+// `n` rows, mirroring the Rust FFI's `distinct_config_resources`: the C rows
+// are one per *operation*, but Java's incrementalAlterConfigs future is one
+// per *resource*, so the Py_INCREF(cb) count must match the resource count,
+// not the row count. `n` is small (one alter_configs call's worth of
+// operations), so the O(n^2) scan is not worth avoiding with a hash set.
+static Py_ssize_t count_distinct_config_resources(const int32_t* types, const char* const* names, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (types[i] == types[j] && strcmp(names[i], names[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
 }
 
 static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObject* args) {
@@ -4361,7 +4411,9 @@ static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObje
         types[i] = (int32_t)t; resources[i] = resource; keys[i] = key;
         values[i] = value; ops[i] = (int32_t)op;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT resource, not per operation row -
+    // see count_distinct_config_resources and admin_alter_configs_trampoline.
+    admin_incref_n(cb, count_distinct_config_resources(types, resources, n));
     kafka_admin_AdminClient_incremental_alter_configs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, types, resources, keys, values, ops,
         (int32_t)n, timeout_ms, validate_only ? true : false,
@@ -4550,6 +4602,21 @@ static PyObject* config_to_py(const kafka_admin_Config_t* config) {
         PyList_SET_ITEM(entries, i, e);
     }
     return entries;
+}
+
+// [config_entry] -- standalone per-key value delivered individually by
+// describe_configs' per-key async callback (admin_describe_configs_trampoline,
+// above), reusing the same config_to_py converter the flattened
+// DescribeConfigsResult path uses. Do NOT call this on a value obtained from
+// the flattened result's DescribeConfigsResult_get_value (borrowed, freed by
+// DescribeConfigsResult_drain instead) - this owns and destroys the handle.
+static PyObject* py_Config_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_Config_t* config = (kafka_admin_Config_t*)(uintptr_t)ptr;
+    PyObject* result = config_to_py(config);
+    kafka_admin_Config_destroy(config);
+    return result;
 }
 
 // {(resource_type, resource_name): (error, [config_entry])}
@@ -7414,12 +7481,13 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"TopicMetadataAndConfig_drain", py_TopicMetadataAndConfig_drain, METH_VARARGS, "Drain+destroy a standalone TopicMetadataAndConfig handle (per-key create_topics callback) into a tuple"},
     {"TopicDescription_drain", py_TopicDescription_drain, METH_VARARGS, "Drain+destroy a standalone TopicDescription handle (per-key describe_topics callbacks) into a tuple"},
     {"DeletedRecords_drain", py_DeletedRecords_drain, METH_VARARGS, "Drain+destroy a DeletedRecords handle (per-key delete_records callback) into its low_watermark"},
+    {"Config_drain", py_Config_drain, METH_VARARGS, "Drain+destroy a standalone Config handle (per-key describe_configs callback) into a list of config entries"},
     {"Admin_describe_cluster_async", py_Admin_describe_cluster_async, METH_VARARGS,
      "Async describeCluster; cb(result_int, error_int)"},
     {"Admin_describe_configs_async", py_Admin_describe_configs_async, METH_VARARGS,
-     "Async describeConfigs; cb(result_int, error_int)"},
+     "Async describeConfigs; per-key cb(resource_type, resource_name, value_int, error_int), once per resource"},
     {"Admin_incremental_alter_configs_async", py_Admin_incremental_alter_configs_async, METH_VARARGS,
-     "Async incrementalAlterConfigs; cb(result_int, error_int)"},
+     "Async incrementalAlterConfigs; per-key cb(resource_type, resource_name, error_int), once per resource"},
     {"Admin_list_config_resources_async", py_Admin_list_config_resources_async, METH_VARARGS,
      "Async listConfigResources; cb(result_int, error_int)"},
     {"Admin_list_client_metrics_resources_async", py_Admin_list_client_metrics_resources_async, METH_VARARGS,
