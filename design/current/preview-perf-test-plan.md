@@ -69,8 +69,9 @@ A case gets both regimes only when the librdkafka knobs could plausibly change t
 | `retries` | MAX_INT | MAX_INT | MAX_INT |
 | `buffer.memory` | 32 MB | — | 32 MB |
 | `compression.type` | none | none | none |
+| `partitioner` (keyed) | **murmur2** | consistent_random (CRC-32) | consistent_random (CRC-32) |
 
-Rust matches Java exactly. Only 3 knobs differ from librdkafka: `enable.idempotence`, `max.in.flight`, `batch.size` — a three-line config snippet, not a vague "defaults differ." *(Verified against the vendored Apache Kafka 4.2 source, librdkafka's published `CONFIGURATION.md`, and this repo's config modules — not from memory.)*
+Rust matches Java on every knob above **except the keyed `partitioner`**: there it deliberately matches librdkafka's `consistent_random` (CRC-32) rather than Java's murmur2 — the one place Rust tracks librdkafka and diverges from Java, the opposite direction from the three librdkafka-divergent rows. Those 3 knobs still differ from librdkafka: `enable.idempotence`, `max.in.flight`, `batch.size` — a three-line config snippet, not a vague "defaults differ." The keyed partitioner is selectable back to murmur2 via `partitioner.class` for exact Java parity; see `design/current/partitioner.md` for the rationale and the mixed-fleet warning. *(Verified against the vendored Apache Kafka 4.2 source, librdkafka's published `CONFIGURATION.md`, and this repo's config modules — not from memory.)*
 
 ### Producer core — 17 cells, Regime J
 

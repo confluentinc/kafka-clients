@@ -59,11 +59,11 @@ use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 use crate::producer::Callback;
+use crate::producer::Partitioner;
 use crate::producer::Producer;
 use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::internals::BufferPool;
-use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::KafkaProducerMetrics;
@@ -74,7 +74,7 @@ use crate::producer::internals::Sender;
 use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::TransactionManager;
 use crate::producer::internals::sender::throttle_time_sensor;
-use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
+use crate::producer::internals::{BuiltInPartitioner, KeyHasher, PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
 use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
@@ -183,8 +183,26 @@ pub struct KafkaProducer<K, V> {
     compression_type: CompressionType,
     /// The maximum time to block on send/partitionsFor.
     max_block_ms: i64,
+    /// The custom partitioner, if one is configured; `None` uses the built-in
+    /// default partitioner (the keyed CRC-32 / murmur2 path plus adaptive
+    /// partitioning).
+    ///
+    /// Translated from `KafkaProducer.partitionerPlugin` (Java 264), a
+    /// `Plugin<Partitioner>`. The `Plugin<>` wrapper is `Monitorable`/metrics
+    /// plumbing (KIP-877) with no Rust counterpart in this milestone, so the
+    /// bare [`Partitioner`] trait object is held directly. Nullable in Java
+    /// (built-in partitioning when unset) — hence [`Option`]. Resolved from
+    /// `partitioner.class` via
+    /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)
+    /// or supplied as an instance through
+    /// [`from_config_with_partitioner`](Self::from_config_with_partitioner).
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
     /// Whether to ignore keys for partitioning.
     partitioner_ignore_keys: bool,
+    /// Which hash the keyed partition path uses, resolved from
+    /// `partitioner.class` (default [`KeyHasher::Crc32`], librdkafka
+    /// `consistent_random` parity). Copy-cheap; consulted once per keyed record.
+    key_hasher: KeyHasher,
     /// Whether the sender task is still running.
     running: Arc<AtomicBool>,
     /// Whether the caller wants to force-close.
@@ -237,6 +255,10 @@ impl<K, V> KafkaProducer<K, V> {
     ///   when idempotence is disabled
     /// * `pending_requests` - The transactional request queue this producer shares
     ///   with the [`Sender`]
+    /// * `partitioner` - The custom partitioner instance, or `None` to use the
+    ///   built-in default partitioner. Stored as-is and **not** configured, mirroring
+    ///   Java's internal constructor (`KafkaProducer.java:502`), which wraps a
+    ///   pre-built `Partitioner` without calling `configure`
     // `TransactionManager` is `pub(crate)` per CLAUDE.md §2; see the note on
     // [`Self::with_client`] for why this constructor stays nominally `pub`.
     #[allow(private_interfaces)]
@@ -254,6 +276,7 @@ impl<K, V> KafkaProducer<K, V> {
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
+        partitioner: Option<Box<dyn Partitioner<K, V>>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let (metrics, producer_metrics) = Self::create_metrics(config);
@@ -269,7 +292,9 @@ impl<K, V> KafkaProducer<K, V> {
             pending_requests,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
+            partitioner,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            key_hasher: config.key_hasher(),
             running,
             force_close,
             wakeup,
@@ -341,17 +366,78 @@ impl<K, V> KafkaProducer<K, V> {
         // the caller as something for which `is_kafka_error()` is `false`.
         //
         // The `close(Duration.ofMillis(0), true)` half of Java's catch (KAFKA-2121)
-        // has nothing to do here: every fallible step in `from_config_inner`
+        // has nothing to do here: every fallible step in `from_config_impl`
         // precedes the `Selector` / `NetworkClient` / sender-task construction, so
         // no socket and no spawned task can leak.
-        Self::from_config_inner(config, key_serializer, value_serializer)
+        Self::from_config_impl(config, key_serializer, value_serializer, None)
             .map_err(|e| Error::kafka_with_source("Failed to construct kafka producer", e))
     }
 
-    fn from_config_inner(
+    /// Creates a `KafkaProducer` from configuration, serializers, and an explicit
+    /// custom [`Partitioner`] instance.
+    ///
+    /// This is Rust's counterpart to configuring a user-written partitioner
+    /// through Java's `partitioner.class`. Java loads the named class reflectively
+    /// (`KafkaProducer.java:381-388`), but Rust has no reflection, so a
+    /// user-written [`Partitioner`] is supplied here as an instance instead. The
+    /// producer takes ownership and `configure`s it exactly as the
+    /// `partitioner.class` path does — with the user config map
+    /// ([`ProducerConfig::originals`](crate::producer::ProducerConfig)) plus the
+    /// resolved `client.id` — before sharing it with the send path. As with a
+    /// `partitioner.class` partitioner, adaptive partitioning is disabled while a
+    /// custom partitioner is in use.
+    ///
+    /// The explicit instance takes precedence over any built-in partitioner that
+    /// `partitioner.class` would otherwise name, mirroring how Java's
+    /// `getConfiguredInstance` returns the caller-provided instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The producer configuration
+    /// * `key_serializer` - The key serializer
+    /// * `value_serializer` - The value serializer
+    /// * `partitioner` - The custom partitioner instance to use
+    ///
+    /// # Errors
+    ///
+    /// Exactly as for [`from_config`](Self::from_config): every construction
+    /// failure — such as the [`Error::LocalIllegalArgument`] raised when no valid
+    /// bootstrap server addresses can be resolved from `config.bootstrap_servers`
+    /// — is returned relabelled as Java's
+    /// `KafkaException("Failed to construct kafka producer", t)`, an
+    /// [`Error::KafkaError`] carrying the underlying failure as its source.
+    pub fn from_config_with_partitioner(
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        partitioner: Box<dyn Partitioner<K, V>>,
+    ) -> Result<Self, Error> {
+        // Same `catch (Throwable t)` relabelling as `from_config` above
+        // (`KafkaProducer.java:461-466`): Java has a single constructor body
+        // behind both the `partitioner.class` and the caller-supplied-instance
+        // paths, so both Rust constructors wrap identically.
+        Self::from_config_impl(config, key_serializer, value_serializer, Some(partitioner))
+            .map_err(|e| Error::kafka_with_source("Failed to construct kafka producer", e))
+    }
+
+    /// Shared implementation behind [`from_config`](Self::from_config) and
+    /// [`from_config_with_partitioner`](Self::from_config_with_partitioner).
+    ///
+    /// `explicit_partitioner` is `Some` only on the
+    /// [`from_config_with_partitioner`](Self::from_config_with_partitioner) path;
+    /// when it is `None`, the partitioner is resolved from `partitioner.class`
+    /// (built-in names only, via
+    /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)).
+    /// Either way, a resolved partitioner is `configure`d exactly once here
+    /// (`originals` + `client.id`, Java `KafkaProducer.java:381-388`), and adaptive
+    /// partitioning is gated on its absence, so both public constructors share one
+    /// configure + adaptive-gating code path. Errors escape raw from here; the
+    /// public constructors relabel them (`KafkaProducer.java:461-466`).
+    fn from_config_impl(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        explicit_partitioner: Option<Box<dyn Partitioner<K, V>>>,
     ) -> Result<Self, Error> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
@@ -455,6 +541,33 @@ impl<K, V> KafkaProducer<K, V> {
         //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
         let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
 
+        // 9b. Resolve and configure the partitioner. Translated from
+        //     `KafkaProducer.java:381-388`: Java reflectively instantiates
+        //     `partitioner.class` and calls `partitioner.configure(originals +
+        //     {client.id -> clientId})`. Rust has no reflection, so an explicit
+        //     instance (`from_config_with_partitioner`) wins; otherwise the built-in
+        //     `partitioner.class` names resolve here, and a user-written partitioner
+        //     is always supplied as an instance. It is configured with the user
+        //     config map (`originals`) plus the resolved (possibly generated)
+        //     `client.id`, so a generated `producer-N` id is visible to `configure`
+        //     just as in Java. Resolved after metrics/`TransactionManager` creation
+        //     (matching Java's ordering) and before the `RecordAccumulator`, whose
+        //     adaptive-partitioning flag is gated on the partitioner's absence below.
+        //
+        //     KAFKA-2121: Java's constructor `catch (Throwable)` closes an
+        //     already-constructed partitioner. Here, partitioner setup is infallible
+        //     (`resolve_partitioner` -> `Option`, `configure` -> `()`), and every
+        //     fallible `?` step above runs *before* this point, so no reachable
+        //     fallible step follows the partitioner's construction; the normal
+        //     `close()` path is therefore the only one, and no close-on-error path is
+        //     needed.
+        let mut partitioner = explicit_partitioner.or_else(|| config.resolve_partitioner::<K, V>());
+        if let Some(partitioner) = partitioner.as_mut() {
+            let mut configs = config.originals.clone();
+            configs.insert(ProducerConfig::CLIENT_ID_CONFIG.to_string(), config.client_id.clone());
+            partitioner.configure(&configs);
+        }
+
         // 10. Create BufferPool and RecordAccumulator, threading the shared
         //    `Arc<Metrics>` and time provider into both (KafkaProducer.java:438
         //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
@@ -476,7 +589,11 @@ impl<K, V> KafkaProducer<K, V> {
             config.retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig {
-                enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
+                // Java `KafkaProducer.java:428-433`: "There is no need to do work
+                // required for adaptive partitioning, if we use a custom
+                // partitioner." So adaptive partitioning is enabled only when no
+                // custom partitioner is present AND the config opts in.
+                enable_adaptive_partitioning: partitioner.is_none() && config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
             Arc::clone(&metrics),
@@ -513,6 +630,7 @@ impl<K, V> KafkaProducer<K, V> {
             sender_metrics_registry,
             transaction_manager,
             Arc::new(Mutex::new(PendingRequests::new())),
+            partitioner,
         ))
     }
 
@@ -580,6 +698,14 @@ impl<K, V> KafkaProducer<K, V> {
     /// # Type Parameters
     ///
     /// * `C` - The KafkaClient implementation type
+    ///
+    /// # Arguments
+    ///
+    /// * `partitioner` - The custom partitioner instance (already `configure`d by
+    ///   the caller), or `None` for the built-in default partitioner. Callers that
+    ///   resolve a partitioner also gate adaptive partitioning on its absence before
+    ///   building the `accumulator` they pass in (see
+    ///   [`from_config_with_partitioner`](Self::from_config_with_partitioner)).
     #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_client<C: KafkaClient + Send + 'static>(
@@ -595,6 +721,7 @@ impl<K, V> KafkaProducer<K, V> {
         sender_metrics_registry: SenderMetricsRegistry,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
+        partitioner: Option<Box<dyn Partitioner<K, V>>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
@@ -645,7 +772,9 @@ impl<K, V> KafkaProducer<K, V> {
             pending_requests,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
+            partitioner,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            key_hasher: config.key_hasher(),
             running,
             force_close,
             wakeup,
@@ -1089,10 +1218,13 @@ impl<K, V> KafkaProducer<K, V> {
     /// returns a `Future` for API errors and always invokes the callback.
     ///
     /// Everything else is propagated as `Err(...)`: the generic runtime errors
-    /// (`LocalIllegalState` when the producer is closed) and the `KafkaException`s that
-    /// are not `ApiException`s. `SerializationException` is one of the latter —
-    /// it extends `KafkaException` directly — so a serialization failure is
-    /// returned as `Err`, not as a failed future.
+    /// (`LocalIllegalState` when the producer is closed, or `LocalIllegalArgument`
+    /// when a custom partitioner returns a negative partition —
+    /// `KafkaProducer.java:1476-1481`, which escapes `doSend` through
+    /// `catch (Exception e)` and is rethrown out of `send()`) and the
+    /// `KafkaException`s that are not `ApiException`s. `SerializationException` is
+    /// one of the latter — it extends `KafkaException` directly — so a
+    /// serialization failure is returned as `Err`, not as a failed future.
     async fn do_send(
         &self,
         record: ProducerRecord<K, V>,
@@ -1121,7 +1253,7 @@ impl<K, V> KafkaProducer<K, V> {
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
-        // Destructure the record to take ownership of key/value for zero-copy serialization
+        // Destructure the record to take ownership of key/value for serialization.
         let (record_topic, partition_opt, timestamp_opt, record_headers, key, value) = record.into_parts();
 
         // Java's only catch around either serializer call is
@@ -1135,45 +1267,111 @@ impl<K, V> KafkaProducer<K, V> {
         // callback and yields a failed future (`:1056`), anything else is returned
         // as `Err` (`:1073` / `:1077`). Rewriting every serializer error as
         // `SerializationException` flipped `is_retriable_error()` for the first
-        // case and skipped its callback entirely.
-        let serialized_key = match self
-            .key_serializer
-            .serialize_owned_with_headers(&record_topic, &record_headers, key)
-        {
-            Ok(bytes) => bytes,
-            Err(e) if e.is_api_error() => {
-                return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
-            },
-            Err(e) => return Err(e),
-        };
+        // case and skipped its callback entirely. Both branches below — the
+        // custom-partitioner one that serializes by borrowing and the owned
+        // zero-copy one — dispatch the same way.
+        if self.partitioner.is_some() {
+            // A custom partitioner is handed the *typed* key/value
+            // (`KafkaProducer.java:1474-1475` passes `record.key()` / `record.value()`),
+            // so serialize by BORROWING — `serialize_with_headers` keeps `key`/`value`
+            // alive — and compute the partition here, with the typed references. That
+            // partition is passed to `do_send_bytes` as an explicit `Some(..)`, which
+            // short-circuits its own partition step so the partitioner runs EXACTLY
+            // once, even a stateful one such as `RoundRobinPartitioner`.
+            let serialized_key =
+                match self
+                    .key_serializer
+                    .serialize_with_headers(&record_topic, &record_headers, key.as_ref())
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
 
-        let serialized_value =
-            match self
-                .value_serializer
-                .serialize_owned_with_headers(&record_topic, &record_headers, value)
-            {
-                Ok(bytes) => bytes,
-                Err(e) if e.is_api_error() => {
-                    return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
-                },
-                Err(e) => return Err(e),
-            };
+            let serialized_value =
+                match self
+                    .value_serializer
+                    .serialize_with_headers(&record_topic, &record_headers, value.as_ref())
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
 
-        let headers = record_headers.to_array();
+            let partition = self.compute_partition(
+                &record_topic,
+                partition_opt,
+                key.as_ref(),
+                serialized_key.as_deref(),
+                value.as_ref(),
+                serialized_value.as_deref(),
+                &cluster,
+            )?;
 
-        self.do_send_bytes(
-            &record_topic,
-            partition_opt,
-            timestamp_opt,
-            serialized_key.as_deref(),
-            serialized_value.as_deref(),
-            headers,
-            callback,
-            now_ms,
-            remaining_wait_ms,
-            &cluster,
-        )
-        .await
+            let headers = record_headers.to_array();
+
+            self.do_send_bytes(
+                &record_topic,
+                Some(partition),
+                timestamp_opt,
+                serialized_key.as_deref(),
+                serialized_value.as_deref(),
+                headers,
+                callback,
+                now_ms,
+                remaining_wait_ms,
+                &cluster,
+            )
+            .await
+        } else {
+            // No custom partitioner: keep the zero-copy owned path.
+            // `serialize_owned_with_headers` moves the key/value so a `Vec<u8>` payload
+            // is written into the batch without a copy (CLAUDE.md §12); `do_send_bytes`
+            // then runs the built-in key-hash partitioning via `compute_partition`.
+            let serialized_key =
+                match self
+                    .key_serializer
+                    .serialize_owned_with_headers(&record_topic, &record_headers, key)
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
+
+            let serialized_value =
+                match self
+                    .value_serializer
+                    .serialize_owned_with_headers(&record_topic, &record_headers, value)
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
+
+            let headers = record_headers.to_array();
+
+            self.do_send_bytes(
+                &record_topic,
+                partition_opt,
+                timestamp_opt,
+                serialized_key.as_deref(),
+                serialized_value.as_deref(),
+                headers,
+                callback,
+                now_ms,
+                remaining_wait_ms,
+                &cluster,
+            )
+            .await
+        }
     }
 
     /// Common send path for already-serialized key/value bytes.
@@ -1196,20 +1394,13 @@ impl<K, V> KafkaProducer<K, V> {
         remaining_wait_ms: i64,
         cluster: &Cluster,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        let partition = if let Some(p) = partition {
-            p
-        } else if let Some(k) = key
-            && !self.partitioner_ignore_keys
-        {
-            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
-            if num_partitions > 0 {
-                BuiltInPartitioner::partition_for_key(k, num_partitions)
-            } else {
-                record_metadata::UNKNOWN_PARTITION
-            }
-        } else {
-            record_metadata::UNKNOWN_PARTITION
-        };
+        // `compute_partition` with `None` typed key/value: this method has only the
+        // serialized bytes. When called from `do_send`'s custom-partitioner branch the
+        // partition arrives pre-computed as `Some(..)`, so this short-circuits and the
+        // partitioner is not consulted twice. On the borrowed `send(&[u8], &[u8])` path
+        // the typed key/value ARE the bytes, so passing them as `serialized_*` (and
+        // `None` typed) is the faithful call there.
+        let partition = self.compute_partition(topic, partition, None, key, None, value, cluster)?;
 
         let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -1582,34 +1773,101 @@ impl<K, V> KafkaProducer<K, V> {
         Ok(())
     }
 
+    /// Resolve the key-based partition when no explicit partition was supplied,
+    /// or [`UNKNOWN_PARTITION`](record_metadata::UNKNOWN_PARTITION) to defer to
+    /// the keyless (sticky, KIP-794) path.
+    ///
+    /// Mirrors the key branch of Java's `KafkaProducer.partition()`: the key is
+    /// hashed only when it is present, keys are not being ignored
+    /// (`partitioner.ignore.keys=false`), the configured [`KeyHasher`] actually
+    /// hashes this key ([`KeyHasher::hashes_key`] — CRC-32 leaves an *empty* key
+    /// to the keyless path, matching librdkafka `consistent_random`; murmur2
+    /// hashes it, matching the Java client), and the topic has known partitions.
+    ///
+    /// Both send call sites ([`do_send_bytes`](Self::do_send_bytes) and
+    /// [`partition`](Self::partition)) route their key branch through this one
+    /// helper so the hashing gate cannot diverge between them.
+    fn partition_for_key_or_unknown(&self, key: Option<&[u8]>, topic: &str, cluster: &Cluster) -> i32 {
+        if let Some(k) = key
+            && !self.partitioner_ignore_keys
+            && self.key_hasher.hashes_key(k)
+        {
+            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
+            if num_partitions > 0 {
+                return BuiltInPartitioner::partition_for_key(k, num_partitions, self.key_hasher);
+            }
+        }
+        record_metadata::UNKNOWN_PARTITION
+    }
+
+    /// Compute the partition for a record, mirroring Java's `KafkaProducer.partition()`
+    /// (`KafkaProducer.java:1469-1489`).
+    ///
+    /// Precedence is exactly Java's:
+    /// 1. an explicit `partition` on the record wins outright;
+    /// 2. otherwise, if a custom [`Partitioner`] is configured, it decides — and a
+    ///    negative result is rejected with the same `IllegalArgumentException` message
+    ///    Java throws. In Java that exception escapes `doSend`'s `catch (Exception e)`
+    ///    and is rethrown out of `send()`; here it is the `Err` variant, propagated by
+    ///    the caller with `?`.
+    /// 3. otherwise fall back to the built-in key-hash / `UNKNOWN_PARTITION` path
+    ///    ([`partition_for_key_or_unknown`](Self::partition_for_key_or_unknown)).
+    ///
+    /// The typed `key` / `value` are handed straight to the custom partitioner (Java
+    /// passes it `record.key()` / `record.value()` alongside the serialized bytes); the
+    /// built-in fallback in step 3 uses only `serialized_key`.
+    #[allow(clippy::too_many_arguments)]
+    fn compute_partition(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<&K>,
+        serialized_key: Option<&[u8]>,
+        value: Option<&V>,
+        serialized_value: Option<&[u8]>,
+        cluster: &Cluster,
+    ) -> Result<i32, Error> {
+        if let Some(p) = partition {
+            return Ok(p);
+        }
+
+        if let Some(partitioner) = &self.partitioner {
+            let custom_partition = partitioner.partition(topic, key, serialized_key, value, serialized_value, cluster);
+            if custom_partition < 0 {
+                return Err(Error::local_illegal_argument(format!(
+                    "The partitioner generated an invalid partition number: {}. Partition number should always be non-negative.",
+                    custom_partition
+                )));
+            }
+            return Ok(custom_partition);
+        }
+
+        Ok(self.partition_for_key_or_unknown(serialized_key, topic, cluster))
+    }
+
     /// Compute partition for the given record.
     ///
-    /// If the record has a partition, return it. Otherwise, try to calculate
-    /// partition based on key. If there is no key or key should be ignored,
-    /// return `UNKNOWN_PARTITION` to indicate any partition can be used.
-    ///
-    /// Translated from `KafkaProducer.partition()`.
+    /// A thin test wrapper over [`compute_partition`](Self::compute_partition), which is
+    /// the faithful translation of `KafkaProducer.partition()`. Every caller is a test
+    /// that uses a producer WITHOUT a custom partitioner, so the negative-partition `Err`
+    /// path is unreachable and unwrapping it here is safe.
     fn partition(
         &self,
         record: &ProducerRecord<K, V>,
         serialized_key: Option<&[u8]>,
-        _serialized_value: Option<&[u8]>,
+        serialized_value: Option<&[u8]>,
         cluster: &Cluster,
     ) -> i32 {
-        if let Some(p) = record.partition() {
-            return p;
-        }
-
-        if let Some(key) = serialized_key
-            && !self.partitioner_ignore_keys
-        {
-            let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
-            if num_partitions > 0 {
-                return BuiltInPartitioner::partition_for_key(key, num_partitions);
-            }
-        }
-
-        record_metadata::UNKNOWN_PARTITION
+        self.compute_partition(
+            record.topic(),
+            record.partition(),
+            record.key(),
+            serialized_key,
+            record.value(),
+            serialized_value,
+            cluster,
+        )
+        .expect("partition() test helper is only used without a custom partitioner")
     }
 
     /// Initiate a graceful close of the sender.
@@ -1865,10 +2123,19 @@ where
             self.await_sender_handle_indefinitely().await;
         }
 
-        // Java `close`: `Utils.closeQuietly(producerMetrics, ...)` then
-        // `Utils.closeQuietly(metrics, ...)` (`KafkaProducer.java:1449-1450`).
+        // Java `close`'s `Utils.closeQuietly(...)` chain, in order:
+        // `producerMetrics` → `metrics` → `keySerializer` → `valueSerializer` →
+        // `partitioner` (`KafkaProducer.java:1441-1446`). This crate does not model
+        // closeable serializers, so the partitioner is closed right after `metrics`,
+        // which is its faithful position among the closeables that exist. (The Phase 2
+        // spec cited `:1449-1450` for the position, but 4.3.1 closes the partitioner at
+        // `:1446`, after metrics rather than before — behaviourally irrelevant for the
+        // built-in partitioners, whose `close` is a no-op.)
         self.producer_metrics.close();
         self.metrics.close();
+        if let Some(partitioner) = &self.partitioner {
+            partitioner.close();
+        }
 
         kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
@@ -1899,10 +2166,13 @@ mod tests {
     use crate::common::protocol::Errors;
     use crate::common::requests::ConcreteResponse;
     use crate::common::serialization::StringSerializer;
+    use crate::common::utils::{murmur2, to_positive};
     use crate::mock_client::MockClient;
     use crate::producer::ProducerConfig;
+    use crate::producer::RoundRobinPartitioner;
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
+    use crate::producer::mock_partitioner;
 
     const TOPIC: &str = "test-topic";
 
@@ -2020,6 +2290,7 @@ mod tests {
             default_time_provider(),
             None,
             Arc::new(Mutex::new(PendingRequests::new())),
+            None,
         )
     }
 
@@ -2051,6 +2322,7 @@ mod tests {
             default_time_provider(),
             None,
             Arc::new(Mutex::new(PendingRequests::new())),
+            None,
         )
     }
 
@@ -2629,6 +2901,591 @@ mod tests {
         let cluster = metadata.fetch();
         let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
         assert_eq!(record_metadata::UNKNOWN_PARTITION, partition);
+    }
+
+    /// Builds a `KafkaProducer` whose `partitioner.class` selects
+    /// `Murmur2RandomPartitioner` (the `KeyHasher::Murmur2` hash).
+    fn create_murmur2_producer(
+        metadata: Arc<ProducerMetadata>,
+        accumulator: Arc<RecordAccumulator>,
+    ) -> KafkaProducer<String, String> {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("murmur2 partitioner config is valid");
+        create_producer_with_config(config, metadata, accumulator)
+    }
+
+    /// The default (unset `partitioner.class`) keyed partition path uses the
+    /// IEEE CRC-32 (librdkafka `consistent_random`) hash taken UNSIGNED modulo
+    /// the partition count — NOT murmur2 / `Utils.toPositive`. This is the
+    /// deliberate, user-approved deviation from Java parity.
+    #[test]
+    fn test_partition_default_hasher_is_crc32() {
+        let metadata = create_metadata_with_topic(TOPIC, 7);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata.clone(), accumulator);
+        assert_eq!(KeyHasher::Crc32, producer.key_hasher);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
+        assert_eq!((crc32fast::hash(b"key") % 7) as i32, partition);
+        // Both send call sites route through the same helper, so it agrees.
+        assert_eq!(partition, producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster));
+    }
+
+    /// Under the CRC-32 default, an EMPTY (but non-null) key defers to the
+    /// keyless sticky (KIP-794) path — `UNKNOWN_PARTITION` — matching
+    /// librdkafka `consistent_random` (which treats `keylen == 0` as no key).
+    /// Asserted through both send call sites' shared helper.
+    #[test]
+    fn test_partition_empty_key_crc32_defers_to_sticky() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata.clone(), accumulator);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some(String::new()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        // via KafkaProducer.partition()
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition(&record, Some(b""), Some(b"value"), &cluster)
+        );
+        // via the helper do_send_bytes uses
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition_for_key_or_unknown(Some(b""), TOPIC, &cluster)
+        );
+    }
+
+    /// `Murmur2RandomPartitioner` reproduces the exact Java-client formula
+    /// `Utils.toPositive(Utils.murmur2(key)) % numPartitions` for a non-empty
+    /// key.
+    #[test]
+    fn test_partition_murmur2_matches_java_formula() {
+        let metadata = create_metadata_with_topic(TOPIC, 7);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+        assert_eq!(KeyHasher::Murmur2, producer.key_hasher);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
+        assert_eq!(to_positive(murmur2(b"key")) % 7, partition);
+        assert_eq!(partition, producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster));
+    }
+
+    /// murmur2 hashes an EMPTY (non-null) key rather than deferring to the
+    /// sticky path — exact Java-client parity, and the point of contrast with
+    /// the CRC-32 default (`test_partition_empty_key_crc32_defers_to_sticky`).
+    #[test]
+    fn test_partition_empty_key_murmur2_is_hashed() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+
+        let cluster = metadata.fetch();
+        let partition = producer.partition_for_key_or_unknown(Some(b""), TOPIC, &cluster);
+        assert_eq!(to_positive(murmur2(b"")) % 3, partition);
+        assert_ne!(record_metadata::UNKNOWN_PARTITION, partition);
+    }
+
+    /// An explicit record partition wins over key hashing regardless of the
+    /// selected hasher (here: murmur2). Complements
+    /// `test_partition_returns_explicit_partition` (which covers the default).
+    #[test]
+    fn test_partition_explicit_partition_wins_under_murmur2() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+
+        let record = ProducerRecord::with_partition(
+            TOPIC.to_string(),
+            Some(2),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .unwrap();
+        let cluster = metadata.fetch();
+        assert_eq!(2, producer.partition(&record, Some(b"key"), Some(b"value"), &cluster));
+    }
+
+    /// `partitioner.ignore.keys=true` forces `UNKNOWN_PARTITION` even when a
+    /// non-empty key would otherwise hash, under murmur2 as well as the default.
+    #[test]
+    fn test_partition_ignore_keys_overrides_murmur2() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        props.insert("partitioner.ignore.keys".to_string(), "true".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_producer_with_config(config, metadata.clone(), accumulator);
+
+        let cluster = metadata.fetch();
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster)
+        );
+    }
+
+    // =====================================================================
+    // PHASE-2 TEST ACCOUNTING — the pluggable-`Partitioner` `KafkaProducerTest` methods
+    //
+    // SCOPE CRITERION. A `KafkaProducerTest.java` method is in scope for Phase 2 iff its
+    // body sets `PARTITIONER_CLASS_CONFIG` or names one of the partitioner nested classes
+    // (`MockPartitioner` / `PartitionerForClientId` / `BuggyPartitioner` /
+    // `MonitorablePartitioner`) as its subject. That marker set is exactly five methods:
+    //
+    //   - testPartitionerClose (:668) .............. TRANSLATED -> test_partitioner_close
+    //   - negativePartitionShouldThrow (:2410) ..... TRANSLATED -> negative_partition_should_throw
+    //   - configurableObjectsShouldSeeGeneratedClientId (:2296)
+    //         ...... TRANSLATED (partitioner portion) -> configurable_objects_should_see_generated_client_id
+    //   - shouldCloseProperlyAndThrowIfInterrupted (:689) ....... N/A (see below)
+    //   - testMonitorablePlugins (:2828) ........................ N/A (see below)
+    //
+    // N/A justifications:
+    //
+    //   - shouldCloseProperlyAndThrowIfInterrupted asserts that `close()` blocks until an
+    //     in-flight `send` completes and that INTERRUPTING the closing thread surfaces an
+    //     `InterruptException`. Thread interruption (`Thread.interrupt()` /
+    //     `InterruptException`) has no Rust/Tokio analogue — the same gap the producer-
+    //     transaction rules record for `TransactionalRequestResult`. `MockPartitioner` is
+    //     incidental here (merely the configured `partitioner.class`), not the subject, so
+    //     this belongs to the close/interrupt surface, not Phase 2.
+    //   - testMonitorablePlugins exercises the `Plugin` / `Monitorable` metrics SPI, which
+    //     the Phase 2 spec places explicitly out of scope. `MonitorablePartitioner` is only
+    //     the vehicle; there is nothing partitioner-specific to translate.
+    //
+    // RUST-ONLY BEHAVIORAL TESTS. Java gets its partitioner round-trip coverage "for free"
+    // from a real/mock broker plus reflective `partitioner.class` loading. Rust has no
+    // reflection (a user partitioner is passed as an instance) and these unit tests do not
+    // stand up a broker, so five behavioral contracts that Java never asserts directly are
+    // pinned explicitly here:
+    //
+    //   - test_round_robin_partitioner_resolution_and_gating — `from_config` resolves a
+    //         built-in `partitioner.class` (both spellings) and a resolved partitioner
+    //         disables adaptive partitioning (KafkaProducer.java:428-433).
+    //   - test_round_robin_partitioner_used_once_per_record — a stateful partitioner is
+    //         consulted EXACTLY once per record on the send path (do_send computes it,
+    //         do_send_bytes short-circuits on the passed `Some(..)`).
+    //   - test_partitioner_receives_key_value_and_serialized_bytes — the typed key/value
+    //         and the serialized bytes are forwarded unchanged.
+    //   - test_explicit_partition_bypasses_partitioner — an explicit record partition
+    //         short-circuits `compute_partition` before the partitioner is consulted.
+    //   - test_explicit_partitioner_instance_wins_over_partitioner_class — an explicit
+    //         instance overrides a built-in `partitioner.class` (Java's
+    //         `getConfiguredInstance` returns the caller-provided instance).
+    // =====================================================================
+
+    // --- test-local partitioners (translated from KafkaProducerTest's nested classes) ---
+
+    /// Translated from `KafkaProducerTest.BuggyPartitioner` (`:2583-2595`): always
+    /// returns an invalid negative partition, exercising `compute_partition`'s
+    /// non-negative guard. Java's empty `close`/`configure` overrides are the trait's
+    /// default no-ops, so they are intentionally not overridden.
+    struct BuggyPartitioner;
+
+    impl<K, V> Partitioner<K, V> for BuggyPartitioner {
+        fn partition(
+            &self,
+            _topic: &str,
+            _key: Option<&K>,
+            _key_bytes: Option<&[u8]>,
+            _value: Option<&V>,
+            _value_bytes: Option<&[u8]>,
+            _cluster: &Cluster,
+        ) -> i32 {
+            -1
+        }
+    }
+
+    /// Translated from `KafkaProducerTest.PartitionerForClientId` (`:2521-2536`):
+    /// `partition` returns 0, and `configure` records the resolved `client.id` so a
+    /// test can assert the partitioner saw the generated id. Java accumulates into a
+    /// static `CLIENT_IDS` set; here the sink is an injected `Arc<Mutex<Vec<String>>>`
+    /// so tests running in parallel do not share it.
+    struct PartitionerForClientId {
+        client_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<K, V> Partitioner<K, V> for PartitionerForClientId {
+        fn configure(&mut self, configs: &HashMap<String, String>) {
+            if let Some(id) = configs.get(ProducerConfig::CLIENT_ID_CONFIG) {
+                self.client_ids.lock().unwrap().push(id.clone());
+            }
+        }
+
+        fn partition(
+            &self,
+            _topic: &str,
+            _key: Option<&K>,
+            _key_bytes: Option<&[u8]>,
+            _value: Option<&V>,
+            _value_bytes: Option<&[u8]>,
+            _cluster: &Cluster,
+        ) -> i32 {
+            0
+        }
+    }
+
+    /// One recorded `Partitioner::partition` invocation: the borrowed arguments
+    /// (captured as owned copies) and the partition the delegate returned.
+    #[derive(Debug, Clone)]
+    struct RecordedCall {
+        topic: String,
+        key: Option<String>,
+        key_bytes: Option<Vec<u8>>,
+        value: Option<String>,
+        value_bytes: Option<Vec<u8>>,
+        returned: i32,
+    }
+
+    /// A `Partitioner` decorator with no Java counterpart: it delegates to an inner
+    /// partitioner and records every `partition` call. It exists to probe two
+    /// contracts Java gets implicitly from a real broker — that a stateful partitioner
+    /// is consulted EXACTLY once per record, and that the producer forwards the typed
+    /// key/value and the serialized bytes unchanged. A justified `definition-of-done`
+    /// §7 addition (a test-only decorator, present only under `#[cfg(test)]`).
+    struct RecordingPartitioner {
+        inner: Box<dyn Partitioner<String, String>>,
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
+    }
+
+    impl Partitioner<String, String> for RecordingPartitioner {
+        fn partition(
+            &self,
+            topic: &str,
+            key: Option<&String>,
+            key_bytes: Option<&[u8]>,
+            value: Option<&String>,
+            value_bytes: Option<&[u8]>,
+            cluster: &Cluster,
+        ) -> i32 {
+            let returned = self.inner.partition(topic, key, key_bytes, value, value_bytes, cluster);
+            self.calls.lock().unwrap().push(RecordedCall {
+                topic: topic.to_string(),
+                key: key.cloned(),
+                key_bytes: key_bytes.map(|b| b.to_vec()),
+                value: value.cloned(),
+                value_bytes: value_bytes.map(|b| b.to_vec()),
+                returned,
+            });
+            returned
+        }
+    }
+
+    /// Seam constructor for a producer that owns a custom `partitioner` (the
+    /// `KafkaProducer::new` last argument). Metadata is pre-seeded (see
+    /// `create_metadata_with_topic`) and `sender_handle` is `None`, so `send()` and
+    /// `close()` neither block on metadata nor hang on a sender task — the send-path
+    /// partitioner tests need a producer that can actually append a record. NOTE the
+    /// `new()` seam stores the partitioner as-is and does NOT `configure` it or gate
+    /// adaptive partitioning; the `from_config`-based tests below cover those.
+    fn create_producer_with_partitioner(
+        config: ProducerConfig,
+        metadata: Arc<ProducerMetadata>,
+        accumulator: Arc<RecordAccumulator>,
+        partitioner: Box<dyn Partitioner<String, String>>,
+    ) -> KafkaProducer<String, String> {
+        let running = Arc::new(AtomicBool::new(true));
+        let force_close = Arc::new(AtomicBool::new(false));
+        let wakeup = Arc::new(Notify::new());
+
+        KafkaProducer::new(
+            &config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            metadata,
+            accumulator,
+            running,
+            force_close,
+            wakeup,
+            None,
+            default_time_provider(),
+            None,
+            Arc::new(Mutex::new(PendingRequests::new())),
+            Some(partitioner),
+        )
+    }
+
+    /// Translated from `KafkaProducerTest.testPartitionerClose` (`:667-686`).
+    ///
+    /// Java resolves the partitioner reflectively through `partitioner.class`, which
+    /// invokes the `MockPartitioner` constructor (bumping `INIT_COUNT`) and then
+    /// `configure`. `MockPartitioner` is a test-only type with no built-in
+    /// `partitioner.class` name, so here it is supplied as an explicit instance;
+    /// constructing it via `MockPartitioner::new()` bumps `INIT_COUNT` exactly as the
+    /// Java ctor does. `close()` then bumps `CLOSE_COUNT` (`KafkaProducer.java:1446`).
+    ///
+    /// The counters are process-global statics, so the whole body must hold
+    /// `lock_counters()` and reset at start AND end (Java's `finally`) to serialize
+    /// against the other counter-touching test (`mock_partitioner::test_counts_init_and_close`).
+    /// That serializer is a `std::sync::Mutex` guard (matching the codebase's
+    /// preference for CPU-bound state, and shared with the D6 test), and it must stay
+    /// held across the async `close()` — otherwise a parallel counter test could
+    /// interleave between the INIT and CLOSE assertions. Holding a `std` guard across
+    /// an `.await` is exactly what `clippy::await_holding_lock` forbids, so this is a
+    /// plain `#[test]` that drives `close()` on a dedicated current-thread runtime via
+    /// `block_on`: the guard spans a synchronous `block_on` call rather than an
+    /// `.await` point (and the close path never locks `COUNTER_GUARD`, so parking the
+    /// thread inside `block_on` while holding it cannot deadlock).
+    #[test]
+    fn test_partitioner_close() {
+        let _guard = mock_partitioner::lock_counters();
+        mock_partitioner::reset_counters();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let producer = create_producer_with_partitioner(
+                ProducerConfig::default(),
+                create_metadata_with_topic(TOPIC, 1),
+                create_accumulator(),
+                Box::new(mock_partitioner::MockPartitioner::new()),
+            );
+            assert_eq!(1, mock_partitioner::INIT_COUNT.load(Ordering::SeqCst));
+            assert_eq!(0, mock_partitioner::CLOSE_COUNT.load(Ordering::SeqCst));
+
+            producer.close().await.expect("seam producer closes cleanly");
+
+            assert_eq!(1, mock_partitioner::INIT_COUNT.load(Ordering::SeqCst));
+            assert_eq!(1, mock_partitioner::CLOSE_COUNT.load(Ordering::SeqCst));
+        });
+
+        // Cleanup since we use mutable process-global statics in MockPartitioner.
+        mock_partitioner::reset_counters();
+    }
+
+    /// Translated from `KafkaProducerTest.negativePartitionShouldThrow` (`:2410-2427`).
+    ///
+    /// A partitioner returning a negative partition makes `send()` fail with
+    /// `IllegalArgument` (Java: `IllegalArgumentException`). The exact message is
+    /// asserted (DoD §3): error-message content is part of the behavioral contract.
+    #[tokio::test]
+    async fn negative_partition_should_throw() {
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 1),
+            create_accumulator(),
+            Box::new(BuggyPartitioner),
+        );
+
+        let record = ProducerRecord::with_key("topic".to_string(), Some("key".to_string()), Some("value".to_string()));
+        let err = producer.send(record).await.expect_err("negative partition must be rejected");
+        match &err {
+            Error::LocalIllegalArgument(msg) => {
+                assert_eq!(
+                    msg.message(),
+                    "The partitioner generated an invalid partition number: -1. Partition number should always be non-negative."
+                );
+            },
+            other => panic!("Expected LocalIllegalArgument error, got: {:?}", other),
+        }
+    }
+
+    /// Translated from `KafkaProducerTest.configurableObjectsShouldSeeGeneratedClientId`
+    /// (`:2296-2310`), partitioner portion.
+    ///
+    /// A `configure`-able partitioner must see the generated `client.id` when the user
+    /// sets none. Java asserts the same for the two serializers and the interceptor
+    /// (`CLIENT_IDS.size() == 4`); Rust's `Serializer` has no `configure(client.id)`
+    /// hook and no `ProducerInterceptor` exists yet, so only the partitioner is checked
+    /// here — hence exactly ONE recorded id rather than four. The producer is built via
+    /// `from_config_with_partitioner` so `configure` actually runs (the `new()` seam
+    /// does not configure).
+    #[tokio::test]
+    async fn configurable_objects_should_see_generated_client_id() {
+        let client_ids = Arc::new(Mutex::new(Vec::new()));
+        let props = guard_props(&[]); // bootstrap only; NO client.id
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config_with_partitioner(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            Box::new(PartitionerForClientId { client_ids: Arc::clone(&client_ids) }),
+        )
+        .expect("constructs with an explicit partitioner");
+
+        assert!(!producer.client_id().is_empty(), "a client.id is generated when unset");
+        let recorded = client_ids.lock().unwrap();
+        assert_eq!(1, recorded.len(), "the partitioner's configure ran exactly once");
+        assert_eq!(
+            recorded[0].as_str(),
+            producer.client_id(),
+            "the partitioner saw the generated client.id"
+        );
+    }
+
+    /// A built-in `partitioner.class` (both the simple name and the fully-qualified
+    /// Java class name) is resolved by `from_config` into a live `partitioner`, and a
+    /// resolved partitioner turns OFF adaptive partitioning in the accumulator (Java
+    /// `KafkaProducer.java:428-433`: "no need ... if we use a custom partitioner"). The
+    /// control producer (no `partitioner.class`) keeps `partitioner = None` and adaptive
+    /// partitioning follows the config default.
+    ///
+    /// Rust-only behavioral test (Java never inspects these internals); it pins the
+    /// `from_config` resolution + accumulator gating D3/D4 added. `#[tokio::test]`:
+    /// `from_config` spawns the Sender task, which fails to reach localhost:9999
+    /// harmlessly and is dropped with the test.
+    #[tokio::test]
+    async fn test_round_robin_partitioner_resolution_and_gating() {
+        for name in [
+            "RoundRobinPartitioner",
+            "org.apache.kafka.clients.producer.RoundRobinPartitioner",
+        ] {
+            let props = guard_props(&[("partitioner.class", name)]);
+            let config = ProducerConfig::from_properties(&props).expect("valid config");
+            let producer = KafkaProducer::<String, String>::from_config(
+                config,
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+            )
+            .expect("RoundRobinPartitioner resolves");
+            assert!(
+                producer.partitioner.is_some(),
+                "partitioner.class={name} must resolve a partitioner"
+            );
+            assert!(
+                !producer.accumulator.enable_adaptive_partitioning_for_test(),
+                "a resolved partitioner must disable adaptive partitioning (partitioner.class={name})"
+            );
+        }
+
+        // Control: no partitioner.class -> no partitioner, adaptive follows config.
+        let props = guard_props(&[]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let adaptive_default = config.partitioner_adaptive_partitioning_enable;
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("default config constructs");
+        assert!(producer.partitioner.is_none(), "no partitioner.class -> no partitioner");
+        assert_eq!(
+            adaptive_default,
+            producer.accumulator.enable_adaptive_partitioning_for_test(),
+            "without a partitioner, adaptive partitioning follows partitioner.adaptive.partitioning.enable"
+        );
+    }
+
+    /// A stateful `RoundRobinPartitioner` used through the producer's send path is
+    /// consulted EXACTLY once per record and cycles through the topic's available
+    /// partitions. A recording decorator wraps the RoundRobin; four sends over a
+    /// 3-partition topic must produce four calls whose first three returned partitions
+    /// are a permutation of {0,1,2} and whose fourth repeats the first (the counter
+    /// wraps mod 3). The available-partition ORDER is not contractually fixed, so the
+    /// assertion is order-robust rather than hard-coded to `[0,1,2,0]`.
+    #[tokio::test]
+    async fn test_round_robin_partitioner_used_once_per_record() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let partitioner =
+            RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 3),
+            create_accumulator(),
+            Box::new(partitioner),
+        );
+
+        for _ in 0..4 {
+            let record = ProducerRecord::with_key("topic".to_string(), Some("k".to_string()), Some("v".to_string()));
+            producer.send(record).await.expect("send succeeds");
+        }
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(4, recorded.len(), "the partitioner is consulted exactly once per record");
+        let returned: Vec<i32> = recorded.iter().map(|c| c.returned).collect();
+        let mut first_cycle = returned[..3].to_vec();
+        first_cycle.sort_unstable();
+        assert_eq!(vec![0, 1, 2], first_cycle, "the first cycle visits every partition once");
+        assert_eq!(returned[0], returned[3], "the fourth record wraps back to the first partition");
+    }
+
+    /// The producer forwards the record's typed key/value AND the serialized bytes to
+    /// the partitioner unchanged. A single send of key "mykey"/value "myval" with no
+    /// explicit partition must record `key=Some("mykey")`, `key_bytes=b"mykey"`,
+    /// `value=Some("myval")`, `value_bytes=b"myval"` (the `StringSerializer` output).
+    #[tokio::test]
+    async fn test_partitioner_receives_key_value_and_serialized_bytes() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let partitioner =
+            RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 3),
+            create_accumulator(),
+            Box::new(partitioner),
+        );
+
+        let record =
+            ProducerRecord::with_key("topic".to_string(), Some("mykey".to_string()), Some("myval".to_string()));
+        producer.send(record).await.expect("send succeeds");
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(1, recorded.len());
+        let call = &recorded[0];
+        assert_eq!("topic", call.topic);
+        assert_eq!(Some("mykey".to_string()), call.key);
+        assert_eq!(Some(b"mykey".to_vec()), call.key_bytes);
+        assert_eq!(Some("myval".to_string()), call.value);
+        assert_eq!(Some(b"myval".to_vec()), call.value_bytes);
+    }
+
+    /// An explicit record partition short-circuits `compute_partition` before the
+    /// partitioner is consulted (it returns the given `Some(p)` immediately). A send
+    /// with an explicit partition therefore records ZERO partitioner calls and still
+    /// succeeds.
+    #[tokio::test]
+    async fn test_explicit_partition_bypasses_partitioner() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let partitioner =
+            RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 3),
+            create_accumulator(),
+            Box::new(partitioner),
+        );
+
+        let record =
+            ProducerRecord::with_partition("topic".to_string(), Some(2), Some("k".to_string()), Some("v".to_string()))
+                .unwrap();
+        producer.send(record).await.expect("send with explicit partition succeeds");
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "explicit partition must bypass the partitioner"
+        );
+    }
+
+    /// An explicit partitioner instance passed to `from_config_with_partitioner` wins
+    /// over a built-in `partitioner.class`, mirroring Java's `getConfiguredInstance`
+    /// returning the caller-provided instance. Verified via `configure`: only the
+    /// explicit `PartitionerForClientId` records the client.id (`RoundRobinPartitioner`'s
+    /// `configure` is the default no-op), so a single recorded id proves the explicit
+    /// instance — not the RoundRobin named by `partitioner.class` — was resolved and
+    /// configured.
+    #[tokio::test]
+    async fn test_explicit_partitioner_instance_wins_over_partitioner_class() {
+        let client_ids = Arc::new(Mutex::new(Vec::new()));
+        let props = guard_props(&[("partitioner.class", "RoundRobinPartitioner")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config_with_partitioner(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            Box::new(PartitionerForClientId { client_ids: Arc::clone(&client_ids) }),
+        )
+        .expect("explicit instance overrides partitioner.class");
+
+        let recorded = client_ids.lock().unwrap();
+        assert_eq!(
+            1,
+            recorded.len(),
+            "the explicit PartitionerForClientId was configured, not RoundRobin"
+        );
+        assert_eq!(recorded[0].as_str(), producer.client_id());
     }
 
     /// Tests that a record can be successfully sent and appended to the accumulator.
@@ -3425,6 +4282,7 @@ mod tests {
                 default_time_provider(),
                 transaction_manager,
                 Arc::new(Mutex::new(PendingRequests::new())),
+                None,
             );
             let cluster = metadata.fetch();
 
@@ -3678,6 +4536,7 @@ mod tests {
                 time.as_provider(),
                 Some(Arc::clone(&transaction_manager)),
                 pending_requests,
+                None,
             );
 
             Self { producer, sender, accumulator, metadata, transaction_manager, time }
@@ -5184,6 +6043,7 @@ mod tests {
             time.as_provider(),
             Some(transaction_manager),
             pending_requests,
+            None,
         )
     }
 

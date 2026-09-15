@@ -130,22 +130,44 @@ mod tests {
         assert_eq!(i32::MAX, to_positive(i32::MAX));
     }
 
+    /// Known murmur2 vectors, translated verbatim from the Java client's
+    /// `UtilsTest.testMurmur2`
+    /// (`kafka/clients/src/test/java/org/apache/kafka/common/utils/UtilsTest.java`).
+    ///
+    /// These pin the EXACT 32-bit output for known inputs, not merely that the
+    /// hash equals itself. murmur2 is a wire-visible partitioning contract: a
+    /// consistently wrong implementation round-trips against itself yet routes
+    /// keyed records to different partitions than the Java client, so
+    /// `Murmur2RandomPartitioner`'s promise of exact Java parity would silently
+    /// break. The inputs are 2, 6, 24, 26, 48, and 3 bytes long (tail remainders
+    /// 2, 2, 0, 2, 0, 3), so the trailing-byte handling is exercised for
+    /// remainders 0, 2, and 3.
     #[test]
-    fn test_murmur2_empty() {
-        // Known value for empty input
-        let hash = murmur2(b"");
-        // Verify it returns a consistent value
-        assert_eq!(hash, murmur2(b""));
+    fn test_murmur2() {
+        // `(input, expected)` exactly as Java's `cases` map.
+        let cases: &[(&[u8], i32)] = &[
+            (b"21", -973932308),
+            (b"foobar", -790332482),
+            (b"a-little-bit-long-string", -985981536),
+            (b"a-little-bit-longer-string", -1486304829),
+            (b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8", -58897971),
+            // Java's `new byte[]{'a', 'b', 'c'}`; `b"abc"` is the identical `[97, 98, 99]`.
+            (b"abc", 479470107),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(*expected, murmur2(input), "murmur2 mismatch for {input:?}");
+        }
     }
 
-    #[test]
-    fn test_murmur2_known_values() {
-        // Test with known values from Java implementation
-        // These are cross-verified with Kafka's Java Utils.murmur2
-        assert_eq!(murmur2(b"21"), murmur2(b"21"));
-        assert_eq!(murmur2(b"foobar"), murmur2(b"foobar"));
-        assert_eq!(murmur2(b"a]b[c"), murmur2(b"a]b[c"));
-    }
+    // NOTE: Java's `UtilsTest.testMurmur2Checksum` (a 100-trial × length-0..=1000
+    // fuzz checksum asserting `0xc3b8cf7c99fcL`) is intentionally NOT translated
+    // here. It is faithful only if the random byte stream is byte-for-byte
+    // identical to Java's, which requires porting `java.util.SplittableRandom`
+    // (seed 0). That is an OpenJDK translation gated on CLAUDE.md §1.3
+    // ("ask before doing it" + keep the GPL+Classpath-Exception licence) and is
+    // outside this change's approved scope. The known-vector `test_murmur2`
+    // above plus `test_murmur2_consistency` cover the implementation; the
+    // checksum test can be added when `SplittableRandom` is ported.
 
     #[test]
     fn test_murmur2_consistency() {

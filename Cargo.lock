@@ -483,6 +483,7 @@ dependencies = [
  "bytes",
  "cbindgen",
  "crc32c",
+ "crc32fast",
  "dashmap",
  "env_logger",
  "flate2",
