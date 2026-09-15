@@ -4285,12 +4285,49 @@ static void admin_list_config_resources_trampoline(kafka_admin_ListConfigResourc
                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_client_metrics_trampoline(kafka_admin_ListClientMetricsResourcesResult_t* r,
                                                  kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_log_dirs_trampoline(kafka_admin_DescribeLogDirsResult_t* r,
-                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_replica_log_dirs_trampoline(kafka_admin_AlterReplicaLogDirsResult_t* r,
-                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_replica_log_dirs_trampoline(kafka_admin_DescribeReplicaLogDirsResult_t* r,
-                                                       kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+// describeLogDirs / alterReplicaLogDirs / describeReplicaLogDirs (Log dirs
+// family; fire once per broker/replica, independently, as that key's own
+// future resolves) - see the "per-key trampolines (Topics family...)" comment
+// above for the shared contract. describeLogDirs' key is a broker id (int);
+// alterReplicaLogDirs' and describeReplicaLogDirs' key is a
+// TopicPartitionReplica, delivered as (topic, partition, broker id) rather
+// than through a single opaque key handle, mirroring
+// admin_delete_records_trampoline's two-param TopicPartition handling.
+static void admin_describe_log_dirs_trampoline(int32_t broker_id,
+    kafka_admin_LogDirDescriptionMap_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "iKK", (int)broker_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// alterReplicaLogDirs: Java's per-replica future is KafkaFuture<Void>, so
+// there is no value parameter (as for delete_topics/create_partitions).
+static void admin_alter_replica_log_dirs_trampoline(const char* topic, int32_t partition,
+    int32_t broker_id, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siiK", topic, partition, broker_id,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_describe_replica_log_dirs_trampoline(const char* topic, int32_t partition,
+    int32_t broker_id, kafka_admin_ReplicaLogDirInfo_t* value, kafka_common_Error_t* error,
+    void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siiKK", topic, partition, broker_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- input marshaling helpers ----------------------------------------------
 
@@ -4459,7 +4496,12 @@ static PyObject* py_Admin_describe_log_dirs_async(PyObject* self, PyObject* args
 
     int32_t* brokers = NULL; Py_ssize_t n = 0;
     if (build_int_array(brokers_seq, &brokers, &n) < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per broker (Java's per-key KafkaFuture), not one
+    // for the whole batch - see admin_describe_log_dirs_trampoline. The Python
+    // caller is responsible for `brokers_seq` already being deduplicated (as
+    // for the Topics/Configs families), so the row count matches the number of
+    // times the native callback will actually fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_log_dirs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         brokers, (int32_t)n, timeout_ms, admin_describe_log_dirs_trampoline, cb);
     PyMem_Free(brokers);
@@ -4492,7 +4534,12 @@ static PyObject* py_Admin_alter_replica_log_dirs_async(PyObject* self, PyObject*
         }
         topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b; log_dirs[i] = dir;
     }
-    Py_INCREF(cb);
+    // One callback invocation per replica (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{TopicPartitionReplica: log_dir}` dict, which
+    // is already unique by construction, so the row count matches the number
+    // of times the native callback will actually fire - see
+    // admin_alter_replica_log_dirs_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_alter_replica_log_dirs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, log_dirs,
         (int32_t)n, timeout_ms, admin_alter_replica_log_dirs_trampoline, cb);
@@ -4525,7 +4572,13 @@ static PyObject* py_Admin_describe_replica_log_dirs_async(PyObject* self, PyObje
         }
         topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT replica (Java's per-key
+    // KafkaFuture). The Python caller is responsible for `spec` already being
+    // deduplicated by `TopicPartitionReplica` (as for the Topics family's
+    // `_string_keyed_names`), so the row count matches the number of times the
+    // native callback will actually fire - see
+    // admin_describe_replica_log_dirs_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_replica_log_dirs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, (int32_t)n,
         timeout_ms, admin_describe_replica_log_dirs_trampoline, cb);
@@ -4751,6 +4804,44 @@ static PyObject* log_dir_map_to_py(const kafka_admin_LogDirDescriptionMap_t* map
         Py_DECREF(key); Py_DECREF(val);
     }
     return d;
+}
+
+// {log_dir: log_dir_description} -- standalone per-key value delivered
+// individually by describe_log_dirs' per-key async callback
+// (admin_describe_log_dirs_trampoline, above), reusing the same
+// log_dir_map_to_py converter the flattened DescribeLogDirsResult path uses.
+// Do NOT call this on a value obtained from the flattened result's
+// DescribeLogDirsResult_get_value (borrowed, freed by
+// DescribeLogDirsResult_drain instead) - this owns and destroys the handle.
+static PyObject* py_LogDirDescriptionMap_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_LogDirDescriptionMap_t* map = (kafka_admin_LogDirDescriptionMap_t*)(uintptr_t)ptr;
+    PyObject* result = log_dir_map_to_py(map);
+    kafka_admin_LogDirDescriptionMap_destroy(map);
+    return result;
+}
+
+// (current_log_dir, current_offset_lag, future_log_dir, future_offset_lag) --
+// standalone per-key value delivered individually by
+// describe_replica_log_dirs' per-key async callback
+// (admin_describe_replica_log_dirs_trampoline, above). Do NOT call this on a
+// value obtained from the flattened result's
+// DescribeReplicaLogDirsResult_get_value (borrowed, freed by
+// DescribeReplicaLogDirsResult_drain instead) - this owns and destroys the
+// handle.
+static PyObject* py_ReplicaLogDirInfo_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ReplicaLogDirInfo_t* info = (kafka_admin_ReplicaLogDirInfo_t*)(uintptr_t)ptr;
+    PyObject* result = Py_BuildValue(
+        "(zLzL)",
+        kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(info),
+        (long long)kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(info),
+        kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(info),
+        (long long)kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(info));
+    kafka_admin_ReplicaLogDirInfo_destroy(info);
+    return result;
 }
 
 // {broker_id: (error, {log_dir: log_dir_description})}
@@ -7499,11 +7590,13 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_list_client_metrics_resources_async", py_Admin_list_client_metrics_resources_async, METH_VARARGS,
      "Async listClientMetricsResources; cb(result_int, error_int)"},
     {"Admin_describe_log_dirs_async", py_Admin_describe_log_dirs_async, METH_VARARGS,
-     "Async describeLogDirs; cb(result_int, error_int)"},
+     "Async describeLogDirs; per-key cb(broker_id, value_int, error_int), once per broker"},
     {"Admin_alter_replica_log_dirs_async", py_Admin_alter_replica_log_dirs_async, METH_VARARGS,
-     "Async alterReplicaLogDirs; cb(result_int, error_int)"},
+     "Async alterReplicaLogDirs; per-key cb(topic, partition, broker_id, error_int), once per replica"},
     {"Admin_describe_replica_log_dirs_async", py_Admin_describe_replica_log_dirs_async, METH_VARARGS,
-     "Async describeReplicaLogDirs; cb(result_int, error_int)"},
+     "Async describeReplicaLogDirs; per-key cb(topic, partition, broker_id, value_int, error_int), once per replica"},
+    {"LogDirDescriptionMap_drain", py_LogDirDescriptionMap_drain, METH_VARARGS, "Drain+destroy a standalone LogDirDescriptionMap handle (per-key describe_log_dirs callback) into a dict"},
+    {"ReplicaLogDirInfo_drain", py_ReplicaLogDirInfo_drain, METH_VARARGS, "Drain+destroy a standalone ReplicaLogDirInfo handle (per-key describe_replica_log_dirs callback) into a tuple"},
     {"DescribeClusterResult_drain", py_DescribeClusterResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeClusterResult handle into a tuple"},
     {"DescribeConfigsResult_drain", py_DescribeConfigsResult_drain, METH_VARARGS,
