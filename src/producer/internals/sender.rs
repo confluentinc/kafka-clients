@@ -1209,86 +1209,154 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// # Errors
     ///
-    /// Propagates a failure from `reenqueue` / `split_and_reenqueue`, both of which
-    /// re-insert an idempotent batch in sequence order. Java's
-    /// `IllegalStateException` from `insertInSequenceOrder` escapes the completion
+    /// Propagates the first error raised while completing or retrying this request's
+    /// batches: from `complete_batch` (Java's `IllegalStateException` out of
+    /// `TransactionManager.handleCompletedBatch`), or from `reenqueue` /
+    /// `split_and_reenqueue`, which re-insert an idempotent batch in sequence order via
+    /// `insertInSequenceOrder`. Java's `IllegalStateException` escapes the completion
     /// callback but is caught **inside** `client.poll`, by
     /// `NetworkClient.completeResponses` (`NetworkClient.java:666-674`) — *not* by
     /// `Sender.run`. [`Self::handle_client_responses`] is that boundary and logs the
     /// error there, so the remaining responses of the same poll are still dispatched.
+    ///
+    /// The error is propagated only **after** every batch this request carried has been
+    /// made reachable again — retried, or failed with an error. The produce response is
+    /// consumed from `pending_produce_responses` here and never arrives again, so a
+    /// batch dropped on an early `?` return would hang its `send()` futures forever,
+    /// leak its pooled buffer (eventually blocking `send` on `max.block.ms`), and keep
+    /// `accumulator.has_incomplete()` true — which parks a pending transactional
+    /// `EndTxn` and wedges `commit_transaction` / `abort_transaction`. issues.md
+    /// Issue 4.
     fn handle_produce_response_for(&mut self, response: &ClientResponse, now: i64) -> Result<(), Error> {
-        {
-            let correlation_id = response.request_header().correlation_id();
-            if let Some(pending) = self.pending_produce_responses.remove(&correlation_id) {
-                // Extract the batches this request carried from `in_flight_batches`.
-                // Java's callback holds them directly; here they are located by identity
-                // (see `PendingProduceRequest`).
-                let mut batches: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
-                for (tp, identity) in &pending.batches {
-                    // Take the batch this request actually carried, not merely the
-                    // oldest one for the partition — see `PendingProduceRequest`.
-                    let mut taken = None;
-                    if let Some(partition_batches) = self.in_flight_batches.get_mut(tp) {
-                        if let Some(index) = partition_batches
-                            .iter()
-                            .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
-                        {
-                            taken = Some(partition_batches.remove(index));
-                        }
-                        if partition_batches.is_empty() {
-                            self.in_flight_batches.remove(tp);
-                        }
-                    }
-                    // A batch that was completed while still in flight is no longer in
-                    // `in_flight_batches` but is still waiting for exactly this response
-                    // in order to release its buffer — see
-                    // `Self::batches_awaiting_response`.
-                    if taken.is_none()
-                        && let Some(index) = self
-                            .batches_awaiting_response
-                            .iter()
-                            .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
-                    {
-                        taken = Some(self.batches_awaiting_response.remove(index));
-                    }
-                    if let Some(batch) = taken {
-                        batches.insert(tp.clone(), batch);
-                    }
+        let correlation_id = response.request_header().correlation_id();
+        let Some(pending) = self.pending_produce_responses.remove(&correlation_id) else {
+            return Ok(());
+        };
+        // Extract the batches this request carried from `in_flight_batches`.
+        // Java's callback holds them directly; here they are located by identity
+        // (see `PendingProduceRequest`).
+        let mut batches: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
+        for (tp, identity) in &pending.batches {
+            // Take the batch this request actually carried, not merely the
+            // oldest one for the partition — see `PendingProduceRequest`.
+            let mut taken = None;
+            if let Some(partition_batches) = self.in_flight_batches.get_mut(tp) {
+                if let Some(index) = partition_batches
+                    .iter()
+                    .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
+                {
+                    taken = Some(partition_batches.remove(index));
                 }
-                let actions = self.handle_produce_response(response, &mut batches, &pending.topic_names, now)?;
+                if partition_batches.is_empty() {
+                    self.in_flight_batches.remove(tp);
+                }
+            }
+            // A batch that was completed while still in flight is no longer in
+            // `in_flight_batches` but is still waiting for exactly this response
+            // in order to release its buffer — see
+            // `Self::batches_awaiting_response`.
+            if taken.is_none()
+                && let Some(index) = self
+                    .batches_awaiting_response
+                    .iter()
+                    .position(|batch| Arc::ptr_eq(&batch.produce_future, identity))
+            {
+                taken = Some(self.batches_awaiting_response.remove(index));
+            }
+            if let Some(batch) = taken {
+                batches.insert(tp.clone(), batch);
+            }
+        }
 
-                // Process deferred actions that require batch ownership.
-                for (tp, action) in actions {
-                    if let Some(batch) = batches.remove(&tp) {
-                        match action {
-                            BatchAction::Reenqueue => {
-                                // Java's `reenqueueBatch` records retries after
-                                // re-enqueuing (`Sender.java:753`). Capture the
-                                // topic/count before the batch is moved.
-                                let topic = batch.topic_partition.topic().to_string();
-                                let count = batch.record_count;
-                                // RecordAccumulator::reenqueue calls batch.reenqueued() internally.
-                                self.accumulator.reenqueue(batch, now)?;
-                                self.sensors.record_retries(&topic, count);
+        // `handle_produce_response` completes every batch it can and returns the
+        // ownership-transfer actions collected before any failure, plus the first error
+        // a `complete_batch` raised. The error is deferred, not thrown with `?`, so the
+        // actions already collected still run and every batch is made reachable again —
+        // dropping an owned `ProducerBatch` here would silently hang its `send()`
+        // futures and leak its pooled buffer (the response is already consumed above and
+        // never arrives again). See the method rustdoc; issues.md Issue 4.
+        let (actions, first_error) = self.handle_produce_response(response, &mut batches, &pending.topic_names, now);
+
+        // Process deferred actions that require batch ownership. Each action's batch is
+        // removed from `batches`, so anything left in `batches` afterwards was never
+        // completed (the response handling erred and abandoned the rest, or the broker
+        // omitted the partition) and is failed by the sweep below.
+        let mut action_error: Option<Error> = None;
+        for (tp, action) in actions {
+            if let Some(batch) = batches.remove(&tp) {
+                match action {
+                    BatchAction::Reenqueue => {
+                        // Java's `reenqueueBatch` records retries after re-enqueuing
+                        // (`Sender.java:753`). Capture the topic/count before the batch
+                        // is moved. RecordAccumulator::reenqueue calls batch.reenqueued()
+                        // internally, and on the idempotent sequence-order check failing
+                        // it hands the batch back rather than dropping it — fail it inline
+                        // so its records do not hang (issues.md Issue 4).
+                        let topic = batch.topic_partition.topic().to_string();
+                        let count = batch.record_count;
+                        match self.accumulator.reenqueue(batch, now) {
+                            Ok(()) => self.sensors.record_retries(&topic, count),
+                            Err(boxed) => {
+                                let (error, mut batch) = *boxed;
+                                self.fail_undelivered_batch(&mut batch, error.clone());
+                                if action_error.is_none() {
+                                    action_error = Some(error);
+                                }
                             },
-                            BatchAction::SplitAndReenqueue => {
-                                // split_and_reenqueue takes ownership, splits the batch,
-                                // chains the sub-batch futures, and pushes them to the
-                                // front of the deque. After splitting, the original batch's
-                                // produce future is completed with RECORD_BATCH_TOO_LARGE
-                                // by ProducerBatch::split → finalize_split_batches.
-                                self.accumulator.split_and_reenqueue(batch)?;
-                                // Java records the split in `completeBatch` right
-                                // after `splitAndReenqueue` (`Sender.java:689`).
+                        }
+                    },
+                    BatchAction::SplitAndReenqueue => {
+                        // split_and_reenqueue takes ownership, splits the batch, chains
+                        // the sub-batch futures, and pushes them to the front of the
+                        // deque. After splitting, the original batch's produce future is
+                        // completed with RECORD_BATCH_TOO_LARGE by ProducerBatch::split →
+                        // finalize_split_batches. On the idempotent sequence-order check
+                        // failing for a sub-batch, `split_and_reenqueue` fails that
+                        // sub-batch internally (it owns them) and returns the error — the
+                        // original batch is consumed either way, so only record the error.
+                        match self.accumulator.split_and_reenqueue(batch) {
+                            Ok(_num_split_batches) => {
+                                // Java records the split in `completeBatch` right after
+                                // `splitAndReenqueue` (`Sender.java:689`).
                                 self.sensors.record_batch_split();
                             },
-                            BatchAction::Done => {},
+                            Err(error) => {
+                                if action_error.is_none() {
+                                    action_error = Some(error);
+                                }
+                            },
                         }
-                    }
+                    },
+                    BatchAction::Done => {
+                        // `complete_batch` already completed the batch (success or
+                        // failure with the buffer returned); dropping the owned value
+                        // here is correct — no records hang, no buffer leaks.
+                    },
                 }
             }
         }
-        Ok(())
+
+        // Fail any batch this request carried that response handling never completed, so
+        // its records do not hang and its pooled buffer is not leaked. `first_error` is
+        // still surfaced to the boundary for logging (`handle_client_responses`); each
+        // swept batch gets an honest "not completed" error rather than another
+        // partition's failure misattributed to it (issues.md Issue 4).
+        for mut batch in batches.into_values() {
+            let error = Error::kafka(format!(
+                "Produce response for correlation id {correlation_id} did not complete this batch; \
+                 failing its records so they do not hang"
+            ));
+            self.fail_undelivered_batch(&mut batch, error);
+        }
+
+        // Preserve Java's log-once boundary behavior: the first error out of
+        // `handle_produce_response` / the action loop is returned so
+        // `handle_client_responses` can log it ("Uncaught error in request completion"),
+        // exactly where `NetworkClient.completeResponses` catches and logs in Java.
+        match first_error.or(action_error) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     // -- The `transactionManager != null` block of `runOnce` -----------------
@@ -2024,6 +2092,39 @@ impl<C: KafkaClient> Sender<C> {
         }
     }
 
+    /// Fails a batch that this request carried but that produce-response handling never
+    /// completed — because an earlier partition's completion raised an error and
+    /// abandoned the rest of the loop, or because the broker's response omitted the
+    /// partition. issues.md Issue 4.
+    ///
+    /// The produce response was already consumed from `pending_produce_responses` by
+    /// [`Self::handle_produce_response_for`], so — unlike an expired in-flight batch —
+    /// this buffer will **never** be released by a later response. The batch is failed
+    /// with `deallocate_batch = true` so its pooled buffer is returned now; leaving it
+    /// (or reinserting it into `in_flight_batches`) would leak the buffer and hang the
+    /// records' `send()` futures forever.
+    ///
+    /// Mirrors [`Self::fail_expired_batches`]'s per-batch tail: clear the inflight flag
+    /// (a never-completed batch is still `inflight`, and `deallocate` panics on an
+    /// inflight non-split batch — `set_inflight(false)` is idempotent for the one batch
+    /// that reached `complete_batch` before erroring), fail it, then — for an idempotent
+    /// or transactional producer whose batch was a retry — mark the sequence unresolved
+    /// so no new batches drain until the in-flight sequences are resolved
+    /// (`Sender.java:372-375`, the expired-batch analog).
+    fn fail_undelivered_batch(&mut self, batch: &mut ProducerBatch, error: Error) {
+        batch.set_inflight(false);
+        let retain = self.fail_batch_with_error(batch, error, false, true);
+        debug_assert!(
+            !retain,
+            "deallocate_batch = true always returns the buffer, never retains the batch"
+        );
+        if let Some(transaction_manager) = self.transaction_manager.clone()
+            && batch.in_retry()
+        {
+            transaction_manager.lock().unwrap().mark_sequence_unresolved(batch);
+        }
+    }
+
     /// Start closing the sender (won't actually complete until all data is sent out).
     ///
     /// Translated from `Sender.initiateClose()`.
@@ -2050,16 +2151,27 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Translated from `Sender.handleProduceResponse()`.
     ///
-    /// Returns a list of `(TopicPartition, BatchAction)` for batches that require
-    /// ownership transfer (reenqueue or split). The caller owns the batches and
-    /// must process these actions.
+    /// Returns the `(TopicPartition, BatchAction)` list for batches that require
+    /// ownership transfer (reenqueue or split) — the caller owns the batches and
+    /// must process these actions — together with the **first** error a
+    /// `complete_batch` raised, if any.
+    ///
+    /// The error is returned *alongside* the actions rather than through `?` because
+    /// the actions collected before the failing partition must still be executed:
+    /// Java's `completeBatch` reenqueues/splits **inline**, so a partition completed
+    /// before a later one throws has already been retried, and the exception unwinding
+    /// out of `handleProduceResponse` does not undo it. Mirroring that, the caller runs
+    /// the returned actions first and only then propagates the error. On error the
+    /// remaining partition responses of the same request are abandoned — as in Java,
+    /// where the throw skips the rest of the loop, the leader-info metadata update, and
+    /// `recordLatency`.
     fn handle_produce_response(
         &mut self,
         response: &ClientResponse,
         batches: &mut HashMap<TopicPartition, ProducerBatch>,
         topic_names: &HashMap<Uuid, String>,
         now: i64,
-    ) -> Result<Vec<(TopicPartition, BatchAction)>, Error> {
+    ) -> (Vec<(TopicPartition, BatchAction)>, Option<Error>) {
         let request_header = response.request_header();
         let correlation_id = request_header.correlation_id();
         let mut deferred_actions: Vec<(TopicPartition, BatchAction)> = Vec::new();
@@ -2076,8 +2188,10 @@ impl<C: KafkaClient> Sender<C> {
                 Some(format!("Disconnected from node {} due to timeout", response.destination())),
             );
             for (tp, batch) in batches.iter_mut() {
-                let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;
-                deferred_actions.push((tp.clone(), action));
+                match self.complete_batch(batch, &part_resp, correlation_id, now, None) {
+                    Ok(action) => deferred_actions.push((tp.clone(), action)),
+                    Err(error) => return (deferred_actions, Some(error)),
+                }
             }
         } else if response.was_disconnected() {
             kafka_trace!(
@@ -2091,8 +2205,10 @@ impl<C: KafkaClient> Sender<C> {
                 Some(format!("Disconnected from node {}", response.destination())),
             );
             for (tp, batch) in batches.iter_mut() {
-                let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;
-                deferred_actions.push((tp.clone(), action));
+                match self.complete_batch(batch, &part_resp, correlation_id, now, None) {
+                    Ok(action) => deferred_actions.push((tp.clone(), action)),
+                    Err(error) => return (deferred_actions, Some(error)),
+                }
             }
         } else if response.version_mismatch().is_some() {
             kafka_warn!(
@@ -2107,8 +2223,10 @@ impl<C: KafkaClient> Sender<C> {
                 response.version_mismatch().map(|s| s.to_string()),
             );
             for (tp, batch) in batches.iter_mut() {
-                let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;
-                deferred_actions.push((tp.clone(), action));
+                match self.complete_batch(batch, &part_resp, correlation_id, now, None) {
+                    Ok(action) => deferred_actions.push((tp.clone(), action)),
+                    Err(error) => return (deferred_actions, Some(error)),
+                }
             }
         } else {
             kafka_trace!(
@@ -2150,14 +2268,16 @@ impl<C: KafkaClient> Sender<C> {
                             };
 
                             if let Some(batch) = batches.get_mut(&tp) {
-                                let action = self.complete_batch(
+                                match self.complete_batch(
                                     batch,
                                     &part_resp,
                                     correlation_id,
                                     now,
                                     Some(&mut partitions_with_updated_leader_info),
-                                )?;
-                                deferred_actions.push((tp, action));
+                                ) {
+                                    Ok(action) => deferred_actions.push((tp, action)),
+                                    Err(error) => return (deferred_actions, Some(error)),
+                                }
                             } else {
                                 kafka_error!(
                                     self.log_context,
@@ -2200,13 +2320,15 @@ impl<C: KafkaClient> Sender<C> {
                 // acks = 0 case, just complete all requests
                 let part_resp = PartitionResponse::from_error(Errors::None);
                 for (tp, batch) in batches.iter_mut() {
-                    let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;
-                    deferred_actions.push((tp.clone(), action));
+                    match self.complete_batch(batch, &part_resp, correlation_id, now, None) {
+                        Ok(action) => deferred_actions.push((tp.clone(), action)),
+                        Err(error) => return (deferred_actions, Some(error)),
+                    }
                 }
             }
         }
 
-        Ok(deferred_actions)
+        (deferred_actions, None)
     }
 
     /// Complete or retry the given batch of records.
@@ -6594,11 +6716,20 @@ mod tests {
     /// fail (its partition is no longer tracked, so `insertInSequenceOrder` rejects
     /// it, `RecordAccumulator.java:558-560`). The second response must still be
     /// dispatched and complete its record.
+    ///
+    /// The first record must be **failed**, not left hanging (issues.md Issue 4):
+    /// before the fix the re-enqueue error dropped the owned batch on an early `?`
+    /// return, hanging its `send()` future forever, leaking its pooled buffer, and
+    /// keeping `has_incomplete()` true. Now `reenqueue` hands the batch back and it is
+    /// failed inline, so its future resolves with the `insertInSequenceOrder` error, its
+    /// buffer returns to the pool, and nothing stays in flight or incomplete. This is the
+    /// Site-2 (reenqueue hand-back) regression for Issue 4.
     #[tokio::test]
     async fn test_a_failing_response_handler_does_not_abandon_the_rest_of_the_poll() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
 
         let future1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
         ctx.sender.run_once().await.expect("run_once");
@@ -6631,15 +6762,253 @@ mod tests {
 
         ctx.sender.run_once().await.expect("the poll itself must not fail");
 
+        // Issue 4: the first record is now FAILED, not left hanging. Its re-enqueue
+        // could not be tracked (the partition was untracked above), so `reenqueue`
+        // hands the batch back and it is failed inline with the `insertInSequenceOrder`
+        // error instead of being dropped on an early `?` return.
         assert!(
-            !future1.is_done(),
-            "the first response's handler failed, so its record is not completed"
+            future1.is_done(),
+            "the first record must be failed (not hung) once its re-enqueue fails"
         );
+        let error1 = future1.get().await.expect_err("the first record must fail");
+        assert!(
+            error1.message().contains("not tracked as part of the in flight requests"),
+            "unexpected failure cause for the first record: {error1}"
+        );
+
+        // The second response must still be dispatched and complete its record.
         assert!(
             future2.is_done(),
             "the second response must still be dispatched after the first one failed"
         );
         assert_eq!(future2.get().await.expect("succeeds").offset(), 1000);
+
+        // Nothing hangs, leaks, or stays tracked (Issue 4): both records resolved, the
+        // failed batch's buffer is back in the pool, and no batch is left in flight,
+        // incomplete, or parked awaiting a response that already arrived.
+        assert!(
+            !ctx.accumulator.has_incomplete(),
+            "no batch may remain incomplete after both responses are handled"
+        );
+        assert_eq!(
+            ctx.accumulator.buffer_pool_available_memory(),
+            total_memory,
+            "both batches' buffers must be returned to the pool"
+        );
+        assert!(
+            ctx.sender.in_flight_batches(&tp0).is_empty(),
+            "no batch may remain in flight for the partition"
+        );
+        assert!(
+            ctx.sender.batches_awaiting_response.is_empty(),
+            "the failed batch is deallocated inline, not parked awaiting its consumed response"
+        );
+    }
+
+    /// A batch that the produce response never completes must be failed inline, not
+    /// left hanging (issues.md Issue 4, the Site-1 sweep).
+    ///
+    /// One produce request carries two partitions to the same node. The response
+    /// completes `tp1` but **omits** `tp0` — the case Java tolerates because its
+    /// callback holds the batch objects directly, so an omitted partition simply has
+    /// its `completeBatch` skipped and its batch garbage-collected once the accumulator
+    /// releases it. Here the batch is owned by `in_flight_batches` and located by the
+    /// response; a partition the response never mentions is never matched, so before the
+    /// fix `handle_produce_response_for` dropped that owned `ProducerBatch` when the
+    /// method returned — hanging its `send()` future forever, leaking its pooled buffer
+    /// (eventually blocking `send` on `max.block.ms`), and keeping `has_incomplete()`
+    /// true (which wedges a transactional `EndTxn`). Now the batch is swept: failed
+    /// inline with an honest "did not complete this batch" error so its records resolve
+    /// and its buffer returns to the pool.
+    ///
+    /// This is the same sweep that reclaims a batch abandoned when a *later* partition's
+    /// `complete_batch` raises (Site 1 proper): `handle_produce_response` defers that
+    /// error instead of throwing it with `?`, and the errored/abandoned batches remain
+    /// in the local map for this sweep. That genuine-`complete_batch`-error trigger is
+    /// exercised directly by
+    /// [`test_a_later_partitions_completion_error_does_not_drop_earlier_batches`], which
+    /// drives a transactional producer so a *later* partition's `handle_completed_batch`
+    /// errors after an earlier partition has already completed; this test isolates the
+    /// simpler omitted-partition trigger of the same sweep.
+    #[tokio::test]
+    async fn test_a_batch_the_response_never_completes_is_failed_not_hung() {
+        let mut ctx = SenderTestContext::idempotent();
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
+
+        // Both partitions share node 0, so a single poll drains them into one request.
+        let future0 = ctx.append_to_accumulator_with(&tp0, 0, "k0", "v0").await;
+        let future1 = ctx.append_to_accumulator_with(&tp1, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "both partitions must be carried by one request to node 0"
+        );
+        assert!(!ctx.sender.in_flight_batches(&tp0).is_empty());
+        assert!(!ctx.sender.in_flight_batches(&tp1).is_empty());
+
+        // The broker answers for tp1 only, omitting tp0 from the response.
+        let response = ctx.produce_response_for(&[(&tp1, 1000, Errors::None)]);
+        ctx.sender.client_mut().respond_to_request_at(0, response);
+
+        // The poll itself must not fail: an omitted partition surfaces no error (there is
+        // nothing to log at the `NetworkClient.completeResponses` boundary), it is just
+        // swept.
+        ctx.sender.run_once().await.expect("the poll itself must not fail");
+
+        // tp1 completes normally with its offset.
+        assert!(future1.is_done(), "the answered partition must complete");
+        assert_eq!(future1.get().await.expect("tp1 succeeds").offset(), 1000);
+
+        // tp0 was omitted; it must be failed inline, not left hanging.
+        assert!(future0.is_done(), "the omitted partition's record must be failed (not hung)");
+        let error0 = future0.get().await.expect_err("the omitted partition must fail");
+        assert!(
+            error0.message().contains("did not complete this batch"),
+            "unexpected failure cause for the omitted partition: {error0}"
+        );
+
+        // Nothing hangs, leaks, or stays tracked (Issue 4).
+        assert!(
+            !ctx.accumulator.has_incomplete(),
+            "no batch may remain incomplete after the response is handled"
+        );
+        assert_eq!(
+            ctx.accumulator.buffer_pool_available_memory(),
+            total_memory,
+            "both batches' buffers must be returned to the pool"
+        );
+        assert!(
+            ctx.sender.in_flight_batches(&tp0).is_empty() && ctx.sender.in_flight_batches(&tp1).is_empty(),
+            "no batch may remain in flight for either partition"
+        );
+        assert!(
+            ctx.sender.batches_awaiting_response.is_empty(),
+            "the swept batch is deallocated inline, not parked awaiting its consumed response"
+        );
+    }
+
+    /// A `complete_batch` that raises for a *later* partition must not drop the batches
+    /// the same request carried for *earlier* partitions (issues.md Issue 4, Site 1).
+    ///
+    /// One produce request carries two partitions of a **transactional** producer to the
+    /// same node. Both are answered successfully in one response, `tp0` first. Before the
+    /// response is handled, `tp1`'s `TxnPartitionMap` entry is removed, so `tp1`'s
+    /// completion (`complete_batch` → `complete_batch_success` → `handle_completed_batch`
+    /// → `update_last_acked_offset` → `TxnPartitionMap::get_mut`) raises a genuine error
+    /// mid-loop, *after* `tp0` has already completed and been released.
+    ///
+    /// Before the fix, `handle_produce_response` threw that error out of
+    /// `handle_produce_response_for` with `?`, dropping every batch still owned by the
+    /// function-local map — including `tp1`'s own owned `ProducerBatch`. That hung its
+    /// `send()` future forever, leaked its pooled buffer (eventually blocking `send` on
+    /// `max.block.ms`), and kept `has_incomplete()` true, which wedges a transactional
+    /// `EndTxn` / `commit_transaction` / `abort_transaction`.
+    ///
+    /// Now the error is *deferred*: `handle_produce_response` returns it alongside the
+    /// actions collected before it (so `tp0`'s completion still stands), and the abandoned
+    /// `tp1` batch is left in the local map and failed by the sweep with an honest "did
+    /// not complete this batch" error. The error is still surfaced to the
+    /// `NetworkClient.completeResponses` boundary and logged once, so `run_once` itself
+    /// returns `Ok`.
+    #[tokio::test]
+    async fn test_a_later_partitions_completion_error_does_not_drop_earlier_batches() {
+        let mut ctx = SenderTestContext::transactional();
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+
+        // Discover the coordinator and obtain a producer id (13131 / 1).
+        run_init_transactions(&mut ctx).await;
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
+
+        // Begin the transaction and add BOTH partitions in one AddPartitionsToTxn
+        // round-trip, so a later produce request may carry them together.
+        {
+            let manager = ctx.transaction_manager();
+            let mut manager = manager.lock().unwrap();
+            manager.begin_transaction().expect("beginTransaction");
+            manager.maybe_add_partition(&tp0).expect("maybeAddPartition tp0");
+            manager.maybe_add_partition(&tp1).expect("maybeAddPartition tp1");
+        }
+        ctx.sender.client_mut().prepare_response(add_partitions_to_txn_response(&[
+            (tp0.clone(), Errors::None),
+            (tp1.clone(), Errors::None),
+        ]));
+        ctx.sender.run_once().await.expect("run_once");
+        {
+            let manager = ctx.transaction_manager();
+            let manager = manager.lock().unwrap();
+            assert!(manager.transaction_contains_partition(&tp0));
+            assert!(manager.transaction_contains_partition(&tp1));
+        }
+        assert!(!ctx.sender.has_in_flight_request());
+
+        // Append one record to each partition; both share node 0, so one poll drains
+        // them into a single produce request.
+        let future0 = ctx.append_to_accumulator_with(&tp0, 0, "k0", "v0").await;
+        let future1 = ctx.append_to_accumulator_with(&tp1, 0, "k1", "v1").await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "both partitions must be carried by one request to node 0"
+        );
+        assert!(!ctx.sender.in_flight_batches(&tp0).is_empty());
+        assert!(!ctx.sender.in_flight_batches(&tp1).is_empty());
+
+        // Untrack tp1 so its (successful) completion raises inside handle_completed_batch:
+        // update_last_acked_offset -> TxnPartitionMap::get_mut errors on the missing entry.
+        ctx.transaction_manager().lock().unwrap().remove_partition_entry_for_test(&tp1);
+
+        // One response answers both partitions successfully, tp0 first (valid offsets so
+        // update_last_acked_offset does not short-circuit on INVALID_OFFSET). tp0
+        // completes; tp1's completion then raises mid-loop.
+        let response = ctx.produce_response_for(&[(&tp0, 1000, Errors::None), (&tp1, 2000, Errors::None)]);
+        ctx.sender.client_mut().respond_to_request_at(0, response);
+
+        // The poll must not fail: the deferred error is logged once at the
+        // NetworkClient.completeResponses boundary and swallowed.
+        ctx.sender.run_once().await.expect("the poll itself must not fail");
+
+        // tp0 was completed and released before tp1's error — it must keep its offset.
+        assert!(future0.is_done(), "the earlier partition must complete");
+        assert_eq!(future0.get().await.expect("tp0 succeeds").offset(), 1000);
+
+        // tp1's completion raised; its owned batch must be FAILED by the sweep, not
+        // dropped. Before the fix its future hung here.
+        assert!(
+            future1.is_done(),
+            "the later partition whose completion errored must be failed (not hung)"
+        );
+        let error1 = future1.get().await.expect_err("tp1's completion must fail its record");
+        assert!(
+            error1.message().contains("did not complete this batch"),
+            "unexpected failure cause for the abandoned partition: {error1}"
+        );
+
+        // Nothing hangs, leaks, or stays tracked (Issue 4): both records resolved, both
+        // buffers back in the pool, nothing in flight, incomplete, or parked awaiting a
+        // response that already arrived.
+        assert!(
+            !ctx.accumulator.has_incomplete(),
+            "no batch may remain incomplete after the response is handled"
+        );
+        assert_eq!(
+            ctx.accumulator.buffer_pool_available_memory(),
+            total_memory,
+            "both batches' buffers must be returned to the pool"
+        );
+        assert!(
+            ctx.sender.in_flight_batches(&tp0).is_empty() && ctx.sender.in_flight_batches(&tp1).is_empty(),
+            "no batch may remain in flight for either partition"
+        );
+        assert!(
+            ctx.sender.batches_awaiting_response.is_empty(),
+            "the swept batch is deallocated inline, not parked awaiting its consumed response"
+        );
     }
 
     // =====================================================================
