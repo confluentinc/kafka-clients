@@ -7655,8 +7655,13 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica(
 /// Opaque handle to a `ListOffsetsResultInfo` (Java's
 /// `ListOffsetsResult.ListOffsetsResultInfo`).
 ///
-/// Borrowed from the owning `listOffsets` result handle; valid until that handle
-/// is destroyed. Do not free it.
+/// Two provenances, like `kafka_common_Error_t` (see `_get_error(i)` vs. an
+/// owned callback error): from [`kafka_admin_ListOffsetsResult_get_value`]
+/// (the synchronous / flattened result path) it is **borrowed**, valid until
+/// the owning [`kafka_admin_ListOffsetsResult_t`] is destroyed — do not free
+/// it. From [`kafka_admin_AdminClient_list_offsets_async`]'s per-key callback
+/// it is **owned** and must be freed with
+/// [`kafka_admin_ListOffsetsResultInfo_destroy`] instead.
 #[repr(C)]
 pub struct kafka_admin_ListOffsetsResultInfo_t {
     _private: [u8; 0],
@@ -7729,6 +7734,26 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
             true
         },
         None => false,
+    }
+}
+
+/// Destroys a `ListOffsetsResultInfo` handle **owned** by a per-key async
+/// callback ([`kafka_admin_AdminClient_list_offsets_async`]). Safe with null
+/// (no-op).
+///
+/// Do **not** call this on a value returned by
+/// [`kafka_admin_ListOffsetsResult_get_value`] — that one is borrowed from its
+/// owning [`kafka_admin_ListOffsetsResult_t`] and is freed by
+/// [`kafka_admin_ListOffsetsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `info` must be null or an owned handle from the `list_offsets` per-key
+/// async callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_destroy(info: *mut kafka_admin_ListOffsetsResultInfo_t) {
+    if !info.is_null() {
+        unsafe { drop(Box::from_raw(info as *mut ListOffsetsResultInfoInner)) };
     }
 }
 
@@ -8583,6 +8608,19 @@ fn submit_alter_partition_reassignments(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Submits `alterPartitionReassignments`, unjoined, for
+/// [`admin_async_per_key_op`]'s independent-per-key delivery. Same `Admin` call
+/// as [`submit_alter_partition_reassignments`]; see the "RPC submission
+/// helpers — per-key (unjoined) variants" note above.
+fn submit_alter_partition_reassignments_entries(
+    admin: &dyn Admin,
+    reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+    options: AlterPartitionReassignmentsOptions,
+) -> Vec<(TopicPartition, KafkaFuture<()>)> {
+    let result = admin.alter_partition_reassignments(reassignments, options);
+    result.values().iter().map(|(tp, f)| (tp.clone(), f.clone())).collect()
+}
+
 /// Submits `listPartitionReassignments` and returns its single `reassignments()`
 /// future.
 fn submit_list_partition_reassignments(
@@ -8613,6 +8651,38 @@ fn submit_list_offsets(
         entries.push((tp.clone(), result.partition_result(tp)?));
     }
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `listOffsets`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_list_offsets`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+///
+/// `listOffsets` is the first RPC in this file whose real (non-mock) `Admin`
+/// implementation resolves its per-key futures through the
+/// `AdminApiDriver`/`PartitionLeaderStrategy` machinery (`admin-client.md`
+/// §2) rather than a single `Call`: partitions that share a leader are
+/// fetched by one wire request and so tend to resolve together in practice.
+/// That does not change this function's contract — `Admin::list_offsets`
+/// still returns one `KafkaFuture` per partition (`ListOffsetsResult`'s own
+/// doc comment), and [`admin_async_per_key_op`] still registers one
+/// independent `when_complete` per entry — it only means a genuinely
+/// independent completion *timing* between two partitions of this RPC is
+/// harder to observe end-to-end than for a simple `Call`-based RPC. The
+/// direct `admin_async_per_key_op`-level test below is unaffected by this,
+/// since it drives the two futures by hand rather than through a real
+/// leader-lookup round trip.
+fn submit_list_offsets_entries(
+    admin: &dyn Admin,
+    topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+    options: ListOffsetsOptions,
+) -> Result<Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)>, Error> {
+    let result = admin.list_offsets(topic_partition_offsets, options);
+    let mut entries: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)> =
+        Vec::with_capacity(topic_partition_offsets.len());
+    for tp in topic_partition_offsets.keys() {
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -8756,15 +8826,22 @@ fn read_election_type(election_type: i32) -> Result<ElectionType, Error> {
 // alterPartitionReassignments
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_alter_partition_reassignments_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_alter_partition_reassignments_async`], fired
+/// **once per partition, as that partition's own future resolves** —
+/// independently of every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<Void>>` (`admin-client.md` §5), rather
+/// than waiting for the whole batch. The key is a `TopicPartition`, delivered
+/// as a topic name and a partition id — like the synchronous result's
+/// `_get_topic(i)` / `_get_partition(i)` pair — rather than through a single
+/// opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterPartitionReassignmentsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-partition failure
-/// arrives inside `result`, not as `error`.
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. There is no value parameter: Java's per-partition
+/// future is `KafkaFuture<Void>`, so a null `error` *is* the success value. A
+/// non-null `error` must be freed with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterPartitionReassignmentsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*const c_char, i32, *mut kafka_common_Error_t, *mut c_void);
 
 /// Changes the reassignments of one or more partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -8835,19 +8912,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
 /// Changes partition reassignments asynchronously. See
 /// [`kafka_admin_AdminClient_alter_partition_reassignments`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or a non-cancelled entry with no
-/// target replicas). And it runs on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding operation
-/// holds its own sender, so it cannot disconnect the queue; what remains is a
-/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks are not guaranteed to be serialised on one thread.
-/// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per
+/// partition, as that partition's future resolves**, not once for the whole
+/// batch — a fast or already-resolved partition is not held up by a slow or
+/// failing one. It is called once per distinct `(topic, partition)` pair in
+/// the input (skipping entries with a NULL topic), but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, or a non-cancelled entry with no target replicas). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when a given partition's result arrives. Destroying the
+/// handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be
+/// serialised on one thread, nor in request order. Do not hold a lock across
+/// this call and re-acquire it in the callback, and publish everything the
+/// callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -8868,20 +8950,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_a
     callback: kafka_admin_AdminClient_alter_partition_reassignments_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_reassignments`'s fallible per-entry
+    // parse (an empty replica list on a non-cancelled entry is an error), so
+    // every requested key still gets its own callback via
+    // `admin_async_per_key_op`'s fan-out even when the parse below fails.
+    let keys = unsafe { read_topic_partitions(topics, partitions, count) };
     let reassignments =
         unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
     let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_alter_partition_reassignments(a, &reassignments?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_partition_reassignments_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_alter_partition_reassignments_entries(a, &reassignments?, options)),
+            move |tp, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(topic_c.as_ptr(), tp.partition(), error, ud);
             },
         )
     };
@@ -9005,14 +9091,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_as
 // listOffsets
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_list_offsets_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_list_offsets_async`], fired **once per
+/// partition, as that partition's own future resolves** — independently of
+/// every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch. The key
+/// is a `TopicPartition`, delivered as a topic name and a partition id —
+/// like the synchronous result's `_get_topic(i)` / `_get_partition(i)` pair —
+/// rather than through a single opaque key handle.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_ListOffsetsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_list_offsets_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `topic` is borrowed and valid only for the duration of this call — copy it
+/// if you need to retain it. Exactly one of `value` / `error` is non-null;
+/// `value` is owned by the callback and must be freed with
+/// [`kafka_admin_ListOffsetsResultInfo_destroy`] (**not**
+/// [`kafka_admin_ListOffsetsResult_destroy`], which is for the synchronous /
+/// flattened result only), and `error` with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_list_offsets_callback_t = unsafe extern "C" fn(
+    *const c_char, /* topic */
+    i32,           /* partition */
+    *mut kafka_admin_ListOffsetsResultInfo_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Lists the offsets of the given partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -9075,20 +9176,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
 
 /// Lists offsets asynchronously. See [`kafka_admin_AdminClient_list_offsets`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, an unknown `isolation_level`, or a
-/// `spec_timestamps` entry that is neither flagged as a timestamp nor a
-/// recognised sentinel). And it runs on a **tokio worker thread** if the
-/// dispatcher's completion queue can no longer be reached when the result
-/// arrives. Destroying the handle does not cause that — an outstanding operation
-/// holds its own sender, so it cannot disconnect the queue; what remains is a
-/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
-/// callback. So callbacks are not guaranteed to be serialised on one thread.
-/// Do not hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before calling
-/// rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per
+/// partition, as that partition's future resolves**, not once for the whole
+/// batch — a fast or already-resolved partition is not held up by a slow or
+/// failing one. It is called once per distinct `(topic, partition)` pair in
+/// the input (skipping entries with a NULL topic), but not always on the same
+/// thread. Per key, it normally runs on the handle's dispatcher thread. It
+/// runs **synchronously on the calling thread, before this function returns,
+/// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, an unknown `isolation_level`, or a `spec_timestamps` entry that is
+/// neither flagged as a timestamp nor a recognised sentinel). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no
+/// longer be reached when a given partition's result arrives. Destroying the
+/// handle does not cause that — an outstanding operation holds its own
+/// sender, so it cannot disconnect the queue; what remains is a dispatcher
+/// thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be
+/// serialised on one thread, nor in request order. Do not hold a lock across
+/// this call and re-acquire it in the callback, and publish everything the
+/// callback needs (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -9107,18 +9213,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
     callback: kafka_admin_AdminClient_list_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // Computed independently of `read_offset_specs`'s fallible per-entry
+    // sentinel parse and of `list_offsets_options`'s fallible isolation-level
+    // parse, so every requested key still gets its own callback via
+    // `admin_async_per_key_op`'s fan-out even when either parse below fails.
+    let keys = unsafe { read_topic_partitions(topics, partitions, count) };
     let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_list_offsets(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_list_offsets_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_list_offsets_entries(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?),
+            move |tp, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let (value, error) = match outcome {
+                    Ok(info) => (
+                        Box::into_raw(Box::new(ListOffsetsResultInfoInner { info }))
+                            as *mut kafka_admin_ListOffsetsResultInfo_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), tp.partition(), value, error, ud);
             },
         )
     };
@@ -25052,6 +25169,325 @@ mod tests {
         assert!(
             seen["drld-missing"],
             "the unknown topic's replica must resolve with an explicit error, not hang forever"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -- Phase D (Partitions/offsets family): alterPartitionReassignments /
+    // listOffsets per-key callback delivery ----------------------------------
+    //
+    // Reuses Phase A/B/C's `admin_async_per_key_op` mechanism verbatim. Both
+    // RPCs are keyed by `TopicPartition`, delivered as `(topic, partition)`
+    // exactly like the pre-existing flattened sync results' `_get_topic(i)` /
+    // `_get_partition(i)` pair (`admin-client.md` §5's key-representation
+    // rule). `alterPartitionReassignments`' per-partition future is
+    // `KafkaFuture<Void>` (no value handle, like `alter_replica_log_dirs`);
+    // `listOffsets`' per-partition future is `KafkaFuture<ListOffsetsResultInfo>`,
+    // delivered as a newly-owned `kafka_admin_ListOffsetsResultInfo_t` reusing
+    // the existing `ListOffsetsResultInfoInner` backing type verbatim (dual
+    // provenance, like `kafka_common_Error_t`: borrowed from the flattened
+    // sync result, owned from this per-key callback).
+    //
+    // `listOffsets` is also the first RPC in this file whose real (non-mock)
+    // `Admin` impl resolves through `AdminApiDriver`/`PartitionLeaderStrategy`
+    // rather than a plain `Call` (`admin-client.md` §2) — partitions sharing a
+    // leader tend to resolve together in practice on a real broker. That does
+    // not weaken the per-key contract (`Admin::list_offsets` still returns one
+    // `KafkaFuture` per partition) and does not affect the direct
+    // `admin_async_per_key_op`-level tests below, which drive two hand-built
+    // futures directly rather than through a real leader lookup.
+
+    #[test]
+    fn destroying_a_null_list_offsets_per_key_value_handle_is_a_no_op() {
+        unsafe { kafka_admin_ListOffsetsResultInfo_destroy(std::ptr::null_mut()) };
+    }
+
+    /// The same temporal-independence property as
+    /// `admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one`
+    /// (Phase A), exercised through `alterPartitionReassignments`' actual key
+    /// (`TopicPartition`) and Void-shaped value. `MockAdminClient` resolves
+    /// every future synchronously (see the Phase A comment on the generic
+    /// test), so this drives two hand-built `KafkaFutureImpl<()>` instances
+    /// directly rather than proving only structural (dict-of-Futures)
+    /// independence.
+    #[test]
+    fn alter_partition_reassignments_async_delivers_a_resolved_partition_without_waiting_on_a_pending_one() {
+        let fast_tp = TopicPartition::new("t".to_string(), 0);
+        let slow_tp = TopicPartition::new("t".to_string(), 1);
+
+        // Partition 0 is already complete when submitted; partition 1 is
+        // deliberately never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        fast.complete(());
+        let slow: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<(), Error>)>();
+        let entries = vec![(fast_tp.clone(), fast.future()), (slow_tp.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![fast_tp.clone(), slow_tp.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |tp: TopicPartition, result: Result<(), Error>, _ud: *mut c_void| {
+                    tx.send((tp, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two partitions before
+        // delivering either (reintroducing `join_map_results`), this would
+        // hang until the test harness's own timeout, since partition 1 never
+        // completes. A bounded `recv_timeout` turns that into a fast,
+        // explicit failure instead.
+        let (tp, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved partition must be delivered without waiting on the pending one");
+        assert_eq!(tp, fast_tp);
+        assert!(result.is_ok());
+
+        // Partition 1 is still pending, so nothing further should arrive
+        // promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending partition must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view
+        // registered above share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
+        drop(slow);
+    }
+
+    /// The same temporal-independence property, exercised through
+    /// `listOffsets`' actual key (`TopicPartition`) and value
+    /// (`ListOffsetsResultInfo`) types — see the driver-architecture note
+    /// above for why this direct-mechanism test, rather than an end-to-end
+    /// one, is the way genuine (not merely structural) independence is
+    /// proven for this RPC.
+    #[test]
+    fn list_offsets_async_delivers_a_resolved_partition_without_waiting_on_a_pending_one() {
+        let fast_tp = TopicPartition::new("t".to_string(), 0);
+        let slow_tp = TopicPartition::new("t".to_string(), 1);
+
+        let fast: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
+        fast.complete(ListOffsetsResultInfo::new(42, -1, None));
+        let slow: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<ListOffsetsResultInfo, Error>)>();
+        let entries = vec![(fast_tp.clone(), fast.future()), (slow_tp.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![fast_tp.clone(), slow_tp.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |tp: TopicPartition, result: Result<ListOffsetsResultInfo, Error>, _ud: *mut c_void| {
+                    tx.send((tp, result)).unwrap();
+                },
+            );
+        }
+
+        let (tp, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved partition must be delivered without waiting on the pending one");
+        assert_eq!(tp, fast_tp);
+        assert_eq!(result.unwrap().offset(), 42);
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending partition must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// End-to-end structural test through the real public async entry point
+    /// and a `MockAdminClient`: two partitions, one accepted and one rejected
+    /// (an out-of-range partition — `MockAdminClient::alter_partition_reassignments`
+    /// fails any partition index at or beyond the topic's partition count with
+    /// `UnknownTopicOrPartition`), proving the Void-shaped per-key callback
+    /// delivers both with the right key and the right success/error split.
+    #[test]
+    fn alter_partition_reassignments_async_reports_per_partition_success_and_failure() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"apr-topic".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        // Partition 0 exists (accepted); partition 5 does not (rejected as
+        // out of range). Both cancel their reassignment (Java's empty
+        // Optional) - the simplest non-empty request shape.
+        let (_topics_owned, topic_ptrs) = c_array(&["apr-topic", "apr-topic"]);
+        let partitions = [0i32, 5i32];
+        let cancel = [true, true];
+        let target_replicas: [*const i32; 2] = [std::ptr::null(), std::ptr::null()];
+        let target_replica_counts = [0i32, 0i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, i32, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, i32, bool)>);
+        extern "C" fn on_alter(
+            topic: *const c_char,
+            partition: i32,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            }
+            ctx.0.send((name, partition, had_error)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_partition_reassignments_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                cancel.as_ptr(),
+                target_replicas.as_ptr(),
+                target_replica_counts.as_ptr(),
+                2,
+                -1,
+                true,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (_topic, partition, had_error) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both partitions must get exactly one callback, not hang");
+            seen.insert(partition, had_error);
+        }
+        assert_eq!(seen.len(), 2, "both partitions must have delivered exactly once");
+        assert!(!seen[&0], "partition 0 exists and its reassignment cancel is accepted");
+        assert!(seen[&5], "partition 5 is out of range and must report an error");
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// End-to-end structural test through the real public async entry point
+    /// and a `MockAdminClient`: asserts the delivered `ListOffsetsResultInfo`
+    /// handle's scalar fields round-trip correctly through the per-key owned
+    /// value (offset/timestamp/leader-epoch), not just that the callback
+    /// fires.
+    #[test]
+    fn list_offsets_async_delivers_the_seeded_offset() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"lo-topic".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+
+            let (_seed_topics_owned, seed_topic_ptrs) = c_array(&["lo-topic"]);
+            let seed_partitions = [0i32];
+            let seed_end_offsets = [123i64];
+            let seed_err = kafka_admin_MockAdminClient_update_end_offsets(
+                admin,
+                seed_topic_ptrs.as_ptr(),
+                seed_partitions.as_ptr(),
+                seed_end_offsets.as_ptr(),
+                1,
+            );
+            assert!(seed_err.is_null());
+        }
+
+        let (_topics_owned, topic_ptrs) = c_array(&["lo-topic"]);
+        let partitions = [0i32];
+        let is_timestamp = [false];
+        // -1 is the `latest()` sentinel, which `MockAdminClient::list_offsets`
+        // resolves against the seeded end offset for any non-`Earliest` spec.
+        let spec_timestamps = [-1i64];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, i32, i64, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, i32, i64, bool)>);
+        extern "C" fn on_list(
+            topic: *const c_char,
+            partition: i32,
+            value: *mut kafka_admin_ListOffsetsResultInfo_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                ctx.0.send((name, partition, -99, true)).unwrap();
+                return;
+            }
+            assert!(!value.is_null());
+            let offset = unsafe { kafka_admin_ListOffsetsResultInfo_offset(value) };
+            unsafe { kafka_admin_ListOffsetsResultInfo_destroy(value) };
+            ctx.0.send((name, partition, offset, false)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_list_offsets_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                is_timestamp.as_ptr(),
+                spec_timestamps.as_ptr(),
+                1,
+                -1,
+                0,
+                on_list,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (topic, partition, offset, had_error) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the requested partition's callback must fire, not hang");
+        assert_eq!(topic, "lo-topic");
+        assert_eq!(partition, 0);
+        assert!(
+            !had_error,
+            "listOffsets against a known topic with a seeded end offset must succeed"
+        );
+        assert_eq!(
+            offset, 123,
+            "the seeded end offset must round-trip through the owned per-key value handle"
         );
 
         unsafe {
