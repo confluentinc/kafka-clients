@@ -665,6 +665,83 @@ Java as possible."* That resolves D1–D3.
       rather than leaving one without a callback.
   The **synchronous** entry points for all seven RPCs are unaffected, per the
   same rule as the Topics/Configs/Log-dirs/Partitions-offsets addenda.
+
+  **Addendum (2026-09-16, Phase F) — also superseded for the
+  ACLs/quotas/features-family `_async` entry points.**
+  `kafka_admin_AdminClient_create_acls_async`, `_delete_acls_async`,
+  `_alter_client_quotas_async`, `_alter_user_scram_credentials_async` and
+  `_update_features_async` now fire their callback once per key,
+  independently, via the same `admin_async_per_key_op` mechanism. Unlike
+  Phase E's split, all five of this family's Java `*Result` types are
+  genuine `Map<K, KafkaFuture<V>>` — none derives multiple per-key views from
+  one shared future — so there is no single-group-many-sub-key wrinkle here;
+  the interesting variation this phase adds is in the *key* shape itself:
+    - `createAcls` is keyed by `AclBinding`, whose constituent
+      `ResourcePattern`/`AccessControlEntry` **validate** (an ANY resource
+      type, an ANY/MATCH pattern type, etc. are rejected). A malformed row
+      therefore cannot be represented as a real `AclBinding` for the per-key
+      fan-out, so the key delivered to the callback is the raw `AclBindingKey`
+      tuple `(resource_type, resource_name, pattern_type, principal, host,
+      operation, permission_type)` — computed independently of the validated
+      parse (the by-now-standard "keys computed independently of the fallible
+      parse" pattern from Phase A onward), never through `AclBinding`'s
+      validating constructors — packaged into an **owned**
+      `kafka_common_AclBinding_t` handle (freed by a new
+      `kafka_common_AclBinding_destroy`), the same opaque type the existing
+      flattened sync result (`kafka_admin_CreateAclsResult_get_binding`)
+      already exposes borrowed — the dual-provenance pattern from
+      `kafka_admin_ListOffsetsResultInfo_t` (Phase D) applied to a *key*
+      rather than a value for the first time in this series.
+    - `deleteAcls` is keyed by `AclBindingFilter`, whose constructors are
+      infallible (a filter's ANY/MATCH values and nullable strings are the
+      whole point of a filter), so no raw-tuple stand-in is needed there — the
+      real `AclBindingFilter` doubles as the key, delivered as an owned
+      `kafka_common_AclBindingFilter_t` handle (new
+      `kafka_common_AclBindingFilter_destroy`), same dual-provenance pattern.
+      Its value, `FilterResults` (a `List<FilterResult>`, one row per matched
+      ACL, each carrying either a binding or its own exception), is a
+      genuinely *nested* value like `describeLogDirs` (Phase C) and
+      `listConsumerGroupOffsets` (Phase E) — but unlike those, there was no
+      existing "whole nested value" handle type to reuse under dual
+      provenance, since the old flattened sync result embedded its nested
+      rows directly (`kafka_admin_DeleteAclsResult_get_result_count`/
+      `_get_binding`/`_get_result_error`, addressed by the *outer* filter
+      index) rather than through a handle representing one filter's whole
+      `FilterResults`. Phase F mints that handle for the first time,
+      `kafka_admin_DeleteAclsFilterResults_t` (reusing the existing
+      `DeleteAclsFilterResultInner` per-row struct, still shared with the
+      synchronous path's own nested rows), with its own
+      `kafka_admin_DeleteAclsFilterResults_destroy`.
+    - `alterClientQuotas` is keyed by `ClientQuotaEntity`. Unlike
+      `AclBinding`, `ClientQuotaEntity::new` does not validate at all (it is a
+      bare `HashMap<String, Option<String>>` wrapper), so — like
+      `AclBindingFilter` — the real type doubles as the key with no raw-tuple
+      stand-in, computed independently of `read_client_quota_alterations`'s
+      validated (and duplicate-rejecting) parse. Delivered as an owned
+      `kafka_common_ClientQuotaEntity_t` handle (new
+      `kafka_common_ClientQuotaEntity_destroy`), the same opaque type the
+      existing flattened sync result already exposes borrowed.
+    - `alterUserScramCredentials` and `updateFeatures` are both keyed by a
+      plain string (username / feature name respectively) with a
+      `KafkaFuture<Void>` value — the same shape `delete_consumer_groups`
+      (Phase E) already established for a plain string key with no handle to
+      free; nothing new here beyond reusing that shape twice more.
+    - `updateFeatures` is the one RPC across all six phases so far whose
+      top-level `Admin` method call is itself fallible (Java's real
+      `KafkaAdminClient.updateFeatures` throws `IllegalArgumentException` for
+      an empty update map — `src/admin/mod.rs`'s `update_features` returns
+      `Result<UpdateFeaturesResult, Error>`, not a bare `UpdateFeaturesResult`,
+      to carry it). With a non-empty map this behaves like every other
+      fallible-submission RPC (the shared error fans out to every key via
+      `admin_async_per_key_op`'s existing "submission failed" branch). With an
+      **empty** map there are zero keys, so — like Phase E's
+      `alterConsumerGroupOffsets`/`removeMembersFromConsumerGroup` empty-input
+      cases — the callback fires zero times and this rejection has no channel
+      to travel through at all; a documented limitation (see the callback
+      typedef's doc comment in `src/ffi/admin.rs` and `update_features`'s
+      docstring in `admin.py`), not an oversight.
+  The **synchronous** entry points for all five RPCs are unaffected, per the
+  same rule as every prior addendum in this section.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
