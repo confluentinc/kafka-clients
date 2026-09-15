@@ -42,61 +42,83 @@ this is the cheapest of the three per-key value shapes seen so far (Phase A:
 new standalone handles for scalar/simple types; Phase B: `Config`, same
 pattern; Phase C: reuse an ALREADY-nested handle type verbatim).
 
-## The hazard this phase actually surfaced: a key that legitimately never gets a future
+## The hazard this phase surfaced, and why my first resolution was WRONG (COMMENTS.67)
 
 `MockAdminClient::describe_replica_log_dirs` (`src/admin/mock_admin_client.rs`)
 mirrors Java's own `MockAdminClient.describeReplicaLogDirs`
 (`MockAdminClient.java:1112`, `if (topicMetadata != null)`): a replica of a
 topic the mock does not know is skipped ENTIRELY — no `KafkaFutureImpl` is
-ever created for it, so it is simply absent from `result.values()`. This is
-faithful to Java (Java's own `MockAdminClient` does the same; only the REAL
-`KafkaAdminClient` always resolves every requested key —
-`KafkaAdminClient.java:3066-3068` seeds one future per replica regardless).
+ever created for it, so it is simply absent from `result.values()`.
 
-This collided with the per-key architecture's core assumption: Python must
-pre-build `futures = {key: Future() for key in keys}` for ALL deduped
-requested keys BEFORE calling the async FFI entry point (so the native
-callback, whenever it fires, has somewhere to deliver to). For every other
-per-key RPC in Phases A/B, every requested key eventually gets a callback
-(success or error) — that assumption is baked into "return the futures dict
-immediately, the caller resolves each key's own Future." `describe_replica_log_dirs`
-against the mock is the FIRST case where a key can be **silently absent from
-the underlying per-key future map**, not merely resolve with an error. Python
-cannot learn the confirmed key set before returning (verified: `submit()` DOES
-run synchronously on the calling thread inside `admin_async_per_key_op`
-before the FFI function returns, and `MockAdminClient` resolves everything
-synchronously too, but the FFI's own dispatch is inherently async / GIL-
-released at the Python call boundary — by the time Python's wrapper can
-inspect anything, it has already had to return the dict of pre-built futures
-to satisfy the "returns immediately" contract).
+This collides with the per-key architecture's core assumption: Python (and
+the C caller in general) must pre-build one `Future`/`Promise` per requested
+key BEFORE calling the async FFI entry point, so the native callback,
+whenever it fires, has somewhere to deliver to. If a key never gets a
+callback at all (as opposed to an error callback), that pre-built
+`Future`/`Promise` hangs forever.
 
-**Resolution (not a bug fix, a documented, tested limitation):** built the
-futures dict from ALL deduped requested keys anyway (matching every other
-per-key RPC, faithful to the REAL client's contract), and explicitly
-documented + tested that under `MockAdminClient` a replica of an unknown
-topic's `Future` stays pending forever. `test_describe_replica_log_dirs_omits_unknown_topics`
-(bindings/python/test/unit/test_admin.py) asserts BOTH keys are present in the
-immediately-returned dict, the known key's Future resolves normally, and the
-unknown key's Future is still pending after a bounded 0.2s wait (`pytest.raises(
-concurrent.futures.TimeoutError)`) — proving what's actually true rather than
-hiding the divergence or (worse) trying to force a resolution that would hang
-the test. Did NOT change `MockAdminClient::describe_replica_log_dirs`'s core
-behavior to "fix" this — that would violate admin-client.md §9's "mirror
-Java's MockAdminClient method-for-method" (Java's own mock has the identical
-omission). Docstrings on `Admin.describe_replica_log_dirs` /
-`AsyncAdmin.describe_replica_log_dirs` and the module header both state this
-caveat explicitly.
+**My first pass got the fix wrong**: I documented this as an accepted,
+"Java-faithful mock behavior" limitation (citing admin-client.md §9's "mirror
+Java's MockAdminClient method-for-method") and added a test proving only the
+*pending* state, not resolution. **A Critic review (COMMENTS.67) correctly
+rejected this.** The citation was the wrong layer: nobody asked to change
+what the mock resolves to (§9 is about the mock's *values*, not this
+wrapper's *delivery* contract). Java's real `MockAdminClient` never promises
+a `Future` per key in the first place — a missing key is simply absent from
+the returned `Map`, which a Java caller detects immediately
+(`results.get(key) == null`). The hang is a consequence purely of *this
+port's own wrapping design* (pre-building a `Future` per input key before
+the call returns), not something inherited faithfully from Java. It was also
+reachable outside the unit test: `grpc_translate.py`'s
+`_resolve_admin_futures`/`_resolve_admin_futures_async` call
+`.result()`/`await fut` with no timeout, so the gRPC harness would hang too.
 
-**Lesson for later phases**: before assuming "every requested key eventually
-gets a callback" (which every one of Phases A/B's RPCs satisfies), check
-whether the Java/mock source can OMIT a key from its per-key future map
-entirely (`continue`/`skip` before creating a `KafkaFutureImpl`, not just
-`complete_with_error`). Grep the mock's implementation for an early
-`continue`/skip guard keyed on caller input. If found, the pre-built
-Python futures dict WILL contain a permanently-pending Future for that key
-under the mock — document it in both docstrings and a dedicated
-bounded-timeout test; do not assume "it'll get a KafkaError like every other
-divergence."
+**The actual fix, generic, in `admin_async_per_key_op` itself**
+(`src/ffi/admin.rs`) — since this helper is shared by every per-key RPC
+across Phases A–C (and D–G to come), fixing it here protects all of them:
+after `submit` succeeds, any key present in `keys` but absent from `entries`
+now fires an explicit `Error::local_illegal_state(...)` synchronously,
+extending the existing total-submission-failure fan-out (which already
+handled "every key fails with the same error" for a null admin or `submit`
+`Err`) to also cover this **partial**-success gap. Needed a new `K: PartialEq`
+bound — verified against all 15 call sites' key types
+(`String`/`TopicPartition`/`ConfigResource`/`i32`/`TopicPartitionReplica`,
+all already `Eq + Hash` for `HashMap` usage elsewhere) — zero call-site
+changes required, crate builds clean. Used a `claimed: Vec<bool>` mask over
+`entries`' positions (not a plain membership check) so a **repeated** key in
+`keys` (raw, undeduped input — `describe_log_dirs`'s broker-id list, say)
+claims at most one real entry; a second occurrence of an already-claimed key
+is correctly reported missing too, not silently treated as satisfied by the
+first occurrence's entry (which would leave it with zero callbacks, since
+`entries` only fires once for that key).
+
+**Confirmed zero behavior change for Phases A/B**: none of their `entries`
+builders can currently produce fewer entries than `keys` (their admin-core
+implementations always create one future per requested/deduped key), so the
+new fan-out path is provably never reached for them — full `cargo test --lib
+--features ffi` count is identical before/after apart from the 3 new tests.
+
+**Lesson for later phases (D–G) and for future Critic rounds on this
+mechanism**: before assuming "every requested key eventually gets a
+callback," check whether the Java/mock source can OMIT a key from its
+per-key future map entirely (`continue`/`skip` before creating a
+`KafkaFutureImpl`, not just `complete_with_error`) — grep for an early
+`continue`/skip guard keyed on caller input. Thanks to this fixup,
+`admin_async_per_key_op` now closes that gap generically, so a later phase
+hitting the same pattern should NOT need its own fix — but verify the
+generic fan-out actually reaches the affected RPC's key type (it will, since
+the bound is `PartialEq` and every admin key type already satisfies it) and
+add the phase-specific end-to-end test anyway (three layers: Rust unit test
+against the real async entry point + a real `MockAdminClient`, Python test
+asserting eventual resolution with an explicit error within a bounded
+timeout, C test doing the same through the ABI) rather than assuming the
+generic mechanism test alone is sufficient coverage for a new call site.
+**Second lesson, on my own process**: "matches Java" is not a blanket
+excuse for a design choice that Java's own architecture doesn't actually
+require — check whether the divergence is forced by JAVA'S CONTRACT or is
+purely an artifact of THIS PORT'S OWN wrapping/translation choices (here:
+pre-building futures eagerly) before citing a "mirror Java" rule to justify
+leaving something documented-but-broken.
 
 ## Dedup direction: no `Entry::Vacant` question here, but cardinality still matters
 
@@ -186,6 +208,19 @@ confirming `timeout 20 cargo test ... ; echo REAL_EXIT=$?` gives `124`
 this exact "inject the bug, watch it hang, revert" ritual — it has caught
 nothing NEW each time, which is itself useful confirmation the mechanism is
 solid, not evidence the ritual is skippable.
+
+### Post-COMMENTS.67-fixup counts (final)
+
+After the missing-key fan-out fix (see the corrected section above): `cargo
+test --lib` 3920 passed (unchanged), `cargo test --lib --features ffi` 4136
+passed (was 4133 pre-fixup, +3 for the two generic-mechanism tests plus the
+end-to-end `describe_replica_log_dirs_async_resolves_an_unknown_topic_replica_
+with_an_explicit_error`). `bindings/python/test/unit/` 369 passed, 2 skipped
+(unchanged — one test renamed/rewritten in place, no net count change).
+`mock_admin` ctest target full pass including the new
+`test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error`.
+`kafka_admin` ctest target: same one pre-existing unrelated failure as before
+the fixup (stray broker on port 9093).
 
 ## Orphaned converters: removed, not left dead
 
