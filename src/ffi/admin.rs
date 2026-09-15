@@ -1726,6 +1726,27 @@ pub unsafe extern "C" fn kafka_admin_Config_find_entry(
     }
 }
 
+/// Destroys a `Config` handle delivered **individually** by
+/// [`kafka_admin_AdminClient_describe_configs_async`]'s per-key callback. Safe
+/// with null (no-op).
+///
+/// Do **not** call this on a value obtained from
+/// [`kafka_admin_DescribeConfigsResult_get_value`] (the synchronous /
+/// flattened-result path) — that pointer is borrowed from the owning
+/// [`kafka_admin_DescribeConfigsResult_t`] and is freed by
+/// [`kafka_admin_DescribeConfigsResult_destroy`] instead.
+///
+/// # Safety
+///
+/// `config` must be null or an owned handle from the `describe_configs`
+/// per-key async callback. After this call the pointer is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Config_destroy(config: *mut kafka_admin_Config_t) {
+    if !config.is_null() {
+        unsafe { drop(Box::from_raw(config as *mut ConfigInner)) };
+    }
+}
+
 /// Returns the entry name (borrowed).
 ///
 /// # Safety
@@ -4668,6 +4689,47 @@ unsafe fn read_alter_config_ops(
     Ok(out)
 }
 
+/// Extracts the distinct config resources named across the flat
+/// `incrementalAlterConfigs` rows, preserving first-occurrence order.
+///
+/// Java's per-resource future (`admin-client.md` §5) is one `KafkaFuture<Void>`
+/// per resource, not per operation, but the C rows are one per *operation*
+/// (`read_alter_config_ops`), so a resource with several ops must be
+/// de-duplicated down to a single key before it can drive
+/// [`admin_async_per_key_op`]'s fan-out. This runs independently of
+/// `read_alter_config_ops`'s parse (which can fail on an unknown op-type code),
+/// so an async submission failure still fans out over every resource the
+/// caller named rather than none of them.
+///
+/// # Safety
+///
+/// `resource_type_codes` and `resource_names` must be null or have `count`
+/// readable entries each, every name NULL or a valid C string.
+unsafe fn distinct_config_resources(
+    resource_type_codes: *const i32,
+    resource_names: *const *const c_char,
+    count: i32,
+) -> Vec<ConfigResource> {
+    let n = count.max(0) as usize;
+    let mut out: Vec<ConfigResource> = Vec::new();
+    if resource_type_codes.is_null() || resource_names.is_null() {
+        return out;
+    }
+    for i in 0..n {
+        let name_ptr = unsafe { *resource_names.add(i) };
+        if name_ptr.is_null() {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        let resource = ConfigResource::new(resource_type, name);
+        if !out.contains(&resource) {
+            out.push(resource);
+        }
+    }
+    out
+}
+
 /// Sorts a per-`ConfigResource` outcome map by `(type id, name)`.
 ///
 /// [`ConfigResource`] is not `Ord` (Java's map is unordered too), but C
@@ -5569,6 +5631,18 @@ fn submit_describe_configs(
     KafkaFuture::join_map_results(entries)
 }
 
+/// Submits `describeConfigs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as [`submit_describe_configs`];
+/// see the "RPC submission helpers — per-key (unjoined) variants" note above.
+fn submit_describe_configs_entries(
+    admin: &dyn Admin,
+    resources: &[ConfigResource],
+    options: DescribeConfigsOptions,
+) -> Vec<(ConfigResource, KafkaFuture<Config>)> {
+    let result = admin.describe_configs(resources, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
 /// Builds `DescribeConfigsOptions` from the flat C option parameters.
 fn describe_configs_options(
     timeout_ms: i32,
@@ -5581,14 +5655,22 @@ fn describe_configs_options(
         .include_documentation(include_documentation)
 }
 
-/// Completion callback for [`kafka_admin_AdminClient_describe_configs_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_configs_async`], fired **once per
+/// resource, as that resource's own future resolves** — independently of every
+/// other resource in the same call, matching Java's
+/// `Map<ConfigResource, KafkaFuture<Config>>` (`admin-client.md` §5), rather
+/// than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeConfigsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-resource failure arrives inside
-/// `result`, not as `error`.
+/// `resource_type` is the resource's `ConfigResource.Type.id()` and
+/// `resource_name` its name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. Exactly one of `value` / `error`
+/// is non-null; `value` is owned by the callback and must be freed with
+/// [`kafka_admin_Config_destroy`] (**not**
+/// [`kafka_admin_DescribeConfigsResult_destroy`], which is for the synchronous
+/// / flattened result only), and `error` with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_configs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeConfigsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(i32, *const c_char, *mut kafka_admin_Config_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the configuration of the given resources, blocking until every
 /// per-resource future has resolved (synchronous).
@@ -5634,16 +5716,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
 /// Describes resource configurations asynchronously. See
 /// [`kafka_admin_AdminClient_describe_configs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
+/// Unlike the synchronous entry point, the callback fires **once per
+/// resource, as that resource's future resolves**, not once for the whole
+/// batch — a fast or already-resolved resource is not held up by a slow or
+/// failing one. It is called exactly `count` times (once per requested
+/// resource, minus entries skipped for a NULL name), but not always on the
+/// same thread. Per key, it normally runs on the handle's dispatcher thread.
+/// It runs **synchronously on the calling thread, before this function
+/// returns, for every key**, when the RPC cannot be submitted at all (a NULL
+/// `admin` handle). And it runs on a **tokio worker thread** if the
+/// dispatcher's completion queue can no longer be reached when a given
+/// resource's result arrives. Destroying the handle does not cause that — an
 /// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// queue; what remains is a dispatcher thread that terminated abnormally, i.e.
+/// a panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -5665,18 +5752,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     user_data: *mut c_void,
 ) {
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
+    let keys = resources.clone();
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_describe_configs(a, &resources, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_configs_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_describe_configs_entries(a, &resources, options)),
+            move |resource, outcome, ud| {
+                let name_c = to_cstring(resource.name());
+                let resource_type = i32::from(resource.resource_type().id());
+                let (value, error) = match outcome {
+                    Ok(config) => (
+                        Box::into_raw(Box::new(ConfigInner::new(&config))) as *mut kafka_admin_Config_t,
+                        std::ptr::null_mut(),
+                    ),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(resource_type, name_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -5826,15 +5920,32 @@ fn submit_incremental_alter_configs(
     KafkaFuture::join_map_results(entries)
 }
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_incremental_alter_configs_async`].
+/// Submits `incrementalAlterConfigs`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_incremental_alter_configs`]; see the "RPC submission helpers —
+/// per-key (unjoined) variants" note above.
+fn submit_incremental_alter_configs_entries(
+    admin: &dyn Admin,
+    configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+    options: AlterConfigsOptions,
+) -> Vec<(ConfigResource, KafkaFuture<()>)> {
+    let result = admin.incremental_alter_configs(configs, options);
+    result.values().iter().map(|(r, f)| (r.clone(), f.clone())).collect()
+}
+
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_incremental_alter_configs_async`], fired **once
+/// per resource, as that resource's own future resolves** — independently of
+/// every other resource in the same call. There is no value parameter: Java's
+/// per-resource future is `KafkaFuture<Void>` (as for `create_partitions`), so
+/// a null `error` *is* the success value.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_AlterConfigsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-resource failure arrives inside
-/// `result`, not as `error`.
+/// `resource_type` is the resource's `ConfigResource.Type.id()` and
+/// `resource_name` its name, borrowed and valid only for the duration of this
+/// call — copy it if you need to retain it. `error` is owned by the callback
+/// and must be freed with `kafka_common_Error_destroy`, or is null on success.
 pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterConfigsResult_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(i32, *const c_char, *mut kafka_common_Error_t, *mut c_void);
 
 /// Incrementally alters resource configurations, blocking until every
 /// per-resource future has resolved (synchronous).
@@ -5894,17 +6005,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
 /// Incrementally alters resource configurations asynchronously. See
 /// [`kafka_admin_AdminClient_incremental_alter_configs`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, or an unknown `AlterConfigOp.OpType`
-/// code). And it runs on a **tokio worker
+/// Unlike the synchronous entry point, the callback fires **once per
+/// resource, as that resource's future resolves**, not once for the whole
+/// batch — a fast or already-resolved resource is not held up by a slow or
+/// failing one. It is called once per **distinct** resource named across the
+/// input rows (several rows may target the same resource; Java's future is
+/// one per resource, not per operation), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle, or an unknown `AlterConfigOp.OpType` code — the latter still fans
+/// out over every named resource, since the resource set is computed
+/// independently of the op-type parse). And it runs on a **tokio worker
 /// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread.
+/// a given resource's result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order.
 /// Do not hold a lock across this call and re-acquire it in the callback, and
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
@@ -5927,22 +6046,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
     callback: kafka_admin_AdminClient_incremental_alter_configs_callback_t,
     user_data: *mut c_void,
 ) {
+    let keys = unsafe { distinct_config_resources(resource_types, resource_names, count) };
     let parsed =
         unsafe { read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count) };
     let options = AlterConfigsOptions::new()
         .timeout_ms(option_timeout(timeout_ms))
         .validate_only(validate_only);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| Ok(submit_incremental_alter_configs(a, &parsed?, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_alter_configs_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
+            keys,
+            move |a| Ok(submit_incremental_alter_configs_entries(a, &parsed?, options)),
+            move |resource, outcome, ud| {
+                let name_c = to_cstring(resource.name());
+                let resource_type = i32::from(resource.resource_type().id());
+                let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                callback(resource_type, name_c.as_ptr(), error, ud);
             },
         )
     };
@@ -24177,6 +24297,77 @@ mod tests {
         // `slow` (the completable handle) and the `slow_future` view registered
         // above share one Arc<Completable>; `slow` never completing it is the
         // whole point of the test, so it is simply left to drop uncompleted here.
+        drop(slow);
+    }
+
+    // Phase B (Configs family): the same temporal-independence property as
+    // above, but exercised through `describeConfigs`' actual key
+    // (`ConfigResource`) and value (`Config`) types rather than the generic
+    // `String`/`i32` stand-ins — so a `ConfigResource`-specific mistake (e.g.
+    // relying on `Hash`/`Eq` where only `Clone` is available, or a `Config`
+    // that isn't `Send + Sync`) would show up here even though it compiles
+    // fine against the generic test above. `MockAdminClient` resolves every
+    // future synchronously (see the comment above), so this — like the
+    // generic test — drives two hand-built `KafkaFutureImpl<Config>`
+    // instances directly rather than going through a real `describe_configs`
+    // call, to prove genuine temporal independence rather than merely
+    // structural (dict-of-Futures) independence.
+    #[test]
+    fn describe_configs_async_delivers_a_resolved_resource_without_waiting_on_a_pending_one() {
+        let topic_a = ConfigResource::new(ConfigResourceType::Topic, "topic-a".to_string());
+        let topic_b = ConfigResource::new(ConfigResourceType::Topic, "topic-b".to_string());
+
+        // "topic-a" is already complete when submitted; "topic-b" is
+        // deliberately never completed for the lifetime of this test.
+        let fast: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
+        fast.complete(Config::new(vec![ConfigEntry::new(
+            "retention.ms".to_string(),
+            Some("1000".to_string()),
+        )]));
+        let slow: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(ConfigResource, Result<Config, Error>)>();
+        let entries = vec![(topic_a.clone(), fast.future()), (topic_b.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![topic_a.clone(), topic_b.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |resource: ConfigResource, result: Result<Config, Error>, _ud: *mut c_void| {
+                    tx.send((resource, result)).unwrap();
+                },
+            );
+        }
+
+        // If `admin_async_per_key_op` joined the two resources before
+        // delivering either (reintroducing `join_map_results`), this would
+        // hang until the test harness's own timeout, since "topic-b" never
+        // completes. A bounded `recv_timeout` turns that hang into a fast,
+        // explicit failure instead.
+        let (resource, result) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved resource must be delivered without waiting on the pending one");
+        assert_eq!(resource, topic_a);
+        let config = result.unwrap();
+        assert_eq!(config.entries().count(), 1);
+
+        // "topic-b" is still pending, so nothing further should arrive
+        // promptly.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending resource must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        // `slow` (the completable handle) and the `slow_future` view
+        // registered above share one Arc<Completable>; `slow` never
+        // completing it is the whole point of the test, so it is simply left
+        // to drop uncompleted here.
         drop(slow);
     }
 }
