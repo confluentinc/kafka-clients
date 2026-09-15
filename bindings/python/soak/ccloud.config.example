@@ -1,0 +1,60 @@
+# The soak client's one configuration file (Confluent Cloud example).
+#
+# Copy to ccloud.config, fill in the endpoint and API key, and run:
+#   TESTID=soak1 ./run.sh ccloud.config              # 80 msg/s, 50 B
+#   HI=true TESTID=soak2 ./run.sh ccloud.config      # 1000 msg/s, 10240 B
+#
+# There is no profile file and no "rolling" switch: rolling is a property of the
+# cluster (an external CronJob rolls it), so a rolling soak is just this file
+# pointed at the rolled cluster. Label it with SOAK_VARIANT=848-rolling so its
+# metrics are distinguishable.
+#
+# HI=true appends its own consumer.fetch.max.bytes /
+# consumer.max.partition.fetch.bytes / producer.batch.size /
+# producer.compression.type to a copy of this file; you do not need to set them.
+#
+# Format: one `key=value` per line. Everything after the FIRST '=' is the
+# value, so a JAAS string containing '=' needs no escaping. Lines starting
+# with '#' and blank lines are ignored.
+#
+# Keys may be prefixed with `producer.`, `consumer.` or `admin.` to target one
+# client only; unprefixed keys go to all of them. Unprefixed keys that only one
+# client knows (e.g. `group.id`) are routed automatically.
+#
+# The soak REFUSES TO START on a key neither client recognises. That is
+# deliberate: the Rust client only logs a warning for unknown configuration
+# keys (src/producer/producer_config.rs, src/consumer/consumer_config.rs), so a
+# typo would otherwise start a two-week run against the default value.
+
+bootstrap.servers=pkc-xxxxx.us-west-2.aws.confluent.cloud:9092
+
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+
+# !! sasl.username / sasl.password DO NOT EXIST in this client and are
+# !! SILENTLY IGNORED (they are not accepted keys, so the soak's startup
+# !! validation rejects them outright rather than letting you connect
+# !! unauthenticated). Credentials go in `sasl.jaas.config`, in Java JAAS form.
+# !! The soak logs the username it extracted — never the secret — at startup,
+# !! and refuses to start if it cannot recover credentials.
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="API_KEY" password="API_SECRET";
+
+# --- consumer -------------------------------------------------------------
+# MANDATORY. The client defaults to `classic` and CONSTRUCTION FAILS for it:
+# only the KIP-848 consumer protocol is implemented.
+consumer.group.protocol=consumer
+
+# MANDATORY for the soak's accounting: it commits synchronously itself, because
+# commit_async() takes neither offsets nor a completion callback in this
+# binding, so its failures could not otherwise be counted.
+consumer.enable.auto.commit=false
+
+consumer.auto.offset.reset=earliest
+
+# --- producer -------------------------------------------------------------
+producer.acks=all
+producer.linger.ms=5
+
+# NOTE: `enable.idempotence` is accepted but INERT in this client — there is no
+# producer-id/sequence machinery behind it, and transactions are not exposed.
+# Duplicates are therefore expected; only gaps are a soak failure. See README.
