@@ -5022,6 +5022,140 @@ static void test_mock_admin_create_acls_rejects_what_javas_constructors_reject(v
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Phase F: create_acls_async fires once PER BINDING, independently, as that
+ * binding's own future resolves - not once for the whole batch (same shape as
+ * describe_configs_async). The key is delivered as an owned
+ * kafka_common_AclBinding_t handle, which the callback must free. A dedicated
+ * struct (not the generic `acl_async_result_t` other ACL RPCs below share via
+ * `record_async_error`), since the per-key shape needs per-key counters and
+ * the round-tripped resource name instead of a single result/error pair. */
+typedef struct {
+    atomic_int fired;
+    atomic_int error_count;
+    atomic_int ok_count;
+    char message[128];
+    char resource_name_for_error[64];
+} create_acls_async_result_t;
+
+static void on_create_acls(kafka_common_AclBinding_t *key, kafka_common_Error_t *error,
+                           void *user_data) {
+    create_acls_async_result_t *r = (create_acls_async_result_t *)user_data;
+    if (error != NULL) {
+        atomic_fetch_add(&r->error_count, 1);
+        const char *m = kafka_common_Error_message(error);
+        if (m != NULL) {
+            snprintf(r->message, sizeof(r->message), "%s", m);
+        }
+        if (key != NULL) {
+            const char *name = kafka_common_AclBinding_resource_name(key);
+            if (name != NULL) {
+                snprintf(r->resource_name_for_error, sizeof(r->resource_name_for_error), "%s", name);
+            }
+        }
+        kafka_common_Error_destroy(error);
+    } else {
+        atomic_fetch_add(&r->ok_count, 1);
+    }
+    if (key != NULL) {
+        kafka_common_AclBinding_destroy(key);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+static void test_mock_admin_create_acls_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_TOPIC};
+    const char *names[1] = {"async-topic"};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+    const int32_t op[1] = {ACL_OPERATION_READ};
+    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
+
+    /* MockAdminClient.createAcls always throws UnsupportedOperationException
+     * (MockAdminClient.java:806-808), so even a well-formed binding reports an
+     * error here - the point of this test is the per-key callback shape and
+     * key round-trip, not a real success. */
+    create_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
+    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
+                                              -1, on_create_acls, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.ok_count));
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
+    TEST_ASSERT_EQUAL_STRING("async-topic", r.resource_name_for_error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_create_acls_async_reports_marshaling_failure(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_ANY};
+    const char *names[1] = {"t"};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+    const int32_t op[1] = {ACL_OPERATION_READ};
+    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
+
+    /* The RPC is never submitted, so the callback fires inline on this thread
+     * before the call returns — the "cannot be submitted at all" arm of the
+     * documented callback-thread contract. The key still round-trips the raw
+     * (unvalidated) row fields via AclBindingKey. */
+    create_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
+    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
+                                              -1, on_create_acls, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("acl at index 0: resourceType must not be ANY", r.message);
+    TEST_ASSERT_EQUAL_STRING("t", r.resource_name_for_error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_create_acls_async_null_handle(void) {
+    create_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
+    kafka_admin_AdminClient_create_acls_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, -1,
+                                              on_create_acls, &r);
+    /* Zero requested bindings -> zero keys -> the callback never fires, even
+     * with a NULL handle - there is nothing to fan the error out over. */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.fired));
+}
+
+static void test_mock_admin_create_acls_async_null_handle_with_bindings(void) {
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_TOPIC};
+    const char *names[1] = {"async-topic"};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[1] = {"User:a"};
+    const char *hosts[1] = {"*"};
+    const int32_t op[1] = {ACL_OPERATION_READ};
+    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
+
+    create_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
+    kafka_admin_AdminClient_create_acls_async(NULL, rt, names, pt, principals, hosts, op, pm, 1, -1,
+                                              on_create_acls, &r);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("async-topic", r.resource_name_for_error);
+}
+
+/* Generic `void` result used by every still-joined-callback ACL/quota/token
+ * RPC below (describeAcls, alterClientQuotas, describeClientQuotas,
+ * alterUserScramCredentials, describeUserScramCredentials, delegation
+ * tokens, features): exactly one of a result handle or an error fires per
+ * call. */
 typedef struct {
     atomic_int fired;
     int had_result;
@@ -5039,75 +5173,6 @@ static void record_async_error(acl_async_result_t *r, kafka_common_Error_t *erro
         }
         kafka_common_Error_destroy(error);
     }
-}
-
-static void on_create_acls(kafka_admin_CreateAclsResult_t *result,
-                           kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_CreateAclsResult_count(result);
-        kafka_admin_CreateAclsResult_destroy(result);
-    }
-    record_async_error(r, error);
-    atomic_fetch_add(&r->fired, 1);
-}
-
-static void test_mock_admin_create_acls_async(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const int32_t rt[1] = {ACL_RESOURCE_TYPE_TOPIC};
-    const char *names[1] = {"async-topic"};
-    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
-    const char *principals[1] = {"User:a"};
-    const char *hosts[1] = {"*"};
-    const int32_t op[1] = {ACL_OPERATION_READ};
-    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
-
-    acl_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
-                                              -1, on_create_acls, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, r.had_result);
-    TEST_ASSERT_EQUAL_INT(0, r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-static void test_mock_admin_create_acls_async_reports_marshaling_failure(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    const int32_t rt[1] = {ACL_RESOURCE_TYPE_ANY};
-    const char *names[1] = {"t"};
-    const int32_t pt[1] = {ACL_PATTERN_TYPE_LITERAL};
-    const char *principals[1] = {"User:a"};
-    const char *hosts[1] = {"*"};
-    const int32_t op[1] = {ACL_OPERATION_READ};
-    const int32_t pm[1] = {ACL_PERMISSION_ALLOW};
-
-    /* The RPC is never submitted, so the callback fires inline on this thread
-     * before the call returns — the "cannot be submitted at all" arm of the
-     * documented callback-thread contract. */
-    acl_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
-                                              -1, on_create_acls, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(0, r.had_result);
-    TEST_ASSERT_EQUAL_INT(1, r.had_error);
-    TEST_ASSERT_EQUAL_STRING("acl at index 0: resourceType must not be ANY", r.message);
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-static void test_mock_admin_create_acls_async_null_handle(void) {
-    acl_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_create_acls_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, -1,
-                                              on_create_acls, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(0, r.had_result);
-    TEST_ASSERT_EQUAL_INT(1, r.had_error);
 }
 
 // ---- describeAcls -----------------------------------------------------------
@@ -5261,15 +5326,38 @@ static void test_mock_admin_delete_acls_reports_unsupported_per_filter(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void on_delete_acls(kafka_admin_DeleteAclsResult_t *result,
+/* Phase F: delete_acls_async fires once PER FILTER, independently, as that
+ * filter's own future resolves. The key is delivered as an owned
+ * kafka_common_AclBindingFilter_t handle; the value (when present) is an
+ * owned kafka_admin_DeleteAclsFilterResults_t nested handle - MockAdminClient
+ * never succeeds, so `value` is always NULL here, but the destroy-on-NULL
+ * path is still exercised. */
+typedef struct {
+    atomic_int fired;
+    atomic_int error_count;
+    atomic_int value_count;
+    char message[128];
+} delete_acls_async_result_t;
+
+static void on_delete_acls(kafka_common_AclBindingFilter_t *key,
+                           kafka_admin_DeleteAclsFilterResults_t *value,
                            kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_DeleteAclsResult_count(result);
-        kafka_admin_DeleteAclsResult_destroy(result);
+    delete_acls_async_result_t *r = (delete_acls_async_result_t *)user_data;
+    if (error != NULL) {
+        atomic_fetch_add(&r->error_count, 1);
+        const char *m = kafka_common_Error_message(error);
+        if (m != NULL) {
+            snprintf(r->message, sizeof(r->message), "%s", m);
+        }
+        kafka_common_Error_destroy(error);
     }
-    record_async_error(r, error);
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        kafka_admin_DeleteAclsFilterResults_destroy(value);
+    }
+    if (key != NULL) {
+        kafka_common_AclBindingFilter_destroy(key);
+    }
     atomic_fetch_add(&r->fired, 1);
 }
 
@@ -5283,26 +5371,50 @@ static void test_mock_admin_delete_acls_async(void) {
     const int32_t op[1] = {ACL_OPERATION_ANY};
     const int32_t pm[1] = {ACL_PERMISSION_ANY};
 
-    acl_async_result_t r = {0};
+    delete_acls_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_delete_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 1,
                                               -1, on_delete_acls, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, r.had_result);
-    TEST_ASSERT_EQUAL_INT(0, r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
 static void test_mock_admin_delete_acls_async_null_handle(void) {
-    acl_async_result_t r = {0};
+    delete_acls_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_delete_acls_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, -1,
                                               on_delete_acls, &r);
+    /* Zero requested filters -> zero keys -> the callback never fires, even
+     * with a NULL handle. */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.fired));
+}
+
+static void test_mock_admin_delete_acls_async_null_handle_with_filters(void) {
+    const int32_t rt[1] = {ACL_RESOURCE_TYPE_ANY};
+    const char *names[1] = {NULL};
+    const int32_t pt[1] = {ACL_PATTERN_TYPE_ANY};
+    const char *principals[1] = {NULL};
+    const char *hosts[1] = {NULL};
+    const int32_t op[1] = {ACL_OPERATION_ANY};
+    const int32_t pm[1] = {ACL_PERMISSION_ANY};
+
+    delete_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_delete_acls_async(NULL, rt, names, pt, principals, hosts, op, pm, 1, -1,
+                                              on_delete_acls, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(0, r.had_result);
-    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
 // ---- describeClientQuotas ---------------------------------------------------
@@ -5522,15 +5634,39 @@ static void test_mock_admin_alter_client_quotas_rejects_duplicate_entities(void)
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void on_alter_client_quotas(kafka_admin_AlterClientQuotasResult_t *result,
+/* Phase F: alter_client_quotas_async fires once PER ENTITY, independently, as
+ * that entity's own future resolves. The key is delivered as an owned
+ * kafka_common_ClientQuotaEntity_t handle, which the callback must free. */
+typedef struct {
+    atomic_int fired;
+    atomic_int error_count;
+    atomic_int ok_count;
+    char message[128];
+    char entity_name_for_error[64];
+} alter_client_quotas_async_result_t;
+
+static void on_alter_client_quotas(kafka_common_ClientQuotaEntity_t *key,
                                    kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_AlterClientQuotasResult_count(result);
-        kafka_admin_AlterClientQuotasResult_destroy(result);
+    alter_client_quotas_async_result_t *r = (alter_client_quotas_async_result_t *)user_data;
+    if (error != NULL) {
+        atomic_fetch_add(&r->error_count, 1);
+        const char *m = kafka_common_Error_message(error);
+        if (m != NULL) {
+            snprintf(r->message, sizeof(r->message), "%s", m);
+        }
+        if (key != NULL && kafka_common_ClientQuotaEntity_entry_count(key) > 0) {
+            const char *name = kafka_common_ClientQuotaEntity_get_entry_name(key, 0);
+            if (name != NULL) {
+                snprintf(r->entity_name_for_error, sizeof(r->entity_name_for_error), "%s", name);
+            }
+        }
+        kafka_common_Error_destroy(error);
+    } else {
+        atomic_fetch_add(&r->ok_count, 1);
     }
-    record_async_error(r, error);
+    if (key != NULL) {
+        kafka_common_ClientQuotaEntity_destroy(key);
+    }
     atomic_fetch_add(&r->fired, 1);
 }
 
@@ -5542,28 +5678,54 @@ static void test_mock_admin_alter_client_quotas_async(void) {
     const char *const *const entity_names[1] = {names};
     const int32_t entity_counts[1] = {1};
 
-    acl_async_result_t r = {0};
+    /* MockAdminClient.alterClientQuotas always throws
+     * UnsupportedOperationException (MockAdminClient.java:1248-1250). */
+    alter_client_quotas_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
     kafka_admin_AdminClient_alter_client_quotas_async(admin, entity_types, entity_names,
                                                       entity_counts, NULL, NULL, NULL, NULL, 1, -1,
                                                       true, on_alter_client_quotas, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, r.had_result);
-    TEST_ASSERT_EQUAL_INT(0, r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.ok_count));
+    TEST_ASSERT_EQUAL_STRING("Not implement yet", r.message);
+    TEST_ASSERT_EQUAL_STRING("async-user", r.entity_name_for_error);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
 static void test_mock_admin_alter_client_quotas_async_null_handle(void) {
-    acl_async_result_t r = {0};
+    alter_client_quotas_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
     kafka_admin_AdminClient_alter_client_quotas_async(NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                                                       NULL, 0, -1, false, on_alter_client_quotas,
                                                       &r);
+    /* Zero requested entities -> zero keys -> the callback never fires, even
+     * with a NULL handle. */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.fired));
+}
+
+static void test_mock_admin_alter_client_quotas_async_null_handle_with_entities(void) {
+    const char *types[1] = {"user"};
+    const char *names[1] = {"async-user"};
+    const char *const *const entity_types[1] = {types};
+    const char *const *const entity_names[1] = {names};
+    const int32_t entity_counts[1] = {1};
+
+    alter_client_quotas_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
+    kafka_admin_AdminClient_alter_client_quotas_async(NULL, entity_types, entity_names,
+                                                      entity_counts, NULL, NULL, NULL, NULL, 1, -1,
+                                                      false, on_alter_client_quotas, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_EQUAL_INT(0, r.had_result);
-    TEST_ASSERT_EQUAL_INT(1, r.had_error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("async-user", r.entity_name_for_error);
 }
 
 // ---- ownership: a NULL out_result must not build (or leak) a handle ---------
@@ -5761,15 +5923,34 @@ static void on_describe_user_scram_credentials(kafka_admin_DescribeUserScramCred
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void on_alter_user_scram_credentials(kafka_admin_AlterUserScramCredentialsResult_t *result,
-                                            kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_AlterUserScramCredentialsResult_count(result);
-        kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+/* Phase F: alter_user_scram_credentials_async fires once PER USER,
+ * independently, as that user's own future resolves. The key is a plain
+ * string, delivered borrowed like describeConsumerGroups' group id - no
+ * handle to free. */
+typedef struct {
+    atomic_int fired;
+    atomic_int error_count;
+    atomic_int ok_count;
+    char message[128];
+    char user_for_error[64];
+} alter_scram_async_result_t;
+
+static void on_alter_user_scram_credentials(const char *user, kafka_common_Error_t *error,
+                                            void *user_data) {
+    alter_scram_async_result_t *r = (alter_scram_async_result_t *)user_data;
+    if (error != NULL) {
+        atomic_fetch_add(&r->error_count, 1);
+        const char *m = kafka_common_Error_message(error);
+        if (m != NULL) {
+            snprintf(r->message, sizeof(r->message), "%s", m);
+        }
+        if (user != NULL) {
+            snprintf(r->user_for_error, sizeof(r->user_for_error), "%s", user);
+        }
+        kafka_common_Error_destroy(error);
+    } else {
+        atomic_fetch_add(&r->ok_count, 1);
     }
-    record_async_error(r, error);
     atomic_fetch_add(&r->fired, 1);
 }
 
@@ -5786,17 +5967,22 @@ static void test_mock_admin_scram_async(void) {
     TEST_ASSERT_EQUAL_INT(1, r.had_error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
 
+    /* MockAdminClient.alterUserScramCredentials always throws
+     * UnsupportedOperationException (MockAdminClient.java:1256-1259). */
     const bool is_deletions[1] = {true};
     const int32_t mechanisms[1] = {SCRAM_MECHANISM_SHA_512};
-    acl_async_result_t a = {0};
+    alter_scram_async_result_t a = {0};
     atomic_init(&a.fired, 0);
+    atomic_init(&a.error_count, 0);
+    atomic_init(&a.ok_count, 0);
     kafka_admin_AdminClient_alter_user_scram_credentials_async(
         admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1,
         on_alter_user_scram_credentials, &a);
     TEST_ASSERT_TRUE(wait_for(&a.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, a.had_result);
-    TEST_ASSERT_EQUAL_INT(0, a.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, a.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&a.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&a.ok_count));
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", a.message);
+    TEST_ASSERT_EQUAL_STRING("alice", a.user_for_error);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -5810,28 +5996,37 @@ static void test_mock_admin_scram_async_null_handle_and_marshaling_failure(void)
     TEST_ASSERT_EQUAL_INT(0, r.had_result);
     TEST_ASSERT_EQUAL_INT(1, r.had_error);
 
-    acl_async_result_t a = {0};
+    alter_scram_async_result_t a = {0};
     atomic_init(&a.fired, 0);
+    atomic_init(&a.error_count, 0);
+    atomic_init(&a.ok_count, 0);
     kafka_admin_AdminClient_alter_user_scram_credentials_async(NULL, NULL, NULL, NULL, NULL, NULL,
                                                                NULL, NULL, NULL, NULL, 0, -1,
                                                                on_alter_user_scram_credentials, &a);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&a.fired));
-    TEST_ASSERT_EQUAL_INT(1, a.had_error);
+    /* Zero requested users -> zero keys -> the callback never fires, even
+     * with a NULL handle. */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&a.fired));
 
     /* Marshaling failure fires the callback inline too, before the call
-     * returns, so the flag is read without waiting. */
+     * returns, so the flag is read without waiting. The single row's user is
+     * NULL, so `read_scram_user_keys` reports it back as "" (its raw,
+     * unvalidated echo), matching the one key `admin_async_per_key_op` fans
+     * the shared submission error out over. */
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *with_null[1] = {NULL};
     const bool is_deletions[1] = {true};
     const int32_t mechanisms[1] = {SCRAM_MECHANISM_SHA_256};
-    acl_async_result_t m = {0};
+    alter_scram_async_result_t m = {0};
     atomic_init(&m.fired, 0);
+    atomic_init(&m.error_count, 0);
+    atomic_init(&m.ok_count, 0);
     kafka_admin_AdminClient_alter_user_scram_credentials_async(
         admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1,
         on_alter_user_scram_credentials, &m);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&m.fired));
-    TEST_ASSERT_EQUAL_INT(0, m.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&m.error_count));
     TEST_ASSERT_EQUAL_STRING("scram alteration user at index 0 must not be null", m.message);
+    TEST_ASSERT_EQUAL_STRING("", m.user_for_error);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6230,15 +6425,29 @@ static void on_describe_features(kafka_admin_DescribeFeaturesResult_t *result,
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void on_update_features(kafka_admin_UpdateFeaturesResult_t *result,
-                               kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_UpdateFeaturesResult_count(result);
-        kafka_admin_UpdateFeaturesResult_destroy(result);
+/* Phase F: update_features_async fires once PER FEATURE, independently, as
+ * that feature's own future resolves. The key is a plain string, delivered
+ * borrowed like alterUserScramCredentials' user - no handle to free. */
+typedef struct {
+    atomic_int fired;
+    atomic_int error_count;
+    atomic_int ok_count;
+    char message[128];
+} update_features_async_result_t;
+
+static void on_update_features(const char *feature, kafka_common_Error_t *error, void *user_data) {
+    (void)feature;
+    update_features_async_result_t *r = (update_features_async_result_t *)user_data;
+    if (error != NULL) {
+        atomic_fetch_add(&r->error_count, 1);
+        const char *m = kafka_common_Error_message(error);
+        if (m != NULL) {
+            snprintf(r->message, sizeof(r->message), "%s", m);
+        }
+        kafka_common_Error_destroy(error);
+    } else {
+        atomic_fetch_add(&r->ok_count, 1);
     }
-    record_async_error(r, error);
     atomic_fetch_add(&r->fired, 1);
 }
 
@@ -6297,13 +6506,18 @@ static void test_mock_admin_b5b_token_and_feature_async(void) {
 
     const int16_t targets[1] = {19};
     const int32_t upgrade[1] = {UPGRADE_TYPE_UPGRADE};
-    acl_async_result_t u = {0};
+    /* Real success: MockAdminClient.updateFeatures has genuine in-memory
+     * validation logic (unlike the ACL/quota/scram RPCs above), and 17 -> 19
+     * is a valid UPGRADE within the seeded [14, 21] bounds. */
+    update_features_async_result_t u = {0};
     atomic_init(&u.fired, 0);
+    atomic_init(&u.error_count, 0);
+    atomic_init(&u.ok_count, 0);
     kafka_admin_AdminClient_update_features_async(admin, seed, targets, upgrade, 1, -1, false,
                                                   on_update_features, &u);
     TEST_ASSERT_TRUE(wait_for(&u.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, u.had_result);
-    TEST_ASSERT_EQUAL_INT32(1, u.count);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.ok_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.error_count));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6343,12 +6557,31 @@ static void test_mock_admin_b5b_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&f.fired));
     TEST_ASSERT_EQUAL_INT(1, f.had_error);
 
-    acl_async_result_t u = {0};
+    update_features_async_result_t u = {0};
     atomic_init(&u.fired, 0);
+    atomic_init(&u.error_count, 0);
+    atomic_init(&u.ok_count, 0);
     kafka_admin_AdminClient_update_features_async(NULL, NULL, NULL, NULL, 0, -1, false,
                                                   on_update_features, &u);
+    /* Zero requested features -> zero keys -> the callback never fires, even
+     * with a NULL handle - there is no per-call callback slot to report a
+     * whole-call failure through when zero keys were requested. */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.fired));
+}
+
+static void test_mock_admin_update_features_async_null_handle_with_features(void) {
+    const char *seed[1] = {"metadata.version"};
+    const int16_t targets[1] = {19};
+    const int32_t upgrade[1] = {UPGRADE_TYPE_UPGRADE};
+
+    update_features_async_result_t u = {0};
+    atomic_init(&u.fired, 0);
+    atomic_init(&u.error_count, 0);
+    atomic_init(&u.ok_count, 0);
+    kafka_admin_AdminClient_update_features_async(NULL, seed, targets, upgrade, 1, -1, false,
+                                                  on_update_features, &u);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.fired));
-    TEST_ASSERT_EQUAL_INT(1, u.had_error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.error_count));
 }
 
 static void test_mock_admin_b5b_null_out_result(void) {
@@ -6979,6 +7212,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_create_acls_async);
     RUN_TEST(test_mock_admin_create_acls_async_reports_marshaling_failure);
     RUN_TEST(test_mock_admin_create_acls_async_null_handle);
+    RUN_TEST(test_mock_admin_create_acls_async_null_handle_with_bindings);
     RUN_TEST(test_mock_admin_describe_acls_fails_the_whole_call);
     RUN_TEST(test_mock_admin_describe_acls_accepts_any_match_and_nulls);
     RUN_TEST(test_mock_admin_describe_acls_async);
@@ -6986,6 +7220,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_delete_acls_reports_unsupported_per_filter);
     RUN_TEST(test_mock_admin_delete_acls_async);
     RUN_TEST(test_mock_admin_delete_acls_async_null_handle);
+    RUN_TEST(test_mock_admin_delete_acls_async_null_handle_with_filters);
     RUN_TEST(test_mock_admin_describe_client_quotas_fails_the_whole_call);
     RUN_TEST(test_mock_admin_describe_client_quotas_rejects_bad_components);
     RUN_TEST(test_mock_admin_describe_client_quotas_async);
@@ -6994,6 +7229,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_client_quotas_rejects_duplicate_entities);
     RUN_TEST(test_mock_admin_alter_client_quotas_async);
     RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle);
+    RUN_TEST(test_mock_admin_alter_client_quotas_async_null_handle_with_entities);
     RUN_TEST(test_mock_admin_b5a_null_out_result);
     RUN_TEST(test_mock_admin_describe_user_scram_credentials_fails_the_whole_call);
     RUN_TEST(test_mock_admin_alter_user_scram_credentials_reports_unsupported_per_user);
@@ -7008,6 +7244,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_update_features_rejects_bad_input);
     RUN_TEST(test_mock_admin_b5b_token_and_feature_async);
     RUN_TEST(test_mock_admin_b5b_async_null_handle);
+    RUN_TEST(test_mock_admin_update_features_async_null_handle_with_features);
     RUN_TEST(test_mock_admin_b5b_null_out_result);
     RUN_TEST(test_mock_admin_set_feature_levels_rejects_non_mock);
     RUN_TEST(test_mock_admin_describe_producers_reports_unsupported_per_partition);
