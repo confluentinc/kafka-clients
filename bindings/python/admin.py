@@ -29,12 +29,12 @@ C has no ``KafkaFuture``, so most RPCs deliver one flattened result handle
 carrying a value *and* an error per key, and this module drains it into a plain
 dict whose values are either the result object or a :class:`KafkaError`.
 
-The Topics-, Configs- and Log-dirs-family RPCs below are the exception: their
-native callback fires **once per key, independently, as that key's own future
-resolves** — matching Java's per-key ``KafkaFuture`` exactly rather than
-joining every key into one flattened batch — so these ten return a dict of
-**Futures** immediately, before any key has necessarily completed, rather than
-a dict of already-resolved values:
+The Topics-, Configs-, Log-dirs- and Partitions/offsets-family RPCs below are
+the exception: their native callback fires **once per key, independently, as
+that key's own future resolves** — matching Java's per-key ``KafkaFuture``
+exactly rather than joining every key into one flattened batch — so these
+twelve return a dict of **Futures** immediately, before any key has
+necessarily completed, rather than a dict of already-resolved values:
 
 * ``create_topics`` -> ``{topic_name: Future[TopicMetadataAndConfig]}``
 * ``delete_topics`` / ``delete_topics_by_ids`` -> ``{topic_name_or_id: Future[None]}``
@@ -64,6 +64,10 @@ a dict of already-resolved values:
   as an explicit error instead of leaving its ``Future`` pending forever.
   Against a real broker every requested key always resolves with a value
   (a null current log dir for an unknown topic, not an error).
+* ``alter_partition_reassignments`` -> ``{(topic, partition): Future[None]}``
+  (per-partition future is ``KafkaFuture<Void>``, so a result of ``None``
+  means success)
+* ``list_offsets`` -> ``{(topic, partition): Future[ListOffsetsResultInfo]}``
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -83,14 +87,9 @@ per-key failure there likewise does not raise — only a whole-call failure does
 * ``elect_leaders`` -> ``{(topic, partition): None | KafkaError}`` (Java's
   per-partition value is an ``Optional<Throwable>``, so ``None`` means that
   partition's election succeeded)
-* ``alter_partition_reassignments`` ->
-  ``{(topic, partition): None | KafkaError}`` (per-partition future is
-  ``KafkaFuture<Void>``, so ``None`` means success)
 * ``list_partition_reassignments`` ->
   ``{(topic, partition): PartitionReassignment}`` (Java has a single future
   here, so a failure raises instead of appearing per key)
-* ``list_offsets`` ->
-  ``{(topic, partition): ListOffsetsResultInfo | KafkaError}``
 * ``describe_consumer_groups`` / ``describe_classic_groups`` ->
   ``{group_id: ConsumerGroupDescription | ClassicGroupDescription | KafkaError}``
 * ``list_consumer_group_offsets`` ->
@@ -115,9 +114,9 @@ per-key failure there likewise does not raise — only a whole-call failure does
 
 For the already-drained dicts above, a per-key failure therefore does **not**
 raise; iterate the dict and check for ``KafkaError`` values. Only a whole-call
-failure raises. For the ten Topics-, Configs- and Log-dirs-family RPCs (dicts
-of ``Future``s), a per-key failure raises from *that key's* ``Future.result()``
-instead — see above.
+failure raises. For the twelve Topics-, Configs-, Log-dirs- and
+Partitions/offsets-family RPCs (dicts of ``Future``s), a per-key failure
+raises from *that key's* ``Future.result()`` instead — see above.
 """
 
 import asyncio
@@ -1974,24 +1973,18 @@ def _to_elect_leaders(raw):
     return {key: _to_error(error) for key, error in raw.items()}
 
 
-def _to_alter_partition_reassignments(raw):
-    """{(topic, partition): error} -> {(topic, partition): None | KafkaError}"""
-    return {key: _to_error(error) for key, error in raw.items()}
-
-
 def _to_list_partition_reassignments(raw):
     """{(topic, partition): (replicas, adding, removing)}
     -> {(topic, partition): PartitionReassignment}"""
     return {key: PartitionReassignment(*value) for key, value in raw.items()}
 
 
-def _to_list_offsets(raw):
-    """{(topic, partition): (error, info)}
-    -> {(topic, partition): ListOffsetsResultInfo | KafkaError}"""
-    out = {}
-    for key, (error, info) in raw.items():
-        out[key] = _to_error(error) if error is not None else ListOffsetsResultInfo(*info)
-    return out
+def _drain_list_offsets_info(value):
+    """Drain+destroy a standalone ListOffsetsResultInfo handle delivered by
+    ``list_offsets``'s per-key async callback (Phase D) into a
+    :class:`ListOffsetsResultInfo`.
+    """
+    return ListOffsetsResultInfo(*_lib.ListOffsetsResultInfo_drain(value))
 
 
 def _to_member_assignment(raw):
@@ -2585,6 +2578,45 @@ class _AdminBase:
                 self._resolve_keyed_value, futures[key], value, error, convert)
         return cb
 
+    def _keyed_topic_partition_void_cb(self, futures, loop=None):
+        """Builds the `cb(topic, partition, error)` native callback for
+        `alter_partition_reassignments` (Phase D), whose key is a
+        `(topic, partition)` tuple - mirrors `_keyed_delete_records_cb`'s
+        two-param key handling, generalized (like
+        `_keyed_config_resource_void_cb`) to take no `convert`, since Java's
+        per-partition future is `KafkaFuture<Void>`."""
+        if loop is None:
+            def cb(topic, partition, error):
+                self._resolve_keyed_void(futures[(topic, partition)], error)
+            return cb
+
+        def cb(topic, partition, error):
+            if loop.is_closed():
+                self._free_keyed_void(error)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_void, futures[(topic, partition)], error)
+        return cb
+
+    def _keyed_topic_partition_value_cb(self, futures, convert, loop=None):
+        """Builds the `cb(topic, partition, value, error)` native callback for
+        `list_offsets` (Phase D), whose key is a `(topic, partition)` tuple -
+        mirrors `_keyed_delete_records_cb`'s two-param key handling,
+        generalized (like `_keyed_config_resource_value_cb`) to take a
+        `convert` parameter."""
+        if loop is None:
+            def cb(topic, partition, value, error):
+                self._resolve_keyed_value(futures[(topic, partition)], value, error, convert)
+            return cb
+
+        def cb(topic, partition, value, error):
+            if loop.is_closed():
+                self._free_keyed_value(value, error, convert)
+                return
+            loop.call_soon_threadsafe(
+                self._resolve_keyed_value, futures[(topic, partition)], value, error, convert)
+        return cb
+
     # ---- per-key request builders (Phase A) --------------------------------
     #
     # Build the `spec` the C layer parses plus the deduplicated `{key: ...}`
@@ -2710,6 +2742,36 @@ class _AdminBase:
         deduped = list(dict.fromkeys(replicas))
         return deduped, [(str(r.topic), int(r.partition), int(r.broker_id)) for r in deduped]
 
+    @staticmethod
+    def _alter_partition_reassignments_keys_and_spec(reassignments):
+        """``{(topic, partition): NewPartitionReassignment | None}`` -> the
+        per-partition key list plus the ``(topic, partition, is_cancel,
+        [replicas])`` rows the C extension unpacks. Already unique by
+        construction (a dict's keys cannot repeat), like
+        `_alter_replica_log_dirs_keys_and_spec`.
+
+        A ``None`` value is Java's empty ``Optional``, which *reverts* the
+        reassignment; it crosses as a separate flag so it stays distinct from
+        an empty replica list, which Java rejects.
+        """
+        keys = list(reassignments.keys())
+        spec = [(str(topic), int(partition), r is None,
+                 [] if r is None else [int(x) for x in r.target_replicas])
+                for (topic, partition), r in reassignments.items()]
+        return keys, spec
+
+    @staticmethod
+    def _list_offsets_keys_and_spec(topic_partition_offsets):
+        """``{(topic, partition): OffsetSpec}`` -> the per-partition key list
+        plus the ``(topic, partition, is_timestamp, value)`` rows the C
+        extension unpacks. Already unique by construction, like
+        `_alter_replica_log_dirs_keys_and_spec`.
+        """
+        keys = list(topic_partition_offsets.keys())
+        spec = [(str(topic), int(partition), spec_.is_timestamp, int(spec_.value))
+                for (topic, partition), spec_ in topic_partition_offsets.items()]
+        return keys, spec
+
     def _close_spec(self, timeout):
         ms = _close_ms(timeout)
         return (lambda cb: _lib.Admin_close_async(self._h, ms, cb),
@@ -2800,21 +2862,6 @@ class _AdminBase:
                 self._resolve_value(drain, _to_elect_leaders),
                 self._free_value(drain))
 
-    def _alter_partition_reassignments_spec(self, reassignments, timeout,
-                                            allow_replication_factor_change):
-        # A None value is Java's empty Optional, which *reverts* the
-        # reassignment; it crosses as a separate flag so it stays distinct from
-        # an empty replica list, which Java rejects.
-        spec = [(str(topic), int(partition), r is None,
-                 [] if r is None else [int(x) for x in r.target_replicas])
-                for (topic, partition), r in reassignments.items()]
-        ms = _ms(timeout)
-        drain = _lib.AlterPartitionReassignmentsResult_drain
-        return (lambda cb: _lib.Admin_alter_partition_reassignments_async(
-                    self._h, spec, ms, bool(allow_replication_factor_change), cb),
-                self._resolve_value(drain, _to_alter_partition_reassignments),
-                self._free_value(drain))
-
     def _list_partition_reassignments_spec(self, partitions, timeout):
         # `partitions is None` is Java's Optional.empty(): list everything.
         all_partitions = partitions is None
@@ -2824,16 +2871,6 @@ class _AdminBase:
         return (lambda cb: _lib.Admin_list_partition_reassignments_async(
                     self._h, all_partitions, spec, ms, cb),
                 self._resolve_value(drain, _to_list_partition_reassignments),
-                self._free_value(drain))
-
-    def _list_offsets_spec(self, topic_partition_offsets, timeout, isolation_level):
-        spec = [(str(topic), int(partition), spec_.is_timestamp, int(spec_.value))
-                for (topic, partition), spec_ in topic_partition_offsets.items()]
-        ms = _ms(timeout)
-        drain = _lib.ListOffsetsResult_drain
-        return (lambda cb: _lib.Admin_list_offsets_async(
-                    self._h, spec, ms, int(isolation_level), cb),
-                self._resolve_value(drain, _to_list_offsets),
                 self._free_value(drain))
 
     def _list_groups_spec(self, group_states, protocol_types, types, timeout):
@@ -3661,10 +3698,19 @@ class Admin(_AdminBase):
                                       allow_replication_factor_change=True):
         """Apply ``{(topic, partition): NewPartitionReassignment | None}``. A
         ``None`` value **reverts** that partition's reassignment (Java's empty
-        ``Optional``). Returns ``{(topic, partition): None | KafkaError}``."""
+        ``Optional``). Returns ``{(topic, partition): Future[None]}``
+        immediately; each partition's ``Future`` resolves independently (a
+        result of ``None`` means success) - a fast or already-resolved
+        partition is not held up by a slow or failing one (Java's per-key
+        ``KafkaFuture``; see the module docstring)."""
         self._check_closed()
-        return self._run_sync(*self._alter_partition_reassignments_spec(
-            reassignments, timeout, allow_replication_factor_change))
+        keys, spec = self._alter_partition_reassignments_keys_and_spec(reassignments)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_partition_reassignments_async(
+            self._h, spec, ms, bool(allow_replication_factor_change),
+            self._keyed_topic_partition_void_cb(futures))
+        return futures
 
     def list_partition_reassignments(self, partitions=None, timeout=None):
         """List ongoing reassignments, restricted to ``partitions`` (an
@@ -3679,10 +3725,16 @@ class Admin(_AdminBase):
     def list_offsets(self, topic_partition_offsets, timeout=None,
                      isolation_level=IsolationLevel.READ_UNCOMMITTED):
         """Look up ``{(topic, partition): OffsetSpec}``. Returns
-        ``{(topic, partition): ListOffsetsResultInfo | KafkaError}``."""
+        ``{(topic, partition): Future[ListOffsetsResultInfo]}`` immediately;
+        each partition's ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._list_offsets_spec(
-            topic_partition_offsets, timeout, isolation_level))
+        keys, spec = self._list_offsets_keys_and_spec(topic_partition_offsets)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_list_offsets_async(
+            self._h, spec, ms, int(isolation_level),
+            self._keyed_topic_partition_value_cb(futures, _drain_list_offsets_info))
+        return futures
 
     def list_groups(self, group_states=None, protocol_types=None, types=None, timeout=None):
         """List every group in the cluster. Returns
@@ -4289,9 +4341,18 @@ class AsyncAdmin(_AdminBase):
 
     async def alter_partition_reassignments(self, reassignments, timeout=None,
                                             allow_replication_factor_change=True):
+        """See :meth:`Admin.alter_partition_reassignments`. Returns
+        ``{(topic, partition): Future[None]}`` immediately (no internal
+        ``await``); each partition's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._alter_partition_reassignments_spec(
-            reassignments, timeout, allow_replication_factor_change))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._alter_partition_reassignments_keys_and_spec(reassignments)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_partition_reassignments_async(
+            self._h, spec, ms, bool(allow_replication_factor_change),
+            self._keyed_topic_partition_void_cb(futures, loop))
+        return futures
 
     async def list_partition_reassignments(self, partitions=None, timeout=None):
         self._check_closed()
@@ -4300,9 +4361,19 @@ class AsyncAdmin(_AdminBase):
 
     async def list_offsets(self, topic_partition_offsets, timeout=None,
                            isolation_level=IsolationLevel.READ_UNCOMMITTED):
+        """See :meth:`Admin.list_offsets`. Returns
+        ``{(topic, partition): Future[ListOffsetsResultInfo]}`` immediately (no
+        internal ``await``); each partition's ``Future`` resolves
+        independently."""
         self._check_closed()
-        return await self._run_async(*self._list_offsets_spec(
-            topic_partition_offsets, timeout, isolation_level))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._list_offsets_keys_and_spec(topic_partition_offsets)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_list_offsets_async(
+            self._h, spec, ms, int(isolation_level),
+            self._keyed_topic_partition_value_cb(futures, _drain_list_offsets_info, loop))
+        return futures
 
     async def list_groups(self, group_states=None, protocol_types=None, types=None,
                           timeout=None):
