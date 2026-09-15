@@ -24,7 +24,7 @@ import time
 import pytest
 from admin import (
     MockAdminClient, AsyncMockAdminClient, AdminClient, AsyncAdminClient,
-    NewTopic, NewPartitions, RecordsToDelete, DeletedRecords,
+    NewTopic, NewPartitions, RecordsToDelete,
     TopicDescription, TopicListing, TopicMetadataAndConfig,
     AlterConfigOp, ClientMetricsResourceListing, ClusterDescription, Config,
     ConfigEntry, ConfigResource, ConfigResourceType, OpType, ReplicaLogDirInfo,
@@ -50,7 +50,7 @@ from admin import (
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
     _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
     _to_list_partition_reassignments, _to_log_dir_description,
-    _to_member_description, _to_cluster_description, _to_describe_topics,
+    _to_member_description, _to_cluster_description, _to_description,
     _to_partition_info,
     _close_ms, _ms,
 )
@@ -67,10 +67,14 @@ KAFKA_STORAGE_ERROR = 56
 
 
 def _created(admin, name, num_partitions=1, replication_factor=1):
-    """Create one topic and assert it succeeded; returns its metadata."""
-    result = admin.create_topics(
+    """Create one topic and assert it succeeded; returns its metadata.
+
+    ``create_topics`` returns a dict of ``Future``s (Phase A: one native
+    callback per key, independently) rather than an already-resolved dict, so
+    the caller must resolve the topic's own ``Future``."""
+    futures = admin.create_topics(
         [NewTopic(name, num_partitions, replication_factor)])
-    value = result[name]
+    value = futures[name].result(timeout=5.0)
     assert isinstance(value, TopicMetadataAndConfig), value
     return value
 
@@ -188,10 +192,18 @@ def test_admin_client_rejects_mock_only_driver():
 
 def test_admin_client_marshaling_error_needs_no_broker():
     """Argument marshaling runs before the RPC is submitted, so an unparseable
-    topic id fails on the production client with no network involved."""
+    topic id fails on the production client with no network involved.
+
+    describe_topics_by_ids is per-key-Future (Phase A): a submission failure
+    does not raise from the call itself (there may be other, well-formed keys
+    in the same batch whose Futures must still resolve independently) -
+    instead every requested key's Future - keyed by the raw string, since
+    parsing never got far enough to produce a Uuid - resolves with the same
+    error."""
     with AdminClient(dict(PRODUCTION_CONFIG)) as admin:
+        futures = admin.describe_topics_by_ids(["not-a-base64-uuid"], timeout=1.0)
         with pytest.raises(KafkaError) as excinfo:
-            admin.describe_topics_by_ids(["not-a-base64-uuid"], timeout=1.0)
+            futures["not-a-base64-uuid"].result(timeout=5.0)
         assert "invalid topic id" in str(excinfo.value)
 
 
@@ -207,9 +219,9 @@ async def test_async_admin_client_constructs_and_closes():
 
 def test_create_topics_returns_metadata():
     with MockAdminClient(3) as admin:
-        result = admin.create_topics([NewTopic("topic-a", 4, 2)])
-        assert list(result) == ["topic-a"]
-        meta = result["topic-a"]
+        futures = admin.create_topics([NewTopic("topic-a", 4, 2)])
+        assert list(futures) == ["topic-a"]
+        meta = futures["topic-a"].result(timeout=5.0)
         assert isinstance(meta, TopicMetadataAndConfig)
         assert meta.num_partitions == 4
         assert meta.replication_factor == 2
@@ -220,9 +232,9 @@ def test_create_topics_returns_metadata():
 
 def test_create_topics_with_configs():
     with MockAdminClient(1) as admin:
-        result = admin.create_topics(
+        futures = admin.create_topics(
             [NewTopic("configured", 1, 1, configs={"cleanup.policy": "compact"})])
-        meta = result["configured"]
+        meta = futures["configured"].result(timeout=5.0)
         assert len(meta.configs) == 1
         entry = meta.configs[0]
         assert entry.name == "cleanup.policy"
@@ -240,28 +252,53 @@ def test_create_topics_broker_defaults():
 
 
 def test_create_topics_partial_failure_keeps_both_outcomes():
-    """One topic succeeds, two fail, and every outcome survives in one dict."""
+    """One topic succeeds, two fail, and every outcome survives as its own
+    Future - a per-key failure resolves only that key's Future, not the whole
+    call (Phase A: one native callback per key, independently)."""
     with MockAdminClient(3) as admin:
         _created(admin, "existing")
-        result = admin.create_topics([
+        futures = admin.create_topics([
             NewTopic("existing", 1, 1),
             NewTopic("fresh", 2, 1),
             NewTopic("too-many-replicas", 1, 9),
         ])
-        assert set(result) == {"existing", "fresh", "too-many-replicas"}
+        assert set(futures) == {"existing", "fresh", "too-many-replicas"}
 
-        existing = result["existing"]
-        assert isinstance(existing, KafkaError)
-        assert existing.code == TOPIC_ALREADY_EXISTS
-        assert existing.message == "Topic existing exists already."
+        with pytest.raises(KafkaError) as excinfo:
+            futures["existing"].result(timeout=5.0)
+        assert excinfo.value.code == TOPIC_ALREADY_EXISTS
+        assert excinfo.value.message == "Topic existing exists already."
 
-        too_many = result["too-many-replicas"]
-        assert isinstance(too_many, KafkaError)
-        assert too_many.code == INVALID_REPLICATION_FACTOR
+        with pytest.raises(KafkaError) as excinfo:
+            futures["too-many-replicas"].result(timeout=5.0)
+        assert excinfo.value.code == INVALID_REPLICATION_FACTOR
 
-        fresh = result["fresh"]
+        fresh = futures["fresh"].result(timeout=5.0)
         assert isinstance(fresh, TopicMetadataAndConfig)
         assert fresh.num_partitions == 2
+
+
+def test_create_topics_two_keys_resolve_independently():
+    """The defining property of Phase A's per-key delivery: each key's Future
+    is gettable on its own, regardless of the order the underlying native
+    callbacks happened to fire in - unlike the old flattened-batch design,
+    where the whole dict only existed once every key had already resolved.
+    MockAdminClient resolves every future synchronously and in submission
+    order, so this asserts the observable order-independence property (both
+    futures are done and gettable immediately) rather than manufacturing an
+    artificial reordering."""
+    with MockAdminClient(3) as admin:
+        futures = admin.create_topics([
+            NewTopic("first", 1, 1),
+            NewTopic("second", 1, 1),
+        ])
+        # Deliberately read "second" before "first": order of access must not
+        # matter, and neither Future should be blocked on the other.
+        second = futures["second"].result(timeout=5.0)
+        assert second.num_partitions == 1
+        first = futures["first"].result(timeout=5.0)
+        assert first.num_partitions == 1
+        assert futures["first"].done() and futures["second"].done()
 
 
 def test_create_topics_validate_only_option_is_accepted():
@@ -270,7 +307,8 @@ def test_create_topics_validate_only_option_is_accepted():
         # (MockAdminClient.java:363-422 at kafka a18251bae0b8), so validateOnly
         # has no effect on the mock and the topic IS created. This pins the
         # option marshaling path, not a behavior the mock does not implement.
-        admin.create_topics([NewTopic("validated", 1, 1)], validate_only=True)
+        futures = admin.create_topics([NewTopic("validated", 1, 1)], validate_only=True)
+        futures["validated"].result(timeout=5.0)
         assert "validated" in admin.list_topics()
 
 
@@ -279,10 +317,10 @@ def test_create_topics_replicas_assignment_accepted():
     # applies its defaults rather than the assignment (see the C test for the
     # Java citation), so only the marshaling path is asserted here.
     with MockAdminClient(3) as admin:
-        result = admin.create_topics([
+        futures = admin.create_topics([
             NewTopic("assigned", replicas_assignments={0: [0, 1], 1: [1, 2]}),
         ])
-        meta = result["assigned"]
+        meta = futures["assigned"].result(timeout=5.0)
         assert isinstance(meta, TopicMetadataAndConfig)
         assert meta.num_partitions == 1
         assert meta.replication_factor == 3
@@ -328,15 +366,15 @@ def test_list_topics_call_failure_raises():
 def test_describe_topics_partial_failure():
     with MockAdminClient(3) as admin:
         _created(admin, "described", 2, 2)
-        result = admin.describe_topics(["described", "missing"])
-        assert set(result) == {"described", "missing"}
+        futures = admin.describe_topics(["described", "missing"])
+        assert set(futures) == {"described", "missing"}
 
-        missing = result["missing"]
-        assert isinstance(missing, KafkaError)
-        assert missing.code == UNKNOWN_TOPIC_OR_PARTITION
-        assert missing.message == "Topic missing not found."
+        with pytest.raises(KafkaError) as excinfo:
+            futures["missing"].result(timeout=5.0)
+        assert excinfo.value.code == UNKNOWN_TOPIC_OR_PARTITION
+        assert excinfo.value.message == "Topic missing not found."
 
-        described = result["described"]
+        described = futures["described"].result(timeout=5.0)
         assert isinstance(described, TopicDescription)
         assert described.name == "described"
         assert described.is_internal is False
@@ -363,9 +401,9 @@ def test_describe_topics_by_ids():
         _created(admin, "by-id")
         topic_id = admin.list_topics(list_internal=True)["by-id"].topic_id
 
-        result = admin.describe_topics_by_ids([topic_id])
-        assert list(result) == [topic_id]
-        described = result[topic_id]
+        futures = admin.describe_topics_by_ids([topic_id])
+        assert list(futures) == [topic_id]
+        described = futures[topic_id].result(timeout=5.0)
         assert isinstance(described, TopicDescription)
         assert described.name == "by-id"
         assert described.topic_id == topic_id
@@ -373,8 +411,9 @@ def test_describe_topics_by_ids():
 
 def test_describe_topics_by_ids_rejects_invalid_id():
     with MockAdminClient(1) as admin:
+        futures = admin.describe_topics_by_ids(["not a base64 uuid at all"])
         with pytest.raises(KafkaError) as excinfo:
-            admin.describe_topics_by_ids(["not a base64 uuid at all"])
+            futures["not a base64 uuid at all"].result(timeout=5.0)
         assert "invalid topic id" in str(excinfo.value)
 
 
@@ -383,13 +422,13 @@ def test_describe_topics_by_ids_rejects_invalid_id():
 def test_delete_topics_partial_failure():
     with MockAdminClient(1) as admin:
         _created(admin, "doomed")
-        result = admin.delete_topics(["doomed", "never-existed"])
+        futures = admin.delete_topics(["doomed", "never-existed"])
         # A void per-key result: None means success.
-        assert result["doomed"] is None
-        missing = result["never-existed"]
-        assert isinstance(missing, KafkaError)
-        assert missing.code == UNKNOWN_TOPIC_OR_PARTITION
-        assert missing.message == "Topic never-existed does not exist."
+        assert futures["doomed"].result(timeout=5.0) is None
+        with pytest.raises(KafkaError) as excinfo:
+            futures["never-existed"].result(timeout=5.0)
+        assert excinfo.value.code == UNKNOWN_TOPIC_OR_PARTITION
+        assert excinfo.value.message == "Topic never-existed does not exist."
         assert admin.list_topics(list_internal=True) == {}
 
 
@@ -397,15 +436,16 @@ def test_delete_topics_by_ids():
     with MockAdminClient(1) as admin:
         _created(admin, "id-doomed")
         topic_id = admin.list_topics(list_internal=True)["id-doomed"].topic_id
-        result = admin.delete_topics_by_ids([topic_id])
-        assert result[topic_id] is None
+        futures = admin.delete_topics_by_ids([topic_id])
+        assert futures[topic_id].result(timeout=5.0) is None
         assert admin.list_topics(list_internal=True) == {}
 
 
 def test_delete_topics_by_ids_rejects_invalid_id():
     with MockAdminClient(1) as admin:
+        futures = admin.delete_topics_by_ids(["@@@"])
         with pytest.raises(KafkaError):
-            admin.delete_topics_by_ids(["@@@"])
+            futures["@@@"].result(timeout=5.0)
 
 
 # -- createPartitions --------------------------------------------------------
@@ -421,12 +461,12 @@ def test_delete_topics_by_ids_rejects_invalid_id():
 def test_create_partitions_reports_unsupported_per_topic():
     with MockAdminClient(3) as admin:
         _created(admin, "grow-me")
-        result = admin.create_partitions({"grow-me": NewPartitions(4)}, timeout=5.0)
-        assert list(result) == ["grow-me"]
-        err = result["grow-me"]
-        assert isinstance(err, KafkaError)
-        assert err.code == UNSUPPORTED_VERSION
-        assert err.message == "Not implemented yet"
+        futures = admin.create_partitions({"grow-me": NewPartitions(4)}, timeout=5.0)
+        assert list(futures) == ["grow-me"]
+        with pytest.raises(KafkaError) as excinfo:
+            futures["grow-me"].result(timeout=5.0)
+        assert excinfo.value.code == UNSUPPORTED_VERSION
+        assert excinfo.value.message == "Not implemented yet"
 
 
 def test_create_partitions_with_assignments_marshals():
@@ -436,13 +476,14 @@ def test_create_partitions_with_assignments_marshals():
     The mock rejects the RPC either way, so this pins the marshaling path only:
     all three shapes cross without raising and every key gets an outcome."""
     with MockAdminClient(3) as admin:
-        result = admin.create_partitions({
+        futures = admin.create_partitions({
             "zeta": NewPartitions(2),
             "alpha": NewPartitions(3, [[0, 1], [1, 2]]),
             "mu": NewPartitions(4, []),
         })
-        assert set(result) == {"alpha", "mu", "zeta"}
-        assert all(isinstance(v, KafkaError) for v in result.values())
+        assert set(futures) == {"alpha", "mu", "zeta"}
+        for fut in futures.values():
+            assert isinstance(fut.exception(timeout=5.0), KafkaError)
 
 
 def test_create_partitions_empty_batch():
@@ -460,16 +501,17 @@ def test_delete_records_reports_unsupported_per_partition():
     with MockAdminClient(1) as admin:
         _created(admin, "trimmed", 2, 1)
         # -1 is Java's documented "truncate to the high watermark".
-        result = admin.delete_records({
+        futures = admin.delete_records({
             ("trimmed", 0): RecordsToDelete(10),
             ("trimmed", 1): RecordsToDelete(5),
             ("another", 0): RecordsToDelete(-1),
         }, timeout=5.0)
-        assert set(result) == {("trimmed", 0), ("trimmed", 1), ("another", 0)}
-        for key, value in result.items():
-            assert isinstance(value, KafkaError), key
-            assert value.code == UNSUPPORTED_VERSION
-            assert value.message == "Not implemented yet"
+        assert set(futures) == {("trimmed", 0), ("trimmed", 1), ("another", 0)}
+        for key, fut in futures.items():
+            error = fut.exception(timeout=5.0)
+            assert isinstance(error, KafkaError), key
+            assert error.code == UNSUPPORTED_VERSION
+            assert error.message == "Not implemented yet"
 
 
 def test_delete_records_empty_batch_succeeds():
@@ -479,22 +521,15 @@ def test_delete_records_empty_batch_succeeds():
         assert admin.delete_records({}) == {}
 
 
-def test_delete_records_success_branch_converts_low_watermark():
-    """The mock never succeeds at deleteRecords, so the success branch of the
-    drain conversion is covered directly: a null per-key error yields a
-    DeletedRecords carrying the low watermark, not a KafkaError."""
-    from admin import _to_delete_records
-
-    converted = _to_delete_records({
-        ("t", 0): (None, 42),
-        ("t", 1): ((UNSUPPORTED_VERSION, "Not implemented yet", 0, 0), -1),
-    })
-    ok = converted[("t", 0)]
-    assert isinstance(ok, DeletedRecords)
-    assert ok.low_watermark == 42
-    failed = converted[("t", 1)]
-    assert isinstance(failed, KafkaError)
-    assert failed.message == "Not implemented yet"
+# There is no standalone test of the "successful DeletedRecords" conversion
+# branch: unlike the old whole-batch `_to_delete_records(raw_dict)` converter
+# (a pure function over synthetic tuples), the per-key drain
+# (`_drain_deleted_records`) now calls `_lib.DeletedRecords_drain`, which
+# requires a live Rust-owned handle and cannot be exercised with a synthetic
+# Python value. Java's own MockAdminClient.deleteRecords always throws for a
+# non-empty request (see the comment above), so there is no way - via the
+# mock, in either language - to reach this branch at all; it is only ever
+# exercised against a real broker (integration tests).
 
 
 # -- options marshaling ------------------------------------------------------
@@ -510,31 +545,42 @@ def test_timeout_accepts_float_and_timedelta():
 # -- asyncio API -------------------------------------------------------------
 
 async def test_async_create_and_describe():
+    """create_topics/describe_topics are per-key-Future (Phase A): the call
+    itself returns immediately with a dict of not-yet-resolved
+    ``asyncio.Future``s (resolution is deferred to the event loop via
+    ``call_soon_threadsafe``, so it never completes within the same
+    uninterrupted coroutine body that submitted it) - each key's Future must
+    be awaited individually to get its value."""
     async with AsyncMockAdminClient(3) as admin:
-        result = await admin.create_topics([NewTopic("async-topic", 3, 2)])
-        meta = result["async-topic"]
+        futures = await admin.create_topics([NewTopic("async-topic", 3, 2)])
+        meta = await futures["async-topic"]
         assert isinstance(meta, TopicMetadataAndConfig)
         assert meta.num_partitions == 3
 
         described = await admin.describe_topics(["async-topic"])
-        assert len(described["async-topic"].partitions) == 3
+        assert len((await described["async-topic"]).partitions) == 3
 
 
 async def test_async_partial_failure():
     async with AsyncMockAdminClient(1) as admin:
+        # The mock's internal state mutates synchronously inside the Rust FFI
+        # call, independently of the returned Future's own resolution, so the
+        # topic already exists by the time this call returns - no need to
+        # await its Future first.
         await admin.create_topics([NewTopic("dupe", 1, 1)])
-        result = await admin.create_topics(
+        futures = await admin.create_topics(
             [NewTopic("dupe", 1, 1), NewTopic("new-one", 1, 1)])
-        assert isinstance(result["dupe"], KafkaError)
-        assert isinstance(result["new-one"], TopicMetadataAndConfig)
+        with pytest.raises(KafkaError):
+            await futures["dupe"]
+        assert isinstance(await futures["new-one"], TopicMetadataAndConfig)
 
 
 async def test_async_list_and_delete():
     async with AsyncMockAdminClient(1) as admin:
         await admin.create_topics([NewTopic("gone", 1, 1)])
         assert set(await admin.list_topics(list_internal=True)) == {"gone"}
-        result = await admin.delete_topics(["gone"])
-        assert result["gone"] is None
+        futures = await admin.delete_topics(["gone"])
+        assert await futures["gone"] is None
         assert await admin.list_topics(list_internal=True) == {}
 
 
@@ -542,10 +588,12 @@ async def test_async_create_partitions_and_delete_records():
     async with AsyncMockAdminClient(1) as admin:
         await admin.create_topics([NewTopic("async-grow", 1, 1)])
         grown = await admin.create_partitions({"async-grow": NewPartitions(3)})
-        assert isinstance(grown["async-grow"], KafkaError)
+        with pytest.raises(KafkaError):
+            await grown["async-grow"]
 
         trimmed = await admin.delete_records({("async-grow", 0): RecordsToDelete(4)})
-        assert isinstance(trimmed[("async-grow", 0)], KafkaError)
+        with pytest.raises(KafkaError):
+            await trimmed[("async-grow", 0)]
 
         # The empty deleteRecords path returns a result, not an error.
         assert await admin.delete_records({}) == {}
@@ -584,7 +632,7 @@ async def test_async_concurrent_calls():
             admin.list_topics(list_internal=True),
         )
         assert set(results[0]) == {"c1"}
-        assert isinstance(results[1]["c1"], TopicDescription)
+        assert isinstance(await results[1]["c1"], TopicDescription)
         assert set(results[2]) == {"c1"}
 
 
@@ -899,8 +947,8 @@ async def test_async_describe_cluster_and_configs():
 async def test_async_log_dirs_and_listings():
     admin = AsyncMockAdminClient(1)
     try:
-        result = await admin.create_topics([NewTopic("async-ld", 1, 1)])
-        assert isinstance(result["async-ld"], TopicMetadataAndConfig)
+        futures = await admin.create_topics([NewTopic("async-ld", 1, 1)])
+        assert isinstance(await futures["async-ld"], TopicMetadataAndConfig)
 
         log_dirs = await admin.describe_log_dirs([0])
         assert set(log_dirs[0]) == {"/tmp/kafka-logs"}
@@ -1051,7 +1099,7 @@ def test_handle_survives_gc_of_intermediate_objects():
     result handle is destroyed and a GC pass runs."""
     with MockAdminClient(1) as admin:
         _created(admin, "gc-topic", 2, 1)
-        described = admin.describe_topics(["gc-topic"])["gc-topic"]
+        described = admin.describe_topics(["gc-topic"])["gc-topic"].result(timeout=5.0)
         listings = admin.list_topics(list_internal=True)
         gc.collect()
         assert described.name == "gc-topic"
@@ -2928,10 +2976,13 @@ def test_authorized_operations_none_stays_distinct_from_empty():
     assert classic_group([]).authorized_operations == []
     assert classic_group([8]).authorized_operations == [8]
 
-    # describe_topics and describe_cluster use the same encoding.
-    described = _to_describe_topics({"t": (None, ("t", "id", 0, [], None))})["t"]
+    # describe_topics and describe_cluster use the same encoding. describe_topics
+    # is now per-key-Future (Phase A), so it goes through `_to_description`
+    # directly (what `_drain_description` calls after draining the per-key
+    # handle) rather than a whole-batch dict converter.
+    described = _to_description(("t", "id", 0, [], None))
     assert described.authorized_operations is None
-    described = _to_describe_topics({"t": (None, ("t", "id", 0, [], []))})["t"]
+    described = _to_description(("t", "id", 0, [], []))
     assert described.authorized_operations == []
 
     cluster = _to_cluster_description(("c", [], None, None))
