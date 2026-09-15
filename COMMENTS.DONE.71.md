@@ -52,7 +52,7 @@ stated plainly in this fixup's commit message instead.
 - **Java Reference**: `KafkaProducerTest.getAndAssertDurationAtLeast` (1841-1845), which asserts `>= tick.toNanos()` (1e9) under MockTime auto-tick — deterministic; the Rust floor cannot use that and previously fell back to `> 0`.
 - **Description**: Four of the five metrics bracket an **awaited round trip**
   (pumped by `drive`), so their delta is comfortably `> 0`. `txn-begin` is the
-  exception: `begin_transaction` times a purely **synchronous** body (one
+  outlier: `begin_transaction` times a purely **synchronous** body (one
   uncontended mutex acquire + an enum state transition, tens of ns). Rust's
   `Instant` is guaranteed **non-decreasing, not strictly increasing**; on a
   platform whose monotonic tick granularity exceeds the bracketed work, two reads
@@ -92,3 +92,29 @@ nanosecond clock through the producer — give the ms-only `time_provider` a
 `>= tick.toNanos()` floor for begin. That changes `time_provider`'s type, every
 constructor, and `flush` / `metadata-wait` timing semantics, so it belongs in its
 own piece of work, not here.
+
+---
+
+## Issue 4 (introduced by `33c07717`): ordinary-English "exception" in a non-Java doc comment — RESOLVED
+- **Resolution**: Reworded the `get_and_assert_duration_at_least` rustdoc (`kafka_producer.rs:5008`, "The exception is `txn-begin-time-ns-total`" → "The outlier is …") and the mirror phrasing in this file's Issue 2 note ("`txn-begin` is the exception:" → "outlier:"), so the only remaining "exception" tokens are Java-type / `TestUtils.retryOnExceptionWithTimeout` references permitted by CLAUDE.md §2; a working-tree sweep of Rust source (`git diff master -- '*.rs' | grep '^+.*exception'`) is clean — the moved finding text below necessarily quotes its own subject word.
+## Issue 4 (NEW, introduced by `33c07717`): ordinary-English "exception" in a non-Java doc comment
+- **File**: `src/producer/kafka_producer.rs:5008` (in `get_and_assert_duration_at_least`'s rustdoc)
+- **Severity**: Behavior Mismatch (convention) — LOW / borderline
+- **Rule**: CLAUDE.md §2 — "the word 'exception' MUST never appear in Rust code, except in comments about the Java client." (DoD #1.)
+- **Description**: The fixup's helper-doc rewrite added
+  `/// realistic tick ... are safe for them. The`
+  `/// exception is `txn-begin-time-ns-total`: ...`.
+  Here "exception" is ordinary English ("the special case / outlier is
+  txn-begin"), and the sentence is about the *Rust* test's clock behaviour, not
+  the Java client — so it is not covered by the §2 carve-out. Every other
+  "exception" in this file (lines 414, 700, 1295, 1304, 2086, …) names a Java
+  type, which the carve-out permits; this is the only non-Java-referring use,
+  and it is newly introduced. The doc-hygiene lint does not catch it.
+- **Note on polarity**: This is the *letter* of §2. The rule's *intent* is to
+  keep Java error-terminology out of Rust error handling, and "the special case
+  is" is not that — so the Manager may reasonably read §2 narrowly and waive
+  this. Flagged only because the review brief explicitly asked to check for
+  "'exception' outside Java-referring comments", and this is one, newly added.
+- **Expected**: Reword to avoid the banned word, e.g. "The **one outlier** is
+  `txn-begin-time-ns-total`" or "The **special case** is …".
+- **Actual**: "The exception is `txn-begin-time-ns-total`: …".

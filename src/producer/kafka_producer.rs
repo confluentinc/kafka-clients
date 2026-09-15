@@ -5005,7 +5005,7 @@ mod tests {
     /// tick and the delta is a legitimate `0`. The four metrics here that bracket an
     /// **awaited** round trip (pumped by `drive`, microseconds of real work) clear any
     /// realistic tick, so `>= 1.0` and round-2 strict growth are safe for them. The
-    /// exception is `txn-begin-time-ns-total`: `begin_transaction` times a purely
+    /// outlier is `txn-begin-time-ns-total`: `begin_transaction` times a purely
     /// **synchronous** body (an uncontended mutex acquire plus a state transition, tens
     /// of ns) that can fall inside one tick — on Apple Silicon `mach_absolute_time`
     /// ticks at 24 MHz (~41.7 ns), so a `0`-ns reading is plausible, not merely
