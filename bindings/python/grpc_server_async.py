@@ -130,6 +130,7 @@ from grpc_translate import (  # noqa: E402
     _admin_transaction_id_pattern,
     _admin_transaction_states,
     _admin_void_response,
+    _resolve_admin_futures_async,
     _kafka_error_to_proto,
     _metric_to_proto,
     _oam_to_proto,
@@ -718,12 +719,16 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.CreateTopicsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.create_topics(
+            futures = await client.create_topics(
                 _admin_new_topics(request.topics),
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
                 retry_on_quota_violation=_admin_retry_on_quota(request),
             )
+            # create_topics is per-key-Future (admin.py's Phase A): await
+            # every key's Future before handing off to the (unchanged)
+            # already-resolved-dict translator.
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_create_topics_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_topics raised")
@@ -737,14 +742,16 @@ class AdminService(apb_grpc.AdminServiceServicer):
         names = list(request.topic_ids.values if by_ids else request.names.values)
         try:
             if by_ids:
-                outcomes = await client.delete_topics_by_ids(
+                futures = await client.delete_topics_by_ids(
                     names, timeout=_admin_timeout(request),
                     retry_on_quota_violation=_admin_retry_on_quota(request))
             else:
-                outcomes = await client.delete_topics(
+                futures = await client.delete_topics(
                     names, timeout=_admin_timeout(request),
                     retry_on_quota_violation=_admin_retry_on_quota(request))
             key_fn = _admin_topic_id_key if by_ids else _admin_name_key
+            # Per-key-Future (Phase A): await before translating.
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, key_fn)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_topics raised")
@@ -772,13 +779,15 @@ class AdminService(apb_grpc.AdminServiceServicer):
                  if request.HasField("partition_size_limit_per_response") else None)
         try:
             method = client.describe_topics_by_ids if by_ids else client.describe_topics
-            outcomes = await method(
+            futures = await method(
                 topics,
                 timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations,
                 partition_size_limit=limit,
             )
             key_fn = _admin_topic_id_key if by_ids else _admin_name_key
+            # Per-key-Future (Phase A): await before translating.
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_describe_topics_response(outcomes, key_fn)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_topics raised")
@@ -789,12 +798,14 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.create_partitions(
+            futures = await client.create_partitions(
                 _admin_new_partitions(request.partitions),
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
                 retry_on_quota_violation=_admin_retry_on_quota(request),
             )
+            # Per-key-Future (Phase A): await before translating.
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_partitions raised")
@@ -805,8 +816,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DeleteRecordsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.delete_records(
+            futures = await client.delete_records(
                 _admin_records_to_delete(request.records), timeout=_admin_timeout(request))
+            # Per-key-Future (Phase A): await before translating.
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_delete_records_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_records raised")
