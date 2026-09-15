@@ -117,10 +117,27 @@ impl MockSelector {
         self.close_channel_sync(id);
     }
 
-    /// Simulate a server authentication failure.
+    /// Simulate a server authentication failure, raising the base
+    /// `AuthenticationException`.
     pub fn server_authentication_failed(&mut self, id: &str) {
-        let auth_failed =
-            ChannelState::with_error(super::channel_state::State::AuthenticationFailed, "Authentication failed", None);
+        self.server_authentication_failed_with(
+            id,
+            crate::common::Error::Authentication(crate::common::errors::AuthenticationError::new(
+                "Authentication failed",
+            )),
+        );
+    }
+
+    /// Simulate a server authentication failure raising a specific
+    /// `AuthenticationException` subclass.
+    ///
+    /// `KafkaChannel.prepare` catches `SslAuthenticationException` and
+    /// `SaslAuthenticationException` separately (`KafkaChannel.java:463-472`) and
+    /// stores whichever it caught in the `ChannelState`, so which subclass reaches
+    /// `client.authenticationException(node)` is observable behaviour; this lets a
+    /// test pick it.
+    pub fn server_authentication_failed_with(&mut self, id: &str, error: crate::common::Error) {
+        let auth_failed = ChannelState::with_error(super::channel_state::State::AuthenticationFailed, error, None);
         self.disconnected.insert(id.to_string(), auth_failed);
         self.close_channel_sync(id);
     }

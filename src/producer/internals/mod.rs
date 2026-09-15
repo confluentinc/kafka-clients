@@ -44,7 +44,7 @@ pub(crate) use produce_request_result::ProduceRequestResult;
 pub(crate) use producer_batch::ProducerBatch;
 pub(crate) use producer_metadata::ProducerMetadata;
 pub(crate) use producer_metrics::ProducerMetrics;
-pub(crate) use record_accumulator::{AppendError, PartitionerConfig, RecordAccumulator};
+pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
 pub(crate) use sender::Sender;
 pub(crate) use sender_metrics_registry::SenderMetricsRegistry;
 // Re-exported per CLAUDE.md §2 so the send path (Phase 4) and the public

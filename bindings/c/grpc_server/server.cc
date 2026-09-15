@@ -289,94 +289,50 @@ using confluent::kafka::test::TopicPartitionInfoEntry;
 
 namespace {
 
-// Mirrors the proto KafkaError.Variant enum. Keep in lockstep with
-// producer_service.proto.
-constexpr int VARIANT_GENERIC = 0;
-constexpr int VARIANT_TOPIC_AUTHORIZATION = 1;
-constexpr int VARIANT_INVALID_TOPIC = 2;
-constexpr int VARIANT_GROUP_AUTHORIZATION = 3;
-constexpr int VARIANT_BUFFER_EXHAUSTED = 4;
-constexpr int VARIANT_ILLEGAL_ARGUMENT = 5;
-constexpr int VARIANT_ILLEGAL_STATE = 6;
-constexpr int VARIANT_TIMEOUT = 7;
-constexpr int VARIANT_RECORD_TOO_LARGE = 8;
-constexpr int VARIANT_SERIALIZATION = 9;
-
-// Infer the proto KafkaError.Variant from an error message.
+// Construct a synthetic KafkaError: an error of the server's own making
+// ("unknown consumer_id"), with no FFI handle behind it.
 //
-// The C FFI does not surface the Rust enum discriminator — only the code, the
-// message and the retriable/fatal flags — so both servers have to guess, and the
-// Rust client matches on the variant it receives. **The guess must be identical
-// in both servers**: a differential harness whose two servers translate the same
-// error differently manufactures disagreements that are not defects. This
-// mirrors `grpc_translate.py`'s `_guess_variant` pattern for pattern and in the
-// same order, including the lowercasing.
+// The code is a real one taken from the generated header, not a placeholder
+// -1. -1 is `UNKNOWN_SERVER_ERROR`, a different class, and since `code` is now
+// the only discriminator on the wire (the proto's `Variant` field is gone) the
+// Rust client would decode these as an unknown *server* error rather than the
+// local failure they are.
 //
-// Slice G1 found this the hard way. This function used to live inside
-// ProducerServiceImpl, cover only three of the nine variants, and be reachable
-// only from the two `Send` call sites — every other error left `fill_proto_error`
-// at its GENERIC default. Python meanwhile guessed for *every* error, so an admin
-// timeout crossed as Timeout from Python (retriable) and as
-// Generic/UnknownServerError from C (not retriable), failing two scenarios on the
-// C backend alone with nothing wrong in the client.
-int guess_variant(const char* message) {
-  if (message == nullptr) return VARIANT_GENERIC;
-  std::string s(message);
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (s.empty()) return VARIANT_GENERIC;
-  const auto has = [&s](const char* needle) { return s.find(needle) != std::string::npos; };
-  if (has("max.request.size") || has("is larger than") || has("too large")) {
-    return VARIANT_RECORD_TOO_LARGE;
-  }
-  if (has("buffer is full") || has("buffer.memory")) return VARIANT_BUFFER_EXHAUSTED;
-  if (has("timed out") || has("expired") || has("not present in metadata")) {
-    return VARIANT_TIMEOUT;
-  }
-  if (has("topic authorization")) return VARIANT_TOPIC_AUTHORIZATION;
-  if (has("invalid topic")) return VARIANT_INVALID_TOPIC;
-  if (has("group authorization")) return VARIANT_GROUP_AUTHORIZATION;
-  if (has("illegal state") || has("already been closed")) return VARIANT_ILLEGAL_STATE;
-  // Illegal *argument*. The C FFI drops the KafkaError discriminator — a core
-  // `KafkaError::IllegalArgument` and a core `KafkaError::IllegalState` both
-  // report `Errors::UnknownServerError`, and `KafkaError::message()` returns the
-  // bare text with no `IllegalArgumentError:` prefix — so the message is the only
-  // signal. These phrases are Java's own literal strings, reproduced verbatim by
-  // the Rust core (`KafkaAdminClient.java:4578,4585` ->
-  // `src/admin/kafka_admin_client.rs:4586,4592`), and they are what
-  // `updateFeatures` answers for an empty map or a blank feature name. Kept
-  // byte-identical to the Python servers' arm in `grpc_translate.py` so the two
-  // guesses cannot drift.
-  if (has("can not be null or empty") || has("can not be empty"))
-    return VARIANT_ILLEGAL_ARGUMENT;
-  if (has("serialization") || has("failed to serialize")) return VARIANT_SERIALIZATION;
-  return VARIANT_GENERIC;
+// It defaults to `LOCAL_ILLEGAL_STATE`, which is what the server's own
+// bookkeeping failures ("unknown producer_id") are; the sites that validate a
+// request's arguments pass `LOCAL_ILLEGAL_ARGUMENT` instead, mirroring the
+// class Java would throw.
+KafkaError make_synthetic_error(
+    const std::string& message,
+    kafka_common_ErrorCode_t code = kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE) {
+  KafkaError err;
+  err.set_code(code);
+  err.set_message("c server: " + message);
+  return err;
 }
 
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
 //
-// The variant is always inferred from the message, as the Python servers do for
-// every error. There is no `variant_hint` parameter any more: its GENERIC default
-// was the divergence described on `guess_variant`, and every caller that wanted
-// the right answer had to remember to pass the guess explicitly.
-void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err) {
+// `kafka_common_Error_code` identifies the error's class on its own -- the
+// codes are injective -- so nothing else has to be inferred here. This is what
+// retired `guess_variant_from_message`, which substring-matched the message
+// text to recover a class the code could not carry, on the two producer paths
+// that bothered; every consumer path shipped an unclassified error.
+//
+// `is_retriable` and `is_fatal` are gone from the proto: no reader consumed
+// them, both are derivable from the code, and this was the server's only
+// predicate call.
+void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err) {
   if (err == nullptr) {
-    dst->set_variant(static_cast<KafkaError::Variant>(VARIANT_GENERIC));
-    dst->set_code(-1);
-    dst->set_message("c server: null error handle");
-    dst->set_is_retriable(false);
-    dst->set_is_fatal(true);
+    // Also the server's own bookkeeping failure, so it takes the same code.
+    *dst = make_synthetic_error("null error handle");
     return;
   }
-  const int32_t code = kafka_common_KafkaError_code(err);
-  const char* msg = kafka_common_KafkaError_message(err);
-  dst->set_variant(static_cast<KafkaError::Variant>(guess_variant(msg)));
-  dst->set_code(code);
+  const char* msg = kafka_common_Error_message(err);
+  dst->set_code(kafka_common_Error_code(err));
   dst->set_message(msg ? std::string(msg) : std::string());
-  dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
-  dst->set_is_fatal(kafka_common_KafkaError_is_fatal(err));
-  kafka_common_KafkaError_destroy(err);
+  kafka_common_Error_destroy(err);
 }
 
 // The normative mock-selection rule of admin_service.proto's
@@ -391,18 +347,6 @@ bool selects_mock(const ConfigMap& config) {
     if (!kv.second.empty()) return false;
   }
   return true;
-}
-
-// Construct a synthetic KafkaError without an underlying FFI handle.
-KafkaError make_synthetic_error(int variant, const std::string& message,
-                                bool is_fatal = true) {
-  KafkaError err;
-  err.set_variant(static_cast<KafkaError::Variant>(variant));
-  err.set_code(-1);
-  err.set_message("c server: " + message);
-  err.set_is_retriable(false);
-  err.set_is_fatal(is_fatal);
-  return err;
 }
 
 // Fields from a metadata handle, copied via the convenience callback so
@@ -534,7 +478,7 @@ struct LogState {
 // TopicPartitionList and must destroy it; returning NULL means the listener
 // succeeded (a non-null error would fail the rebalance, like a throwing Java
 // listener).
-kafka_common_KafkaError_t* log_rebalance(kafka_consumer_TopicPartitionList_t* partitions,
+kafka_common_Error_t* log_rebalance(kafka_consumer_TopicPartitionList_t* partitions,
                                         void* user_data, const char* kind) {
   auto* state = static_cast<LogState*>(user_data);
   CallbackLogEntry entry;
@@ -555,12 +499,12 @@ kafka_common_KafkaError_t* log_rebalance(kafka_consumer_TopicPartitionList_t* pa
   return nullptr;
 }
 
-extern "C" kafka_common_KafkaError_t* log_partitions_assigned(
+extern "C" kafka_common_Error_t* log_partitions_assigned(
     kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_ASSIGNED);
 }
 
-extern "C" kafka_common_KafkaError_t* log_partitions_revoked(
+extern "C" kafka_common_Error_t* log_partitions_revoked(
     kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_REVOKED);
 }
@@ -568,18 +512,18 @@ extern "C" kafka_common_KafkaError_t* log_partitions_revoked(
 // Passed explicitly rather than left NULL (which would make the adapter
 // reproduce Java's "onPartitionsLost delegates to onPartitionsRevoked" default),
 // so a lost callback is distinguishable from a revoke in the log.
-extern "C" kafka_common_KafkaError_t* log_partitions_lost(
+extern "C" kafka_common_Error_t* log_partitions_lost(
     kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_LOST);
 }
 
 // Move the error message into `entry` and destroy the handle (the callee owns
 // every non-null handle delivered to a callback).
-void take_error_into(CallbackLogEntry* entry, kafka_common_KafkaError_t* error) {
+void take_error_into(CallbackLogEntry* entry, kafka_common_Error_t* error) {
   if (error == nullptr) return;
-  const char* msg = kafka_common_KafkaError_message(error);
+  const char* msg = kafka_common_Error_message(error);
   entry->set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
-  kafka_common_KafkaError_destroy(error);
+  kafka_common_Error_destroy(error);
 }
 
 // Copy an owned OffsetMap into `entry`'s partitions + offsets, then destroy it.
@@ -602,7 +546,7 @@ void take_offsets_into(CallbackLogEntry* entry, kafka_consumer_OffsetMap_t* offs
 }
 
 extern "C" void log_commit_complete(kafka_consumer_OffsetMap_t* offsets,
-                                    kafka_common_KafkaError_t* error, void* user_data) {
+                                    kafka_common_Error_t* error, void* user_data) {
   auto* state = static_cast<LogState*>(user_data);
   CallbackLogEntry entry;
   entry.set_kind(KIND_COMMIT);
@@ -617,13 +561,13 @@ extern "C" void log_commit_complete(kafka_consumer_OffsetMap_t* offsets,
 // So an explicit-offsets CommitAsync without with_callback gets this no-op,
 // which still has to free the handles it is given.
 extern "C" void discard_commit_complete(kafka_consumer_OffsetMap_t* offsets,
-                                        kafka_common_KafkaError_t* error, void* /*user_data*/) {
+                                        kafka_common_Error_t* error, void* /*user_data*/) {
   if (offsets != nullptr) kafka_consumer_OffsetMap_destroy(offsets);
-  if (error != nullptr) kafka_common_KafkaError_destroy(error);
+  if (error != nullptr) kafka_common_Error_destroy(error);
 }
 
 extern "C" void log_delivery(kafka_producer_RecordMetadata_t* metadata,
-                             kafka_common_KafkaError_t* error, void* user_data) {
+                             kafka_common_Error_t* error, void* user_data) {
   auto* state = static_cast<LogState*>(user_data);
   CallbackLogEntry entry;
   entry.set_kind(KIND_DELIVERY);
@@ -650,7 +594,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
                               const CreateProducerRequest* req,
                               CreateProducerResponse* resp) override {
     kafka_producer_Producer_t* producer = nullptr;
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
 
     if (req->config().empty()) {
       // Empty config selects MockProducer for client-side smoke testing.
@@ -690,7 +634,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
@@ -715,7 +658,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // the Rust harness can assert (via GetCallbackLog) on what the binding's own
     // callback saw. The blocking future path below is unchanged: the FFI gives us
     // both, exactly like Java's send(record, callback).
-    kafka_common_KafkaError_t* send_err = nullptr;
+    kafka_common_Error_t* send_err = nullptr;
     kafka_producer_FutureRecordMetadata_t* future = nullptr;
     if (req->with_callback()) {
       LogState* state = log_state_for(req->producer_id());
@@ -728,7 +671,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
           value, value_len, &send_err);
     }
     if (future == nullptr) {
-      // Synchronous failure (RecordTooLarge, IllegalState, etc.). The
+      // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
       // FFI returns a non-null error we forward verbatim.
       fill_proto_error(resp->mutable_error(), send_err);
       return grpc::Status::OK;
@@ -737,7 +680,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // Block this gRPC worker thread waiting for the future to resolve.
     // The FFI's get() blocks on a tokio runtime handle that the producer
     // owns, so it's safe to call from arbitrary threads.
-    kafka_common_KafkaError_t* get_err = nullptr;
+    kafka_common_Error_t* get_err = nullptr;
     kafka_producer_RecordMetadata_t* metadata =
         kafka_producer_FutureRecordMetadata_get(future, &get_err);
     kafka_producer_FutureRecordMetadata_destroy(future);
@@ -767,21 +710,19 @@ class ProducerServiceImpl final : public ProducerService::Service {
   //
   // Each maps to the same-named KafkaProducer FFI call, which returns a
   // *error handle directly (not via an out-param), and reports it through
-  // StatusResponse. fill_proto_error infers the variant from the message via
-  // guess_variant — the C FFI carries no structured variant tag, but is_fatal /
-  // is_retriable come straight off the handle. init/commit/abort block on the
-  // producer's tokio runtime server-side; the unary RPC is the resolved result.
+  // StatusResponse. fill_proto_error copies the handle's code and message; the
+  // code identifies the error class on its own, so nothing is inferred from the
+  // message text. init/commit/abort block on the producer's tokio runtime
+  // server-side; the unary RPC is the resolved result.
   grpc::Status InitTransactions(grpc::ServerContext*,
                                 const TransactionRequest* req,
                                 StatusResponse* resp) override {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
-          "unknown producer_id " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_init_transactions(producer);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -794,12 +735,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
                                 StatusResponse* resp) override {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
-          "unknown producer_id " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_begin_transaction(producer);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -812,12 +751,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
                                  StatusResponse* resp) override {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
-          "unknown producer_id " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_commit_transaction(producer);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -830,12 +767,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
                                 StatusResponse* resp) override {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
-          "unknown producer_id " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_abort_transaction(producer);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -852,9 +787,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       StatusResponse* resp) override {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
-          "unknown producer_id " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
     // Flatten repeated OffsetEntry into the parallel arrays
@@ -890,7 +823,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
             gm.group_id().c_str(), gm.generation_id(), gm.member_id().c_str(),
             gm.has_group_instance_id() ? gm.group_instance_id().c_str()
                                        : nullptr);
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_send_offsets_to_transaction(
             producer, topics.data(), partitions.data(), offsets.data(),
             leader_epochs.data(), metadata.data(),
@@ -907,11 +840,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     kafka_producer_Producer_flush(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -925,12 +857,11 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_PartitionInfoList_t* list = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -948,15 +879,12 @@ class ProducerServiceImpl final : public ProducerService::Service {
                        MetricsResponse* resp) override {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
-          "unknown producer_id " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
     kafka_producer_MetricMap_t* map = kafka_producer_Producer_metrics(producer);
     if (map == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "no metrics for producer " + std::to_string(req->producer_id()));
+      *resp->mutable_error() = make_synthetic_error("no metrics for producer " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
     MetricList* out = resp->mutable_metrics();
@@ -1017,7 +945,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // Idempotent close — silent success on unknown id.
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     // close() flushes, so the *Rust* side of every outstanding delivery
     // callback has run by the time this returns — i.e. its C callback has been
     // enqueued on the dispatcher. It does not guarantee the dispatcher has run
@@ -1202,7 +1130,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       for (const auto& kv : req->config()) {
         kafka_consumer_ConsumerProperties_put(props, kv.first.c_str(), kv.second.c_str());
       }
-      kafka_common_KafkaError_t* err = nullptr;
+      kafka_common_Error_t* err = nullptr;
       consumer = kafka_consumer_KafkaConsumer_new(props, &err);
       kafka_consumer_ConsumerProperties_destroy(props);
       if (consumer == nullptr) {
@@ -1231,7 +1159,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     std::vector<const char*> topics;
     topics.reserve(req->topics_size());
     for (const auto& t : req->topics()) topics.push_back(t.c_str());
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     if (req->with_listener()) {
       // A real ConsumerRebalanceListener whose invocations land in the callback
       // log. user_data_destroy is NULL because the LogState is owned by
@@ -1256,7 +1184,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                            StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_unsubscribe(c);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_unsubscribe(c);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -1266,7 +1194,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     TpArrays a = tp_arrays(req->partitions());
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_consumer_Consumer_assign(c, a.topics.data(), a.partitions.data(), a.count());
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1277,10 +1205,10 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     kafka_consumer_ConsumerRecords_t* records =
         kafka_consumer_Consumer_poll(c, req->timeout_ms(), &err);
     if (records == nullptr) {
@@ -1302,7 +1230,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                           StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     if (req->offsets().empty()) {
       err = kafka_consumer_Consumer_commit_sync(c);
     } else {
@@ -1319,7 +1247,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                            StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     LogState* state = log_state_for(req->consumer_id());
     // user_data_destroy is NULL for the same reason as in Subscribe: the
     // LogState belongs to log_states_, not to this one registration.
@@ -1345,12 +1273,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     TpArrays a = tp_arrays(req->partitions());
     kafka_consumer_OffsetMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_committed(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_committed(
         c, a.topics.data(), a.partitions.data(), a.count(), &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1378,11 +1306,11 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     int64_t out = 0;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_position(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_position(
         c, req->partition().topic().c_str(), req->partition().partition(), &out);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1396,7 +1324,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                     StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     if (req->has_metadata() || req->has_leader_epoch()) {
       err = kafka_consumer_Consumer_seek_with_metadata(
           c, req->partition().topic().c_str(), req->partition().partition(),
@@ -1441,7 +1369,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     std::vector<const char*> topics;
@@ -1453,7 +1381,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       timestamps.push_back(e.timestamp());
     }
     kafka_consumer_OffsetAndTimestampMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_offsets_for_times(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_offsets_for_times(
         c, topics.data(), partitions.data(), timestamps.data(),
         static_cast<int32_t>(topics.size()), &map);
     if (err != nullptr) {
@@ -1482,11 +1410,11 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_PartitionInfoList_t* infos = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1505,11 +1433,11 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionInfoMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_list_topics(c, &map);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_list_topics(c, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1536,7 +1464,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
@@ -1549,7 +1477,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
@@ -1562,14 +1490,14 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_MetricMap_t* map = kafka_consumer_Consumer_metrics(c);
     if (map == nullptr) {
       // Single-owner guard rejected the call (concurrent access).
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "concurrent access to consumer " + std::to_string(req->consumer_id()));
+          "concurrent access to consumer " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     MetricList* out = resp->mutable_metrics();
@@ -1616,7 +1544,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_StringList_t* list = kafka_consumer_Consumer_subscription(c);
@@ -1661,7 +1589,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // the Rust side of those callbacks has run by the time this returns — i.e.
     // their C callbacks have been enqueued on the dispatcher. It does not
     // guarantee the dispatcher has run them; see CallbackLog's comment.
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_close(consumer);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_close(consumer);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     // The log entries stay in callback_log_ and the LogState stays in
     // log_states_, so GetCallbackLog still works post-close and a late
@@ -1691,22 +1619,22 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 
   grpc::Status unknown(StatusResponse* resp, uint64_t id) {
     *resp->mutable_error() =
-        make_synthetic_error(VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(id));
+        make_synthetic_error("unknown consumer_id " + std::to_string(id));
     return grpc::Status::OK;
   }
 
-  using TpListFn = kafka_common_KafkaError_t* (*)(const kafka_consumer_Consumer_t*,
+  using TpListFn = kafka_common_Error_t* (*)(const kafka_consumer_Consumer_t*,
                                                   const char* const*, const int32_t*, int32_t);
   grpc::Status tp_list_op(const TopicPartitionListRequest* req, StatusResponse* resp, TpListFn fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     TpArrays a = tp_arrays(req->partitions());
-    kafka_common_KafkaError_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count());
+    kafka_common_Error_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count());
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
 
-  using LongOffFn = kafka_common_KafkaError_t* (*)(const kafka_consumer_Consumer_t*,
+  using LongOffFn = kafka_common_Error_t* (*)(const kafka_consumer_Consumer_t*,
                                                    const char* const*, const int32_t*, int32_t,
                                                    kafka_consumer_LongOffsetMap_t**);
   grpc::Status long_offsets(const TopicPartitionListRequest* req, LongOffsetsResponse* resp,
@@ -1714,12 +1642,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     TpArrays a = tp_arrays(req->partitions());
     kafka_consumer_LongOffsetMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count(), &map);
+    kafka_common_Error_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count(), &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -1802,8 +1730,8 @@ class AdminServiceImpl final : public AdminService::Service {
         // handle (a Rust panic must not unwind across the C boundary), so the
         // message is synthesised here.
         *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_ARGUMENT,
-            "MockAdminClient_new returned null for num_brokers " + std::to_string(num_brokers));
+            "MockAdminClient_new returned null for num_brokers " + std::to_string(num_brokers),
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
     } else {
@@ -1811,7 +1739,7 @@ class AdminServiceImpl final : public AdminService::Service {
       for (const auto& kv : req->config()) {
         kafka_admin_AdminClientProperties_put(props, kv.first.c_str(), kv.second.c_str());
       }
-      kafka_common_KafkaError_t* err = nullptr;
+      kafka_common_Error_t* err = nullptr;
       admin = kafka_admin_AdminClient_new(props, &err);
       kafka_admin_AdminClientProperties_destroy(props);
       if (admin == nullptr) {
@@ -1875,7 +1803,7 @@ class AdminServiceImpl final : public AdminService::Service {
     std::vector<const kafka_admin_NewTopic_t*> topics(owned.begin(), owned.end());
 
     kafka_admin_CreateTopicsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_topics(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_create_topics(
         admin, topics.data(), static_cast<int32_t>(topics.size()),
         timeout_ms(*req), req->validate_only(), retry_on_quota(*req), &result);
     for (kafka_admin_NewTopic_t* topic : owned) kafka_admin_NewTopic_destroy(topic);
@@ -1888,7 +1816,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (int32_t i = 0; i < count; i++) {
       CreateTopicsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), kafka_admin_CreateTopicsResult_get_key(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_CreateTopicsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -1899,8 +1827,7 @@ class AdminServiceImpl final : public AdminService::Service {
         const kafka_admin_TopicMetadataAndConfig_t* value =
             kafka_admin_CreateTopicsResult_get_value(result, i);
         if (value == nullptr) {
-          *entry->mutable_error() = make_synthetic_error(
-              VARIANT_ILLEGAL_STATE, "createTopics entry has neither value nor error");
+          *entry->mutable_error() = make_synthetic_error("createTopics entry has neither value nor error");
         } else {
           metadata_to_proto(value, entry->mutable_value());
         }
@@ -1927,7 +1854,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& key : owned) keys.push_back(key.c_str());
 
     kafka_admin_DeleteTopicsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         by_ids ? kafka_admin_AdminClient_delete_topics_by_ids(
                      admin, keys.data(), static_cast<int32_t>(keys.size()),
                      timeout_ms(*req), retry_on_quota(*req), &result)
@@ -1944,7 +1871,7 @@ class AdminServiceImpl final : public AdminService::Service {
       VoidResultEntry* entry = resp->add_entries();
       set_keyed(entry->mutable_key(), kafka_admin_DeleteTopicsResult_get_key(result, i), by_ids);
       // No value for a KafkaFuture<Void>: an absent error is the success signal.
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DeleteTopicsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -1960,7 +1887,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     kafka_admin_ListTopicsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_topics(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_topics(
         admin, timeout_ms(*req), req->list_internal(), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -1982,8 +1909,7 @@ class AdminServiceImpl final : public AdminService::Service {
         // agreement between backends instead of a loud disagreement. Both Python
         // servers already surface this condition at whole-call level.
         resp->clear_listings();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "listTopics entry has no listing");
+        *resp->mutable_error() = make_synthetic_error("listTopics entry has no listing");
         break;
       }
       AdminTopicListing* dst = resp->add_listings();
@@ -2017,7 +1943,7 @@ class AdminServiceImpl final : public AdminService::Service {
                               : -1;
 
     kafka_admin_DescribeTopicsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         by_ids ? kafka_admin_AdminClient_describe_topics_by_ids(
                      admin, keys.data(), static_cast<int32_t>(keys.size()),
                      timeout_ms(*req), req->include_authorized_operations(), limit, &result)
@@ -2033,7 +1959,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (int32_t i = 0; i < count; i++) {
       DescribeTopicsEntry* entry = resp->add_entries();
       set_keyed(entry->mutable_key(), kafka_admin_DescribeTopicsResult_get_key(result, i), by_ids);
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeTopicsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2041,8 +1967,7 @@ class AdminServiceImpl final : public AdminService::Service {
         const kafka_admin_TopicDescription_t* value =
             kafka_admin_DescribeTopicsResult_get_value(result, i);
         if (value == nullptr) {
-          *entry->mutable_error() = make_synthetic_error(
-              VARIANT_ILLEGAL_STATE, "describeTopics entry has neither value nor error");
+          *entry->mutable_error() = make_synthetic_error("describeTopics entry has neither value nor error");
         } else {
           description_to_proto(value, entry->mutable_value());
         }
@@ -2087,7 +2012,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& name : topic_names) topics.push_back(name.c_str());
 
     kafka_admin_CreatePartitionsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_partitions(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_create_partitions(
         admin, topics.data(), counts.data(), static_cast<int32_t>(topics.size()),
         timeout_ms(*req), req->validate_only(), retry_on_quota(*req), &result);
     for (kafka_admin_NewPartitions_t* np : owned) kafka_admin_NewPartitions_destroy(np);
@@ -2100,7 +2025,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (int32_t i = 0; i < count; i++) {
       VoidResultEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), kafka_admin_CreatePartitionsResult_get_key(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_CreatePartitionsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -2130,7 +2055,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& name : topic_names) topics.push_back(name.c_str());
 
     kafka_admin_DeleteRecordsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_records(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_records(
         admin, topics.data(), partitions.data(), before_offsets.data(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2144,7 +2069,7 @@ class AdminServiceImpl final : public AdminService::Service {
       TopicPartition* tp = entry->mutable_key()->mutable_partition();
       tp->set_topic(cstr(kafka_admin_DeleteRecordsResult_get_topic(result, i)));
       tp->set_partition(kafka_admin_DeleteRecordsResult_get_partition(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DeleteRecordsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2172,7 +2097,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     kafka_admin_DescribeClusterResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_cluster(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_cluster(
         admin, timeout_ms(*req), req->include_authorized_operations(),
         req->include_fenced_brokers(), &result);
     if (err != nullptr) {
@@ -2223,7 +2148,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& name : owned_names) names.push_back(name.c_str());
 
     kafka_admin_DescribeConfigsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_configs(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_configs(
         admin, types.data(), names.data(), static_cast<int32_t>(types.size()),
         timeout_ms(*req), req->include_synonyms(), req->include_documentation(), &result);
     if (err != nullptr) {
@@ -2237,7 +2162,7 @@ class AdminServiceImpl final : public AdminService::Service {
       set_config_resource_key(entry->mutable_key(),
                               kafka_admin_DescribeConfigsResult_get_key_type(result, i),
                               kafka_admin_DescribeConfigsResult_get_key_name(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeConfigsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2245,12 +2170,10 @@ class AdminServiceImpl final : public AdminService::Service {
         const kafka_admin_Config_t* config =
             kafka_admin_DescribeConfigsResult_get_value(result, i);
         if (config == nullptr) {
-          *entry->mutable_error() = make_synthetic_error(
-              VARIANT_ILLEGAL_STATE, "describeConfigs entry has neither value nor error");
+          *entry->mutable_error() = make_synthetic_error("describeConfigs entry has neither value nor error");
         } else if (!config_to_proto(config, entry->mutable_value())) {
           entry->clear_value();
-          *entry->mutable_error() = make_synthetic_error(
-              VARIANT_ILLEGAL_STATE, "describeConfigs entry has an unreadable config entry");
+          *entry->mutable_error() = make_synthetic_error("describeConfigs entry has an unreadable config entry");
         }
       }
     }
@@ -2299,7 +2222,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
 
     kafka_admin_AlterConfigsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_incremental_alter_configs(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_incremental_alter_configs(
         admin, types.data(), resources.data(), config_names.data(), config_values.data(),
         op_types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req),
         req->validate_only(), &result);
@@ -2314,7 +2237,7 @@ class AdminServiceImpl final : public AdminService::Service {
       set_config_resource_key(entry->mutable_key(),
                               kafka_admin_AlterConfigsResult_get_key_type(result, i),
                               kafka_admin_AlterConfigsResult_get_key_name(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_AlterConfigsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -2332,7 +2255,7 @@ class AdminServiceImpl final : public AdminService::Service {
     // An empty array is Java's empty Set: every type the cluster supports.
     std::vector<int32_t> types(req->resource_types().begin(), req->resource_types().end());
     kafka_admin_ListConfigResourcesResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_config_resources(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_config_resources(
         admin, types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -2357,7 +2280,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     kafka_admin_ListClientMetricsResourcesResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_client_metrics_resources(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_client_metrics_resources(
         admin, timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -2381,7 +2304,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
     std::vector<int32_t> brokers(req->brokers().begin(), req->brokers().end());
     kafka_admin_DescribeLogDirsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_log_dirs(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_log_dirs(
         admin, brokers.data(), static_cast<int32_t>(brokers.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -2393,7 +2316,7 @@ class AdminServiceImpl final : public AdminService::Service {
       DescribeLogDirsEntry* entry = resp->add_entries();
       entry->mutable_key()->set_broker_id(
           kafka_admin_DescribeLogDirsResult_get_broker(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeLogDirsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2402,8 +2325,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const kafka_admin_LogDirDescriptionMap_t* map =
           kafka_admin_DescribeLogDirsResult_get_value(result, i);
       if (map == nullptr) {
-        *entry->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeLogDirs entry has neither value nor error");
+        *entry->mutable_error() = make_synthetic_error("describeLogDirs entry has neither value nor error");
         continue;
       }
       // The nested level: one description per log-dir path.
@@ -2417,8 +2339,7 @@ class AdminServiceImpl final : public AdminService::Service {
           // the log dir would return a successful per-broker value with silently
           // reduced cardinality. This entry does have an error arm, so use it.
           entry->clear_value();
-          *entry->mutable_error() = make_synthetic_error(
-              VARIANT_ILLEGAL_STATE, "describeLogDirs entry has an unreadable log dir");
+          *entry->mutable_error() = make_synthetic_error("describeLogDirs entry has an unreadable log dir");
           break;
         }
         log_dir_description_to_proto(
@@ -2455,7 +2376,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& dir : owned_log_dirs) log_dirs.push_back(dir.c_str());
 
     kafka_admin_AlterReplicaLogDirsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_replica_log_dirs(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_replica_log_dirs(
         admin, topics.data(), partitions.data(), broker_ids.data(), log_dirs.data(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2470,7 +2391,7 @@ class AdminServiceImpl final : public AdminService::Service {
                       kafka_admin_AlterReplicaLogDirsResult_get_topic(result, i),
                       kafka_admin_AlterReplicaLogDirsResult_get_partition(result, i),
                       kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_AlterReplicaLogDirsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -2499,7 +2420,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
 
     kafka_admin_DescribeReplicaLogDirsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_replica_log_dirs(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_replica_log_dirs(
         admin, topics.data(), partitions.data(), broker_ids.data(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2514,7 +2435,7 @@ class AdminServiceImpl final : public AdminService::Service {
                       kafka_admin_DescribeReplicaLogDirsResult_get_topic(result, i),
                       kafka_admin_DescribeReplicaLogDirsResult_get_partition(result, i),
                       kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeReplicaLogDirsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2523,8 +2444,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const kafka_admin_ReplicaLogDirInfo_t* info =
           kafka_admin_DescribeReplicaLogDirsResult_get_value(result, i);
       if (info == nullptr) {
-        *entry->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeReplicaLogDirs entry has neither value nor error");
+        *entry->mutable_error() = make_synthetic_error("describeReplicaLogDirs entry has neither value nor error");
         continue;
       }
       ReplicaLogDirInfo* dst = entry->mutable_value();
@@ -2579,7 +2499,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
 
     kafka_admin_ElectLeadersResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_elect_leaders(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_elect_leaders(
         admin, req->election_type(), all_partitions, topics.data(), partitions.data(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2595,7 +2515,7 @@ class AdminServiceImpl final : public AdminService::Service {
                         kafka_admin_ElectLeadersResult_get_partition(result, i));
       // Java's Optional<Throwable> per partition: a null handle means the
       // election succeeded for that partition, which is the absent error.
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_ElectLeadersResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -2650,7 +2570,7 @@ class AdminServiceImpl final : public AdminService::Service {
                                      : true;
 
     kafka_admin_AlterPartitionReassignmentsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_partition_reassignments(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_partition_reassignments(
         admin, topics.data(), partitions.data(), cancel.get(), replica_ptrs.data(),
         replica_counts.data(), static_cast<int32_t>(topics.size()), timeout_ms(*req),
         allow_rf_change, &result);
@@ -2666,7 +2586,7 @@ class AdminServiceImpl final : public AdminService::Service {
           entry->mutable_key(),
           kafka_admin_AlterPartitionReassignmentsResult_get_topic(result, i),
           kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_AlterPartitionReassignmentsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -2698,7 +2618,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
 
     kafka_admin_ListPartitionReassignmentsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_partition_reassignments(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_partition_reassignments(
         admin, all_partitions, topics.data(), partitions.data(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2718,8 +2638,7 @@ class AdminServiceImpl final : public AdminService::Service {
         // the only honest answer: there is no per-entry error arm here, and
         // skipping the entry would return an error-free response one item short.
         resp->clear_reassignments();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "listPartitionReassignments entry has no reassignment");
+        *resp->mutable_error() = make_synthetic_error("listPartitionReassignments entry has no reassignment");
         break;
       }
       OngoingPartitionReassignment* dst = resp->add_reassignments();
@@ -2769,18 +2688,19 @@ class AdminServiceImpl final : public AdminService::Service {
         // A KIND_UNSPECIFIED or an unknown kind, or FOR_TIMESTAMP with no
         // timestamp: a protocol error, never a defaulted variant.
         //
-        // Whole-call, and with the ILLEGAL_ARGUMENT **variant** — which is the
-        // part that has to match, since `variant` is what the Rust client
-        // matches on. Both Python servers raise `AdminRequestError` for the same
-        // condition, which `_kafka_error_to_proto` maps to ILLEGAL_ARGUMENT; an
-        // earlier revision of this comment claimed only that the two agreed on
-        // the *level*, and they did not agree on the variant at all (Python fell
+        // Whole-call, and with the LOCAL_ILLEGAL_ARGUMENT **code** — which is
+        // the part that has to match, since the code is now the sole
+        // discriminator the Rust client decodes. Both Python servers raise
+        // `AdminRequestError` for the same condition, which
+        // `_kafka_error_to_proto` maps to LOCAL_ILLEGAL_ARGUMENT; an earlier
+        // revision of this comment claimed only that the two agreed on the
+        // *level*, and they did not agree on the class at all (Python fell
         // through to ILLEGAL_STATE).
         *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_ARGUMENT,
             "OffsetSpec for " + spec.partition().topic() + "-" +
-                std::to_string(spec.partition().partition()) +
-                " has no usable kind (" + std::to_string(spec.spec().kind()) + ")");
+                std::to_string(spec.partition().partition()) + " has no usable kind (" +
+                std::to_string(spec.spec().kind()) + ")",
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
       is_timestamp[values.size()] = spec_is_timestamp;
@@ -2793,7 +2713,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
 
     kafka_admin_ListOffsetsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_offsets(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_offsets(
         admin, topics.data(), partitions.data(), is_timestamp.get(), values.data(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), req->isolation_level(), &result);
     if (err != nullptr) {
@@ -2807,7 +2727,7 @@ class AdminServiceImpl final : public AdminService::Service {
       set_partition_key(entry->mutable_key(),
                         kafka_admin_ListOffsetsResult_get_topic(result, i),
                         kafka_admin_ListOffsetsResult_get_partition(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_ListOffsetsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2816,8 +2736,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const kafka_admin_ListOffsetsResultInfo_t* info =
           kafka_admin_ListOffsetsResult_get_value(result, i);
       if (info == nullptr) {
-        *entry->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "listOffsets entry has neither value nor error");
+        *entry->mutable_error() = make_synthetic_error("listOffsets entry has neither value nor error");
         continue;
       }
       ListOffsetsResultInfo* dst = entry->mutable_value();
@@ -2862,7 +2781,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray types(req->types());
 
     kafka_admin_ListGroupsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_groups(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_groups(
         admin, states.data(), states.count(), protocols.data(), protocols.count(),
         types.data(), types.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2879,8 +2798,7 @@ class AdminServiceImpl final : public AdminService::Service {
         // successful listing one item short, so fail the whole call instead.
         resp->clear_valid();
         resp->clear_listing_errors();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "listGroups valid entry is null");
+        *resp->mutable_error() = make_synthetic_error("listGroups valid entry is null");
         kafka_admin_ListGroupsResult_destroy(result);
         return grpc::Status::OK;
       }
@@ -2898,7 +2816,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
     const int32_t errors = kafka_admin_ListGroupsResult_error_count(result);
     for (int32_t i = 0; i < errors; i++) {
-      const kafka_common_KafkaError_t* listing_err =
+      const kafka_common_Error_t* listing_err =
           kafka_admin_ListGroupsResult_get_error(result, i);
       if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
     }
@@ -2917,7 +2835,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray types(req->types());
 
     kafka_admin_ListConsumerGroupsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_consumer_groups(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_consumer_groups(
         admin, states.data(), states.count(), types.data(), types.count(),
         timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -2932,8 +2850,7 @@ class AdminServiceImpl final : public AdminService::Service {
       if (listing == nullptr) {
         resp->clear_valid();
         resp->clear_listing_errors();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "listConsumerGroups valid entry is null");
+        *resp->mutable_error() = make_synthetic_error("listConsumerGroups valid entry is null");
         kafka_admin_ListConsumerGroupsResult_destroy(result);
         return grpc::Status::OK;
       }
@@ -2952,7 +2869,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
     const int32_t errors = kafka_admin_ListConsumerGroupsResult_error_count(result);
     for (int32_t i = 0; i < errors; i++) {
-      const kafka_common_KafkaError_t* listing_err =
+      const kafka_common_Error_t* listing_err =
           kafka_admin_ListConsumerGroupsResult_get_error(result, i);
       if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
     }
@@ -2971,7 +2888,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray group_ids(req->group_ids());
 
     kafka_admin_DescribeConsumerGroupsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_consumer_groups(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_consumer_groups(
         admin, group_ids.data(), group_ids.count(), timeout_ms(*req),
         req->include_authorized_operations(), &result);
     if (err != nullptr) {
@@ -2984,7 +2901,7 @@ class AdminServiceImpl final : public AdminService::Service {
       DescribeConsumerGroupsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeConsumerGroupsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -2993,8 +2910,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const kafka_admin_ConsumerGroupDescription_t* description =
           kafka_admin_DescribeConsumerGroupsResult_get_value(result, i);
       if (description == nullptr) {
-        *entry->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeConsumerGroups entry has neither value nor error");
+        *entry->mutable_error() = make_synthetic_error("describeConsumerGroups entry has neither value nor error");
         continue;
       }
       consumer_group_description_to_proto(description, entry->mutable_value());
@@ -3014,7 +2930,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray group_ids(req->group_ids());
 
     kafka_admin_DescribeClassicGroupsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_classic_groups(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_classic_groups(
         admin, group_ids.data(), group_ids.count(), timeout_ms(*req),
         req->include_authorized_operations(), &result);
     if (err != nullptr) {
@@ -3027,7 +2943,7 @@ class AdminServiceImpl final : public AdminService::Service {
       DescribeClassicGroupsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_DescribeClassicGroupsResult_get_group_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeClassicGroupsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -3036,8 +2952,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const kafka_admin_ClassicGroupDescription_t* description =
           kafka_admin_DescribeClassicGroupsResult_get_value(result, i);
       if (description == nullptr) {
-        *entry->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeClassicGroups entry has neither value nor error");
+        *entry->mutable_error() = make_synthetic_error("describeClassicGroups entry has neither value nor error");
         continue;
       }
       classic_group_description_to_proto(description, entry->mutable_value());
@@ -3108,7 +3023,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
 
     kafka_admin_ListConsumerGroupOffsetsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_consumer_group_offsets(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_consumer_group_offsets(
         admin, group_ids.data(), all_partitions.get(), topics_per_group.data(),
         partitions_per_group.data(), partition_counts.data(),
         static_cast<int32_t>(group_ids.size()), timeout_ms(*req), req->require_stable(),
@@ -3123,7 +3038,7 @@ class AdminServiceImpl final : public AdminService::Service {
       ListConsumerGroupOffsetsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -3132,9 +3047,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const kafka_admin_OffsetAndMetadataMap_t* map =
           kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, i);
       if (map == nullptr) {
-        *entry->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE,
-            "listConsumerGroupOffsets entry has neither value nor error");
+        *entry->mutable_error() = make_synthetic_error("listConsumerGroupOffsets entry has neither value nor error");
         continue;
       }
       // The nested level: one committed offset per partition, each nullable.
@@ -3199,7 +3112,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& value : owned_metadata) metadata.push_back(value.c_str());
 
     kafka_admin_AlterConsumerGroupOffsetsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_consumer_group_offsets(
         admin, req->group_id().c_str(), topics.data(), partitions.data(), offsets.data(),
         metadata.data(), leader_epochs.data(), has_leader_epoch.get(),
         static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
@@ -3215,7 +3128,7 @@ class AdminServiceImpl final : public AdminService::Service {
           entry->mutable_key(),
           kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(result, i),
           kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3234,7 +3147,7 @@ class AdminServiceImpl final : public AdminService::Service {
     TpArrays tps = tp_arrays(req->partitions());
 
     kafka_admin_DeleteConsumerGroupOffsetsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_consumer_group_offsets(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_consumer_group_offsets(
         admin, req->group_id().c_str(), tps.topics.data(), tps.partitions.data(),
         tps.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -3249,7 +3162,7 @@ class AdminServiceImpl final : public AdminService::Service {
           entry->mutable_key(),
           kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(result, i),
           kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3268,7 +3181,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray group_ids(req->group_ids());
 
     kafka_admin_DeleteConsumerGroupsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_consumer_groups(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_consumer_groups(
         admin, group_ids.data(), group_ids.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -3280,7 +3193,7 @@ class AdminServiceImpl final : public AdminService::Service {
       VoidResultEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_DeleteConsumerGroupsResult_get_group_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DeleteConsumerGroupsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3317,7 +3230,7 @@ class AdminServiceImpl final : public AdminService::Service {
     const std::string reason = req->has_reason() ? req->reason() : std::string();
 
     kafka_admin_RemoveMembersFromConsumerGroupResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_admin_AdminClient_remove_members_from_consumer_group(
             admin, req->group_id().c_str(), remove_all, ids.data(),
             static_cast<int32_t>(ids.size()),
@@ -3336,7 +3249,7 @@ class AdminServiceImpl final : public AdminService::Service {
       set_name_key(
           entry->mutable_key(),
           kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3372,7 +3285,7 @@ class AdminServiceImpl final : public AdminService::Service {
     AclBindingColumns cols(req->acls());
 
     kafka_admin_CreateAclsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_acls(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_create_acls(
         admin, cols.resource_types.data(), cols.resource_names.data(),
         cols.pattern_types.data(), cols.principals.data(), cols.hosts.data(),
         cols.operations.data(), cols.permission_types.data(), cols.count(),
@@ -3391,13 +3304,12 @@ class AdminServiceImpl final : public AdminService::Service {
         // Unreachable for i < count, but a keyless entry would be silently
         // dropped by the client's map, so fail the whole call instead.
         resp->clear_entries();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "createAcls entry has no binding key");
+        *resp->mutable_error() = make_synthetic_error("createAcls entry has no binding key");
         kafka_admin_CreateAclsResult_destroy(result);
         return grpc::Status::OK;
       }
       acl_binding_to_proto(binding, entry->mutable_key()->mutable_acl_binding());
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_CreateAclsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3418,7 +3330,7 @@ class AdminServiceImpl final : public AdminService::Service {
     // empty name.
     const AclBindingFilter& f = req->filter();
     kafka_admin_DescribeAclsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_acls(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_acls(
         admin, f.resource_type(),
         f.has_resource_name() ? f.resource_name().c_str() : nullptr,
         f.pattern_type(),
@@ -3436,8 +3348,7 @@ class AdminServiceImpl final : public AdminService::Service {
           kafka_admin_DescribeAclsResult_get_binding(result, i);
       if (binding == nullptr) {
         resp->clear_acls();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeAcls binding is null");
+        *resp->mutable_error() = make_synthetic_error("describeAcls binding is null");
         kafka_admin_DescribeAclsResult_destroy(result);
         return grpc::Status::OK;
       }
@@ -3457,7 +3368,7 @@ class AdminServiceImpl final : public AdminService::Service {
     AclFilterColumns cols(req->filters());
 
     kafka_admin_DeleteAclsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_acls(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_acls(
         admin, cols.resource_types.data(), cols.resource_names.data(),
         cols.pattern_types.data(), cols.principals.data(), cols.hosts.data(),
         cols.operations.data(), cols.permission_types.data(), cols.count(),
@@ -3474,13 +3385,12 @@ class AdminServiceImpl final : public AdminService::Service {
           kafka_admin_DeleteAclsResult_get_filter(result, i);
       if (filter == nullptr) {
         resp->clear_entries();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "deleteAcls entry has no filter key");
+        *resp->mutable_error() = make_synthetic_error("deleteAcls entry has no filter key");
         kafka_admin_DeleteAclsResult_destroy(result);
         return grpc::Status::OK;
       }
       acl_filter_to_proto(filter, entry->mutable_key()->mutable_acl_binding_filter());
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DeleteAclsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -3500,7 +3410,7 @@ class AdminServiceImpl final : public AdminService::Service {
         if (deleted_binding != nullptr) {
           acl_binding_to_proto(deleted_binding, deleted->mutable_binding());
         }
-        const kafka_common_KafkaError_t* inner_err =
+        const kafka_common_Error_t* inner_err =
             kafka_admin_DeleteAclsResult_get_result_error(result, i, j);
         if (inner_err != nullptr) copy_proto_error(deleted->mutable_exception(), inner_err);
       }
@@ -3537,8 +3447,8 @@ class AdminServiceImpl final : public AdminService::Service {
         case MATCH_KIND_EXACT:
           if (!c.has_match_name()) {
             *resp->mutable_error() = make_synthetic_error(
-                VARIANT_ILLEGAL_ARGUMENT,
-                "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name");
+                "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name",
+                kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
             return grpc::Status::OK;
           }
           match_type = 0;  // DescribeClientQuotasRequest.MATCH_TYPE_EXACT
@@ -3554,9 +3464,9 @@ class AdminServiceImpl final : public AdminService::Service {
           break;
         default:
           *resp->mutable_error() = make_synthetic_error(
-              VARIANT_ILLEGAL_ARGUMENT,
               "ClientQuotaFilterComponent has no match_kind (got " +
-                  std::to_string(static_cast<int>(c.match_kind())) + ")");
+                  std::to_string(static_cast<int>(c.match_kind())) + ")",
+              kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
       }
       match_types.push_back(match_type);
@@ -3571,7 +3481,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
 
     kafka_admin_DescribeClientQuotasResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_client_quotas(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_client_quotas(
         admin, entity_types.empty() ? nullptr : entity_types.data(),
         match_types.empty() ? nullptr : match_types.data(),
         match_names.empty() ? nullptr : match_names.data(),
@@ -3587,8 +3497,7 @@ class AdminServiceImpl final : public AdminService::Service {
           kafka_admin_DescribeClientQuotasResult_get_entity(result, i);
       if (entity == nullptr) {
         resp->clear_entities();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeClientQuotas entity is null");
+        *resp->mutable_error() = make_synthetic_error("describeClientQuotas entity is null");
         kafka_admin_DescribeClientQuotasResult_destroy(result);
         return grpc::Status::OK;
       }
@@ -3677,7 +3586,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
 
     kafka_admin_AlterClientQuotasResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_client_quotas(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_client_quotas(
         admin, entity_types.empty() ? nullptr : entity_types.data(),
         entity_names.empty() ? nullptr : entity_names.data(),
         entity_counts.empty() ? nullptr : entity_counts.data(),
@@ -3697,14 +3606,13 @@ class AdminServiceImpl final : public AdminService::Service {
           kafka_admin_AlterClientQuotasResult_get_entity(result, i);
       if (entity == nullptr) {
         resp->clear_entries();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "alterClientQuotas entry has no entity key");
+        *resp->mutable_error() = make_synthetic_error("alterClientQuotas entry has no entity key");
         kafka_admin_AlterClientQuotasResult_destroy(result);
         return grpc::Status::OK;
       }
       VoidResultEntry* entry = resp->add_entries();
       quota_entity_to_proto(entity, entry->mutable_key()->mutable_client_quota_entity());
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_AlterClientQuotasResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3724,7 +3632,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray users(req->users());
 
     kafka_admin_DescribeUserScramCredentialsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_user_scram_credentials(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_user_scram_credentials(
         admin, users.data(), users.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -3736,7 +3644,7 @@ class AdminServiceImpl final : public AdminService::Service {
       DescribeUserScramCredentialsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeUserScramCredentialsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -3810,7 +3718,7 @@ class AdminServiceImpl final : public AdminService::Service {
     }
 
     kafka_admin_AlterUserScramCredentialsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_user_scram_credentials(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_user_scram_credentials(
         admin, users.empty() ? nullptr : users.data(), is_deletions.get(),
         mechanisms.empty() ? nullptr : mechanisms.data(),
         iterations.empty() ? nullptr : iterations.data(),
@@ -3829,7 +3737,7 @@ class AdminServiceImpl final : public AdminService::Service {
       VoidResultEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_AlterUserScramCredentialsResult_get_user(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_AlterUserScramCredentialsResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -3853,7 +3761,7 @@ class AdminServiceImpl final : public AdminService::Service {
     const char* owner_name = req->has_owner() ? req->owner().name().c_str() : nullptr;
 
     kafka_admin_CreateDelegationTokenResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_delegation_token(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_create_delegation_token(
         admin, renewers.types, renewers.names, renewers.count(),
         owner_type, owner_name, req->max_lifetime_ms(), timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -3864,12 +3772,10 @@ class AdminServiceImpl final : public AdminService::Service {
     const kafka_common_DelegationToken_t* token =
         kafka_admin_CreateDelegationTokenResult_get_token(result);
     if (token == nullptr) {
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "createDelegationToken returned neither a token nor an error");
+      *resp->mutable_error() = make_synthetic_error("createDelegationToken returned neither a token nor an error");
     } else if (!delegation_token_to_proto(token, resp->mutable_token())) {
       resp->clear_token();
-      *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "createDelegationToken token has no token_info");
+      *resp->mutable_error() = make_synthetic_error("createDelegationToken token has no token_info");
     }
     kafka_admin_CreateDelegationTokenResult_destroy(result);
     return grpc::Status::OK;
@@ -3884,7 +3790,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     kafka_admin_RenewDelegationTokenResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_renew_delegation_token(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_renew_delegation_token(
         admin, reinterpret_cast<const uint8_t*>(req->hmac().data()),
         static_cast<int32_t>(req->hmac().size()), req->renew_time_period_ms(),
         timeout_ms(*req), &result);
@@ -3906,7 +3812,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     kafka_admin_ExpireDelegationTokenResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_expire_delegation_token(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_expire_delegation_token(
         admin, reinterpret_cast<const uint8_t*>(req->hmac().data()),
         static_cast<int32_t>(req->hmac().size()), req->expiry_time_period_ms(),
         timeout_ms(*req), &result);
@@ -3936,7 +3842,7 @@ class AdminServiceImpl final : public AdminService::Service {
     PrincipalColumns owners(has_owners ? req->owners().principals() : kNoPrincipals);
 
     kafka_admin_DescribeDelegationTokenResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_delegation_token(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_delegation_token(
         admin, has_owners, owners.types, owners.names, owners.count(),
         timeout_ms(*req), &result);
     if (err != nullptr) {
@@ -3950,8 +3856,7 @@ class AdminServiceImpl final : public AdminService::Service {
           kafka_admin_DescribeDelegationTokenResult_get_token(result, i);
       if (token == nullptr || !delegation_token_to_proto(token, resp->add_tokens())) {
         resp->clear_tokens();
-        *resp->mutable_error() = make_synthetic_error(
-            VARIANT_ILLEGAL_STATE, "describeDelegationToken token is null or has no token_info");
+        *resp->mutable_error() = make_synthetic_error("describeDelegationToken token is null or has no token_info");
         kafka_admin_DescribeDelegationTokenResult_destroy(result);
         return grpc::Status::OK;
       }
@@ -3970,7 +3875,7 @@ class AdminServiceImpl final : public AdminService::Service {
     // `has_node_id` carries the absence: node id 0 is a legal broker, so it
     // cannot be encoded as a sentinel value.
     kafka_admin_DescribeFeaturesResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_features(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_features(
         admin, req->has_node_id(), req->has_node_id() ? req->node_id() : 0, timeout_ms(*req),
         &result);
     if (err != nullptr) {
@@ -4032,7 +3937,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (const std::string& feature : owned_features) features.push_back(feature.c_str());
 
     kafka_admin_UpdateFeaturesResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_update_features(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_update_features(
         admin, features.empty() ? nullptr : features.data(),
         max_version_levels.empty() ? nullptr : max_version_levels.data(),
         upgrade_types.empty() ? nullptr : upgrade_types.data(),
@@ -4046,7 +3951,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (int32_t i = 0; i < count; i++) {
       VoidResultEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(), kafka_admin_UpdateFeaturesResult_get_feature(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_UpdateFeaturesResult_get_error(result, i);
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
@@ -4088,7 +3993,7 @@ class AdminServiceImpl final : public AdminService::Service {
     // `has_broker_id` is the dedicated discriminant for Java's OptionalInt: the
     // setter range-checks nothing, so no sentinel is free.
     kafka_admin_DescribeProducersResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_producers(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_producers(
         admin, topics.empty() ? nullptr : topics.data(),
         partitions.empty() ? nullptr : partitions.data(),
         static_cast<int32_t>(topics.size()), req->has_broker_id(),
@@ -4104,7 +4009,7 @@ class AdminServiceImpl final : public AdminService::Service {
       set_partition_key(entry->mutable_key(),
                         kafka_admin_DescribeProducersResult_get_topic(result, i),
                         kafka_admin_DescribeProducersResult_get_partition(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeProducersResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -4150,7 +4055,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray ids(req->transactional_ids());
 
     kafka_admin_DescribeTransactionsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_transactions(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_transactions(
         admin, ids.data(), ids.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -4162,7 +4067,7 @@ class AdminServiceImpl final : public AdminService::Service {
       DescribeTransactionsEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_DescribeTransactionsResult_get_transactional_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_DescribeTransactionsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -4209,14 +4114,16 @@ class AdminServiceImpl final : public AdminService::Service {
     }
     // Java's AbortTransactionSpec holds a TopicPartition, which has no
     // null-topic form, so an absent one is a malformed *request* — the
-    // ILLEGAL_ARGUMENT variant, matching grpc_translate's AdminRequestError.
+    // LOCAL_ILLEGAL_ARGUMENT class, matching grpc_translate's
+    // AdminRequestError.
     if (!req->has_topic_partition()) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_ARGUMENT, "abort_transaction requires a topic_partition");
+          "abort_transaction requires a topic_partition",
+          kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
       return grpc::Status::OK;
     }
     const std::string topic = req->topic_partition().topic();
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_abort_transaction(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_abort_transaction(
         admin, topic.c_str(), req->topic_partition().partition(), req->producer_id(),
         req->producer_epoch(), req->coordinator_epoch(), timeout_ms(*req));
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
@@ -4232,7 +4139,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
     const std::string id = req->transactional_id();
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_force_terminate_transaction(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_force_terminate_transaction(
         admin, id.c_str(), timeout_ms(*req));
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -4259,7 +4166,7 @@ class AdminServiceImpl final : public AdminService::Service {
         req->has_transactional_id_pattern() ? req->transactional_id_pattern() : std::string();
 
     kafka_admin_ListTransactionsResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_transactions(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_list_transactions(
         admin, states.data(), states.count(),
         producer_ids.empty() ? nullptr : producer_ids.data(),
         static_cast<int32_t>(producer_ids.size()), req->duration_ms(),
@@ -4275,7 +4182,7 @@ class AdminServiceImpl final : public AdminService::Service {
       ListTransactionsEntry* entry = resp->add_entries();
       entry->mutable_key()->set_broker_id(
           kafka_admin_ListTransactionsResult_get_broker_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_ListTransactionsResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -4307,7 +4214,7 @@ class AdminServiceImpl final : public AdminService::Service {
     StringArray ids(req->transactional_ids());
 
     kafka_admin_FenceProducersResult_t* result = nullptr;
-    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_fence_producers(
+    kafka_common_Error_t* err = kafka_admin_AdminClient_fence_producers(
         admin, ids.data(), ids.count(), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -4319,7 +4226,7 @@ class AdminServiceImpl final : public AdminService::Service {
       FenceProducersEntry* entry = resp->add_entries();
       set_name_key(entry->mutable_key(),
                    kafka_admin_FenceProducersResult_get_transactional_id(result, i));
-      const kafka_common_KafkaError_t* key_err =
+      const kafka_common_Error_t* key_err =
           kafka_admin_FenceProducersResult_get_error(result, i);
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
@@ -4369,8 +4276,7 @@ class AdminServiceImpl final : public AdminService::Service {
   }
 
   static KafkaError unknown_admin(uint64_t id) {
-    return make_synthetic_error(VARIANT_ILLEGAL_STATE,
-                                "unknown admin_id " + std::to_string(id));
+    return make_synthetic_error("unknown admin_id " + std::to_string(id));
   }
 
   static std::string cstr(const char* s) { return s ? std::string(s) : std::string(); }
@@ -4391,13 +4297,10 @@ class AdminServiceImpl final : public AdminService::Service {
 
   // Per-key error pointers are *borrowed* from the result handle, so unlike
   // fill_proto_error this must not destroy them.
-  static void copy_proto_error(KafkaError* dst, const kafka_common_KafkaError_t* err) {
-    const char* msg = kafka_common_KafkaError_message(err);
-    dst->set_variant(static_cast<KafkaError::Variant>(guess_variant(msg)));
-    dst->set_code(kafka_common_KafkaError_code(err));
+  static void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
+    const char* msg = kafka_common_Error_message(err);
+    dst->set_code(kafka_common_Error_code(err));
     dst->set_message(msg ? std::string(msg) : std::string());
-    dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
-    dst->set_is_fatal(kafka_common_KafkaError_is_fatal(err));
   }
 
   static void set_name_key(ResultKey* key, const char* name) { key->set_name(cstr(name)); }
@@ -4708,7 +4611,7 @@ class AdminServiceImpl final : public AdminService::Service {
                                            LogDirDescription* dst) {
     // The log dir's own error: the broker answered, but this directory is
     // offline or unreadable. Not the per-broker error.
-    const kafka_common_KafkaError_t* err = kafka_admin_LogDirDescription_error(description);
+    const kafka_common_Error_t* err = kafka_admin_LogDirDescription_error(description);
     if (err != nullptr) copy_proto_error(dst->mutable_error(), err);
     // Java's totalBytes() / usableBytes() are OptionalLong; the C surface spells
     // an empty one -1 (DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES), the same
@@ -4746,7 +4649,7 @@ class AdminServiceImpl final : public AdminService::Service {
     // The value-level error of envelope exception 3: the topic was created but
     // the broker did not return its metadata, so every Java accessor rethrows.
     // It must cross as the error arm, not as a metadata of -1s.
-    const kafka_common_KafkaError_t* err = kafka_admin_TopicMetadataAndConfig_error(mc);
+    const kafka_common_Error_t* err = kafka_admin_TopicMetadataAndConfig_error(mc);
     if (err != nullptr) {
       copy_proto_error(dst->mutable_error(), err);
       return;

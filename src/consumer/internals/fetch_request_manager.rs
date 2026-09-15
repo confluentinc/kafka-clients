@@ -37,7 +37,7 @@ use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::fetch_response::FetchResponse;
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::consumer::internals::abstract_fetch::AbstractFetch;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
@@ -59,7 +59,7 @@ pub(crate) type IsUnavailableFn = Arc<dyn Fn(&Node) -> bool + Send + Sync + 'sta
 
 /// Callback that returns `Err(...)` when the node has a pending
 /// authentication failure (Java's `maybeThrowAuthFailure`).
-pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), KafkaError> + Send + Sync + 'static>;
+pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), Error> + Send + Sync + 'static>;
 
 /// Always-available stub for [`IsUnavailableFn`]: every node is
 /// reachable. Used by tests and as a default when no delegate is wired.
@@ -115,7 +115,7 @@ pub(crate) enum PendingFetchCompletion {
     Failure {
         fetch_target: Node,
         request_data: FetchSessionRequestData,
-        error: KafkaError,
+        error: Error,
         for_close: bool,
     },
 }
@@ -131,7 +131,7 @@ pub(crate) struct FetchRequestManager {
     /// are completed together on the next `pollInternal` (Java does
     /// this via `whenComplete` chaining; Rust collects them in a single
     /// slot and resolves them in one shot).
-    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), KafkaError>>>>,
+    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), Error>>>>,
     /// Node-availability callbacks supplied by the consumer bg task. They
     /// are stored as `Arc<dyn Fn>` so the bg task can plug in
     /// [`crate::consumer::internals::network_client_delegate::NetworkClientDelegate`]
@@ -225,7 +225,7 @@ impl FetchRequestManager {
     /// so concurrent callers all complete on ONE `pollInternal`. The
     /// Rust port collects all acks in a single slot; the next `poll`
     /// completes them together.
-    pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), KafkaError>> {
+    pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
         rx
@@ -238,7 +238,7 @@ impl FetchRequestManager {
     /// to enqueue the ack. The next `poll(current_time_ms)` completes
     /// all accumulated acks together (Java's single-slot
     /// `pendingFetchRequestFuture` semantics).
-    pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), KafkaError>>) {
+    pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), Error>>) {
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(ack);
     }
 
@@ -305,10 +305,17 @@ impl FetchRequestManager {
                     // callers exceptionally and returns a "dummy" empty
                     // PollResult to avoid interrupting other request
                     // managers.
+                    // Java's `catch (Throwable t)` completes the future with
+                    // `t` UNCHANGED. Rebuilding it (as `Error::local_illegal_state`,
+                    // keeping only the message) would discard the class, the
+                    // error code and the source — turning a fatal
+                    // `SASL_AUTHENTICATION_FAILED` from
+                    // `maybe_throw_auth_failure` into something for which
+                    // `is_authentication_error()`, `is_api_error()` and
+                    // `is_kafka_error()` all answer false, i.e. a fatal
+                    // authentication failure presented as client misuse.
                     for tx in pending_acks {
-                        // Cheap KafkaError clone via String reformat.
-                        let cloned = KafkaError::illegal_state(e.message().to_string());
-                        let _ = tx.send(Err(cloned));
+                        let _ = tx.send(Err(e.clone()));
                     }
                     return PollResult::empty();
                 },
@@ -389,7 +396,7 @@ impl FetchRequestManager {
                             _ => PendingFetchCompletion::Failure {
                                 fetch_target: fetch_target_for_forwarder,
                                 request_data: request_data_for_forwarder,
-                                error: KafkaError::new(Errors::UnknownServerError),
+                                error: Error::new(Errors::UnknownServerError),
                                 for_close: for_close_flag,
                             },
                         }
@@ -403,7 +410,7 @@ impl FetchRequestManager {
                     Err(_recv) => PendingFetchCompletion::Failure {
                         fetch_target: fetch_target_for_forwarder,
                         request_data: request_data_for_forwarder,
-                        error: KafkaError::new(Errors::NetworkException),
+                        error: Error::new(Errors::NetworkError),
                         for_close: for_close_flag,
                     },
                 };
@@ -532,7 +539,7 @@ impl Drop for FetchRequestManager {
         // dropped receiver.
         if let Some(pending) = self.pending_fetch_requests.take() {
             for tx in pending {
-                let _ = tx.send(Err(KafkaError::illegal_state(
+                let _ = tx.send(Err(Error::local_illegal_state(
                     "FetchRequestManager dropped with pending CreateFetchRequests ack",
                 )));
             }
@@ -835,7 +842,7 @@ mod tests {
         // Fire a transport-level retriable failure through the handler.
         unsent
             .handler()
-            .on_failure(0, KafkaError::new(crate::common::protocol::Errors::NetworkException));
+            .on_failure(0, Error::new(crate::common::protocol::Errors::NetworkError));
 
         // Wait deterministically for the drain on the next `poll(now)`
         // to observe the failure and remove node 0 from the pending set.
@@ -962,7 +969,7 @@ mod round_trip {
     use crate::common::requests::fetch_request::FetchRequest;
     use crate::common::requests::fetch_response::{FetchResponse, INVALID_PREFERRED_REPLICA_ID};
     use crate::common::serialization::Deserializer;
-    use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition, Uuid};
+    use crate::common::{Error, IsolationLevel, Node, TopicPartition, Uuid};
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
     use crate::consumer::internals::deserializers::Deserializers;
@@ -984,7 +991,7 @@ mod round_trip {
     /// Identity (byte-array) deserializer — Java's `ByteArrayDeserializer`.
     struct BytesDeserializer;
     impl Deserializer<Vec<u8>> for BytesDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             Ok(data.to_vec())
         }
     }
@@ -995,9 +1002,9 @@ mod round_trip {
         fail_value: Vec<u8>,
     }
     impl Deserializer<Vec<u8>> for FailOnValueDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             if data == self.fail_value.as_slice() {
-                return Err(KafkaError::serialization("simulated value deserialization failure"));
+                return Err(Error::serialization("simulated value deserialization failure"));
             }
             Ok(data.to_vec())
         }
@@ -1566,7 +1573,7 @@ mod round_trip {
             &mut self,
             node_id: i32,
             request_data: &crate::fetch_session_handler::FetchSessionRequestData,
-            error: KafkaError,
+            error: Error,
         ) {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
             self.mgr.abstract_fetch_mut().handle_fetch_failure(&node, request_data, &error);
@@ -1635,7 +1642,7 @@ mod round_trip {
 
         /// Like [`Self::collect_records`] but surfaces the `collect_fetch`
         /// error instead of unwrapping (for the OOR-after-records test).
-        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
             let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> =
                 Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
             let collector = FetchCollector::new(
@@ -1654,7 +1661,7 @@ mod round_trip {
         fn collect_records_failing_on_value(
             &self,
             fail_value: Vec<u8>,
-        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
             let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> = Arc::new(Deserializers::new(
                 Box::new(BytesDeserializer),
                 Box::new(FailOnValueDeserializer { fail_value }),
@@ -2071,6 +2078,13 @@ mod round_trip {
     /// `FetchRequestManagerTest.testFetchCompletedBeforeHandlerAdded`: a
     /// success response for a node with NO session handler is ignored (no
     /// panic, no buffered fetch).
+    ///
+    /// Also pins Java's `finally { removePendingFetchRequest(...) }`
+    /// (`AbstractFetch.java:253-255`), which runs even on the `handler == null`
+    /// early `return`. Skipping it would leave the node in
+    /// `nodes_with_pending_fetch_requests` forever, and
+    /// `prepare_fetch_requests` skips every node in that set — so every
+    /// partition led by that broker would stall permanently.
     #[test]
     fn test_fetch_completed_before_handler_added() {
         let (topic_id, ids) = single_topic_id();
@@ -2083,12 +2097,109 @@ mod round_trip {
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
         rt.mgr.abstract_fetch_mut().close_session_handler(*node_id);
 
+        // The build above marked the node as having a fetch request in flight.
+        assert!(
+            rt.mgr.abstract_fetch_mut().nodes_with_pending_fetch_requests.contains(node_id),
+            "the built request must have marked the node pending"
+        );
+
         let response = FullFetchResponse::new()
             .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
             .build();
         // Must not panic; must not buffer a fetch.
         rt.deliver(*node_id, request_data, response, built[node_id].version());
         assert!(!rt.has_completed_fetches(), "no handler -> response ignored, nothing buffered");
+        // Java's `finally` runs on the `handler == null` return too, so the
+        // node must NOT be left pending — otherwise it is never fetched again.
+        assert!(
+            !rt.mgr.abstract_fetch_mut().nodes_with_pending_fetch_requests.contains(node_id),
+            "the handler-not-found path must still clear the pending-fetch marker"
+        );
+        let _ = topic_id;
+    }
+
+    /// Java's `catch (Throwable t) { pendingFetchRequestFuture
+    /// .completeExceptionally(t); return PollResult.EMPTY; }`
+    /// (`FetchRequestManager.java:172-175`) hands `t` to the application
+    /// **unchanged**.
+    ///
+    /// The only error exit from `prepare_fetch_requests` is
+    /// `maybe_throw_auth_failure(node)` (`AbstractFetch.java:452-457`, reached
+    /// when the node is inside the reconnect-backoff window), so this drives
+    /// that path with a failing auth closure and pins that the class, the
+    /// error code, the message and the `source()` all survive.
+    ///
+    /// Rebuilding the error as `Error::local_illegal_state(e.message())` — as this
+    /// site used to — keeps only the message and makes
+    /// `is_authentication_error()`, `is_api_error()` and `is_kafka_error()` all
+    /// answer `false`: a fatal authentication failure presented to the
+    /// application as client misuse.
+    #[test]
+    fn create_fetch_requests_propagates_the_prepare_error_unchanged() {
+        let (topic_id, ids) = single_topic_id();
+        // TWO nodes, and only ONE of them unavailable. `prepare_fetch_requests`
+        // short-circuits to `Ok(empty)` when EVERY node is pending-or-
+        // unavailable, so a single unavailable node would never reach the auth
+        // check; Java's loop is per-partition, so keeping one node fetchable is
+        // what actually exercises `maybeThrowAuthFailure`.
+        let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0), tp(1), tp(2), tp(3)]);
+        let unavailable_node_id = {
+            let cluster = rt.metadata.metadata_arc().fetch();
+            cluster.nodes()[0].id()
+        };
+
+        // Java reaches `maybeThrowAuthFailure` only for a node that is
+        // currently unavailable, so both closures must fire.
+        // The same shape `NetworkClientDelegate::maybe_return_auth_failure`
+        // produces, plus a cause so the `source()` assertion is meaningful.
+        let cause = Error::with_message(Errors::SaslAuthenticationFailed, "invalid credentials");
+        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::with_source(
+            "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256",
+            cause,
+        ));
+        let auth_error_for_closure = auth_error.clone();
+        rt.mgr.is_unavailable = Arc::new(move |n: &Node| n.id() == unavailable_node_id);
+        rt.mgr.maybe_throw_auth_failure = Arc::new(move |n: &Node| {
+            if n.id() == unavailable_node_id {
+                Err(auth_error_for_closure.clone())
+            } else {
+                Ok(())
+            }
+        });
+
+        let mut ack = rt.mgr.create_fetch_requests();
+        let poll_result = crate::consumer::internals::request_manager::RequestManager::poll(&mut rt.mgr, 0);
+        assert!(
+            poll_result.unsent_requests.is_empty(),
+            "Java returns PollResult.EMPTY so the other request managers keep polling"
+        );
+
+        let err = ack
+            .try_recv()
+            .expect("the pending create-fetch-requests ack must be completed")
+            .expect_err("the prepare failure must surface");
+
+        // Class + code preserved, not flattened to IllegalState.
+        assert!(
+            !matches!(err, Error::LocalIllegalState(_)),
+            "the error must not be rebuilt as IllegalState: {err:?}"
+        );
+        assert_eq!(
+            Errors::SaslAuthenticationFailed,
+            err.error(),
+            "the protocol error code must survive: {err:?}"
+        );
+        // Hierarchy predicates that the flattening inverted.
+        assert!(err.is_authentication_error(), "must stay an authentication error: {err:?}");
+        assert!(err.is_api_error(), "must stay an API error: {err:?}");
+        assert!(err.is_kafka_error(), "must stay a Kafka error: {err:?}");
+        // Message and cause preserved.
+        assert_eq!(auth_error.message(), err.message(), "the message must survive verbatim");
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the cause must survive — rebuilding the error dropped it: {err:?}"
+        );
         let _ = topic_id;
     }
 
@@ -2249,16 +2360,16 @@ mod round_trip {
     ///
     /// **Deliberate divergence from Java (documented, regression-tested).**
     /// In Rust the per-partition build loop (`abstract_fetch.rs`
-    /// `prepare_fetch_requests`) does NOT raise `IllegalState` on an
+    /// `prepare_fetch_requests`) does NOT raise `LocalIllegalState` on an
     /// `Ok(None)` position; it `continue`s and skips the partition. This is
     /// the intentional Phase-13 fix to COMMENTS.DONE.1.md Issue 7: surfacing
-    /// `IllegalState` for a missing position over-propagated a transient
+    /// `LocalIllegalState` for a missing position over-propagated a transient
     /// rebalance-window race (the Rust KIP-848 bg-task interleaves application
     /// events between the `fetchable_partitions()` snapshot and the
     /// per-partition `position()` query, a window Java's per-call
     /// `synchronized` model keeps narrow). That fix is regression-tested by
     /// `test_async_consumer_re2j_pattern_expand_subscription`; re-raising
-    /// `IllegalState` here would re-break it.
+    /// `LocalIllegalState` here would re-break it.
     ///
     /// A null position also makes tp1 NOT `is_fetchable` (no valid position),
     /// so it is excluded from both `fetchable_partitions()` and
@@ -2821,7 +2932,7 @@ mod round_trip {
         //
         // Until Milestone 11 Phase 8 that omission was forced: a READ_COMMITTED
         // control batch from an aborted producer returned
-        // `KafkaError::unsupported_version`. **That blocker is gone** —
+        // `Error::unsupported_version`. **That blocker is gone** —
         // `ControlRecordType` is translated and `CompletedFetch::contains_abort_marker`
         // implements Java's branch — so the omission is now only *unwritten*, and
         // this test plus the three named below are tracked as a follow-up in
@@ -2896,7 +3007,7 @@ mod round_trip {
     /// advances; tp0's position is unchanged and the OOR error surfaces.
     /// Re-collecting does not lose records or re-advance.
     #[test]
-    fn test_fetch_position_after_exception() {
+    fn test_fetch_position_after_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR raises instead of silently resetting.
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
@@ -2942,7 +3053,7 @@ mod round_trip {
         }
 
         // Fetch #1: deliver only tp1's 3 records (offsets 1,2,3) and collect.
-        // (Rust flattens OFFSET_OUT_OF_RANGE to a KafkaError::IllegalState,
+        // (Rust flattens OFFSET_OUT_OF_RANGE to an Error::LocalIllegalState,
         // which the collector ALWAYS propagates even when other partitions
         // have records — unlike Java, where OffsetOutOfRangeException is a
         // KafkaException swallowed while the fetch is non-empty. Delivering the
@@ -3092,7 +3203,7 @@ mod round_trip {
 
         let (_built, prepared) = rt.build_fetch_requests(0);
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
 
         let recs = rt.collect_records();
         assert!(recs.is_empty(), "no records on disconnect");
@@ -3362,7 +3473,7 @@ mod round_trip {
     /// on tp1 before collecting suppresses the OOR error so the subsequent
     /// collect returns no records and does not raise.
     #[test]
-    fn test_seek_before_exception() {
+    fn test_seek_before_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR would raise, maxPollRecords=2.
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
@@ -3515,7 +3626,7 @@ mod round_trip {
         // Disconnect on the next fetch -> preferred replica cleared.
         let (_built, prepared) = rt.build_fetch_requests(0);
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
         assert_eq!(
             None,
             rt.preferred_read_replica(&tp(0), 0),
@@ -3539,7 +3650,7 @@ mod round_trip {
         // Unassign tp0, then disconnect: handle_fetch_failure's clear is a
         // no-op for the now-unassigned partition (no assigned state to mutate).
         rt.assign_only(&[]);
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
         // Unassigned -> no preferred replica retrievable.
         assert_eq!(None, rt.preferred_read_replica(&tp(0), 0));
     }

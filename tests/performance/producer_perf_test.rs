@@ -821,7 +821,7 @@ async fn producer_perf_test() {
                     }
                 },
                 Err(e) => {
-                    eprintln!("Produce call resulted in exception: {e:?}");
+                    eprintln!("Produce call resulted in an error: {e:?}");
                 },
             }
             completed_messages_for_completion.fetch_add(1, Ordering::Relaxed);

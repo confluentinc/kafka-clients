@@ -33,8 +33,8 @@
 //! while [`abort_transaction`](Producer::abort_transaction) discards them.
 //!
 //! Misuse returns `Err` where Java throws: `IllegalStateException` becomes
-//! [`KafkaError::illegal_state`] and `ProducerFencedException` becomes a
-//! [`KafkaError`] carrying [`Errors::ProducerFenced`], with Java's message text
+//! [`Error::local_illegal_state`] and `ProducerFencedException` becomes a
+//! [`Error`] carrying [`Errors::ProducerFenced`], with Java's message text
 //! preserved verbatim (CLAUDE.md §10.2).
 
 use std::collections::{HashMap, VecDeque};
@@ -48,7 +48,7 @@ use super::RecordMetadata;
 use super::internals::FutureRecordMetadata;
 use super::internals::ProduceRequestResult;
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::PartitionInfo;
@@ -228,23 +228,23 @@ struct MockProducerInner<K, V> {
     /// Java `commitCount` (`:76`).
     commit_count: i64,
     /// Java `initTransactionException` (`:79`).
-    init_transaction_error: Option<KafkaError>,
+    init_transaction_error: Option<Error>,
     /// Java `beginTransactionException` (`:80`).
-    begin_transaction_error: Option<KafkaError>,
+    begin_transaction_error: Option<Error>,
     /// Java `sendOffsetsToTransactionException` (`:81`).
-    send_offsets_to_transaction_error: Option<KafkaError>,
+    send_offsets_to_transaction_error: Option<Error>,
     /// Java `commitTransactionException` (`:82`).
-    commit_transaction_error: Option<KafkaError>,
+    commit_transaction_error: Option<Error>,
     /// Java `abortTransactionException` (`:83`).
-    abort_transaction_error: Option<KafkaError>,
+    abort_transaction_error: Option<Error>,
     /// Java `sendException` (`:84`).
-    send_error: Option<KafkaError>,
+    send_error: Option<Error>,
     /// Java `flushException` (`:85`).
-    flush_error: Option<KafkaError>,
+    flush_error: Option<Error>,
     /// Java `partitionsForException` (`:86`).
-    partitions_for_error: Option<KafkaError>,
+    partitions_for_error: Option<Error>,
     /// Java `closeException` (`:87`).
-    close_error: Option<KafkaError>,
+    close_error: Option<Error>,
     /// User-supplied metrics returned by [`metrics()`](Producer::metrics).
     ///
     /// Mirrors Java's `MockProducer.mockMetrics` map, seeded via
@@ -254,27 +254,27 @@ struct MockProducerInner<K, V> {
 
 impl<K, V> MockProducerInner<K, V> {
     /// Corresponds to Java's `verifyNotClosed()` (`MockProducer.java:248`).
-    fn verify_not_closed(&self) -> Result<(), KafkaError> {
+    fn verify_not_closed(&self) -> Result<(), Error> {
         if self.closed {
-            return Err(KafkaError::illegal_state("MockProducer is already closed."));
+            return Err(Error::local_illegal_state("MockProducer is already closed."));
         }
         Ok(())
     }
 
     /// Corresponds to Java's `verifyNotFenced()` (`MockProducer.java:254`),
     /// which throws `ProducerFencedException`.
-    fn verify_not_fenced(&self) -> Result<(), KafkaError> {
+    fn verify_not_fenced(&self) -> Result<(), Error> {
         if self.producer_fenced {
-            return Err(KafkaError::with_message(Errors::ProducerFenced, "MockProducer is fenced."));
+            return Err(Error::with_message(Errors::ProducerFenced, "MockProducer is fenced."));
         }
         Ok(())
     }
 
     /// Corresponds to Java's `verifyTransactionsInitialized()`
     /// (`MockProducer.java:260`).
-    fn verify_transactions_initialized(&self) -> Result<(), KafkaError> {
+    fn verify_transactions_initialized(&self) -> Result<(), Error> {
         if !self.transaction_initialized {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "MockProducer hasn't been initialized for transactions.",
             ));
         }
@@ -283,9 +283,9 @@ impl<K, V> MockProducerInner<K, V> {
 
     /// Corresponds to Java's `verifyTransactionInFlight()`
     /// (`MockProducer.java:266`).
-    fn verify_transaction_in_flight(&self) -> Result<(), KafkaError> {
+    fn verify_transaction_in_flight(&self) -> Result<(), Error> {
         if !self.transaction_in_flight {
-            return Err(KafkaError::illegal_state("There is no open transaction."));
+            return Err(Error::local_illegal_state("There is no open transaction."));
         }
         Ok(())
     }
@@ -298,7 +298,7 @@ impl<K, V> MockProducerInner<K, V> {
     /// already held by the caller, and [`Producer::flush`] is the entry point that
     /// acquires it. Note Java's `flush()` deliberately does *not*
     /// `verifyNotFenced()` — see `shouldNotThrowOnFlushProducerIfProducerIsFenced`.
-    fn flush(&mut self) -> Result<(), KafkaError> {
+    fn flush(&mut self) -> Result<(), Error> {
         self.verify_not_closed()?;
 
         if let Some(err) = self.flush_error.as_ref() {
@@ -317,7 +317,7 @@ impl<K, V> MockProducerInner<K, V> {
 
     /// Corresponds to Java's `errorNext(RuntimeException)`
     /// (`MockProducer.java:513`).
-    fn error_next(&mut self, error: Option<KafkaError>) -> bool {
+    fn error_next(&mut self, error: Option<Error>) -> bool {
         match self.completions.pop_front() {
             Some(completion) => {
                 completion.complete(error);
@@ -336,13 +336,13 @@ impl<K, V> MockProducerInner<K, V> {
     /// `:612-613`) and the partition is chosen by the partitioner — or, when
     /// none is set, by the first partition of the topic (`:614-615`), exactly as
     /// Java's `partitioner == null` branch.
-    fn partition(&self, record: &ProducerRecord<K, V>) -> Result<i32, KafkaError> {
+    fn partition(&self, record: &ProducerRecord<K, V>) -> Result<i32, Error> {
         let topic = record.topic();
         if let Some(partition) = record.partition() {
             let num_partitions = self.cluster.partitions_for_topic(topic).len() as i32;
             // they have given us a partition, use it
             if partition < 0 || partition >= num_partitions {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "Invalid partition given with record: {partition} is not in the range [0...{num_partitions}]."
                 )));
             }
@@ -394,10 +394,10 @@ impl Completion {
     /// observe the send as complete before the callback has returned. It is not
     /// observable from the single task that calls `complete`, since both happen
     /// before the call returns, but it is from a concurrent one.
-    fn complete(self, error: Option<KafkaError>) {
+    fn complete(self, error: Option<Error>) {
         let Completion { offset, metadata, result, callback, topic_partition } = self;
         if let Some(e) = error {
-            let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = {
+            let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = {
                 let e = e.clone();
                 Arc::new(move |_| Some(e.clone()))
             };
@@ -614,7 +614,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns `true` if there was an uncompleted call to complete.
     ///
     /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)`.
-    pub fn error_next(&self, error: KafkaError) -> bool {
+    pub fn error_next(&self, error: Error) -> bool {
         let mut inner = self.inner.lock().unwrap();
         inner.error_next(Some(error))
     }
@@ -630,9 +630,9 @@ impl<K, V> MockProducer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if the producer is closed, is already fenced, or was never
-    /// initialized for transactions ([`KafkaError::illegal_state`] for the first
+    /// initialized for transactions ([`Error::local_illegal_state`] for the first
     /// and last, [`Errors::ProducerFenced`] for the second).
-    pub fn fence_producer(&self) -> Result<(), KafkaError> {
+    pub fn fence_producer(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
@@ -724,7 +724,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.sendException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_send_error(&self, error: Option<KafkaError>) {
+    pub fn set_send_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_error = error;
     }
@@ -736,7 +736,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.flushException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_flush_error(&self, error: Option<KafkaError>) {
+    pub fn set_flush_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.flush_error = error;
     }
@@ -748,7 +748,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.partitionsForException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_partitions_for_error(&self, error: Option<KafkaError>) {
+    pub fn set_partitions_for_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.partitions_for_error = error;
     }
@@ -760,7 +760,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.closeException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_close_error(&self, error: Option<KafkaError>) {
+    pub fn set_close_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.close_error = error;
     }
@@ -779,7 +779,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.initTransactionException` field
     /// (`MockProducer.java:79`), which likewise persists until set back to `null`.
-    pub fn set_init_transaction_error(&self, error: Option<KafkaError>) {
+    pub fn set_init_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.init_transaction_error = error;
     }
@@ -789,7 +789,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.beginTransactionException` field
     /// (`MockProducer.java:80`).
-    pub fn set_begin_transaction_error(&self, error: Option<KafkaError>) {
+    pub fn set_begin_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.begin_transaction_error = error;
     }
@@ -800,7 +800,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.sendOffsetsToTransactionException`
     /// field (`MockProducer.java:81`).
-    pub fn set_send_offsets_to_transaction_error(&self, error: Option<KafkaError>) {
+    pub fn set_send_offsets_to_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_offsets_to_transaction_error = error;
     }
@@ -810,7 +810,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.commitTransactionException` field
     /// (`MockProducer.java:82`).
-    pub fn set_commit_transaction_error(&self, error: Option<KafkaError>) {
+    pub fn set_commit_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.commit_transaction_error = error;
     }
@@ -820,7 +820,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Matches Java's public `MockProducer.abortTransactionException` field
     /// (`MockProducer.java:83`).
-    pub fn set_abort_transaction_error(&self, error: Option<KafkaError>) {
+    pub fn set_abort_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.abort_transaction_error = error;
     }
@@ -847,12 +847,12 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     /// Returns `Err` if the producer is closed, is fenced, has already been
     /// initialized, or an error was installed with
     /// [`set_init_transaction_error`](MockProducer::set_init_transaction_error).
-    async fn init_transactions(&self) -> Result<(), KafkaError> {
+    async fn init_transactions(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
         if inner.transaction_initialized {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "MockProducer has already been initialized for transactions.",
             ));
         }
@@ -877,7 +877,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     /// Returns `Err` if the producer is closed, is fenced, was not initialized for
     /// transactions, a transaction is already in flight, or an error was installed
     /// with [`set_begin_transaction_error`](MockProducer::set_begin_transaction_error).
-    fn begin_transaction(&self) -> Result<(), KafkaError> {
+    fn begin_transaction(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
@@ -888,7 +888,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         }
 
         if inner.transaction_in_flight {
-            return Err(KafkaError::illegal_state("Transaction already started"));
+            return Err(Error::local_illegal_state("Transaction already started"));
         }
 
         inner.transaction_in_flight = true;
@@ -918,7 +918,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
@@ -955,7 +955,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     /// transactions, has no open transaction, an error was installed with
     /// [`set_commit_transaction_error`](MockProducer::set_commit_transaction_error),
     /// or the `flush()` this performs fails.
-    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    async fn commit_transaction(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
@@ -1000,7 +1000,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     /// transactions, has no open transaction, an error was installed with
     /// [`set_abort_transaction_error`](MockProducer::set_abort_transaction_error),
     /// or the `flush()` this performs fails.
-    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    async fn abort_transaction(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
@@ -1022,7 +1022,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.send_with_callback(record, None).await
     }
 
@@ -1030,21 +1030,27 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.closed {
-            return Err(KafkaError::illegal_state("MockProducer is already closed."));
+            return Err(Error::local_illegal_state("MockProducer is already closed."));
         }
 
-        // Java 293-295 throws `KafkaException("MockProducer is fenced.", new
-        // ProducerFencedException("Fenced"))` — a wrapper whose *cause* is what
-        // `shouldThrowOnSendIfProducerGotFenced` asserts on. `KafkaError` has no
-        // cause chain (PLAN §10.5 deviation 5), so the two collapse into one value
-        // that keeps both observable halves: the fenced error code and Java's
-        // wrapper message. It is the same value `verify_not_fenced` produces.
+        // Java `:293` throws `KafkaException("MockProducer is fenced.", new
+        // ProducerFencedException("Fenced"))` — deliberately a DIFFERENT value from
+        // `verifyNotFenced`'s bare `ProducerFencedException("MockProducer is fenced.")`
+        // (`:256`): here the fenced error is the *cause* of a bare `KafkaException`,
+        // which is what `shouldThrowOnSendIfProducerGotFenced` asserts
+        // (`assertThrows(KafkaException.class, ..)` plus
+        // `assertInstanceOf(ProducerFencedException.class, e.getCause())`). The outer
+        // error must therefore be a bare `KafkaError` — `is_api_error()` is `false`
+        // for it and `true` for `ProducerFencedError`.
         if inner.producer_fenced {
-            return Err(KafkaError::with_message(Errors::ProducerFenced, "MockProducer is fenced."));
+            return Err(Error::kafka_with_source(
+                "MockProducer is fenced.",
+                Error::with_message(Errors::ProducerFenced, "Fenced"),
+            ));
         }
 
         if let Some(err) = inner.send_error.as_ref() {
@@ -1109,12 +1115,12 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(KafkaFuture::new(future))
     }
 
-    async fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.flush()
     }
 
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let inner = self.inner.lock().unwrap();
 
         if let Some(err) = inner.partitions_for_error.as_ref() {
@@ -1131,7 +1137,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         inner.mock_metrics.clone()
     }
 
-    async fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
 
         if let Some(err) = inner.close_error.as_ref() {
@@ -1142,7 +1148,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    async fn close_timeout(&self, _timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, _timeout: Duration) -> Result<(), Error> {
         self.close().await
     }
 }
@@ -1222,10 +1228,10 @@ mod tests {
     /// Assert `result` failed the way Java's `IllegalStateException` does, with
     /// Java's message text (`definition-of-done.md` §3 — the message is part of
     /// the contract, so `is_err()` alone is not enough).
-    fn assert_illegal_state<T>(result: Result<T, KafkaError>, message: &str) {
+    fn assert_illegal_state<T>(result: Result<T, Error>, message: &str) {
         let error = result.err().expect("expected an IllegalState error, got Ok");
         assert!(
-            matches!(error, KafkaError::IllegalState(_)),
+            matches!(error, Error::LocalIllegalState(_)),
             "expected IllegalState, got {error}"
         );
         assert_eq!(message, error.message());
@@ -1255,7 +1261,7 @@ mod tests {
     ///
     /// `MockProducer` raises it with exactly one message, from `verifyNotFenced`
     /// (`MockProducer.java:256`) and from the fenced `send` (`:294`).
-    fn assert_producer_fenced<T>(result: Result<T, KafkaError>) {
+    fn assert_producer_fenced<T>(result: Result<T, Error>) {
         let error = result.err().expect("expected a ProducerFenced error, got Ok");
         assert_eq!(Errors::ProducerFenced, error.error(), "expected ProducerFenced, got {error}");
         assert_eq!("MockProducer is fenced.", error.message());
@@ -1352,8 +1358,8 @@ mod tests {
             .await
             .expect_err("out-of-range partition should be rejected");
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
-            "expected IllegalArgument, got {error}"
+            matches!(error, Error::LocalIllegalArgument(_)),
+            "expected LocalIllegalArgument, got {error}"
         );
         assert_eq!(
             "Invalid partition given with record: 2 is not in the range [0...2].",
@@ -1439,10 +1445,10 @@ mod tests {
         assert!(!md2.is_done(), "Second request still incomplete");
 
         assert!(
-            producer.error_next(KafkaError::illegal_argument("blah")),
+            producer.error_next(Error::local_illegal_argument("blah")),
             "Complete the second request with an error"
         );
-        // Java asserts `assertEquals(e, err.getCause())`; `KafkaError` has no cause
+        // Java asserts `assertEquals(e, err.getCause())`; `Error` has no cause
         // chain, so the message identifies the injected error.
         let error = md2.get().await.expect_err("Expected error to be thrown");
         assert_eq!("blah", error.message());
@@ -1527,7 +1533,7 @@ mod tests {
     /// (`ProducerBatch.java:318-320`), not in `MockProducer.Completion.complete`,
     /// which has no try/catch.)
     #[tokio::test]
-    async fn test_metadata_on_exception() {
+    async fn test_metadata_on_error() {
         let producer = build_mock_producer(false);
 
         let observed: Arc<Mutex<Option<ObservedMetadata>>> = Arc::new(Mutex::new(None));
@@ -1543,7 +1549,7 @@ mod tests {
         });
 
         let future = producer.send_with_callback(record2(), Some(callback)).await.unwrap();
-        let e = KafkaError::illegal_argument("dummy exception");
+        let e = Error::local_illegal_argument("dummy error");
         assert!(producer.error_next(e), "Complete the second request with an error");
 
         let (offset, timestamp, key_size, value_size) = observed.lock().unwrap().expect("the callback did not fire");
@@ -1552,11 +1558,11 @@ mod tests {
         assert_eq!(-1, key_size, "Invalid Serialized Key size");
         assert_eq!(-1, value_size, "Invalid Serialized value size");
 
-        // Java asserts the injected exception is the future's cause; `KafkaError`
+        // Java asserts the injected exception is the future's cause; `Error`
         // has no cause chain, so the message identifies it.
         let result = future.get().await;
         let error = result.expect_err("Something went wrong, expected an error");
-        assert_eq!("dummy exception", error.message());
+        assert_eq!("dummy error", error.message());
     }
 
     // -----------------------------------------------------------------------
@@ -1777,16 +1783,32 @@ mod tests {
     /// precedes any use of the record, and `ProducerRecord` is taken by value here,
     /// so a real record makes the same point.
     ///
-    /// Java throws `KafkaException` *wrapping* `ProducerFencedException` and
-    /// asserts on the cause. `KafkaError` has no cause chain, so the one value
-    /// carries both halves — the fenced code (what the cause assertion is for) and
-    /// the wrapper's message — and `assert_producer_fenced` checks both.
+    /// Java throws a bare `KafkaException` *wrapping* a `ProducerFencedException`
+    /// and asserts on the cause, so both halves are checked here: the outer error is
+    /// a bare `KafkaError` (`is_api_error() == false`) carrying the wrapper message,
+    /// and its `source()` is the `ProducerFenced` error.
     #[tokio::test]
     async fn should_throw_on_send_if_producer_got_fenced() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
         producer.fence_producer().unwrap();
-        assert_producer_fenced(producer.send(record1()).await);
+        let error = producer.send(record1()).await.expect_err("expected a fenced error, got Ok");
+
+        // `assertThrows(KafkaException.class, ..)` — a BARE `KafkaException`, not the
+        // `ProducerFencedException` that `verify_not_fenced` raises.
+        assert!(
+            matches!(error, Error::KafkaError(_)),
+            "expected a bare KafkaError, got {error:?}"
+        );
+        assert!(error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException");
+        assert_eq!("MockProducer is fenced.", error.message());
+
+        // `assertInstanceOf(ProducerFencedException.class, e.getCause())`.
+        let cause = crate::common::kafka_error::ErrorSource::source(&error)
+            .expect("Java chains a ProducerFencedException as the cause");
+        assert_eq!(Errors::ProducerFenced, cause.error(), "expected ProducerFenced, got {cause}");
+        assert_eq!("Fenced", cause.message());
     }
 
     /// Translated from
@@ -2323,7 +2345,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_send_error() {
         let producer = build_mock_producer(true);
-        producer.set_send_error(Some(KafkaError::new(Errors::CorruptMessage)));
+        producer.set_send_error(Some(Error::new(Errors::CorruptMessage)));
 
         let result = producer.send(make_record("t", "k", "v")).await;
         assert!(result.is_err());
@@ -2345,7 +2367,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_flush_error() {
         let producer = build_mock_producer(true);
-        producer.set_flush_error(Some(KafkaError::new(Errors::CorruptMessage)));
+        producer.set_flush_error(Some(Error::new(Errors::CorruptMessage)));
 
         let result = producer.flush().await;
         assert!(result.is_err());
@@ -2367,7 +2389,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_partitions_for_error() {
         let producer = build_mock_producer(true);
-        producer.set_partitions_for_error(Some(KafkaError::new(Errors::UnknownTopicOrPartition)));
+        producer.set_partitions_for_error(Some(Error::new(Errors::UnknownTopicOrPartition)));
 
         let result = producer.partitions_for("t").await;
         assert!(result.is_err());
@@ -2389,7 +2411,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_close_error() {
         let producer = build_mock_producer(true);
-        producer.set_close_error(Some(KafkaError::new(Errors::UnknownServerError)));
+        producer.set_close_error(Some(Error::new(Errors::UnknownServerError)));
 
         let result = producer.close().await;
         assert!(result.is_err());
@@ -2497,7 +2519,7 @@ mod tests {
     #[test]
     fn test_error_next_no_pending() {
         let producer = build_mock_producer(false);
-        assert!(!producer.error_next(KafkaError::new(Errors::UnknownServerError)));
+        assert!(!producer.error_next(Error::new(Errors::UnknownServerError)));
     }
 
     /// `metrics()` returns the mock metrics seeded via `set_mock_metrics`,
@@ -2616,7 +2638,7 @@ mod tests {
     /// in-flight check (`MockProducer.java:167-173`).
     #[tokio::test]
     async fn test_set_transactional_errors() {
-        let injected = || KafkaError::new(Errors::CoordinatorNotAvailable);
+        let injected = || Error::new(Errors::CoordinatorNotAvailable);
 
         // `auto_complete = false` so a pending send stays pending: that is what
         // shows the commit / abort errors firing *ahead* of Java's `flush()`

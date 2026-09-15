@@ -80,8 +80,8 @@ DoD §3). For a value `<value>` the inner message is:
 Invalid value <value> for configuration partitioner.class: Class <value> could not be found.
 ```
 
-(The Rust `KafkaError` Display prepends its variant tag, e.g.
-`IllegalArgumentError: `, ahead of that inner text; tests assert on the inner
+(The Rust `Error` Display prepends its variant tag, e.g.
+`ConfigError: `, ahead of that inner text; tests assert on the inner
 text with `ends_with`.) This mirrors Java's `ConfigDef` reflectively loading the
 named class and failing when it cannot be found.
 

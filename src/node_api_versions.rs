@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::feature::SupportedVersionRange;
 use crate::common::protocol::ApiKeys;
 use crate::common::requests::ApiVersionsResponse;
@@ -125,7 +125,7 @@ impl NodeApiVersions {
     ///
     /// # Errors
     /// Returns an error if the node does not support the given API key.
-    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, KafkaError> {
+    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, Error> {
         self.latest_usable_version_in_range(api_key, api_key.oldest_version(), api_key.latest_version())
     }
 
@@ -139,11 +139,15 @@ impl NodeApiVersions {
         api_key: &ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
-    ) -> Result<i16, KafkaError> {
+    ) -> Result<i16, Error> {
         let supported_version = self
             .supported_versions
             .get(api_key)
-            .ok_or_else(|| KafkaError::unsupported_version(format!("The node does not support {}", api_key.name())))?;
+            // Java interpolates the `ApiKeys` enum value itself
+            // (`NodeApiVersions.java:151`), and `ApiKeys` overrides no
+            // `toString()`, so the message carries the enum constant name
+            // (`METADATA`) — not the `name` field (`Metadata`).
+            .ok_or_else(|| Error::unsupported_version(format!("The node does not support {api_key}")))?;
 
         let mut allowed = ApiVersion::new();
         allowed.set_api_key(api_key.id());
@@ -153,10 +157,12 @@ impl NodeApiVersions {
         let intersect_version = ApiVersionsResponse::intersect(Some(supported_version), Some(&allowed));
         match intersect_version {
             Some(v) => Ok(v.max_version),
-            None => Err(KafkaError::unsupported_version(format!(
+            None => Err(Error::unsupported_version(format!(
+                // As above: Java interpolates the enum value
+                // (`NodeApiVersions.java:162`), giving the constant name.
                 "The node does not support {} with version in range [{},{}]. \
                  The supported range is [{},{}].",
-                api_key.name(),
+                api_key,
                 oldest_allowed_version,
                 latest_allowed_version,
                 supported_version.min_version,
@@ -407,6 +413,30 @@ mod tests {
     fn test_usable_version_calculation_no_known_versions() {
         let versions = NodeApiVersions::with_supported_features(&[], &[]);
         assert!(versions.latest_usable_version(&ApiKeys::FETCH).is_err());
+    }
+
+    /// Java builds both diagnostics by interpolating the `ApiKeys` enum value
+    /// (`NodeApiVersions.java:151` and `:162`). `ApiKeys` overrides no
+    /// `toString()`, so `Enum.toString()` renders the constant name — `FETCH`,
+    /// `PRODUCE` — and NOT the `name` field spelling (`Fetch`, `Produce`).
+    #[test]
+    fn test_unsupported_api_message_uses_the_enum_constant_name() {
+        let versions = NodeApiVersions::with_supported_features(&[], &[]);
+        let err = versions.latest_usable_version(&ApiKeys::FETCH).unwrap_err();
+        assert_eq!(err.to_string(), "The node does not support FETCH");
+
+        // Multi-word keys keep the SCREAMING_SNAKE_CASE spelling too.
+        let err = versions.latest_usable_version(&ApiKeys::LIST_OFFSETS).unwrap_err();
+        assert_eq!(err.to_string(), "The node does not support LIST_OFFSETS");
+
+        let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 1, 2);
+        let err = api_versions
+            .latest_usable_version_in_range(&ApiKeys::PRODUCE, 3, 4)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "The node does not support PRODUCE with version in range [3,4]. The supported range is [1,2]."
+        );
     }
 
     /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRange`

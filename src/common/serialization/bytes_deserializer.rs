@@ -19,7 +19,7 @@
 
 use bytes::Bytes;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::header::Headers;
 use crate::common::serialization::Deserializer;
 
@@ -48,12 +48,12 @@ impl BytesDeserializer {
 }
 
 impl Deserializer<Bytes> for BytesDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Bytes, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Bytes, Error> {
         // Fallback path: no shared owning buffer available, so copy.
         Ok(Bytes::copy_from_slice(data))
     }
 
-    fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<Bytes, KafkaError> {
+    fn deserialize_from_shared(&self, _topic: &str, source: &Bytes, data: &[u8]) -> Result<Bytes, Error> {
         // Zero-copy: `data` is a subslice of `source` (the owning fetch /
         // decompression buffer), so `slice_ref` hands out a refcounted view
         // into the same allocation with no copy. `slice_ref` requires `data`
@@ -68,7 +68,7 @@ impl Deserializer<Bytes> for BytesDeserializer {
         _headers: &dyn Headers,
         source: &Bytes,
         data: &[u8],
-    ) -> Result<Bytes, KafkaError> {
+    ) -> Result<Bytes, Error> {
         // ByteArray semantics ignore headers; keep the zero-copy slice path
         // (the trait default would route through the copying `deserialize`).
         Ok(source.slice_ref(data))

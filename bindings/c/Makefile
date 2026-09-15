@@ -4,7 +4,7 @@ PROFILE ?= release
 CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
 
-.PHONY: build devel-build test grpc-image grpc-image-macos clean
+.PHONY: build devel-build test grpc-image clean
 
 build:
 	cmake -S . -B $(BUILD_DIR) \
@@ -26,16 +26,6 @@ grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
 		-f $(RUST_PROJECT_ROOT)/bindings/c/Dockerfile.grpc \
-		$(RUST_PROJECT_ROOT)
-
-# macOS variant: builds libconfluent_kafka.a inside the image (see
-# Dockerfile.grpc.macos), no host build needed. --platform pins the arm64
-# manifest on Colima's plain docker driver.
-grpc-image-macos:
-	docker build \
-		--platform linux/arm64 \
-		-t $(GRPC_IMAGE_TAG) \
-		-f $(RUST_PROJECT_ROOT)/bindings/c/Dockerfile.grpc.macos \
 		$(RUST_PROJECT_ROOT)
 
 clean:
