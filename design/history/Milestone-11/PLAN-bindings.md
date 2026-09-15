@@ -593,6 +593,78 @@ Java as possible."* That resolves D1–D3.
       key rather than leaving any of them without a callback.
   The **synchronous** entry points for both RPCs are unaffected, per the same
   rule as the Topics/Configs/Log-dirs addenda.
+
+  **Addendum (2026-09-16, Phase E) — also superseded for the
+  Consumer-groups-family `_async` entry points.**
+  `kafka_admin_AdminClient_describe_consumer_groups_async`,
+  `_describe_classic_groups_async`, `_list_consumer_group_offsets_async`,
+  `_alter_consumer_group_offsets_async`, `_delete_consumer_group_offsets_async`,
+  `_delete_consumer_groups_async` and
+  `_remove_members_from_consumer_group_async` now fire their callback once per
+  key, independently, via the same `admin_async_per_key_op` mechanism, reusing
+  the Topics/Configs/Log-dirs/Partitions-offsets addenda's reasoning verbatim.
+  This family splits into two distinct Java key shapes, unlike the four prior
+  phases which were each uniform:
+    - **Map-of-groups** (a top-level `Map<String, KafkaFuture<...>>`, one
+      independent future per group id): `describeConsumerGroups`,
+      `describeClassicGroups`, `listConsumerGroupOffsets` and
+      `deleteConsumerGroups`. The key is a group id (`*const char`), the same
+      shape `create_topics`/`delete_consumer_groups` already established for a
+      plain string key.
+    - **Single-group, many-sub-key** (ONE Java `KafkaFutureImpl` underlying
+      every per-key view via `whenComplete`/`thenApply` —
+      `AlterConsumerGroupOffsetsResult.partitionResult`,
+      `DeleteConsumerGroupOffsetsResult.partitionResult`,
+      `RemoveMembersFromConsumerGroupResult.memberResult`):
+      `alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` (keyed by
+      `TopicPartition`, the same `(topic, partition)` shape as
+      `alter_partition_reassignments`/`list_offsets`), and
+      `removeMembersFromConsumerGroup` (keyed by group instance id). Because
+      every per-key view derives from the *same* source future, all of a
+      call's keys necessarily resolve at the exact same instant — there is no
+      genuine temporal independence to demonstrate for these three, unlike the
+      four map-of-groups RPCs above.
+  Notes specific to this family:
+    - `describeConsumerGroups`'s per-group future is
+      `KafkaFuture<ConsumerGroupDescription>` and `describeClassicGroups`'s is
+      `KafkaFuture<ClassicGroupDescription>`. Per §D2's existing handle rule,
+      both flattened sync results already had `kafka_admin_ConsumerGroupDescription_t`
+      / `kafka_admin_ClassicGroupDescription_t` handle types; Phase E reuses
+      each `Inner` struct as-is, just delivered individually and owned (new
+      `kafka_admin_ConsumerGroupDescription_destroy` /
+      `kafka_admin_ClassicGroupDescription_destroy`) instead of embedded and
+      borrowed inside the flattened result — the same dual-provenance pattern
+      as `kafka_admin_ListOffsetsResultInfo_t` (Phase D).
+    - `listConsumerGroupOffsets`'s per-group future is
+      `KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>` — a *nested* value,
+      like `describeLogDirs` (Phase C). The existing flattened
+      `kafka_admin_OffsetAndMetadataMap_t` handle is reused as-is under the
+      same dual-provenance pattern, with a new
+      `kafka_admin_OffsetAndMetadataMap_destroy`.
+    - `deleteConsumerGroups`'s per-group future, and all three
+      single-group-many-sub-key RPCs' per-sub-key futures, are
+      `KafkaFuture<Void>`, so those four callbacks have no value parameter —
+      the same shape as `alter_partition_reassignments` (Phase D).
+    - `alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` with an
+      empty offsets/partitions argument, and `removeMembersFromConsumerGroup`
+      in `removeAll` mode (or with an empty non-`removeAll` member list, which
+      Java's options constructor itself rejects synchronously), have **no
+      per-key slot at all** — unlike the map-of-groups RPCs and unlike Phases
+      A/D's per-key RPCs, whose empty-input case is simply "zero keys, zero
+      callbacks" with no whole-call observable lost. Here Java's own `all()` is
+      the *only* observable in that case, and the per-key delivery model has no
+      channel to carry it: the callback fires zero times rather than reporting
+      the whole-call outcome. This is a deliberate, documented limitation (see
+      the callback typedef doc comments in `src/ffi/admin.rs` and the
+      `admin.py` module docstring), not an oversight.
+    - All seven RPCs' `keys` (for `admin_async_per_key_op`'s fan-out) are
+      computed independently of their respective fallible parses, the same
+      "keys computed independently of the fallible parse" pattern established
+      in Phase A and continued through Phase D — so a marshaling failure still
+      fans an explicit error out to every requested key (when any exist)
+      rather than leaving one without a callback.
+  The **synchronous** entry points for all seven RPCs are unaffected, per the
+  same rule as the Topics/Configs/Log-dirs/Partitions-offsets addenda.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`

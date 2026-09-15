@@ -45,9 +45,9 @@ from admin import (
     _to_list_transactions,
     _to_acl_binding, _to_acl_binding_filter, _to_alter_client_quotas, _to_create_acls,
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
-    _to_describe_classic_groups, _to_describe_consumer_groups,
+    _to_classic_group_description, _to_consumer_group_description,
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
-    _to_list_consumer_group_offsets, _to_list_groups,
+    _to_group_offsets, _to_list_groups,
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_description,
     _to_partition_info,
@@ -1703,22 +1703,24 @@ def test_list_consumer_groups_reports_empty_optionals_as_none():
 def test_describe_consumer_groups_reports_unsupported_per_group():
     """`describedGroups()` is one future per group, so the mock's
     UnsupportedOperationException (MockAdminClient.java:735-737) lands in every
-    per-group slot rather than raising."""
+    per-group Future rather than raising from the call itself (Phase E: one
+    native callback per group, independently)."""
     with MockAdminClient(1) as admin:
-        result = admin.describe_consumer_groups(["dg-a", "dg-b"],
-                                                include_authorized_operations=True)
-        assert set(result) == {"dg-a", "dg-b"}
-        for value in result.values():
-            assert isinstance(value, KafkaError)
-            assert value.code == UNSUPPORTED_VERSION
-            assert str(value) == "Not implemented yet"
+        futures = admin.describe_consumer_groups(["dg-a", "dg-b"],
+                                                 include_authorized_operations=True)
+        assert set(futures) == {"dg-a", "dg-b"}
+        for future in futures.values():
+            error = future.exception(timeout=5.0)
+            assert isinstance(error, KafkaError)
+            assert error.code == UNSUPPORTED_VERSION
+            assert str(error) == "Not implemented yet"
 
 
 def test_describe_classic_groups_reports_unsupported_per_group():
     with MockAdminClient(1) as admin:
-        result = admin.describe_classic_groups(["dcg"])
-        assert set(result) == {"dcg"}
-        assert str(result["dcg"]) == "Not implemented yet"
+        futures = admin.describe_classic_groups(["dcg"])
+        assert set(futures) == {"dcg"}
+        assert str(futures["dcg"].exception(timeout=5.0)) == "Not implemented yet"
 
 
 def test_list_consumer_group_offsets_round_trip():
@@ -1728,8 +1730,8 @@ def test_list_consumer_group_offsets_round_trip():
     with MockAdminClient(1) as admin:
         admin.update_consumer_group_offsets({("og-a", 0): 17, ("og-b", 1): 23})
 
-        result = admin.list_consumer_group_offsets({"og-group": None})
-        offsets = result["og-group"]
+        futures = admin.list_consumer_group_offsets({"og-group": None})
+        offsets = futures["og-group"].result(timeout=5.0)
         assert set(offsets) == {("og-a", 0), ("og-b", 1)}
         first = offsets[("og-a", 0)]
         assert first.offset == 17
@@ -1740,12 +1742,14 @@ def test_list_consumer_group_offsets_round_trip():
 
         narrowed = admin.list_consumer_group_offsets(
             {"og-group": ListConsumerGroupOffsetsSpec([("og-b", 1)])}, require_stable=True)
-        assert set(narrowed["og-group"]) == {("og-b", 1)}
-        assert narrowed["og-group"][("og-b", 1)].offset == 23
+        narrowed_offsets = narrowed["og-group"].result(timeout=5.0)
+        assert set(narrowed_offsets) == {("og-b", 1)}
+        assert narrowed_offsets[("og-b", 1)].offset == 23
 
 
 def test_list_consumer_group_offsets_rejects_a_negative_seeded_offset():
-    """A negative seeded offset is a per-group KafkaError, not an interpreter abort.
+    """A negative seeded offset resolves the group's Future with a KafkaError,
+    not an interpreter abort.
 
     `update_consumer_group_offsets` does not validate, faithfully: Java's
     `updateConsumerGroupOffsets` is an unvalidated `putAll`
@@ -1761,16 +1765,17 @@ def test_list_consumer_group_offsets_rejects_a_negative_seeded_offset():
     with MockAdminClient(1) as admin:
         admin.update_consumer_group_offsets({("neg-a", 0): 5, ("neg-b", 1): -1})
 
-        result = admin.list_consumer_group_offsets({"neg-group": None})
-        assert set(result) == {"neg-group"}
-        error = result["neg-group"]
+        futures = admin.list_consumer_group_offsets({"neg-group": None})
+        assert set(futures) == {"neg-group"}
+        error = futures["neg-group"].exception(timeout=5.0)
         assert isinstance(error, KafkaError)
         assert str(error) == "Invalid negative offset"
 
         # Still usable afterwards — the assertion that separates "returned an
         # error" from "aborted".
         admin.update_consumer_group_offsets({("neg-b", 1): 9})
-        offsets = admin.list_consumer_group_offsets({"neg-group": None})["neg-group"]
+        offsets = admin.list_consumer_group_offsets({"neg-group": None})["neg-group"].result(
+            timeout=5.0)
         assert set(offsets) == {("neg-a", 0), ("neg-b", 1)}
         assert offsets[("neg-b", 1)].offset == 9
 
@@ -1781,9 +1786,9 @@ def test_list_consumer_group_offsets_ignores_a_negative_offset_outside_the_selec
     call."""
     with MockAdminClient(1) as admin:
         admin.update_consumer_group_offsets({("sel-a", 0): 5, ("sel-b", 1): -1})
-        result = admin.list_consumer_group_offsets(
+        futures = admin.list_consumer_group_offsets(
             {"sel-group": ListConsumerGroupOffsetsSpec([("sel-a", 0)])})
-        offsets = result["sel-group"]
+        offsets = futures["sel-group"].result(timeout=5.0)
         assert set(offsets) == {("sel-a", 0)}
         assert offsets[("sel-a", 0)].offset == 5
 
@@ -1791,92 +1796,99 @@ def test_list_consumer_group_offsets_ignores_a_negative_offset_outside_the_selec
 def test_list_consumer_group_offsets_rejects_a_duplicate_group_id():
     """A Python dict cannot hold a duplicate key, so the rejection is only
     reachable through the C layer — but it is the contract the FFI documents,
-    and `_to_*` would silently collapse the pair if it ever changed."""
+    and the per-key delivery would silently collapse the pair if it ever
+    changed."""
     with MockAdminClient(1) as admin:
-        result = admin.list_consumer_group_offsets({"m1": None, "m2": None})
+        futures = admin.list_consumer_group_offsets({"m1": None, "m2": None})
         # The mock handles exactly one group (MockAdminClient.java:748-751) and
         # fails each group's future otherwise, so this is a per-group error.
-        assert set(result) == {"m1", "m2"}
-        for value in result.values():
-            assert isinstance(value, KafkaError)
-            assert str(value) == "Not implemented yet"
+        assert set(futures) == {"m1", "m2"}
+        for future in futures.values():
+            error = future.exception(timeout=5.0)
+            assert isinstance(error, KafkaError)
+            assert str(error) == "Not implemented yet"
 
 
 def test_alter_consumer_group_offsets_reports_unsupported_per_partition():
     """Java's `partitionResult(tp)` is one KafkaFuture<Void> per requested
     partition, so the mock's "Not implement yet" (Java's own typo,
-    MockAdminClient.java:1213) lands per partition."""
+    MockAdminClient.java:1213) lands per partition's Future, independently."""
     with MockAdminClient(1) as admin:
-        result = admin.alter_consumer_group_offsets("acg", {
+        futures = admin.alter_consumer_group_offsets("acg", {
             ("ac", 0): OffsetAndMetadata(5, "m0", 4),
             ("ac", 1): OffsetAndMetadata(6),
         })
-        assert set(result) == {("ac", 0), ("ac", 1)}
-        for value in result.values():
-            assert str(value) == "Not implement yet"
+        assert set(futures) == {("ac", 0), ("ac", 1)}
+        for future in futures.values():
+            assert str(future.exception(timeout=5.0)) == "Not implement yet"
 
 
 def test_alter_consumer_group_offsets_rejects_a_negative_offset():
-    """Java's OffsetAndMetadata constructor throws; the index prefix tells the
-    caller which entry was at fault, which a Java Map call site does not need."""
+    """A marshaling failure resolves the named partition's Future with that
+    error (the per-key submission-failure fan-out), rather than the call
+    itself raising - mirroring
+    `test_alter_partition_reassignments_rejects_empty_replicas`. The index
+    prefix tells the caller which entry was at fault, which a Java Map call
+    site does not need."""
     with MockAdminClient(1) as admin:
-        with pytest.raises(KafkaError) as exc:
-            admin.alter_consumer_group_offsets("acg", {("ac", 0): OffsetAndMetadata(-1)})
-        assert str(exc.value) == "offset at index 0: Invalid negative offset"
+        futures = admin.alter_consumer_group_offsets(
+            "acg", {("ac", 0): OffsetAndMetadata(-1)})
+        error = futures[("ac", 0)].exception(timeout=5.0)
+        assert str(error) == "offset at index 0: Invalid negative offset"
 
 
-def test_alter_consumer_group_offsets_with_no_partitions_raises():
-    """With no requested partition there is no per-key slot for the outcome, so
-    the whole-request failure raises — which is also all Java's `all()` could
-    report."""
+def test_alter_consumer_group_offsets_with_no_partitions_returns_an_empty_dict():
+    """With no requested partition there is no per-partition key at all, so the
+    returned dict is empty — there is no Future to observe a whole-call
+    failure through, which is also all Java's `all()` could report in that
+    case."""
     with MockAdminClient(1) as admin:
-        with pytest.raises(KafkaError) as exc:
-            admin.alter_consumer_group_offsets("acg", {})
-        assert str(exc.value) == "Not implement yet"
+        assert admin.alter_consumer_group_offsets("acg", {}) == {}
 
 
 def test_delete_consumer_group_offsets_reports_unsupported_per_partition():
     with MockAdminClient(1) as admin:
-        result = admin.delete_consumer_group_offsets("dcg", [("dc", 0), ("dc", 1)])
-        assert set(result) == {("dc", 0), ("dc", 1)}
-        for value in result.values():
-            assert str(value) == "Not implemented yet"
+        futures = admin.delete_consumer_group_offsets("dcg", [("dc", 0), ("dc", 1)])
+        assert set(futures) == {("dc", 0), ("dc", 1)}
+        for future in futures.values():
+            assert str(future.exception(timeout=5.0)) == "Not implemented yet"
 
 
 def test_delete_consumer_groups_reports_unsupported_per_group():
     with MockAdminClient(1) as admin:
-        result = admin.delete_consumer_groups(["z-group", "a-group"])
-        assert set(result) == {"a-group", "z-group"}
-        for value in result.values():
-            assert str(value) == "Not implemented yet"
+        futures = admin.delete_consumer_groups(["z-group", "a-group"])
+        assert set(futures) == {"a-group", "z-group"}
+        for future in futures.values():
+            assert str(future.exception(timeout=5.0)) == "Not implemented yet"
 
 
 def test_remove_members_keys_by_group_instance_id():
     """Accepts MemberToRemove objects and bare instance-id strings alike, and
     keys the result by group instance id."""
     with MockAdminClient(1) as admin:
-        result = admin.remove_members_from_consumer_group(
+        futures = admin.remove_members_from_consumer_group(
             "rm-group", [MemberToRemove("instance-a"), "instance-b"],
             reason="rolling restart")
-        assert set(result) == {"instance-a", "instance-b"}
-        for value in result.values():
-            assert str(value) == "Not implemented yet"
+        assert set(futures) == {"instance-a", "instance-b"}
+        for future in futures.values():
+            assert str(future.exception(timeout=5.0)) == "Not implemented yet"
 
 
 def test_remove_all_members_has_no_per_member_outcome():
     """`members=None` is Java's no-argument options constructor, where
-    `memberResult` is not applicable and `all()` is the only observable — so a
-    failure raises instead of landing per member."""
+    `memberResult` is not applicable and `all()` is the only observable — so
+    the returned dict is empty; there is no Future to observe that mode's
+    outcome through."""
     with MockAdminClient(1) as admin:
-        with pytest.raises(KafkaError) as exc:
-            admin.remove_members_from_consumer_group("rm-group", None)
-        assert str(exc.value) == "Not implemented yet"
+        assert admin.remove_members_from_consumer_group("rm-group", None) == {}
 
 
 def test_remove_members_rejects_an_empty_member_list():
     """Java's `RemoveMembersFromConsumerGroupOptions(Collection)` throws for an
-    empty collection, so an empty list must not silently become "remove
-    everything" — the two are different arguments here."""
+    empty collection **synchronously**, before any per-member Future could
+    exist to carry it (unlike a mid-RPC marshaling failure, there is no
+    per-member key here at all), so this still raises directly rather than
+    silently becoming "remove everything" or returning an empty dict."""
     with MockAdminClient(1) as admin:
         with pytest.raises(KafkaError) as exc:
             admin.remove_members_from_consumer_group("rm-group", [])
@@ -1917,37 +1929,52 @@ async def test_async_group_rpcs():
         assert [g.group_id for g in valid] == ["async-group"]
 
         described = await admin.describe_consumer_groups(["async-group"])
-        assert str(described["async-group"]) == "Not implemented yet"
+        with pytest.raises(KafkaError) as exc:
+            await described["async-group"]
+        assert str(exc.value) == "Not implemented yet"
         described = await admin.describe_classic_groups(["async-group"])
-        assert str(described["async-group"]) == "Not implemented yet"
+        with pytest.raises(KafkaError) as exc:
+            await described["async-group"]
+        assert str(exc.value) == "Not implemented yet"
 
         # The mock drivers are synchronous inherent methods on both clients.
         admin.update_consumer_group_offsets({("async-t", 0): 8})
-        offsets = await admin.list_consumer_group_offsets({"async-group": None})
-        assert offsets["async-group"][("async-t", 0)].offset == 8
+        offsets_futures = await admin.list_consumer_group_offsets({"async-group": None})
+        offsets = await offsets_futures["async-group"]
+        assert offsets[("async-t", 0)].offset == 8
 
         altered = await admin.alter_consumer_group_offsets(
             "async-group", {("async-t", 0): OffsetAndMetadata(1)})
-        assert str(altered[("async-t", 0)]) == "Not implement yet"
+        with pytest.raises(KafkaError) as exc:
+            await altered[("async-t", 0)]
+        assert str(exc.value) == "Not implement yet"
         deleted = await admin.delete_consumer_group_offsets("async-group", [("async-t", 0)])
-        assert str(deleted[("async-t", 0)]) == "Not implemented yet"
+        with pytest.raises(KafkaError) as exc:
+            await deleted[("async-t", 0)]
+        assert str(exc.value) == "Not implemented yet"
         groups = await admin.delete_consumer_groups(["async-group"])
-        assert str(groups["async-group"]) == "Not implemented yet"
+        with pytest.raises(KafkaError) as exc:
+            await groups["async-group"]
+        assert str(exc.value) == "Not implemented yet"
         members = await admin.remove_members_from_consumer_group("async-group", ["i-1"])
-        assert str(members["i-1"]) == "Not implemented yet"
+        with pytest.raises(KafkaError) as exc:
+            await members["i-1"]
+        assert str(exc.value) == "Not implemented yet"
     finally:
         await admin.close()
 
 
 @pytest.mark.asyncio
 async def test_async_alter_consumer_group_offsets_rejects_a_negative_offset():
-    """A marshaling failure raises from the coroutine rather than resolving a
-    future that never completes."""
+    """A marshaling failure resolves the named partition's Future with that
+    error, rather than the call itself raising - the asyncio counterpart of
+    `test_alter_consumer_group_offsets_rejects_a_negative_offset`."""
     admin = AsyncMockAdminClient(1)
     try:
+        futures = await admin.alter_consumer_group_offsets(
+            "acg", {("t", 0): OffsetAndMetadata(-3)})
         with pytest.raises(KafkaError) as exc:
-            await admin.alter_consumer_group_offsets(
-                "acg", {("t", 0): OffsetAndMetadata(-3)})
+            await futures[("t", 0)]
         assert str(exc.value) == "offset at index 0: Invalid negative offset"
     finally:
         await admin.close()
@@ -1960,28 +1987,27 @@ def test_b4_handles_survive_gc_of_intermediate_objects():
         _seed_group(admin, "gc-b4")
         admin.update_consumer_group_offsets({("gc-b4-t", 0): 4})
         valid, _ = admin.list_groups()
-        offsets = admin.list_consumer_group_offsets({"gc-b4": None})
+        futures = admin.list_consumer_group_offsets({"gc-b4": None})
+        offsets = futures["gc-b4"].result(timeout=5.0)
         gc.collect()
         assert valid[0].group_id == "gc-b4"
-        assert offsets["gc-b4"][("gc-b4-t", 0)].offset == 4
+        assert offsets[("gc-b4-t", 0)].offset == 4
 
 
 # -- B4 direct converter coverage (unreachable through the mock) --------------
 
-def test_to_describe_consumer_groups_maps_every_field():
+def test_to_consumer_group_description_maps_every_field():
     """The mock never describes a group, so every populated field here is only
-    reachable through the converter. Distinct values throughout, so a
-    transposed tuple field fails."""
+    reachable through the converter (now exercised directly, since Phase E's
+    per-key delivery calls it through `_drain_consumer_group_description`
+    rather than through a whole-batch `{group_id: (error, description)}` dict).
+    Distinct values throughout, so a transposed tuple field fails."""
     member = ("consumer-7", "instance-7", "rack-7", "client-7", "host-7",
               [("ta", 0), ("tb", 1)], [("tc", 2)], 17, True)
     description = ("g-ok", False, [member], "range", "Consumer", "Stable", "Stable",
                    (3, "h3", 9093, "rack-3"), [3, 4], 11, 12)
-    converted = _to_describe_consumer_groups({
-        "g-ok": (None, description),
-        "g-bad": ((69, "no such group", False, False), None),
-    })
+    group = _to_consumer_group_description(description)
 
-    group = converted["g-ok"]
     assert group.group_id == "g-ok"
     assert group.is_simple_consumer_group is False
     assert group.partition_assignor == "range"
@@ -2011,8 +2037,7 @@ def test_to_describe_consumer_groups_maps_every_field():
     assert described_member.member_epoch == 17
     assert described_member.upgraded is True
 
-    assert isinstance(converted["g-bad"], KafkaError)
-    assert converted["g-bad"].code == 69
+    assert _to_consumer_group_description(None) is None
 
 
 def test_to_member_description_keeps_an_absent_target_assignment_none():
@@ -2028,12 +2053,13 @@ def test_to_member_description_keeps_an_absent_target_assignment_none():
     assert converted.assignment.topic_partitions == []
 
 
-def test_to_describe_classic_groups_keeps_protocol_and_protocol_data_apart():
-    """Two adjacent same-typed strings, asserted with different values."""
+def test_to_classic_group_description_keeps_protocol_and_protocol_data_apart():
+    """Two adjacent same-typed strings, asserted with different values. Now
+    exercised directly (see `test_to_consumer_group_description_maps_every_field`
+    for why)."""
     description = ("cg", "consumer", "range", False, [], "Stable",
                    (1, "h1", 9091, None), [8])
-    converted = _to_describe_classic_groups({"cg": (None, description)})
-    group = converted["cg"]
+    group = _to_classic_group_description(description)
     assert group.protocol == "consumer"
     assert group.protocol_data == "range"
     assert group.state == "Stable"
@@ -2041,21 +2067,19 @@ def test_to_describe_classic_groups_keeps_protocol_and_protocol_data_apart():
     assert group.coordinator.host == "h1"
     assert group.coordinator.port == 9091
     assert group.authorized_operations == [8]
+    assert _to_classic_group_description(None) is None
 
 
-def test_to_list_consumer_group_offsets_is_two_level_and_keeps_null_offsets():
+def test_to_group_offsets_keeps_null_offsets():
     """The inner None is Java's null map value: no committed offset for that
-    partition, which is not the same as a committed offset of 0."""
-    converted = _to_list_consumer_group_offsets({
-        "g-ok": (None, {("ta", 0): (100, "meta-a", 4), ("tb", 1): None}),
-        "g-bad": ((35, "Not implemented yet", False, False), None),
-    })
-    offsets = converted["g-ok"]
+    partition, which is not the same as a committed offset of 0. Now exercised
+    directly (see `test_to_consumer_group_description_maps_every_field` for
+    why)."""
+    offsets = _to_group_offsets({("ta", 0): (100, "meta-a", 4), ("tb", 1): None})
     assert offsets[("ta", 0)].offset == 100
     assert offsets[("ta", 0)].metadata == "meta-a"
     assert offsets[("ta", 0)].leader_epoch == 4
     assert offsets[("tb", 1)] is None
-    assert isinstance(converted["g-bad"], KafkaError)
 
 
 def test_to_list_groups_keeps_the_valid_and_error_lists_independent():
@@ -2564,15 +2588,16 @@ def test_elect_leaders_rows_keep_all_partitions_apart_from_an_empty_selection():
         False, [("orders", 3), ("events", 5)])
 
 
-def test_alter_consumer_group_offsets_rows_keep_both_nulls():
+def test_alter_consumer_group_offsets_keys_and_spec_keep_both_nulls():
     """`leader_epoch is None` is an absent epoch, not epoch 0, and
     `metadata is None` is a NULL pointer, not `""`. The mock throws before
     either is echoed back."""
-    rows = MockAdminClient._alter_consumer_group_offsets_rows({
+    keys, rows = MockAdminClient._alter_consumer_group_offsets_keys_and_spec({
         ("orders", 3): OffsetAndMetadata(11, "checkpoint", 7),
         ("events", 5): OffsetAndMetadata(13, None, 0),
         ("audit", 6): OffsetAndMetadata(17, "", None),
     })
+    assert keys == [("orders", 3), ("events", 5), ("audit", 6)]
     assert rows[0] == ("orders", 3, 11, "checkpoint", True, 7)
     # Epoch 0 is present, and must not collapse into the absent case.
     assert rows[1] == ("events", 5, 13, None, True, 0)
@@ -2582,21 +2607,26 @@ def test_alter_consumer_group_offsets_rows_keep_both_nulls():
     assert rows[1][4] != rows[2][4]
 
 
-def test_delete_consumer_group_offsets_rows_keep_topic_and_partition_apart():
-    rows = MockAdminClient._delete_consumer_group_offsets_rows(
+def test_delete_consumer_group_offsets_keys_and_spec_keep_topic_and_partition_apart():
+    keys, rows = MockAdminClient._delete_consumer_group_offsets_keys_and_spec(
         [("orders", 3), ("events", 5)])
+    assert keys == [("orders", 3), ("events", 5)]
     assert rows == [("orders", 3), ("events", 5)]
 
 
-def test_remove_members_rows_keep_remove_all_apart_from_an_empty_list():
-    """`None` removes every member; `[]` removes none. Java's Collection
-    constructor rejects the empty list outright, so the two must never
-    collapse."""
-    assert MockAdminClient._remove_members_rows(None) == (True, [])
-    assert MockAdminClient._remove_members_rows([]) == (False, [])
-    assert MockAdminClient._remove_members_rows(
+def test_remove_members_keys_and_spec_keep_remove_all_apart_from_an_empty_list():
+    """`None` removes every member, with no per-member key. An explicitly empty
+    list is different again: Java's Collection constructor rejects it
+    synchronously, so it must raise rather than collapse into either the
+    `None` or the "two real members" case."""
+    assert MockAdminClient._remove_members_from_consumer_group_keys_and_spec(None) == (
+        [], (True, []))
+    with pytest.raises(KafkaError) as exc:
+        MockAdminClient._remove_members_from_consumer_group_keys_and_spec([])
+    assert str(exc.value) == "Invalid empty members has been provided"
+    assert MockAdminClient._remove_members_from_consumer_group_keys_and_spec(
         [MemberToRemove("instance-1"), MemberToRemove("instance-2")]) == (
-            False, ["instance-1", "instance-2"])
+            ["instance-1", "instance-2"], (False, ["instance-1", "instance-2"]))
 
 
 # ---- B5b: SCRAM, delegation tokens and features -----------------------------
@@ -3161,12 +3191,12 @@ def test_authorized_operations_none_stays_distinct_from_empty():
     def consumer_group(operations):
         raw = ("g", False, [], "range", "Consumer", "Stable", "Stable",
                (1, "h1", 9091, None), operations, 1, 1)
-        return _to_describe_consumer_groups({"g": (None, raw)})["g"]
+        return _to_consumer_group_description(raw)
 
     def classic_group(operations):
         raw = ("cg", "consumer", "range", False, [], "Stable",
                (1, "h1", 9091, None), operations)
-        return _to_describe_classic_groups({"cg": (None, raw)})["cg"]
+        return _to_classic_group_description(raw)
 
     assert consumer_group(None).authorized_operations is None
     assert consumer_group([]).authorized_operations == []

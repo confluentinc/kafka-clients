@@ -5353,20 +5353,108 @@ static void admin_list_groups_trampoline(kafka_admin_ListGroupsResult_t* r,
                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_consumer_groups_trampoline(kafka_admin_ListConsumerGroupsResult_t* r,
                                                   kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_consumer_groups_trampoline(kafka_admin_DescribeConsumerGroupsResult_t* r,
-                                                      kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_classic_groups_trampoline(kafka_admin_DescribeClassicGroupsResult_t* r,
-                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_list_consumer_group_offsets_trampoline(kafka_admin_ListConsumerGroupOffsetsResult_t* r,
-                                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_consumer_group_offsets_trampoline(kafka_admin_AlterConsumerGroupOffsetsResult_t* r,
-                                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_consumer_group_offsets_trampoline(kafka_admin_DeleteConsumerGroupOffsetsResult_t* r,
-                                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_consumer_groups_trampoline(kafka_admin_DeleteConsumerGroupsResult_t* r,
-                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_remove_members_trampoline(kafka_admin_RemoveMembersFromConsumerGroupResult_t* r,
-                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// describeConsumerGroups / describeClassicGroups / listConsumerGroupOffsets /
+// deleteConsumerGroups (Phase E; fire once per group, independently, as that
+// key's own future resolves) - see the "per-key trampolines (Topics
+// family...)" comment above for the shared contract. The key is a group id
+// (str).
+
+// describeConsumerGroups: Java's per-group future is
+// KafkaFuture<ConsumerGroupDescription>, so `value` is an owned handle drained
+// by `ConsumerGroupDescription_drain` on the Python side.
+static void admin_describe_consumer_groups_trampoline(const char* group_id,
+    kafka_admin_ConsumerGroupDescription_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", group_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// describeClassicGroups: same shape as describeConsumerGroups, value type
+// ClassicGroupDescription.
+static void admin_describe_classic_groups_trampoline(const char* group_id,
+    kafka_admin_ClassicGroupDescription_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", group_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// listConsumerGroupOffsets: Java's per-group future is
+// KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>, so `value` is an owned
+// OffsetAndMetadataMap handle drained by `OffsetAndMetadataMap_drain`.
+static void admin_list_consumer_group_offsets_trampoline(const char* group_id,
+    kafka_admin_OffsetAndMetadataMap_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", group_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteConsumerGroups: Java's per-group future is KafkaFuture<Void>, so there
+// is no value parameter (as for alter_partition_reassignments).
+static void admin_delete_consumer_groups_trampoline(const char* group_id,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", group_id,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// alterConsumerGroupOffsets / deleteConsumerGroupOffsets (Phase E; fire once
+// per partition, independently). The key is a `TopicPartition`, delivered as
+// (topic, partition) - mirrors admin_alter_partition_reassignments_trampoline.
+// Java's per-partition future is KafkaFuture<Void> for both, so there is no
+// value parameter.
+static void admin_alter_consumer_group_offsets_trampoline(const char* topic, int32_t partition,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_delete_consumer_group_offsets_trampoline(const char* topic, int32_t partition,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// removeMembersFromConsumerGroup (Phase E; fires once per member,
+// independently, keyed by group instance id). Java's per-member future is
+// KafkaFuture<Void>, so there is no value parameter. Never fires at all in
+// `removeAll` mode (there is no per-member key to deliver a callback for).
+static void admin_remove_members_trampoline(const char* group_instance_id,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", group_instance_id,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- shared string-array reader --------------------------------------------
 
@@ -5439,7 +5527,11 @@ static PyObject* py_Admin_describe_consumer_groups_async(PyObject* self, PyObjec
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(groups, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per group (Java's per-key KafkaFuture). `groups`
+    // is built from the caller's already-deduplicated key list, which matches
+    // the number of times the native callback will actually fire - see
+    // admin_describe_consumer_groups_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_consumer_groups_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         include_authorized ? true : false, admin_describe_consumer_groups_trampoline, cb);
@@ -5455,7 +5547,8 @@ static PyObject* py_Admin_describe_classic_groups_async(PyObject* self, PyObject
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(groups, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per group - see admin_describe_classic_groups_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_classic_groups_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         include_authorized ? true : false, admin_describe_classic_groups_trampoline, cb);
@@ -5511,7 +5604,12 @@ static PyObject* py_Admin_list_consumer_group_offsets_async(PyObject* self, PyOb
     }
 
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per group (Java's per-key KafkaFuture). `spec`
+        // is built from the caller's `{group_id: ListConsumerGroupOffsetsSpec |
+        // None}` dict, already unique by construction, so the row count matches
+        // the number of times the native callback will actually fire - see
+        // admin_list_consumer_group_offsets_trampoline.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_list_consumer_group_offsets_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, groups, all_partitions,
             (const char* const* const*)topics, (const int32_t* const*)partitions, counts,
@@ -5562,7 +5660,15 @@ static PyObject* py_Admin_alter_consumer_group_offsets_async(PyObject* self, PyO
         topics[i] = topic; partitions[i] = (int32_t)p; offsets[i] = (int64_t)offset;
         metadata[i] = meta; epochs[i] = (int32_t)epoch; has_epoch[i] = has ? true : false;
     }
-    Py_INCREF(cb);
+    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{(topic, partition): OffsetAndMetadata}`
+    // dict, already unique by construction, so the row count matches the
+    // number of times the native callback will actually fire - see
+    // admin_alter_consumer_group_offsets_trampoline. When `n` is 0 (an empty
+    // offsets map) the callback never fires at all - there is no per-key slot
+    // for the outcome, mirroring Java's empty `Map<TopicPartition,
+    // KafkaFuture<Void>>` in that case.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_alter_consumer_group_offsets_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, offsets, metadata,
         epochs, has_epoch, (int32_t)n, timeout_ms, admin_alter_consumer_group_offsets_trampoline,
@@ -5579,7 +5685,10 @@ static PyObject* py_Admin_delete_consumer_group_offsets_async(PyObject* self, Py
     const char** topics = NULL; int32_t* partitions = NULL;
     Py_ssize_t n = build_topic_partitions(spec, &topics, &partitions);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per partition - see
+    // admin_delete_consumer_group_offsets_trampoline. Never fires at all when
+    // `n` is 0, for the same reason given on alter_consumer_group_offsets_async.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_consumer_group_offsets_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, (int32_t)n,
         timeout_ms, admin_delete_consumer_group_offsets_trampoline, cb);
@@ -5594,7 +5703,8 @@ static PyObject* py_Admin_delete_consumer_groups_async(PyObject* self, PyObject*
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(groups, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per group - see admin_delete_consumer_groups_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_consumer_groups_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         admin_delete_consumer_groups_trampoline, cb);
@@ -5612,7 +5722,12 @@ static PyObject* py_Admin_remove_members_from_consumer_group_async(PyObject* sel
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(members, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per member (Java's per-key KafkaFuture), keyed by
+    // group instance id - see admin_remove_members_trampoline. `members` is
+    // empty both in `removeAll` mode and for an (unsubmittable) empty member
+    // list without `removeAll`, so `n` is 0 in both cases and the callback
+    // never fires at all - there is no per-member key to deliver it to.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_remove_members_from_consumer_group_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, remove_all ? true : false, ids,
         (int32_t)n, reason, timeout_ms, admin_remove_members_trampoline, cb);
@@ -5881,6 +5996,25 @@ static PyObject* py_DescribeConsumerGroupsResult_drain(PyObject* self, PyObject*
     return d;
 }
 
+// (group_id, is_simple, members, partition_assignor, group_type, state,
+//  group_state, coordinator, authorized_operations, group_epoch,
+//  target_assignment_epoch) -- standalone per-key value delivered individually
+// by describe_consumer_groups' per-key async callback
+// (admin_describe_consumer_groups_trampoline, above), reusing
+// consumer_group_description_to_py. Do NOT call this on a value obtained from
+// the flattened result's DescribeConsumerGroupsResult_get_value (borrowed,
+// freed by DescribeConsumerGroupsResult_destroy instead) - this owns and
+// destroys the handle.
+static PyObject* py_ConsumerGroupDescription_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ConsumerGroupDescription_t* d =
+        (kafka_admin_ConsumerGroupDescription_t*)(uintptr_t)ptr;
+    PyObject* result = consumer_group_description_to_py(d);
+    kafka_admin_ConsumerGroupDescription_destroy(d);
+    return result;
+}
+
 // {group_id: (error, description_or_None)}
 static PyObject* py_DescribeClassicGroupsResult_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -5906,6 +6040,24 @@ static PyObject* py_DescribeClassicGroupsResult_drain(PyObject* self, PyObject* 
     }
     kafka_admin_DescribeClassicGroupsResult_destroy(r);
     return d;
+}
+
+// (group_id, protocol, protocol_data, is_simple, members, state, coordinator,
+//  authorized_operations) -- standalone per-key value delivered individually
+// by describe_classic_groups' per-key async callback
+// (admin_describe_classic_groups_trampoline, above), reusing
+// classic_group_description_to_py. Do NOT call this on a value obtained from
+// the flattened result's DescribeClassicGroupsResult_get_value (borrowed,
+// freed by DescribeClassicGroupsResult_destroy instead) - this owns and
+// destroys the handle.
+static PyObject* py_ClassicGroupDescription_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ClassicGroupDescription_t* d =
+        (kafka_admin_ClassicGroupDescription_t*)(uintptr_t)ptr;
+    PyObject* result = classic_group_description_to_py(d);
+    kafka_admin_ClassicGroupDescription_destroy(d);
+    return result;
 }
 
 // {(topic, partition): (offset, metadata, leader_epoch) | None}
@@ -5970,6 +6122,23 @@ static PyObject* py_ListConsumerGroupOffsetsResult_drain(PyObject* self, PyObjec
     }
     kafka_admin_ListConsumerGroupOffsetsResult_destroy(r);
     return d;
+}
+
+// {(topic, partition): (offset, metadata, leader_epoch_or_None) | None} --
+// standalone per-key value delivered individually by
+// list_consumer_group_offsets' per-key async callback
+// (admin_list_consumer_group_offsets_trampoline, above), reusing
+// offset_map_to_py. Do NOT call this on a value obtained from the flattened
+// result's ListConsumerGroupOffsetsResult_get_value (borrowed, freed by
+// ListConsumerGroupOffsetsResult_destroy instead) - this owns and destroys
+// the handle.
+static PyObject* py_OffsetAndMetadataMap_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_OffsetAndMetadataMap_t* map = (kafka_admin_OffsetAndMetadataMap_t*)(uintptr_t)ptr;
+    PyObject* result = offset_map_to_py(map);
+    kafka_admin_OffsetAndMetadataMap_destroy(map);
+    return result;
 }
 
 // {(topic, partition): error_or_None} — per-partition future is
@@ -7697,30 +7866,36 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_list_consumer_groups_async", py_Admin_list_consumer_groups_async, METH_VARARGS,
      "Async listConsumerGroups; cb(result_int, error_int)"},
     {"Admin_describe_consumer_groups_async", py_Admin_describe_consumer_groups_async,
-     METH_VARARGS, "Async describeConsumerGroups; cb(result_int, error_int)"},
+     METH_VARARGS, "Async describeConsumerGroups; cb(group_id, value_int, error_int) per group"},
     {"Admin_describe_classic_groups_async", py_Admin_describe_classic_groups_async, METH_VARARGS,
-     "Async describeClassicGroups; cb(result_int, error_int)"},
+     "Async describeClassicGroups; cb(group_id, value_int, error_int) per group"},
     {"Admin_list_consumer_group_offsets_async", py_Admin_list_consumer_group_offsets_async,
-     METH_VARARGS, "Async listConsumerGroupOffsets; cb(result_int, error_int)"},
+     METH_VARARGS, "Async listConsumerGroupOffsets; cb(group_id, value_int, error_int) per group"},
     {"Admin_alter_consumer_group_offsets_async", py_Admin_alter_consumer_group_offsets_async,
-     METH_VARARGS, "Async alterConsumerGroupOffsets; cb(result_int, error_int)"},
+     METH_VARARGS, "Async alterConsumerGroupOffsets; cb(topic, partition, error_int) per partition"},
     {"Admin_delete_consumer_group_offsets_async", py_Admin_delete_consumer_group_offsets_async,
-     METH_VARARGS, "Async deleteConsumerGroupOffsets; cb(result_int, error_int)"},
+     METH_VARARGS, "Async deleteConsumerGroupOffsets; cb(topic, partition, error_int) per partition"},
     {"Admin_delete_consumer_groups_async", py_Admin_delete_consumer_groups_async, METH_VARARGS,
-     "Async deleteConsumerGroups; cb(result_int, error_int)"},
+     "Async deleteConsumerGroups; cb(group_id, error_int) per group"},
     {"Admin_remove_members_from_consumer_group_async",
      py_Admin_remove_members_from_consumer_group_async, METH_VARARGS,
-     "Async removeMembersFromConsumerGroup; cb(result_int, error_int)"},
+     "Async removeMembersFromConsumerGroup; cb(group_instance_id, error_int) per member"},
     {"ListGroupsResult_drain", py_ListGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a ListGroupsResult handle into (valid, errors)"},
     {"ListConsumerGroupsResult_drain", py_ListConsumerGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a ListConsumerGroupsResult handle into (valid, errors)"},
     {"DescribeConsumerGroupsResult_drain", py_DescribeConsumerGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeConsumerGroupsResult handle into a dict"},
+    {"ConsumerGroupDescription_drain", py_ConsumerGroupDescription_drain, METH_VARARGS,
+     "Drain+destroy a standalone ConsumerGroupDescription handle (per-key describe_consumer_groups callback) into a tuple"},
     {"DescribeClassicGroupsResult_drain", py_DescribeClassicGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeClassicGroupsResult handle into a dict"},
+    {"ClassicGroupDescription_drain", py_ClassicGroupDescription_drain, METH_VARARGS,
+     "Drain+destroy a standalone ClassicGroupDescription handle (per-key describe_classic_groups callback) into a tuple"},
     {"ListConsumerGroupOffsetsResult_drain", py_ListConsumerGroupOffsetsResult_drain,
      METH_VARARGS, "Drain+destroy a ListConsumerGroupOffsetsResult handle into a dict"},
+    {"OffsetAndMetadataMap_drain", py_OffsetAndMetadataMap_drain, METH_VARARGS,
+     "Drain+destroy a standalone OffsetAndMetadataMap handle (per-key list_consumer_group_offsets callback) into a dict"},
     {"AlterConsumerGroupOffsetsResult_drain", py_AlterConsumerGroupOffsetsResult_drain,
      METH_VARARGS, "Drain+destroy an AlterConsumerGroupOffsetsResult handle into a dict"},
     {"DeleteConsumerGroupOffsetsResult_drain", py_DeleteConsumerGroupOffsetsResult_drain,

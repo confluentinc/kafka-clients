@@ -29,12 +29,13 @@ C has no ``KafkaFuture``, so most RPCs deliver one flattened result handle
 carrying a value *and* an error per key, and this module drains it into a plain
 dict whose values are either the result object or a :class:`KafkaError`.
 
-The Topics-, Configs-, Log-dirs- and Partitions/offsets-family RPCs below are
-the exception: their native callback fires **once per key, independently, as
-that key's own future resolves** — matching Java's per-key ``KafkaFuture``
-exactly rather than joining every key into one flattened batch — so these
-twelve return a dict of **Futures** immediately, before any key has
-necessarily completed, rather than a dict of already-resolved values:
+The Topics-, Configs-, Log-dirs-, Partitions/offsets- and Consumer-groups-
+family RPCs below are the exception: their native callback fires **once per
+key, independently, as that key's own future resolves** — matching Java's
+per-key ``KafkaFuture`` exactly rather than joining every key into one
+flattened batch — so these nineteen return a dict of **Futures** immediately,
+before any key has necessarily completed, rather than a dict of
+already-resolved values:
 
 * ``create_topics`` -> ``{topic_name: Future[TopicMetadataAndConfig]}``
 * ``delete_topics`` / ``delete_topics_by_ids`` -> ``{topic_name_or_id: Future[None]}``
@@ -68,6 +69,29 @@ necessarily completed, rather than a dict of already-resolved values:
   (per-partition future is ``KafkaFuture<Void>``, so a result of ``None``
   means success)
 * ``list_offsets`` -> ``{(topic, partition): Future[ListOffsetsResultInfo]}``
+* ``describe_consumer_groups`` / ``describe_classic_groups`` ->
+  ``{group_id: Future[ConsumerGroupDescription | ClassicGroupDescription]}``
+* ``list_consumer_group_offsets`` ->
+  ``{group_id: Future[{(topic, partition): OffsetAndMetadata | None}]}`` (an
+  inner ``None`` is Java's null map value: no committed offset for that
+  partition, which is not a committed offset of 0)
+* ``alter_consumer_group_offsets`` / ``delete_consumer_group_offsets`` ->
+  ``{(topic, partition): Future[None]}`` (per-partition future is
+  ``KafkaFuture<Void>``, so a result of ``None`` means success). An empty
+  ``offsets``/``partitions`` argument returns an **empty dict** rather than a
+  dict of Futures: there is no per-key slot for a whole-call failure to
+  attach to, which is also all Java's ``all()`` could report in that case.
+* ``delete_consumer_groups`` -> ``{group_id: Future[None]}``
+* ``remove_members_from_consumer_group`` ->
+  ``{group_instance_id: Future[None]}``. ``members=None`` selects Java's
+  "remove every member" mode, which has no per-member outcome in Java at all
+  (``memberResult`` refuses and ``all()`` is the only observable) and returns
+  an empty dict for the same reason as the empty-offsets case above. An empty
+  (non-``None``) ``members`` iterable is different again: Java's
+  ``RemoveMembersFromConsumerGroupOptions(Collection)`` constructor raises
+  ``IllegalArgumentException`` **synchronously**, before any ``KafkaFuture``
+  exists, so this raises :class:`KafkaError` synchronously too rather than
+  returning anything.
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -90,17 +114,6 @@ per-key failure there likewise does not raise — only a whole-call failure does
 * ``list_partition_reassignments`` ->
   ``{(topic, partition): PartitionReassignment}`` (Java has a single future
   here, so a failure raises instead of appearing per key)
-* ``describe_consumer_groups`` / ``describe_classic_groups`` ->
-  ``{group_id: ConsumerGroupDescription | ClassicGroupDescription | KafkaError}``
-* ``list_consumer_group_offsets`` ->
-  ``{group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}``
-  (an inner ``None`` is Java's null map value: no committed offset for that
-  partition, which is not a committed offset of 0)
-* ``alter_consumer_group_offsets`` / ``delete_consumer_group_offsets`` ->
-  ``{(topic, partition): None | KafkaError}``, ``delete_consumer_groups`` ->
-  ``{group_id: None | KafkaError}`` and ``remove_members_from_consumer_group``
-  -> ``{group_instance_id: None | KafkaError}`` (all per-key
-  ``KafkaFuture<Void>``, so ``None`` means success)
 * ``list_groups`` -> ``([GroupListing], [KafkaError])`` and
   ``list_consumer_groups`` -> ``([ConsumerGroupListing], [KafkaError])`` —
   Java splits one future into ``valid()`` and an *unkeyed* ``errors()``
@@ -114,9 +127,10 @@ per-key failure there likewise does not raise — only a whole-call failure does
 
 For the already-drained dicts above, a per-key failure therefore does **not**
 raise; iterate the dict and check for ``KafkaError`` values. Only a whole-call
-failure raises. For the twelve Topics-, Configs-, Log-dirs- and
-Partitions/offsets-family RPCs (dicts of ``Future``s), a per-key failure
-raises from *that key's* ``Future.result()`` instead — see above.
+failure raises. For the nineteen Topics-, Configs-, Log-dirs-,
+Partitions/offsets- and Consumer-groups-family RPCs (dicts of ``Future``s), a
+per-key failure raises from *that key's* ``Future.result()`` instead — see
+above.
 """
 
 import asyncio
@@ -2045,24 +2059,22 @@ def _to_list_consumer_groups(raw):
             [_to_error(e) for e in errors])
 
 
-def _to_describe_consumer_groups(raw):
-    """{group_id: (error, description)}
-    -> {group_id: ConsumerGroupDescription | KafkaError}"""
-    out = {}
-    for key, (error, description) in raw.items():
-        out[key] = (_to_error(error) if error is not None
-                    else _to_consumer_group_description(description))
-    return out
+def _drain_consumer_group_description(value):
+    """Drain+destroy a standalone ``ConsumerGroupDescription`` handle
+    delivered by ``describe_consumer_groups``'s per-key async callback
+    (Phase E) into a :class:`ConsumerGroupDescription`. Reuses
+    ``_to_consumer_group_description``'s raw-tuple shape, the same one the
+    flattened (synchronous) result path uses.
+    """
+    return _to_consumer_group_description(_lib.ConsumerGroupDescription_drain(value))
 
 
-def _to_describe_classic_groups(raw):
-    """{group_id: (error, description)}
-    -> {group_id: ClassicGroupDescription | KafkaError}"""
-    out = {}
-    for key, (error, description) in raw.items():
-        out[key] = (_to_error(error) if error is not None
-                    else _to_classic_group_description(description))
-    return out
+def _drain_classic_group_description(value):
+    """Drain+destroy a standalone ``ClassicGroupDescription`` handle
+    delivered by ``describe_classic_groups``'s per-key async callback
+    (Phase E) into a :class:`ClassicGroupDescription`.
+    """
+    return _to_classic_group_description(_lib.ClassicGroupDescription_drain(value))
 
 
 def _to_group_offsets(raw):
@@ -2076,13 +2088,14 @@ def _to_group_offsets(raw):
             for key, value in raw.items()}
 
 
-def _to_list_consumer_group_offsets(raw):
-    """{group_id: (error, offsets)}
-    -> {group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}"""
-    out = {}
-    for key, (error, offsets) in raw.items():
-        out[key] = _to_error(error) if error is not None else _to_group_offsets(offsets)
-    return out
+def _drain_group_offsets_map(value):
+    """Drain+destroy a standalone ``OffsetAndMetadataMap`` handle delivered by
+    ``list_consumer_group_offsets``'s per-key async callback (Phase E) into
+    ``{(topic, partition): OffsetAndMetadata | None}``. Reuses
+    ``_to_group_offsets``'s raw-dict shape, the same one the flattened
+    (synchronous) result path uses.
+    """
+    return _to_group_offsets(_lib.OffsetAndMetadataMap_drain(value))
 
 
 def _to_acl_binding(raw):
@@ -2897,48 +2910,44 @@ class _AdminBase:
                 self._resolve_value(drain, _to_list_consumer_groups),
                 self._free_value(drain))
 
-    def _describe_consumer_groups_spec(self, group_ids, timeout,
-                                       include_authorized_operations):
-        ids = [str(g) for g in group_ids]
-        ms = _ms(timeout)
-        drain = _lib.DescribeConsumerGroupsResult_drain
-        return (lambda cb: _lib.Admin_describe_consumer_groups_async(
-                    self._h, ids, ms, bool(include_authorized_operations), cb),
-                self._resolve_value(drain, _to_describe_consumer_groups),
-                self._free_value(drain))
+    # ---- per-key request builders (Phase E: the consumer-groups family) ---
+    #
+    # Same "keys_and_spec" contract as the Topics/Configs/Log-dirs/
+    # Partitions-offsets families above: build the `spec` the C layer parses
+    # plus the `{key: ...}` shape used to construct the futures dict.
+    # describeConsumerGroups / describeClassicGroups / deleteConsumerGroups
+    # are group-id-keyed (like `_string_keyed_names`); listConsumerGroupOffsets
+    # is keyed by the caller's own dict (already unique by construction);
+    # alterConsumerGroupOffsets / deleteConsumerGroupOffsets are
+    # (topic, partition)-keyed; removeMembersFromConsumerGroup is keyed by
+    # group instance id, empty in `removeAll` mode.
 
-    def _describe_classic_groups_spec(self, group_ids, timeout,
-                                      include_authorized_operations):
-        ids = [str(g) for g in group_ids]
-        ms = _ms(timeout)
-        drain = _lib.DescribeClassicGroupsResult_drain
-        return (lambda cb: _lib.Admin_describe_classic_groups_async(
-                    self._h, ids, ms, bool(include_authorized_operations), cb),
-                self._resolve_value(drain, _to_describe_classic_groups),
-                self._free_value(drain))
+    @staticmethod
+    def _list_consumer_group_offsets_keys_and_spec(group_specs):
+        """``{group_id: ListConsumerGroupOffsetsSpec | None}`` -> the group-id
+        key list plus the ``(group_id, all_partitions, [(topic, partition)])``
+        ragged rows the C extension unpacks. Already unique by construction (a
+        dict's keys cannot repeat).
 
-    def _list_consumer_group_offsets_spec(self, group_specs, timeout, require_stable):
-        # One ragged partition list per group. A spec whose topic_partitions is
-        # None is Java's unset collection — "every partition the group has
-        # committed offsets for" — and crosses as an explicit flag so it stays
-        # distinct from an empty selection.
+        A spec whose ``topic_partitions`` is ``None`` is Java's unset
+        collection — "every partition the group has committed offsets for" —
+        and crosses as an explicit flag so it stays distinct from an empty
+        selection.
+        """
+        keys = list(group_specs.keys())
         spec = []
         for group_id, group_spec in group_specs.items():
             partitions = None if group_spec is None else group_spec.topic_partitions
             all_partitions = partitions is None
             rows = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
             spec.append((str(group_id), all_partitions, rows))
-        ms = _ms(timeout)
-        drain = _lib.ListConsumerGroupOffsetsResult_drain
-        return (lambda cb: _lib.Admin_list_consumer_group_offsets_async(
-                    self._h, spec, ms, bool(require_stable), cb),
-                self._resolve_value(drain, _to_list_consumer_group_offsets),
-                self._free_value(drain))
+        return keys, spec
 
     @staticmethod
-    def _alter_consumer_group_offsets_rows(offsets):
-        """``{(topic, partition): OffsetAndMetadata}`` -> the 6-tuples the C
-        extension unpacks.
+    def _alter_consumer_group_offsets_keys_and_spec(offsets):
+        """``{(topic, partition): OffsetAndMetadata}`` -> the per-partition key
+        list plus the 6-tuples the C extension unpacks. Already unique by
+        construction, like `_alter_replica_log_dirs_keys_and_spec`.
 
         Two nulls are load-bearing and neither survives a round trip — Java's
         ``MockAdminClient.alterConsumerGroupOffsets`` throws
@@ -2950,76 +2959,58 @@ class _AdminBase:
           - ``metadata is None`` stays ``None`` (a NULL pointer), distinct from
             the empty string Java's ``OffsetAndMetadata`` defaults to.
         """
-        return [(str(topic), int(partition), int(o.offset),
+        keys = list(offsets.keys())
+        spec = [(str(topic), int(partition), int(o.offset),
                  None if o.metadata is None else str(o.metadata),
                  o.leader_epoch is not None,
                  0 if o.leader_epoch is None else int(o.leader_epoch))
                 for (topic, partition), o in offsets.items()]
-
-    def _alter_consumer_group_offsets_spec(self, group_id, offsets, timeout):
-        spec = self._alter_consumer_group_offsets_rows(offsets)
-        ms = _ms(timeout)
-        drain = _lib.AlterConsumerGroupOffsetsResult_drain
-        return (lambda cb: _lib.Admin_alter_consumer_group_offsets_async(
-                    self._h, str(group_id), spec, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        return keys, spec
 
     @staticmethod
-    def _delete_consumer_group_offsets_rows(partitions):
-        """``{(topic, partition)}`` -> the ``(topic, partition)`` rows the C
-        extension unpacks.
+    def _delete_consumer_group_offsets_keys_and_spec(partitions):
+        """``{(topic, partition)}`` -> the per-partition key list plus the
+        ``(topic, partition)`` rows the C extension unpacks. ``partitions`` is
+        a set, already unique by construction.
 
         Java's ``MockAdminClient.deleteConsumerGroupOffsets`` throws
         (`MockAdminClient.java:783`), so the column order is not observable end
         to end.
         """
-        return [(str(t), int(p)) for t, p in partitions]
-
-    def _delete_consumer_group_offsets_spec(self, group_id, partitions, timeout):
-        spec = self._delete_consumer_group_offsets_rows(partitions)
-        ms = _ms(timeout)
-        drain = _lib.DeleteConsumerGroupOffsetsResult_drain
-        return (lambda cb: _lib.Admin_delete_consumer_group_offsets_async(
-                    self._h, str(group_id), spec, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
-
-    def _delete_consumer_groups_spec(self, group_ids, timeout):
-        ids = [str(g) for g in group_ids]
-        ms = _ms(timeout)
-        drain = _lib.DeleteConsumerGroupsResult_drain
-        return (lambda cb: _lib.Admin_delete_consumer_groups_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        keys = list(partitions)
+        return keys, [(str(t), int(p)) for t, p in keys]
 
     @staticmethod
-    def _remove_members_rows(members):
-        """Member selection -> ``(remove_all, group_instance_ids)``.
+    def _remove_members_from_consumer_group_keys_and_spec(members):
+        """Member selection -> the per-member group-instance-id key list plus
+        ``(remove_all, group_instance_ids)``.
 
         ``members is None`` selects Java's no-argument options constructor
-        ("remove every member"). An empty *list* is not the same thing: Java's
-        Collection constructor rejects it, so it must not silently become the
-        destructive form. Java's
-        ``MockAdminClient.removeMembersFromConsumerGroup`` throws
-        (`MockAdminClient.java:801-803`), so the flag has no end-to-end
-        observable.
+        ("remove every member"); Java's ``memberResult`` is not applicable in
+        that mode at all, so there is no per-member key and ``keys`` is empty.
+
+        An empty *list* is not the same thing: Java's
+        ``RemoveMembersFromConsumerGroupOptions(Collection<MemberToRemove>)``
+        constructor throws ``IllegalArgumentException`` for an empty
+        collection **synchronously**, before any ``KafkaFuture`` — even a
+        failed one — exists to carry the error. Unlike a mid-RPC marshaling
+        failure (e.g. an empty replica list for
+        ``alter_partition_reassignments``, which resolves the *named key's*
+        ``Future`` because the key still exists), there is no per-member key
+        here at all for an empty list to attach to, so this raises directly
+        rather than returning a dict with nothing to observe the failure
+        through — the same reasoning as :meth:`Admin.remove_members_from_consumer_group`'s
+        docstring, just enforced before any ``Future`` is built.
         """
         remove_all = members is None
+        members_list = None if remove_all else list(members)
+        if members_list is not None and not members_list:
+            raise KafkaError._from_parts(
+                -1, "Invalid empty members has been provided", False, False)
         ids = ([] if remove_all
-               else [str(getattr(m, "group_instance_id", m)) for m in members])
-        return (remove_all, ids)
-
-    def _remove_members_from_consumer_group_spec(self, group_id, members, reason, timeout):
-        remove_all, ids = self._remove_members_rows(members)
-        ms = _ms(timeout)
-        drain = _lib.RemoveMembersFromConsumerGroupResult_drain
-        return (lambda cb: _lib.Admin_remove_members_from_consumer_group_async(
-                    self._h, str(group_id), remove_all, ids,
-                    None if reason is None else str(reason), ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
-
+               else [str(getattr(m, "group_instance_id", m)) for m in members_list])
+        keys = [] if remove_all else ids
+        return keys, (remove_all, ids)
 
     # ---- B5a: ACLs and client quotas ---------------------------------------
     #
@@ -3773,27 +3764,41 @@ class Admin(_AdminBase):
     def describe_consumer_groups(self, group_ids, timeout=None,
                                  include_authorized_operations=False):
         """Describe ``group_ids``. Returns
-        ``{group_id: ConsumerGroupDescription | KafkaError}``.
+        ``{group_id: Future[ConsumerGroupDescription]}`` immediately; each
+        group's ``Future`` resolves independently (Java's per-key
+        ``KafkaFuture``; see the module docstring).
 
         Covers both classic and consumer (KIP-848) protocol groups; the
         classic-only sibling is :meth:`describe_classic_groups`.
         """
         self._check_closed()
-        return self._run_sync(*self._describe_consumer_groups_spec(
-            group_ids, timeout, include_authorized_operations))
+        ids = self._string_keyed_names(group_ids)
+        futures = {key: Future() for key in ids}
+        ms = _ms(timeout)
+        _lib.Admin_describe_consumer_groups_async(
+            self._h, ids, ms, bool(include_authorized_operations),
+            self._keyed_value_cb(futures, _drain_consumer_group_description))
+        return futures
 
     def describe_classic_groups(self, group_ids, timeout=None,
                                 include_authorized_operations=False):
         """Describe classic ``group_ids``. Returns
-        ``{group_id: ClassicGroupDescription | KafkaError}``."""
+        ``{group_id: Future[ClassicGroupDescription]}`` immediately; each
+        group's ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._describe_classic_groups_spec(
-            group_ids, timeout, include_authorized_operations))
+        ids = self._string_keyed_names(group_ids)
+        futures = {key: Future() for key in ids}
+        ms = _ms(timeout)
+        _lib.Admin_describe_classic_groups_async(
+            self._h, ids, ms, bool(include_authorized_operations),
+            self._keyed_value_cb(futures, _drain_classic_group_description))
+        return futures
 
     def list_consumer_group_offsets(self, group_specs, timeout=None, require_stable=False):
         """List committed offsets for ``{group_id: ListConsumerGroupOffsetsSpec
         | None}``. Returns
-        ``{group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}``.
+        ``{group_id: Future[{(topic, partition): OffsetAndMetadata | None}]}``
+        immediately; each group's ``Future`` resolves independently.
 
         A spec of ``None`` (or one whose ``topic_partitions`` is ``None``) is
         Java's unset collection: every partition the group has committed
@@ -3802,51 +3807,85 @@ class Admin(_AdminBase):
         as a committed offset of 0.
         """
         self._check_closed()
-        return self._run_sync(*self._list_consumer_group_offsets_spec(
-            group_specs, timeout, require_stable))
+        keys, spec = self._list_consumer_group_offsets_keys_and_spec(group_specs)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_list_consumer_group_offsets_async(
+            self._h, spec, ms, bool(require_stable),
+            self._keyed_value_cb(futures, _drain_group_offsets_map))
+        return futures
 
     def alter_consumer_group_offsets(self, group_id, offsets, timeout=None):
         """Commit ``{(topic, partition): OffsetAndMetadata}`` on behalf of
-        ``group_id``. Returns ``{(topic, partition): None | KafkaError}``.
+        ``group_id``. Returns ``{(topic, partition): Future[None]}``
+        immediately; each partition's ``Future`` resolves independently (a
+        result of ``None`` means success).
 
-        With an empty ``offsets`` there is no per-partition slot for the
-        outcome, so a failure raises instead — which is also the only thing
-        Java's ``all()`` could report.
+        With an empty ``offsets`` there is no per-partition key at all, so the
+        returned dict is empty — there is no ``Future`` to observe a whole-call
+        failure through, which is also all Java's ``all()`` could report in
+        that case.
         """
         self._check_closed()
-        return self._run_sync(*self._alter_consumer_group_offsets_spec(
-            group_id, offsets, timeout))
+        keys, spec = self._alter_consumer_group_offsets_keys_and_spec(offsets)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_consumer_group_offsets_async(
+            self._h, str(group_id), spec, ms, self._keyed_topic_partition_void_cb(futures))
+        return futures
 
     def delete_consumer_group_offsets(self, group_id, partitions, timeout=None):
         """Delete ``group_id``'s committed offsets for ``partitions`` (an
         iterable of ``(topic, partition)``). Returns
-        ``{(topic, partition): None | KafkaError}``."""
+        ``{(topic, partition): Future[None]}`` immediately; each partition's
+        ``Future`` resolves independently. An empty ``partitions`` returns an
+        empty dict, for the same reason given on
+        :meth:`alter_consumer_group_offsets`."""
         self._check_closed()
-        return self._run_sync(*self._delete_consumer_group_offsets_spec(
-            group_id, partitions, timeout))
+        keys, spec = self._delete_consumer_group_offsets_keys_and_spec(partitions)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_delete_consumer_group_offsets_async(
+            self._h, str(group_id), spec, ms, self._keyed_topic_partition_void_cb(futures))
+        return futures
 
     def delete_consumer_groups(self, group_ids, timeout=None):
-        """Delete ``group_ids``. Returns ``{group_id: None | KafkaError}``."""
+        """Delete ``group_ids``. Returns ``{group_id: Future[None]}``
+        immediately; each group's ``Future`` resolves independently."""
         self._check_closed()
-        return self._run_sync(*self._delete_consumer_groups_spec(group_ids, timeout))
+        ids = self._string_keyed_names(group_ids)
+        futures = {key: Future() for key in ids}
+        ms = _ms(timeout)
+        _lib.Admin_delete_consumer_groups_async(
+            self._h, ids, ms, self._keyed_void_cb(futures))
+        return futures
 
     def remove_members_from_consumer_group(self, group_id, members, reason=None,
                                            timeout=None):
         """Remove ``members`` (an iterable of :class:`MemberToRemove`, or of
         bare ``group.instance.id`` strings) from ``group_id``. Returns
-        ``{group_instance_id: None | KafkaError}``.
+        ``{group_instance_id: Future[None]}`` immediately; each member's
+        ``Future`` resolves independently.
 
         Pass ``members=None`` for Java's no-argument
         ``RemoveMembersFromConsumerGroupOptions()``: remove **every** member of
         the group. That mode has no per-member outcome in Java at all —
         ``memberResult`` refuses and ``all()`` is the only observable — so the
-        returned dict is empty and a failure raises. An empty iterable is not
-        the same thing: Java's collection constructor rejects it, and so does
-        this, rather than silently selecting the destructive form.
+        returned dict is empty; there is no ``Future`` to observe that mode's
+        outcome through. An empty iterable is not the same thing: Java's
+        collection constructor raises ``IllegalArgumentException``
+        synchronously, before any per-member ``Future`` could exist to carry
+        it, so this raises :class:`KafkaError` synchronously too rather than
+        silently selecting the destructive form or returning an empty dict.
         """
         self._check_closed()
-        return self._run_sync(*self._remove_members_from_consumer_group_spec(
-            group_id, members, reason, timeout))
+        keys, (remove_all, ids) = self._remove_members_from_consumer_group_keys_and_spec(members)
+        futures = {key: Future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_remove_members_from_consumer_group_async(
+            self._h, str(group_id), remove_all, ids,
+            None if reason is None else str(reason), ms, self._keyed_void_cb(futures))
+        return futures
 
     def create_acls(self, acls, timeout=None):
         """Create ``acls`` (an iterable of :class:`AclBinding`). Returns
@@ -4390,49 +4429,107 @@ class AsyncAdmin(_AdminBase):
 
     async def describe_consumer_groups(self, group_ids, timeout=None,
                                        include_authorized_operations=False):
-        """See :meth:`Admin.describe_consumer_groups`."""
+        """See :meth:`Admin.describe_consumer_groups`. Returns
+        ``{group_id: Future[ConsumerGroupDescription]}`` immediately (no
+        internal ``await``); each group's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_consumer_groups_spec(
-            group_ids, timeout, include_authorized_operations))
+        loop = asyncio.get_running_loop()
+        ids = self._string_keyed_names(group_ids)
+        futures = {key: loop.create_future() for key in ids}
+        ms = _ms(timeout)
+        _lib.Admin_describe_consumer_groups_async(
+            self._h, ids, ms, bool(include_authorized_operations),
+            self._keyed_value_cb(futures, _drain_consumer_group_description, loop))
+        return futures
 
     async def describe_classic_groups(self, group_ids, timeout=None,
                                       include_authorized_operations=False):
-        """See :meth:`Admin.describe_classic_groups`."""
+        """See :meth:`Admin.describe_classic_groups`. Returns
+        ``{group_id: Future[ClassicGroupDescription]}`` immediately (no
+        internal ``await``); each group's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._describe_classic_groups_spec(
-            group_ids, timeout, include_authorized_operations))
+        loop = asyncio.get_running_loop()
+        ids = self._string_keyed_names(group_ids)
+        futures = {key: loop.create_future() for key in ids}
+        ms = _ms(timeout)
+        _lib.Admin_describe_classic_groups_async(
+            self._h, ids, ms, bool(include_authorized_operations),
+            self._keyed_value_cb(futures, _drain_classic_group_description, loop))
+        return futures
 
     async def list_consumer_group_offsets(self, group_specs, timeout=None,
                                           require_stable=False):
-        """See :meth:`Admin.list_consumer_group_offsets`."""
+        """See :meth:`Admin.list_consumer_group_offsets`. Returns
+        ``{group_id: Future[{(topic, partition): OffsetAndMetadata | None}]}``
+        immediately (no internal ``await``); each group's ``Future`` resolves
+        independently."""
         self._check_closed()
-        return await self._run_async(*self._list_consumer_group_offsets_spec(
-            group_specs, timeout, require_stable))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._list_consumer_group_offsets_keys_and_spec(group_specs)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_list_consumer_group_offsets_async(
+            self._h, spec, ms, bool(require_stable),
+            self._keyed_value_cb(futures, _drain_group_offsets_map, loop))
+        return futures
 
     async def alter_consumer_group_offsets(self, group_id, offsets, timeout=None):
-        """See :meth:`Admin.alter_consumer_group_offsets`."""
+        """See :meth:`Admin.alter_consumer_group_offsets`. Returns
+        ``{(topic, partition): Future[None]}`` immediately (no internal
+        ``await``); each partition's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._alter_consumer_group_offsets_spec(
-            group_id, offsets, timeout))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._alter_consumer_group_offsets_keys_and_spec(offsets)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_alter_consumer_group_offsets_async(
+            self._h, str(group_id), spec, ms,
+            self._keyed_topic_partition_void_cb(futures, loop))
+        return futures
 
     async def delete_consumer_group_offsets(self, group_id, partitions, timeout=None):
-        """See :meth:`Admin.delete_consumer_group_offsets`."""
+        """See :meth:`Admin.delete_consumer_group_offsets`. Returns
+        ``{(topic, partition): Future[None]}`` immediately (no internal
+        ``await``); each partition's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._delete_consumer_group_offsets_spec(
-            group_id, partitions, timeout))
+        loop = asyncio.get_running_loop()
+        keys, spec = self._delete_consumer_group_offsets_keys_and_spec(partitions)
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_delete_consumer_group_offsets_async(
+            self._h, str(group_id), spec, ms,
+            self._keyed_topic_partition_void_cb(futures, loop))
+        return futures
 
     async def delete_consumer_groups(self, group_ids, timeout=None):
-        """See :meth:`Admin.delete_consumer_groups`."""
+        """See :meth:`Admin.delete_consumer_groups`. Returns
+        ``{group_id: Future[None]}`` immediately (no internal ``await``); each
+        group's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._delete_consumer_groups_spec(group_ids, timeout))
+        loop = asyncio.get_running_loop()
+        ids = self._string_keyed_names(group_ids)
+        futures = {key: loop.create_future() for key in ids}
+        ms = _ms(timeout)
+        _lib.Admin_delete_consumer_groups_async(
+            self._h, ids, ms, self._keyed_void_cb(futures, loop))
+        return futures
 
     async def remove_members_from_consumer_group(self, group_id, members, reason=None,
                                                  timeout=None):
         """See :meth:`Admin.remove_members_from_consumer_group`. ``members`` is
-        required; pass ``None`` explicitly to remove every member."""
+        required; pass ``None`` explicitly to remove every member. Returns
+        ``{group_instance_id: Future[None]}`` immediately (no internal
+        ``await``); each member's ``Future`` resolves independently."""
         self._check_closed()
-        return await self._run_async(*self._remove_members_from_consumer_group_spec(
-            group_id, members, reason, timeout))
+        keys, (remove_all, ids) = self._remove_members_from_consumer_group_keys_and_spec(members)
+        loop = asyncio.get_running_loop()
+        futures = {key: loop.create_future() for key in keys}
+        ms = _ms(timeout)
+        _lib.Admin_remove_members_from_consumer_group_async(
+            self._h, str(group_id), remove_all, ids,
+            None if reason is None else str(reason), ms,
+            self._keyed_void_cb(futures, loop))
+        return futures
 
     async def create_acls(self, acls, timeout=None):
         self._check_closed()

@@ -1037,14 +1037,17 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #     per-broker listing failure is inside the second one, unkeyed, and only a
     #     whole-call failure raises.
     #   - describe_consumer_groups / describe_classic_groups /
-    #     list_consumer_group_offsets have one future per group, so a per-group
-    #     failure arrives in the dict.
-    #   - alter_consumer_group_offsets / delete_consumer_group_offsets /
-    #     remove_members_from_consumer_group have ONE future over the whole map, so
-    #     its failure raises and becomes the top-level error with `entries` empty --
-    #     which with an empty input (no partitions, or removeAll) is the only
-    #     observable. delete_consumer_groups is the one with genuine per-key
-    #     futures.
+    #     list_consumer_group_offsets / alter_consumer_group_offsets /
+    #     delete_consumer_group_offsets / delete_consumer_groups /
+    #     remove_members_from_consumer_group are all per-key-Future now (Phase
+    #     E, mirroring Phase A/D): admin.py returns a dict of Futures
+    #     immediately, one per key, resolving independently, so
+    #     `_resolve_admin_futures_async` (see create_topics above) must be
+    #     awaited before handing off to the (unchanged) already-resolved-dict
+    #     translators below. With an empty input to alter/delete_consumer_group_offsets
+    #     or `removeAll` mode for remove_members_from_consumer_group there is
+    #     no per-key slot at all, so admin.py returns an empty dict and
+    #     `_resolve_admin_futures_async` is a no-op on it.
 
     async def ListGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -1080,9 +1083,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeConsumerGroupsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.describe_consumer_groups(
+            futures = await client.describe_consumer_groups(
                 list(request.group_ids), timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations)
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_describe_consumer_groups_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_consumer_groups raised")
@@ -1093,9 +1097,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeClassicGroupsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.describe_classic_groups(
+            futures = await client.describe_classic_groups(
                 list(request.group_ids), timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations)
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_describe_classic_groups_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_classic_groups raised")
@@ -1107,10 +1112,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.ListConsumerGroupOffsetsResponse(
                 error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.list_consumer_group_offsets(
+            futures = await client.list_consumer_group_offsets(
                 _admin_group_offset_specs(request.group_specs),
                 timeout=_admin_timeout(request),
                 require_stable=request.require_stable)
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_list_consumer_group_offsets_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_consumer_group_offsets raised")
@@ -1121,9 +1127,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.alter_consumer_group_offsets(
+            futures = await client.alter_consumer_group_offsets(
                 request.group_id, _admin_group_offset_commits(request.offsets),
                 timeout=_admin_timeout(request))
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_consumer_group_offsets raised")
@@ -1134,10 +1141,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.delete_consumer_group_offsets(
+            futures = await client.delete_consumer_group_offsets(
                 request.group_id,
                 [(tp.topic, tp.partition) for tp in request.partitions],
                 timeout=_admin_timeout(request))
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_consumer_group_offsets raised")
@@ -1148,8 +1156,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.delete_consumer_groups(
+            futures = await client.delete_consumer_groups(
                 list(request.group_ids), timeout=_admin_timeout(request))
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_consumer_groups raised")
@@ -1163,11 +1172,12 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # `members=None` is Java's no-argument options constructor
             # (removeAll); an empty *list* is the collection constructor, which
             # Java rejects. _admin_members_to_remove keeps the two apart.
-            outcomes = await client.remove_members_from_consumer_group(
+            futures = await client.remove_members_from_consumer_group(
                 request.group_id, _admin_members_to_remove(request),
                 reason=request.reason if request.HasField("reason") else None,
                 timeout=_admin_timeout(request))
             # Keyed by group.instance.id, which is a plain string.
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("remove_members_from_consumer_group raised")
