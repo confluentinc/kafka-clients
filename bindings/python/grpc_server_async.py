@@ -913,8 +913,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeLogDirsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.describe_log_dirs(
+            futures = await client.describe_log_dirs(
                 list(request.brokers), timeout=_admin_timeout(request))
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_describe_log_dirs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_log_dirs raised")
@@ -925,9 +926,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.alter_replica_log_dirs(
+            futures = await client.alter_replica_log_dirs(
                 _admin_replica_log_dir_assignments(request.assignments),
                 timeout=_admin_timeout(request))
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_void_response(outcomes, _admin_replica_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_replica_log_dirs raised")
@@ -938,8 +940,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeReplicaLogDirsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = await client.describe_replica_log_dirs(
+            futures = await client.describe_replica_log_dirs(
                 _admin_replicas(request.replicas), timeout=_admin_timeout(request))
+            outcomes = await _resolve_admin_futures_async(futures)
             return _admin_describe_replica_log_dirs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_replica_log_dirs raised")

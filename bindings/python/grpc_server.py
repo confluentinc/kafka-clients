@@ -929,9 +929,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeLogDirsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = client.describe_log_dirs(
+            futures = client.describe_log_dirs(
                 list(request.brokers), timeout=_admin_timeout(request))
-            return _admin_describe_log_dirs_response(outcomes)
+            return _admin_describe_log_dirs_response(_resolve_admin_futures(futures))
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_log_dirs raised")
             return apb.DescribeLogDirsResponse(error=_kafka_error_to_proto(e))
@@ -941,10 +941,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = client.alter_replica_log_dirs(
+            futures = client.alter_replica_log_dirs(
                 _admin_replica_log_dir_assignments(request.assignments),
                 timeout=_admin_timeout(request))
-            return _admin_void_response(outcomes, _admin_replica_key)
+            return _admin_void_response(_resolve_admin_futures(futures), _admin_replica_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_replica_log_dirs raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -954,9 +954,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.DescribeReplicaLogDirsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            outcomes = client.describe_replica_log_dirs(
+            futures = client.describe_replica_log_dirs(
                 _admin_replicas(request.replicas), timeout=_admin_timeout(request))
-            return _admin_describe_replica_log_dirs_response(outcomes)
+            return _admin_describe_replica_log_dirs_response(_resolve_admin_futures(futures))
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_replica_log_dirs raised")
             return apb.DescribeReplicaLogDirsResponse(error=_kafka_error_to_proto(e))
