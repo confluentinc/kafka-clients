@@ -2993,21 +2993,26 @@ static void test_mock_admin_list_partition_reassignments_after_delete_returns_er
 
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
+    atomic_int error_count;
+    char last_topic[64];
+    int32_t last_partition;
 } alter_reassign_async_result_t;
 
-static void on_alter_partition_reassignments(kafka_admin_AlterPartitionReassignmentsResult_t *result,
+/* Per-key async result (Phase D): the callback now fires once per partition,
+ * independently, rather than once for the whole batch - see
+ * `admin_async_per_key_op` /
+ * `kafka_admin_AdminClient_alter_partition_reassignments_callback_t`. There is
+ * no value parameter: Java's per-partition future is `KafkaFuture<Void>`, so a
+ * null error *is* the success value. */
+static void on_alter_partition_reassignments(const char *topic, int32_t partition,
                                              kafka_common_Error_t *error, void *user_data) {
     alter_reassign_async_result_t *r = (alter_reassign_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_AlterPartitionReassignmentsResult_count(result);
-        kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
+    if (topic != NULL) {
+        strncpy(r->last_topic, topic, sizeof(r->last_topic) - 1);
     }
+    r->last_partition = partition;
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -3026,19 +3031,21 @@ static void test_mock_admin_alter_partition_reassignments_async(void) {
 
     alter_reassign_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_alter_partition_reassignments_async(
         admin, topics, partitions, cancel, replica_ptrs, replica_counts, 1, -1, false,
         on_alter_partition_reassignments, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("ra-async", r.last_topic);
+    TEST_ASSERT_EQUAL_INT32(0, r.last_partition);
     kafka_admin_AdminClient_destroy(admin);
 }
 
 /* An empty non-cancelled replica list is a pre-submission marshaling failure,
- * so the callback fires inline before the call returns. */
+ * so the callback fires inline before the call returns, once per requested
+ * key (there is only one here). */
 static void test_mock_admin_alter_partition_reassignments_async_empty_replicas(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
     create_one(admin, "ra-async-bad", 1, 3);
@@ -3052,24 +3059,60 @@ static void test_mock_admin_alter_partition_reassignments_async_empty_replicas(v
 
     alter_reassign_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_alter_partition_reassignments_async(
         admin, topics, partitions, cancel, replica_ptrs, replica_counts, 1, -1, true,
         on_alter_partition_reassignments, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("ra-async-bad", r.last_topic);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error, once
+ * per requested key (Phase A's mechanism note: an EMPTY key set fans out over
+ * zero keys regardless of admin validity, so the input here must be
+ * non-empty to actually observe the fan-out). */
 static void test_mock_admin_alter_partition_reassignments_async_null_handle(void) {
+    const char *topics[1] = {"ra-async-null"};
+    const int32_t partitions[1] = {0};
+    const bool cancel[1] = {true};
+    const int32_t *replica_ptrs[1] = {NULL};
+    const int32_t replica_counts[1] = {0};
+
     alter_reassign_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
     kafka_admin_AdminClient_alter_partition_reassignments_async(
-        NULL, NULL, NULL, NULL, NULL, NULL, 0, -1, true, on_alter_partition_reassignments, &r);
+        NULL, topics, partitions, cancel, replica_ptrs, replica_counts, 1, -1, true,
+        on_alter_partition_reassignments, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+}
+
+/* Two partitions, one in range and one not: proves independent per-key
+ * delivery through the real async entry point, end to end - mirroring
+ * `test_mock_admin_describe_log_dirs_async_two_brokers` (Phase C). */
+static void test_mock_admin_alter_partition_reassignments_async_two_partitions(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
+    create_one(admin, "ra-async2", 1, 3);
+
+    const char *topics[2] = {"ra-async2", "ra-async2"};
+    const int32_t partitions[2] = {0, 9};
+    const bool cancel[2] = {true, true};
+    const int32_t *replica_ptrs[2] = {NULL, NULL};
+    const int32_t replica_counts[2] = {0, 0};
+
+    alter_reassign_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    kafka_admin_AdminClient_alter_partition_reassignments_async(
+        admin, topics, partitions, cancel, replica_ptrs, replica_counts, 2, -1, true,
+        on_alter_partition_reassignments, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    kafka_admin_AdminClient_destroy(admin);
 }
 
 typedef struct {
@@ -3274,27 +3317,33 @@ static void test_mock_admin_list_offsets_rejects_bad_inputs(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Per-key async result (Phase D): the callback now fires once per partition,
+ * independently, rather than once for the whole batch - see
+ * `admin_async_per_key_op` / `kafka_admin_AdminClient_list_offsets_callback_t`. */
 typedef struct {
     atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
-    int64_t first_offset;
+    atomic_int error_count;
+    atomic_int value_count;
+    char last_topic[64];
+    int32_t last_partition;
+    int64_t last_offset;
 } list_offsets_async_result_t;
 
-static void on_list_offsets(kafka_admin_ListOffsetsResult_t *result,
+static void on_list_offsets(const char *topic, int32_t partition,
+                            kafka_admin_ListOffsetsResultInfo_t *value,
                             kafka_common_Error_t *error, void *user_data) {
     list_offsets_async_result_t *r = (list_offsets_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_ListOffsetsResult_count(result);
-        const kafka_admin_ListOffsetsResultInfo_t *info =
-            kafka_admin_ListOffsetsResult_get_value(result, 0);
-        r->first_offset = info ? kafka_admin_ListOffsetsResultInfo_offset(info) : -99;
-        kafka_admin_ListOffsetsResult_destroy(result);
+    if (topic != NULL) {
+        strncpy(r->last_topic, topic, sizeof(r->last_topic) - 1);
+    }
+    r->last_partition = partition;
+    if (value != NULL) {
+        atomic_fetch_add(&r->value_count, 1);
+        r->last_offset = kafka_admin_ListOffsetsResultInfo_offset(value);
+        kafka_admin_ListOffsetsResultInfo_destroy(value);
     }
     if (error != NULL) {
-        r->had_error = 1;
+        atomic_fetch_add(&r->error_count, 1);
         kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
@@ -3315,19 +3364,23 @@ static void test_mock_admin_list_offsets_async(void) {
 
     list_offsets_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_list_offsets_async(admin, topics, partitions, is_timestamp, specs, 1, -1,
                                                ISOLATION_READ_UNCOMMITTED, on_list_offsets, &r);
     TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
-    TEST_ASSERT_EQUAL_INT64(77, r.first_offset);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_STRING("lo-async", r.last_topic);
+    TEST_ASSERT_EQUAL_INT32(0, r.last_partition);
+    TEST_ASSERT_EQUAL_INT64(77, r.last_offset);
     kafka_admin_AdminClient_destroy(admin);
 }
 
 /* An unknown isolation level is a pre-submission marshaling failure, so the
- * callback fires inline before the call returns. */
+ * callback fires inline before the call returns, once per requested key
+ * (there is only one here). */
 static void test_mock_admin_list_offsets_async_bad_isolation_level(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "lo-async-bad", 1, 1);
@@ -3339,23 +3392,67 @@ static void test_mock_admin_list_offsets_async_bad_isolation_level(void) {
 
     list_offsets_async_result_t r = {0};
     atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
     kafka_admin_AdminClient_list_offsets_async(admin, topics, partitions, is_timestamp, specs, 1, -1,
                                                42, on_list_offsets, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_STRING("lo-async-bad", r.last_topic);
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* A NULL handle must still honor the callback obligation, with an error. */
+/* A NULL handle must still honor the callback obligation, with an error, once
+ * per requested key (Phase A's mechanism note: an EMPTY key set fans out over
+ * zero keys regardless of admin validity, so the input here must be
+ * non-empty to actually observe the fan-out). */
 static void test_mock_admin_list_offsets_async_null_handle(void) {
+    const char *topics[1] = {"lo-async-null"};
+    const int32_t partitions[1] = {0};
+    const bool is_timestamp[1] = {false};
+    const int64_t specs[1] = {OFFSET_SPEC_LATEST};
+
     list_offsets_async_result_t r = {0};
     atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_offsets_async(NULL, NULL, NULL, NULL, NULL, 0, -1,
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_list_offsets_async(NULL, topics, partitions, is_timestamp, specs, 1, -1,
                                                ISOLATION_READ_UNCOMMITTED, on_list_offsets, &r);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+}
+
+/* Two partitions with distinct seeded end offsets: proves independent per-key
+ * delivery through the real async entry point, end to end - mirroring
+ * `test_mock_admin_describe_log_dirs_async_two_brokers` (Phase C). */
+static void test_mock_admin_list_offsets_async_two_partitions(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "lo-async2", 2, 1);
+
+    const char *seed_topics[2] = {"lo-async2", "lo-async2"};
+    const int32_t seed_partitions[2] = {0, 1};
+    const int64_t end[2] = {5, 107};
+    TEST_ASSERT_NULL(
+        kafka_admin_MockAdminClient_update_end_offsets(admin, seed_topics, seed_partitions, end, 2));
+
+    const char *topics[2] = {"lo-async2", "lo-async2"};
+    const int32_t partitions[2] = {0, 1};
+    const bool is_timestamp[2] = {false, false};
+    const int64_t specs[2] = {OFFSET_SPEC_LATEST, OFFSET_SPEC_LATEST};
+
+    list_offsets_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_list_offsets_async(admin, topics, partitions, is_timestamp, specs, 2, -1,
+                                               ISOLATION_READ_UNCOMMITTED, on_list_offsets, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
+    kafka_admin_AdminClient_destroy(admin);
 }
 
 /* The mock drivers reject a production handle rather than panicking. */
@@ -6553,6 +6650,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_partition_reassignments_async);
     RUN_TEST(test_mock_admin_alter_partition_reassignments_async_empty_replicas);
     RUN_TEST(test_mock_admin_alter_partition_reassignments_async_null_handle);
+    RUN_TEST(test_mock_admin_alter_partition_reassignments_async_two_partitions);
     RUN_TEST(test_mock_admin_list_partition_reassignments_async);
     RUN_TEST(test_mock_admin_list_partition_reassignments_async_null_handle);
     RUN_TEST(test_mock_admin_list_offsets_earliest_and_latest);
@@ -6561,6 +6659,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_offsets_async);
     RUN_TEST(test_mock_admin_list_offsets_async_bad_isolation_level);
     RUN_TEST(test_mock_admin_list_offsets_async_null_handle);
+    RUN_TEST(test_mock_admin_list_offsets_async_two_partitions);
     RUN_TEST(test_mock_admin_offset_drivers_reject_non_mock);
     RUN_TEST(test_mock_admin_b3_null_out_result);
     RUN_TEST(test_mock_admin_list_groups_reports_seeded_groups);
