@@ -15,6 +15,7 @@
 """Test suite for the Python Kafka admin bindings (MockAdminClient-driven)."""
 
 import asyncio
+import concurrent.futures
 import datetime as _dt
 import gc
 import signal
@@ -46,7 +47,6 @@ from admin import (
     _to_acl_binding, _to_acl_binding_filter, _to_alter_client_quotas, _to_create_acls,
     _to_delete_acls, _to_describe_acls, _to_describe_client_quotas,
     _to_describe_classic_groups, _to_describe_consumer_groups,
-    _to_describe_log_dirs, _to_describe_replica_log_dirs,
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
     _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
     _to_list_partition_reassignments, _to_log_dir_description,
@@ -932,17 +932,20 @@ def test_list_client_metrics_resources():
 # -- B2: log dirs ------------------------------------------------------------
 
 def test_describe_log_dirs():
+    """``describe_log_dirs`` returns a dict of ``Future``s (Phase C: one
+    native callback per broker, independently), so each broker's own
+    ``Future`` must be resolved."""
     with MockAdminClient(1) as admin:
         _created(admin, "ld-topic", num_partitions=2)
 
         # Broker 7 does not exist. Java still puts an entry in the result for
         # every requested broker (`unwrappedResults.putIfAbsent`), so it comes
         # back with an empty log-dir map rather than an error.
-        described = admin.describe_log_dirs([0, 7])
-        assert set(described) == {0, 7}
-        assert described[7] == {}
+        futures = admin.describe_log_dirs([0, 7])
+        assert set(futures) == {0, 7}
+        assert futures[7].result(timeout=5.0) == {}
 
-        log_dirs = described[0]
+        log_dirs = futures[0].result(timeout=5.0)
         assert list(log_dirs) == ["/tmp/kafka-logs"]
         description = log_dirs["/tmp/kafka-logs"]
         assert description.error is None
@@ -956,7 +959,38 @@ def test_describe_log_dirs():
         assert replica.is_future is False
 
 
+def test_describe_log_dirs_two_brokers_resolve_independently():
+    """Structural independence: both brokers' ``Future``s are gettable in any
+    order (``MockAdminClient`` resolves everything synchronously, so this does
+    not prove genuine temporal independence - see the Rust-level
+    `admin_async_per_key_op` tests in `src/ffi/admin.rs` for that)."""
+    with MockAdminClient(2) as admin:
+        futures = admin.describe_log_dirs([1, 0])
+        assert futures[1].result(timeout=5.0) == {}
+        assert futures[0].result(timeout=5.0) == {}
+
+
+def test_alter_replica_log_dirs_two_replicas_resolve_independently():
+    """Structural independence: both replicas' ``Future``s are gettable in
+    any order (``MockAdminClient`` resolves everything synchronously, so this
+    does not prove genuine temporal independence - see the Rust-level
+    `admin_async_per_key_op` tests in `src/ffi/admin.rs` for that)."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "mv-indep", num_partitions=2)
+        first = TopicPartitionReplica("mv-indep", 1, 0)
+        second = TopicPartitionReplica("mv-indep", 0, 0)
+
+        futures = admin.alter_replica_log_dirs({
+            first: "/tmp/kafka-logs",
+            second: "/tmp/kafka-logs",
+        })
+        assert futures[first].result(timeout=5.0) is None
+        assert futures[second].result(timeout=5.0) is None
+
+
 def test_alter_replica_log_dirs_partial_failure():
+    """``alter_replica_log_dirs`` returns a dict of ``Future``s (Phase C: one
+    native callback per replica, independently)."""
     with MockAdminClient(1) as admin:
         _created(admin, "mv-topic", num_partitions=2)
 
@@ -965,46 +999,61 @@ def test_alter_replica_log_dirs_partial_failure():
         unknown_topic = TopicPartitionReplica("mv-missing", 0, 0)
         unknown_broker = TopicPartitionReplica("mv-topic", 0, 9)
 
-        result = admin.alter_replica_log_dirs({
+        futures = admin.alter_replica_log_dirs({
             accepted: "/tmp/kafka-logs",
             offline_dir: "/data/other",
             unknown_topic: "/tmp/kafka-logs",
             unknown_broker: "/tmp/kafka-logs",
         })
-        assert result[accepted] is None
-        assert result[offline_dir].code == KAFKA_STORAGE_ERROR
-        assert result[unknown_topic].code == REPLICA_NOT_AVAILABLE
-        assert result[unknown_broker].code == REPLICA_NOT_AVAILABLE
+        assert futures[accepted].result(timeout=5.0) is None
+        assert futures[offline_dir].exception(timeout=5.0).code == KAFKA_STORAGE_ERROR
+        assert futures[unknown_topic].exception(timeout=5.0).code == REPLICA_NOT_AVAILABLE
+        assert futures[unknown_broker].exception(timeout=5.0).code == REPLICA_NOT_AVAILABLE
 
         # The accepted move is now a pending move on that replica.
-        described = admin.describe_replica_log_dirs([accepted])[accepted]
+        described = admin.describe_replica_log_dirs([accepted])[accepted].result(timeout=5.0)
         assert described.future_replica_log_dir == "/tmp/kafka-logs"
 
 
 def test_describe_replica_log_dirs_omits_unknown_topics():
     """MockAdminClient.describeReplicaLogDirs skips replicas of unknown topics
     entirely (`if (topicMetadata != null)`, MockAdminClient.java:1112) rather
-    than reporting an error, so the result is shorter than the request.
+    than reporting an error - so, unlike every other per-key RPC, the *native
+    callback is never fired at all* for that key, and its ``Future`` stays
+    pending forever (the Rust-side `HashMap` never gains an entry for it, so
+    `admin_async_per_key_op` has nothing to iterate for that key - see
+    `MockAdminClient::describe_replica_log_dirs` in
+    `src/admin/mock_admin_client.rs`).
 
     This is mock-only. KafkaAdminClient seeds one future per requested replica
     (`KafkaAdminClient.java:3066-3068`) and completes all of them (`:3141-3145`),
     so against a real broker an unknown topic comes back *present*, with a null
     `current_replica_log_dir`.
+
+    Because the ``Future`` dict is returned immediately (Phase C's per-key
+    delivery contract), the caller cannot learn upfront which keys will
+    actually resolve - both keys are present in the returned dict, but only
+    `known`'s ``Future`` ever completes. Asserting `unknown`'s ``Future`` is
+    still pending after a bounded wait (rather than trying to force it to
+    resolve, which would hang) is what this test can honestly prove.
     """
     with MockAdminClient(1) as admin:
         _created(admin, "drld-topic")
         known = TopicPartitionReplica("drld-topic", 0, 0)
         unknown = TopicPartitionReplica("drld-missing", 0, 0)
 
-        described = admin.describe_replica_log_dirs([known, unknown])
-        assert set(described) == {known}
+        futures = admin.describe_replica_log_dirs([known, unknown])
+        assert set(futures) == {known, unknown}
 
-        info = described[known]
+        info = futures[known].result(timeout=5.0)
         assert isinstance(info, ReplicaLogDirInfo)
         assert info.current_replica_log_dir == "/tmp/kafka-logs"
         assert info.current_replica_offset_lag == 0
         assert info.future_replica_log_dir is None
         assert info.future_replica_offset_lag == 0
+
+        with pytest.raises(concurrent.futures.TimeoutError):
+            futures[unknown].result(timeout=0.2)
 
 
 def test_config_resource_and_replica_are_usable_dict_keys():
@@ -1020,7 +1069,7 @@ def test_config_resource_and_replica_are_usable_dict_keys():
 
         replicas = admin.describe_replica_log_dirs(
             [TopicPartitionReplica("key-topic", 0, 0)])
-        assert replicas[TopicPartitionReplica("key-topic", 0, 0)] is not None
+        assert replicas[TopicPartitionReplica("key-topic", 0, 0)].result(timeout=5.0) is not None
         assert TopicPartitionReplica("t", 1, 2) == TopicPartitionReplica("t", 1, 2)
         assert TopicPartitionReplica("t", 1, 2) != TopicPartitionReplica("t", 1, 3)
 
@@ -1050,19 +1099,25 @@ async def test_async_describe_cluster_and_configs():
 
 
 async def test_async_log_dirs_and_listings():
+    """describe_log_dirs / alter_replica_log_dirs / describe_replica_log_dirs
+    return dicts of ``asyncio.Future``s immediately (Phase C: one native
+    callback per key, independently), like create_topics above - each key's
+    own ``Future`` must be awaited."""
     admin = AsyncMockAdminClient(1)
     try:
         futures = await admin.create_topics([NewTopic("async-ld", 1, 1)])
         assert isinstance(await futures["async-ld"], TopicMetadataAndConfig)
 
-        log_dirs = await admin.describe_log_dirs([0])
-        assert set(log_dirs[0]) == {"/tmp/kafka-logs"}
+        log_dirs_futures = await admin.describe_log_dirs([0])
+        log_dirs = await log_dirs_futures[0]
+        assert set(log_dirs) == {"/tmp/kafka-logs"}
 
         replica = TopicPartitionReplica("async-ld", 0, 0)
-        assert await admin.alter_replica_log_dirs({replica: "/tmp/kafka-logs"}) == {
-            replica: None}
-        described = await admin.describe_replica_log_dirs([replica])
-        assert described[replica].future_replica_log_dir == "/tmp/kafka-logs"
+        alter_futures = await admin.alter_replica_log_dirs({replica: "/tmp/kafka-logs"})
+        assert await alter_futures[replica] is None
+        described_futures = await admin.describe_replica_log_dirs([replica])
+        described = await described_futures[replica]
+        assert described.future_replica_log_dir == "/tmp/kafka-logs"
 
         assert [r.name for r in await admin.list_config_resources(
             [ConfigResourceType.TOPIC])] == ["async-ld"]
@@ -1079,7 +1134,7 @@ def test_b2_handles_survive_gc_of_intermediate_objects():
         resource = ConfigResource(ConfigResourceType.TOPIC, "gc-b2")
         cluster = admin.describe_cluster()
         configs = admin.describe_configs([resource])[resource].result(timeout=5.0)
-        log_dirs = admin.describe_log_dirs([0])[0]
+        log_dirs = admin.describe_log_dirs([0])[0].result(timeout=5.0)
         gc.collect()
         assert cluster.nodes[0].host == "localhost"
         assert isinstance(configs, Config)
@@ -1151,34 +1206,6 @@ def test_to_log_dir_description_maps_unknown_volume_bytes_to_none():
     assert description.total_bytes is None
     assert description.usable_bytes is None
     assert description.replica_infos == {}
-
-
-def test_to_describe_log_dirs_error_arm_replaces_the_map():
-    """A per-broker failure surfaces as a KafkaError *instead of* the log-dir
-    map. The mock never fails a broker, so this arm is unreachable end-to-end."""
-    out = _to_describe_log_dirs({
-        0: ((UNSUPPORTED_VERSION, "nope", 0, 0), None),
-        1: (None, {"/data/1": (None, -1, -1, [])}),
-    })
-    assert isinstance(out[0], KafkaError)
-    assert out[0].code == UNSUPPORTED_VERSION
-    assert set(out[1]) == {"/data/1"}
-
-
-def test_to_describe_replica_log_dirs_error_arm_replaces_the_info():
-    out = _to_describe_replica_log_dirs({
-        ("t", 0, 1): ((REPLICA_NOT_AVAILABLE, "gone", 1, 0), None),
-        ("t", 1, 1): (None, ("/data/current", 7, None, -1)),
-    })
-    failed = TopicPartitionReplica("t", 0, 1)
-    assert isinstance(out[failed], KafkaError)
-    assert out[failed].code == REPLICA_NOT_AVAILABLE
-
-    info = out[TopicPartitionReplica("t", 1, 1)]
-    assert info.current_replica_log_dir == "/data/current"
-    assert info.current_replica_offset_lag == 7
-    assert info.future_replica_log_dir is None
-    assert info.future_replica_offset_lag == -1
 
 
 async def test_async_describe_cluster_call_failure_raises():
