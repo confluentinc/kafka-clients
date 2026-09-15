@@ -62,8 +62,7 @@ async fn run(args: &[String]) -> Result<(), Error> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        // Java: `parser.printHelp(); System.exit(0);`
+    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{}", help_text());
         return;
     }
