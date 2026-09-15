@@ -565,11 +565,13 @@ def _resolve_admin_futures(futures):
 
     admin.py's per-key RPCs (Phase A: create_topics, delete_topics[_by_ids],
     describe_topics[_by_ids], create_partitions, delete_records; Phase B:
-    describe_configs, incremental_alter_configs) return a dict of ``Future``s
+    describe_configs, incremental_alter_configs; Phase C: describe_log_dirs,
+    alter_replica_log_dirs, describe_replica_log_dirs; Phase D:
+    alter_partition_reassignments, list_offsets) return a dict of ``Future``s
     immediately, one per key, resolving independently - rather than the
     already-resolved ``{key: value | KafkaError}`` dict every *_response
     translator below still expects (built for the RPCs that never changed,
-    plus these seven before their respective phases). Blocking on every key's
+    plus these twelve before their respective phases). Blocking on every key's
     Future here — the gRPC harness is a synchronous, single-call-at-a-time
     test driver, not a low-latency production client — keeps those
     translators unchanged rather than teaching each one to await/resolve a

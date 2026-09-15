@@ -965,13 +965,16 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #
     # electLeaders and alterPartitionReassignments both answer with the shared
     # VoidKeyedResponse, but their two error levels do not mean the same thing.
-    # alter_partition_reassignments has one Java future per partition, so a
-    # single partition's failure arrives inside the dict as usual.
+    # alter_partition_reassignments has one Java future per partition (Phase D:
+    # admin.py now returns a dict of Futures, resolved here via
+    # _resolve_admin_futures before the shared translator runs), so a single
+    # partition's failure arrives inside the dict as usual.
     # elect_leaders has *one* future for the whole map: admin.py raises when it
     # fails, which is the top-level error, and the per-partition value inside the
     # resolved dict is Java's Optional<Throwable> -- None meaning that partition's
     # election succeeded. list_partition_reassignments is whole-value (one
-    # future, so a raise), list_offsets is ordinary per-key.
+    # future, so a raise), list_offsets is ordinary per-key (Phase D: also a
+    # dict of Futures, resolved the same way).
 
     def ElectLeaders(self, request, context):
         client = self._get(request.admin_id)
@@ -997,11 +1000,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
         allow_rf_change = (request.allow_replication_factor_change
                            if request.HasField("allow_replication_factor_change") else True)
         try:
-            outcomes = client.alter_partition_reassignments(
+            futures = client.alter_partition_reassignments(
                 _admin_reassignments(request.reassignments),
                 timeout=_admin_timeout(request),
                 allow_replication_factor_change=allow_rf_change)
-            return _admin_void_response(outcomes, _admin_tp_tuple_key)
+            return _admin_void_response(_resolve_admin_futures(futures), _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_partition_reassignments raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
@@ -1029,11 +1032,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # ILLEGAL_ARGUMENT *variant*, which is what the C++ server stamps for
             # the same condition. Agreeing on the level is not enough -- `variant`
             # is the field the Rust client matches on.
-            outcomes = client.list_offsets(
+            futures = client.list_offsets(
                 _admin_offset_specs(request.specs),
                 timeout=_admin_timeout(request),
                 isolation_level=request.isolation_level)
-            return _admin_list_offsets_response(outcomes)
+            return _admin_list_offsets_response(_resolve_admin_futures(futures))
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_offsets raised")
             return apb.ListOffsetsResponse(error=_kafka_error_to_proto(e))
