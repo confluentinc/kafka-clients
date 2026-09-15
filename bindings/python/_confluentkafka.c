@@ -4945,14 +4945,41 @@ static PyObject* py_DescribeReplicaLogDirsResult_drain(PyObject* self, PyObject*
 
 static void admin_elect_leaders_trampoline(kafka_admin_ElectLeadersResult_t* r,
                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_partition_reassignments_trampoline(
-    kafka_admin_AlterPartitionReassignmentsResult_t* r,
-    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_partition_reassignments_trampoline(
     kafka_admin_ListPartitionReassignmentsResult_t* r,
     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_list_offsets_trampoline(kafka_admin_ListOffsetsResult_t* r,
-                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// alterPartitionReassignments / listOffsets (Partitions/offsets family; fire
+// once per partition, independently, as that key's own future resolves) - see
+// the "per-key trampolines (Topics family...)" comment above for the shared
+// contract. The key is a `TopicPartition`, delivered as (topic, partition)
+// rather than through a single opaque key handle, mirroring
+// admin_delete_records_trampoline's two-param TopicPartition handling.
+
+// alterPartitionReassignments: Java's per-partition future is
+// KafkaFuture<Void>, so there is no value parameter (as for
+// alter_replica_log_dirs).
+static void admin_alter_partition_reassignments_trampoline(const char* topic, int32_t partition,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_list_offsets_trampoline(const char* topic, int32_t partition,
+    kafka_admin_ListOffsetsResultInfo_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siKK", topic, partition,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- shared (topic, partition) spec reader ---------------------------------
 
@@ -5068,7 +5095,12 @@ static PyObject* py_Admin_alter_partition_reassignments_async(PyObject* self, Py
         PyMem_Free(replica_ptrs); PyMem_Free(replica_counts);
         return NULL;
     }
-    Py_INCREF(cb);
+    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{(topic, partition): NewPartitionReassignment
+    // | None}` dict, which is already unique by construction, so the row count
+    // matches the number of times the native callback will actually fire - see
+    // admin_alter_partition_reassignments_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_alter_partition_reassignments_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, cancel, replica_ptrs,
         replica_counts, (int32_t)n, timeout_ms,
@@ -5126,7 +5158,12 @@ static PyObject* py_Admin_list_offsets_async(PyObject* self, PyObject* args) {
         topics[i] = topic; partitions[i] = (int32_t)p;
         is_timestamp[i] = ts ? true : false; values[i] = (int64_t)value;
     }
-    Py_INCREF(cb);
+    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{(topic, partition): OffsetSpec}` dict, which
+    // is already unique by construction, so the row count matches the number of
+    // times the native callback will actually fire - see
+    // admin_list_offsets_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_list_offsets_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, is_timestamp, values,
         (int32_t)n, timeout_ms, (int32_t)isolation_level, admin_list_offsets_trampoline, cb);
@@ -5245,6 +5282,43 @@ static PyObject* py_ListPartitionReassignmentsResult_drain(PyObject* self, PyObj
     return d;
 }
 
+// (offset, timestamp, leader_epoch_or_None) -- shared between the flattened
+// ListOffsetsResult_drain (below) and the standalone per-key
+// ListOffsetsResultInfo_drain (Phase D), both of which read the same three
+// scalar fields off a (borrowed vs. owned, respectively) info handle.
+static PyObject* list_offsets_info_value_to_py(const kafka_admin_ListOffsetsResultInfo_t* info) {
+    if (info == NULL) {
+        Py_RETURN_NONE;
+    }
+    int32_t epoch = 0;
+    // Java's leaderEpoch() is Optional<Integer>: absent stays None.
+    bool has_epoch = kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &epoch);
+    return has_epoch
+        ? Py_BuildValue("(LLi)",
+                        (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
+                        (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
+                        epoch)
+        : Py_BuildValue("(LLO)",
+                        (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
+                        (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
+                        Py_None);
+}
+
+// (offset, timestamp, leader_epoch_or_None) -- standalone per-key value
+// delivered individually by list_offsets' per-key async callback
+// (admin_list_offsets_trampoline, above), reusing list_offsets_info_value_to_py.
+// Do NOT call this on a value obtained from the flattened result's
+// ListOffsetsResult_get_value (borrowed, freed by ListOffsetsResult_drain
+// instead) - this owns and destroys the handle.
+static PyObject* py_ListOffsetsResultInfo_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListOffsetsResultInfo_t* info = (kafka_admin_ListOffsetsResultInfo_t*)(uintptr_t)ptr;
+    PyObject* result = list_offsets_info_value_to_py(info);
+    kafka_admin_ListOffsetsResultInfo_destroy(info);
+    return result;
+}
+
 // {(topic, partition): (error, (offset, timestamp, leader_epoch_or_None))}
 static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -5259,24 +5333,7 @@ static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
         PyObject* err = borrowed_error_to_py(kafka_admin_ListOffsetsResult_get_error(r, i));
         const kafka_admin_ListOffsetsResultInfo_t* info =
             kafka_admin_ListOffsetsResult_get_value(r, i);
-        PyObject* value;
-        if (info == NULL) {
-            Py_INCREF(Py_None);
-            value = Py_None;
-        } else {
-            int32_t epoch = 0;
-            // Java's leaderEpoch() is Optional<Integer>: absent stays None.
-            bool has_epoch = kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &epoch);
-            value = has_epoch
-                ? Py_BuildValue("(LLi)",
-                                (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
-                                (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
-                                epoch)
-                : Py_BuildValue("(LLO)",
-                                (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
-                                (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
-                                Py_None);
-        }
+        PyObject* value = list_offsets_info_value_to_py(info);
         PyObject* val = error_value_pair(err, value);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
@@ -7616,11 +7673,12 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_elect_leaders_async", py_Admin_elect_leaders_async, METH_VARARGS,
      "Async electLeaders; cb(result_int, error_int)"},
     {"Admin_alter_partition_reassignments_async", py_Admin_alter_partition_reassignments_async,
-     METH_VARARGS, "Async alterPartitionReassignments; cb(result_int, error_int)"},
+     METH_VARARGS, "Async alterPartitionReassignments; cb(topic, partition, error_int) fires "
+     "once per partition"},
     {"Admin_list_partition_reassignments_async", py_Admin_list_partition_reassignments_async,
      METH_VARARGS, "Async listPartitionReassignments; cb(result_int, error_int)"},
     {"Admin_list_offsets_async", py_Admin_list_offsets_async, METH_VARARGS,
-     "Async listOffsets; cb(result_int, error_int)"},
+     "Async listOffsets; cb(topic, partition, value_int, error_int) fires once per partition"},
     {"ElectLeadersResult_drain", py_ElectLeadersResult_drain, METH_VARARGS,
      "Drain+destroy an ElectLeadersResult handle into a dict"},
     {"AlterPartitionReassignmentsResult_drain", py_AlterPartitionReassignmentsResult_drain,
@@ -7629,6 +7687,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      METH_VARARGS, "Drain+destroy a ListPartitionReassignmentsResult handle into a dict"},
     {"ListOffsetsResult_drain", py_ListOffsetsResult_drain, METH_VARARGS,
      "Drain+destroy a ListOffsetsResult handle into a dict"},
+    {"ListOffsetsResultInfo_drain", py_ListOffsetsResultInfo_drain, METH_VARARGS,
+     "Drain+destroy a standalone ListOffsetsResultInfo handle (per-key list_offsets callback) into a tuple"},
     {"MockAdminClient_update_consumer_group_offsets",
      py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS,
      "Mock: seed committed consumer-group offsets; returns error_int"},
