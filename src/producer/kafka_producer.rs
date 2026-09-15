@@ -4316,6 +4316,91 @@ mod tests {
         );
     }
 
+    /// `definition-of-done.md` §10 / CLAUDE.md §11: dispatching through a custom
+    /// `Partitioner<K, V>` must not add a single per-record heap allocation to the
+    /// send path, matching the idempotence audit above
+    /// (`test_send_allocations_do_not_grow_when_idempotence_is_enabled`).
+    ///
+    /// `partition: None` is passed to `do_send_bytes` (rather than the pre-resolved
+    /// `Some(0)` the idempotence test uses) so `compute_partition` actually runs and,
+    /// when a partitioner is configured, calls into it — otherwise this would measure
+    /// nothing, since a pre-resolved partition short-circuits `compute_partition`
+    /// before the partitioner is ever consulted.
+    ///
+    /// `RoundRobinPartitioner` is the concrete partitioner under measurement: its
+    /// steady-state path is a `DashMap::get` on an already-present topic entry plus an
+    /// `AtomicI32` increment (CLAUDE.md §11), so the delta versus no partitioner
+    /// (built-in key-hash partitioning) must be zero.
+    #[tokio::test]
+    async fn test_send_allocations_do_not_grow_with_a_custom_partitioner() {
+        async fn steady_state_send_allocations(with_partitioner: bool) -> usize {
+            let partitioner: Option<Box<dyn Partitioner<String, String>>> = if with_partitioner {
+                Some(Box::new(RoundRobinPartitioner::new()))
+            } else {
+                None
+            };
+            let metadata = create_metadata_with_topic(TOPIC, 1);
+            // A large batch so every send below appends to the same batch.
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
+                1024 * 1024,
+                Compression::none(),
+                5,
+                100,
+                1000,
+                120_000,
+                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
+                None,
+            ));
+            let config = ProducerConfig::default();
+            let producer = KafkaProducer::<String, String>::new(
+                &config,
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+                Arc::clone(&metadata),
+                accumulator,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Notify::new()),
+                None,
+                default_time_provider(),
+                None,
+                Arc::new(Mutex::new(PendingRequests::new())),
+                partitioner,
+            );
+            let cluster = metadata.fetch();
+
+            // Warm up: create the topic info, the deque and the batch, and (for the
+            // partitioner case) the RoundRobinPartitioner's per-topic counter entry.
+            for _ in 0..4 {
+                producer
+                    .do_send_bytes(TOPIC, None, Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .await
+                    .expect("append should succeed");
+            }
+
+            {
+                let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+                crate::test_alloc_tracker::AllocTrackingGuard::reset();
+                producer
+                    .do_send_bytes(TOPIC, None, Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .await
+                    .expect("append should succeed");
+                let count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+                assert!(count > 0, "the tracker must actually be measuring");
+                count
+            }
+        }
+
+        let without = steady_state_send_allocations(false).await;
+        let with = steady_state_send_allocations(true).await;
+        assert_eq!(
+            without, with,
+            "dispatching through a custom Partitioner must add no per-record allocation \
+             to the send path; got {without} without a partitioner vs {with} with one"
+        );
+    }
+
     // =====================================================================
     // `KafkaProducerTest` transactional harness (Milestone 11, Phase 6)
     //
