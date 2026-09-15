@@ -799,7 +799,8 @@ impl<K, V> KafkaProducer<K, V> {
         self.ensure_not_closed()?;
         // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:663`), fed to
         // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:667`) after a
-        // successful await. See `now_nanos` for why this is the wall clock, not the
+        // successful await. See `now_nanos` for why this is the real, un-mocked
+        // monotonic clock (`Instant`, the analog of `System.nanoTime()`), not the
         // injected `time_provider`.
         let start = Self::now_nanos();
         let result = {
@@ -4990,18 +4991,28 @@ mod tests {
     /// the producer times against a different clock. Java times with the injected
     /// `MockTime`, whose `set_auto_tick(1000)` makes every `time.nanoseconds()` read
     /// jump a full second, so Java can assert `>= tick.toNanos()` (1e9 ns). This
-    /// producer times transaction control with `now_nanos()` — the wall clock, the
-    /// same source `flush` / `metadata-wait` and the consumer's
-    /// `commit-sync-time-ns-total` use — which `set_auto_tick` does **not** drive, so
-    /// Java's one-second floor is unreachable. The strongest deterministic floor
-    /// against a real monotonic clock is "at least one nanosecond was recorded":
-    /// durations are integer nanoseconds (`duration as f64`), so a floor of `1.0`
-    /// means `> 0`. A literal 0-ns reading would require two back-to-back `Instant`
-    /// samples with no intervening work landing in the same clock tick; every caller
-    /// here brackets real work between the two samples (an awaited round trip pumped
-    /// by `drive`, or — for `begin_transaction` — a mutex acquisition plus a state
-    /// transition), so on the ns-resolution monotonic clock the interval always
-    /// advances and `> 0` holds.
+    /// producer times transaction control with `now_nanos()` — the real, un-mocked
+    /// monotonic clock (`Instant`, the analog of `System.nanoTime()`), the same source
+    /// `flush` / `metadata-wait` and the consumer's `commit-sync-time-ns-total` use —
+    /// which `set_auto_tick` does **not** drive, so Java's one-second floor is
+    /// unreachable. Durations are integer nanoseconds (`duration as f64`), so a floor
+    /// of `1.0` means "at least one nanosecond was recorded" (`> 0`).
+    ///
+    /// That `> 0` floor is only sound for a caller whose two `now_nanos()` reads
+    /// bracket enough work to cross a clock tick. `Instant` is guaranteed
+    /// **non-decreasing, not strictly increasing**: if the bracketed work is shorter
+    /// than the monotonic clock's tick granularity, both reads can land in the same
+    /// tick and the delta is a legitimate `0`. The four metrics here that bracket an
+    /// **awaited** round trip (pumped by `drive`, microseconds of real work) clear any
+    /// realistic tick, so `>= 1.0` and round-2 strict growth are safe for them. The
+    /// exception is `txn-begin-time-ns-total`: `begin_transaction` times a purely
+    /// **synchronous** body (an uncontended mutex acquire plus a state transition, tens
+    /// of ns) that can fall inside one tick — on Apple Silicon `mach_absolute_time`
+    /// ticks at 24 MHz (~41.7 ns), so a `0`-ns reading is plausible, not merely
+    /// theoretical. Its caller therefore asserts only what the clock guarantees
+    /// (`>= 0.0`, and round-2 non-strict `>= first`); the begin *sensor* plumbing is
+    /// proven separately by
+    /// `kafka_producer_metrics::tests::should_record_tx_begin_time`.
     fn get_and_assert_duration_at_least(producer: &KafkaProducer<String, String>, name: &str, floor: f64) -> f64 {
         let value = get_metric_value(producer, name);
         assert!(value >= floor, "{name} duration {value} is below floor {floor}");
@@ -5024,8 +5035,8 @@ mod tests {
     /// `txn-abort-time-ns-total` is positive after the first abort and strictly larger
     /// after the second. Java's `assertTrue(first > 0)` / `assertTrue(second > first)`
     /// carry over unchanged because both aborts await a full `EndTxn` round trip
-    /// (pumped by `drive`), so each records a strictly positive wall-clock duration
-    /// and the cumulative total grows.
+    /// (pumped by `drive`), so each records a strictly positive monotonic-clock
+    /// duration and the cumulative total grows.
     #[tokio::test]
     async fn test_measure_abort_transaction_duration() {
         let mut ctx = TxnProducerContext::transactional();
@@ -5066,18 +5077,22 @@ mod tests {
     /// already known. That asymmetry is Java's too (the second batch of prepared
     /// responses omits it).
     ///
-    /// Round 1 captures each duration and asserts it is positive
-    /// ([`get_and_assert_duration_at_least`]); round 2 asserts strict growth
-    /// ([`assert_duration_at_least`] with `first + 1.0`). See
-    /// [`get_and_assert_duration_at_least`] for why the floors are the
-    /// wall-clock-deterministic form rather than Java's `tick.toNanos()`.
+    /// Round 1 captures each duration and round 2 asserts growth
+    /// ([`get_and_assert_duration_at_least`] / [`assert_duration_at_least`]). The four
+    /// metrics that bracket an awaited round trip assert positivity (`>= 1.0`) and
+    /// round-2 strict growth (`first + 1.0`); `txn-begin-time-ns-total`, which brackets
+    /// a purely synchronous body, asserts only the monotonic clock's guarantee
+    /// (`>= 0.0`, round-2 non-strict `>= first`). See
+    /// [`get_and_assert_duration_at_least`] for why these floors replace Java's
+    /// `tick.toNanos()` and why begin is special.
     #[tokio::test]
     async fn test_measure_transaction_durations() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
         // Java's `new MockTime(Duration.ofSeconds(1).toMillis())` — a one-second tick.
         // It drives Java's `time.nanoseconds()`, but NOT this producer's `now_nanos()`
-        // wall clock (see `get_and_assert_duration_at_least`), so the floors below are
-        // `> 0` / strict-growth, not Java's 1e9 ns.
+        // monotonic clock (see `get_and_assert_duration_at_least`), so the floors below
+        // are `> 0` / strict-growth for the awaited metrics and `>= 0` / non-strict for
+        // the synchronous begin, not Java's 1e9 ns.
         ctx.time.set_auto_tick(1000);
         init_transactions(&mut ctx).await;
 
@@ -5113,10 +5128,13 @@ mod tests {
                 .begin_transaction()
                 .unwrap_or_else(|error| panic!("beginTransaction {}: {}", attempt, error));
             // Java: getAndAssertDurationAtLeast (round 1) / assertDurationAtLeast (round 2).
+            // begin uses the monotonic clock's guaranteed floors (`>= 0.0` / non-strict),
+            // not `>= 1.0` / strict, because its synchronous body can record a legitimate
+            // 0 ns — see `get_and_assert_duration_at_least`.
             if attempt == 0 {
-                begin_first = get_and_assert_duration_at_least(&ctx.producer, "txn-begin-time-ns-total", 1.0);
+                begin_first = get_and_assert_duration_at_least(&ctx.producer, "txn-begin-time-ns-total", 0.0);
             } else {
-                assert_duration_at_least(&ctx.producer, "txn-begin-time-ns-total", begin_first + 1.0);
+                assert_duration_at_least(&ctx.producer, "txn-begin-time-ns-total", begin_first);
             }
 
             #[allow(deprecated)]
@@ -5659,8 +5677,8 @@ mod tests {
     // matching `record_*` sensor), so every `getMetricValue(producer,
     // "txn-*-time-ns-total")` assertion is translated via `get_metric_value` /
     // `get_and_assert_duration_at_least` / `assert_duration_at_least`. The floors differ
-    // from Java's `tick.toNanos()` because the producer times with the wall clock, not
-    // the injected `MockTime`; each helper documents why.
+    // from Java's `tick.toNanos()` because the producer times with the real monotonic
+    // clock (`now_nanos()`), not the injected `MockTime`; each helper documents why.
     // =====================================================================
 
     // -- `configureTransactionState` tests ----------------------------------
