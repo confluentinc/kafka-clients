@@ -5,6 +5,23 @@ members = [".", "generator", "xtask", "consumer-perf", "multilanguage-test-serve
 name = "confluent-kafka-rust"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Rust implementation of the Confluent Kafka client, translated from the Apache Kafka Java client."
+repository = "https://github.com/confluentinc/example-confluent-kafka-rust"
+exclude = [
+    "kafka/",
+    "bindings/",
+    "xtask/",
+    "consumer-perf/",
+    "multilanguage-test-server/",
+    "tests/",
+    "design/",
+    "coverage/",
+    ".claude/",
+    ".semaphore/",
+    ".github/",
+]
 
 [features]
 integration-tests = []
