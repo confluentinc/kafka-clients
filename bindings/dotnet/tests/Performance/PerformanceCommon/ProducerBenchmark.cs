@@ -397,6 +397,13 @@ public static class ProducerBenchmark
 
         Console.WriteLine($"End time: {afterMs} ms");
         Console.WriteLine($"Duration: {Inv(totalTimeMs)} ms");
+
+        if (stats.Completed == 0)
+        {
+            Console.WriteLine("No messages completed; skipping summary.");
+            return false;
+        }
+
         if (agg.TotalExternalMetrics > 0)
         {
             double averageCpu = agg.AverageCpu;
