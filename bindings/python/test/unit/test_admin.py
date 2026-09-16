@@ -2817,6 +2817,29 @@ def test_alter_user_scram_credentials_reports_unsupported_per_user():
             assert str(exc.value) == "Not implemented yet"
 
 
+def test_alter_user_scram_credentials_collapses_two_rows_for_one_user_to_the_real_outcome():
+    """Two alterations naming the SAME user (a common pattern: rotate a
+    mechanism by deleting one and upserting another) collapse to one per-user
+    outcome, exactly as Java's user-keyed result map does. The caller's single
+    Future for that user MUST resolve to the real broker outcome (here the
+    mock's "Not implemented yet"), NOT the synthetic "the requested key was not
+    present in the admin RPC's response" error that a per-row (un-deduped)
+    fan-out would race ahead and win. Regression test for the distinct-user
+    dedup across admin.py / _confluentkafka.c / src/ffi/admin.rs."""
+    with MockAdminClient(1) as admin:
+        futures = admin.alter_user_scram_credentials([
+            UserScramCredentialUpsertion(
+                "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b"pw"),
+            UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_512),
+        ])
+        # One future, keyed by the distinct user - not two, not a stale row.
+        assert list(futures) == ["alice"]
+        with pytest.raises(KafkaError) as exc:
+            futures["alice"].result(timeout=5)
+        # The real per-user outcome, never the synthetic "not present" error.
+        assert str(exc.value) == "Not implemented yet"
+
+
 def test_alter_user_scram_credentials_passes_an_empty_password_through():
     # An empty password is NOT a whole-call rejection. KafkaAdminClient records
     # UnacceptableCredentialException("Password must not be empty") against that

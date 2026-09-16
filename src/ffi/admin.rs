@@ -17870,10 +17870,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     user_data: *mut c_void,
 ) {
     // Computed independently of `read_scram_alterations`'s validated parse
-    // (which fails the whole array on a NULL user), so every requested row
+    // (which fails the whole array on a NULL user), so every requested user
     // still gets its own callback via `admin_async_per_key_op`'s fan-out even
     // when that parse fails.
-    let keys = unsafe { read_scram_user_keys(users, count) };
+    //
+    // Deduplicated to DISTINCT users (first-occurrence order): Java's
+    // `alterUserScramCredentials` result map is keyed by user
+    // (`KafkaAdminClient.java`'s per-user `futures.put(user, ..)`), so two
+    // alterations naming the same user collapse to ONE outcome future — the
+    // shape `submit_alter_user_scram_credentials_entries` returns. If `keys`
+    // kept one raw entry per row instead, the second occurrence of a repeated
+    // user would find no unclaimed entry and `admin_async_per_key_op` would
+    // fire its synthetic "not present" error, which — racing ahead of the real
+    // per-user outcome — would win the caller's (per-user) Future and hand back
+    // a spurious error. The C incref count must match: it is the distinct-user
+    // count too (`count_distinct_scram_users`, mirroring the Configs family's
+    // `count_distinct_config_resources`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        unsafe { read_scram_user_keys(users, count) }
+            .into_iter()
+            .filter(|user| seen.insert(user.clone()))
+            .collect::<Vec<_>>()
+    };
     let alterations = unsafe {
         read_scram_alterations(
             users,
@@ -27616,6 +27635,90 @@ mod tests {
         assert_eq!(seen.len(), 2, "both users must have delivered exactly once");
         assert_eq!(seen["ausc-alice"].as_deref(), Some("Not implemented yet"));
         assert_eq!(seen["ausc-bob"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// Two rows naming the SAME user (rotate a mechanism: delete one, upsert
+    /// another) collapse to ONE per-user outcome, as Java's user-keyed result
+    /// map does. The single callback for that user MUST carry the real error
+    /// ("Not implemented yet"), and the callback MUST fire exactly once — never
+    /// a second time with the synthetic "requested key was not present" error
+    /// that an un-deduped per-row fan-out would raise for the repeated user and
+    /// race ahead of the real outcome. Regression test for the distinct-user
+    /// `keys` dedup in `kafka_admin_AdminClient_alter_user_scram_credentials_async`.
+    #[test]
+    fn alter_user_scram_credentials_async_collapses_two_rows_for_one_user() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        // Same user twice: a SCRAM_SHA_256 upsertion and a SCRAM_SHA_512 deletion.
+        let (_users_owned, user_ptrs) = c_array(&["ausc-dup", "ausc-dup"]);
+        let is_deletions = [false, true];
+        let mechanisms = [
+            i32::from(ScramMechanism::ScramSha256.r#type()),
+            i32::from(ScramMechanism::ScramSha512.r#type()),
+        ];
+        let iterations = [4096i32, 4096i32];
+        let password_bytes = b"secret".to_vec();
+        let passwords: [*const u8; 2] = [password_bytes.as_ptr(), std::ptr::null()];
+        let password_lens = [password_bytes.len() as i32, 0];
+
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_alter(user: *const c_char, error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let name = unsafe { CStr::from_ptr(user) }.to_string_lossy().into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((name, message)).unwrap();
+        }
+        let ctx = Box::new(Ctx(tx));
+        let ctx_ptr = Box::into_raw(ctx);
+
+        unsafe {
+            kafka_admin_AdminClient_alter_user_scram_credentials_async(
+                admin,
+                user_ptrs.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                2,
+                -1,
+                on_alter,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (name, message) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the single distinct user must get exactly one callback, not hang");
+        assert_eq!(name, "ausc-dup");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the collapsed user must carry the real per-user outcome, not the synthetic missing-key error"
+        );
+        // Exactly one firing: no second (synthetic) callback for the repeated user.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a second callback fired for the repeated user - the per-row fan-out was not deduped"
+        );
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));

@@ -6777,6 +6777,24 @@ static void admin_describe_user_scram_credentials_trampoline(
     kafka_admin_DescribeUserScramCredentialsResult_t* r,
     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
+// Distinct-user count for `alterUserScramCredentials`' per-key callback fan-out.
+// Java's result map is keyed by user, so two rows naming the same user collapse
+// to ONE outcome future and therefore ONE callback firing; the incref count
+// must be the distinct-user count, not the row count, or the callback object
+// leaks (over-incref). Mirrors `count_distinct_config_resources` and the Rust
+// `keys` dedup in `kafka_admin_AdminClient_alter_user_scram_credentials_async`.
+static Py_ssize_t count_distinct_scram_users(const char* const* users, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (strcmp(users[i], users[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
 static void admin_alter_user_scram_credentials_trampoline(const char* user,
     kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
@@ -6985,13 +7003,14 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
         has_salts[i] = salt_obj != Py_None;
     }
     if (!failed) {
-        // One callback invocation per requested row - two rows naming the
-        // same user are passed through rather than deduplicated (Java's
-        // per-user future map collapses them into one outcome, but the
-        // native `keys` for the fan-out still has one raw entry per row; see
-        // read_scram_user_keys in src/ffi/admin.rs), so the increment count
-        // is the row count `n`.
-        admin_incref_n(cb, n);
+        // One callback invocation per DISTINCT user: Java's per-user future map
+        // collapses two rows naming the same user into one outcome, and the
+        // native `keys` fan-out dedupes to match (see
+        // `kafka_admin_AdminClient_alter_user_scram_credentials_async`'s `keys`
+        // in src/ffi/admin.rs). The increment count is therefore the
+        // distinct-user count, not the row count `n`, or the callback object
+        // would be over-increffed and leak.
+        admin_incref_n(cb, count_distinct_scram_users(users, n));
         kafka_admin_AdminClient_alter_user_scram_credentials_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, users, is_deletions, mechanisms, iterations,
             passwords, password_lens, salts, salt_lens, has_salts, (int32_t)n, timeout_ms,

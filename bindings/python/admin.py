@@ -3252,13 +3252,16 @@ class _AdminBase:
                 self._free_value(drain))
 
     def _alter_user_scram_credentials_keys_and_spec(self, alterations):
-        """`alterations`' distinct usernames become the futures dict's keys -
-        a user IS a plain string, unlike `alter_client_quotas`'s compound
-        entity key, so the caller can already match a returned Future by name
-        even when the Rust core collapses two rows naming the same user into
-        one outcome (`kafka_admin_AdminClient_alter_user_scram_credentials`'s
-        own doc: two rows are passed through, not rejected, unlike
-        `alter_client_quotas`'s duplicate-entity rejection)."""
+        """`alterations`' distinct usernames become the futures dict's keys.
+        Java's `alterUserScramCredentials` result map is keyed by user, so two
+        alterations naming the same user collapse to ONE outcome future; the
+        futures dict here is keyed the same (distinct users, first-occurrence
+        order), and both the native `keys` fan-out and the C incref count
+        dedupe to match (see
+        `kafka_admin_AdminClient_alter_user_scram_credentials_async`'s `keys`
+        and `count_distinct_scram_users`). All rows are still sent to the
+        broker — only the per-user *outcome* is collapsed, exactly as Java
+        does."""
         keys = list(dict.fromkeys(str(a.user) for a in alterations))
         return keys, self._scram_alteration_rows(alterations)
 
