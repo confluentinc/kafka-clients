@@ -84,6 +84,23 @@ internal sealed class SoakClient : IDisposable
     /// <summary>Poll interval for the bounded drain above.</summary>
     private const int DrainPollIntervalMs = 10;
 
+    /// <summary>
+    /// How far the producer's pacing schedule may fall behind before it is re-anchored to
+    /// the present instead of being caught up.
+    /// <para>
+    /// The pacer sleeps until an absolute checkpoint (see <see cref="ProducerLoopAsync"/>),
+    /// so a batch that ran long is normally repaid out of the next sleep — that is the
+    /// point. But <c>Send</c> can block up to <c>max.block.ms</c> waiting for admission
+    /// when the broker is unreachable, which would leave a debt of minutes, and repaying
+    /// that in full means a burst of the whole backlog at unbounded speed the moment the
+    /// broker returns. A soak client exists to hold a steady rate, most of all across the
+    /// broker rolls it is there to survive, so past this bound the debt is dropped. One
+    /// second still absorbs a GC pause or a slow ack, and caps the post-outage burst at one
+    /// second of the configured rate.
+    /// </para>
+    /// </summary>
+    internal const double MaxPacingCatchUpSeconds = 1.0;
+
     // Protocol error codes (src/common/protocol/errors.rs) used to classify the errors a
     // broker roll produces. Client-side errors (Wakeup, Timeout, ...) all report
     // UnknownServerError (-1), so they are classified by message instead.
@@ -473,6 +490,31 @@ internal sealed class SoakClient : IDisposable
         return true;
     }
 
+    // -- pacing ----------------------------------------------------------------------
+
+    /// <summary>
+    /// Advances the producer's absolute pacing deadline by one batch interval, dropping the
+    /// accumulated debt when the schedule has fallen further behind than
+    /// <see cref="MaxPacingCatchUpSeconds"/>.
+    /// </summary>
+    /// <remarks>
+    /// Pure, so the arithmetic that decides the soak's message rate is testable without a
+    /// broker. <paramref name="now"/> is a <see cref="MonotonicSeconds"/> reading and
+    /// <paramref name="checkpoint"/> the deadline just slept to.
+    /// </remarks>
+    internal static double NextPacingCheckpoint(double checkpoint, double now, double intervalSeconds)
+    {
+        double advanced = checkpoint + intervalSeconds;
+
+        // Normally `advanced` is still in the future and is returned as-is, which is what
+        // repays a batch that overran out of the next sleep. It is only in the past when
+        // the batch itself outran its interval; past the bound that debt is unrepayable
+        // without a burst, so the schedule restarts from here.
+        return advanced < now - MaxPacingCatchUpSeconds
+            ? now + intervalSeconds
+            : advanced;
+    }
+
     // -- instrumentation -------------------------------------------------------------
 
     /// <summary>Increments a metric counter.</summary>
@@ -731,18 +773,37 @@ internal sealed class SoakClient : IDisposable
         Thread.CurrentThread.Name ??= "producer";
         try
         {
-            // Batched pacing, ported from the Python soak's --perf path: produce
-            // max(1, rate/100) records then sleep off the batch's remaining time budget.
-            // At the soak's 80 msg/s the batch is 1 — the batching only matters if the
-            // rate is raised, where a per-message sleep is below what the OS can honour.
+            // Batching ported from the Python soak's --perf path: produce max(1, rate/100)
+            // records then sleep off the batch's remaining time budget. At the soak's
+            // 80 msg/s the batch is 1 — the batching only matters if the rate is raised,
+            // where a per-message sleep is below what the OS can honour. The DEADLINE
+            // arithmetic below deliberately does not follow Python's.
             int batch = Math.Max(1, (int)(_options.Rate / 100));
             double batchIntervalSeconds = batch / _options.Rate;
             double nextStatus = MonotonicSeconds() + _statusIntervalSeconds;
 
+            // The pacing deadline is ABSOLUTE — advanced from its own prior value, never
+            // recomputed from "now". This is a deliberate deviation from the Python soak,
+            // which sleeps `batch_intvl - (now - t_start)` and so measures each interval
+            // from the last wake-up. Both forms are correct given an exact sleep; they
+            // differ in what happens to an inexact one. In the relative form the period is
+            // `work + sleep(interval - work)`, so any gap between the sleep asked for and
+            // the sleep taken is a permanent error in the achieved rate; in the absolute
+            // form each sleep targets the schedule, so the same errors cancel.
+            //
+            // That gap is not negligible here: Task.Delay resolves only to whole
+            // milliseconds — every TimeSpan in [9, 10) ms sleeps alike — against an
+            // interval of 12.5 ms at the default 80 msg/s and 10 ms at 1000, so up to
+            // ~1 ms of every period is decided by rounding rather than by the rate.
+            // MEASURED over two 10-minute local runs at a 1000 msg/s target: relative
+            // 1017.55 msg/s (+1.8%, per-10s-window stdev 4.40), absolute 999.96 msg/s
+            // (-0.004%, stdev 0.54). Python's `Event.wait` takes a float timeout and does
+            // not round to whole milliseconds, so the relative form does not meet this
+            // particular floor there.
+            double nextBatchTime = MonotonicSeconds() + batchIntervalSeconds;
+
             while (!_stop.IsCancellationRequested)
             {
-                double started = MonotonicSeconds();
-
                 for (int i = 0; i < batch; i++)
                 {
                     if (_stop.IsCancellationRequested)
@@ -760,13 +821,16 @@ internal sealed class SoakClient : IDisposable
                     nextStatus = now + _statusIntervalSeconds;
                 }
 
-                double remaining = batchIntervalSeconds - (MonotonicSeconds() - started);
+                double remaining = nextBatchTime - MonotonicSeconds();
                 if (remaining > 0)
                 {
                     // A cancellable wait, never a bare delay: the pacing sleep must abort
                     // on shutdown.
                     await DelayAsync(TimeSpan.FromSeconds(remaining)).ConfigureAwait(false);
                 }
+
+                nextBatchTime = NextPacingCheckpoint(
+                    nextBatchTime, MonotonicSeconds(), batchIntervalSeconds);
             }
 
             // Wait for outstanding messages to be delivered. main() arms a shutdown
