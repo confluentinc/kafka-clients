@@ -1,0 +1,30 @@
+version: v1.0
+name: Test publish Rust crate
+
+# Test publish: packages the crate and runs every crates.io check, but uploads
+# nothing (cargo publish --dry-run). Promote to "Publish" for the real upload.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 2
+
+blocks:
+  - name: "Test publish (dry-run)"
+    dependencies: []
+    task:
+      jobs:
+        - name: dry-run
+          commands:
+            - checkout
+            - ./.semaphore/dependencies.sh
+            # On a tag the version comes from it (v4.3.0 -> 4.3.0); off-tag it
+            # keeps the Cargo.toml placeholder.
+            - sh .semaphore/crate-set-version.sh
+            - cargo publish -p confluent-kafka-rust --dry-run
+
+promotions:
+  - name: Publish
+    pipeline_file: crate-publish.yml

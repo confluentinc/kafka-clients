@@ -1,0 +1,28 @@
+version: v1.0
+name: Publish Rust crate
+
+# Publishes the crate to crates.io. The actual upload and Vault token fetch are
+# COMMENTED OUT; enable them once the crates.io account, crate-name reservation,
+# Vault token path and the generator dependency are in place.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 2
+
+blocks:
+  - name: "Publish"
+    dependencies: []
+    task:
+      jobs:
+        - name: publish
+          commands:
+            - checkout
+            - ./.semaphore/dependencies.sh
+            - sh .semaphore/crate-set-version.sh
+            # --- ACTUAL PUBLISH (disabled) ---
+            # - export CARGO_REGISTRY_TOKEN="$(vault kv get -field=token v1/ci/kv/crates-io)"
+            # - cargo publish -p confluent-kafka-rust
+            - 'echo "DRY-RUN: publish disabled -- would run cargo publish -p confluent-kafka-rust"'
