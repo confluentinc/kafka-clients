@@ -151,9 +151,13 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// instance shared across concurrent sends must be thread-safe.</b> Running inline on the
     /// calling thread means N threads in <c>Send</c> enter one shared
     /// <see cref="IDeliveryCallback"/> on N threads at once — the binding adds no lock, by design.
-    /// Java never does this (its callbacks run on the single background I/O thread), so this is a
-    /// recorded divergence; see <see cref="IDeliveryCallback"/> for the full statement. A callback
-    /// instance created per send needs no synchronization.
+    /// See <see cref="IDeliveryCallback"/> for the full statement. A callback instance created per
+    /// send needs no synchronization. ⚠ This paragraph used to justify the obligation by asserting
+    /// Java never enters one callback from two threads because its callbacks run on the single
+    /// background I/O thread; that is false — <c>Callback.java:20-21</c> says "<em>generally</em>",
+    /// and <c>KafkaProducer.doSend</c>'s <c>catch (ApiException)</c> invokes the callback on the
+    /// <b>application</b> thread concurrently with the Sender thread's own invocations (finding
+    /// 72.17). The obligation stands on its own and needs no claim about Java.
     /// </para>
     /// <para>
     /// <b>A null <paramref name="callback"/> is rejected (decision D8) — deliberately stricter than
