@@ -1,0 +1,96 @@
+version: v1.0
+name: Build, test and package Rust client
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-3
+
+execution_time_limit:
+  hours: 3
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - mkdir -p artifacts
+
+blocks:
+  - name: "Verify: Linux x64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: ARTIFACT_KEY
+          value: confluent-kafka-rust__plat-linux__arch-x64
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      epilogue:
+        always:
+          commands:
+            - artifact push workflow artifacts/ --destination artifacts/${ARTIFACT_KEY}/ --force
+      jobs:
+        - name: verify
+          commands:
+            - set -o pipefail; make verify-rust 2>&1 | tee artifacts/verify.log
+
+  - name: "Verify: Linux arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: ARTIFACT_KEY
+          value: confluent-kafka-rust__plat-linux__arch-arm64
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      epilogue:
+        always:
+          commands:
+            - artifact push workflow artifacts/ --destination artifacts/${ARTIFACT_KEY}/ --force
+      jobs:
+        - name: verify
+          commands:
+            - set -o pipefail; make verify-rust 2>&1 | tee artifacts/verify.log
+
+  - name: "Verify: macOS arm64"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: ARTIFACT_KEY
+          value: confluent-kafka-rust__plat-osx__arch-arm64
+      prologue:
+        commands:
+          - source ./.semaphore/dependencies-macos.sh
+      epilogue:
+        always:
+          commands:
+            - artifact push workflow artifacts/ --destination artifacts/${ARTIFACT_KEY}/ --force
+      jobs:
+        - name: verify
+          commands:
+            - set -o pipefail; make verify-rust-macos-docker 2>&1 | tee artifacts/verify.log
+
+  - name: "Packaging"
+    dependencies:
+      - "Verify: Linux x64"
+      - "Verify: Linux arm64"
+      - "Verify: macOS arm64"
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-0
+      jobs:
+        - name: collect
+          commands:
+            - artifact pull workflow artifacts
+            - ls -R artifacts
+            - tar czf rust-verify-results.tgz -C artifacts .
+            - artifact push workflow rust-verify-results.tgz --force
