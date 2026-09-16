@@ -58,7 +58,7 @@ pub const DEFAULT_PAUSE_MS: u64 = 100;
 /// Java's two-argument overload (defaulting to [`DEFAULT_MAX_WAIT_MS`] /
 /// [`DEFAULT_PAUSE_MS`]) is not translated because no caller needs it — the
 /// propagation waits here pass an explicit bound. Prefer
-/// [`retry_on_exception_with_timeout`] for read-back *assertions*: it keeps the
+/// [`retry_on_error_with_timeout`] for read-back *assertions*: it keeps the
 /// assertion as the source of truth and reports the last failure, whereas this
 /// helper can only report `msg`.
 pub async fn wait_until_true_with_timeout<F, Fut>(mut condition: F, msg: &str, wait_time_ms: u64, pause: u64)
@@ -105,19 +105,19 @@ where
 ///
 /// Java's `NoRetryException` short-circuit has no caller here and is not
 /// translated; add it if a caller needs to abort early.
-pub async fn retry_on_exception_with_timeout<F, Fut>(timeout: Duration, body: F)
+pub async fn retry_on_error_with_timeout<F, Fut>(timeout: Duration, body: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    retry_on_exception_with_timeout_poll(timeout, Duration::from_millis(DEFAULT_PAUSE_MS), body).await;
+    retry_on_error_with_timeout_poll(timeout, Duration::from_millis(DEFAULT_PAUSE_MS), body).await;
 }
 
-/// [`retry_on_exception_with_timeout`] with an explicit poll interval.
+/// [`retry_on_error_with_timeout`] with an explicit poll interval.
 ///
 /// Mirrors the three-argument Java overload, including its
 /// `Math.min(pollIntervalMs, timeoutMs)` sleep.
-pub async fn retry_on_exception_with_timeout_poll<F, Fut>(timeout: Duration, poll_interval: Duration, mut body: F)
+pub async fn retry_on_error_with_timeout_poll<F, Fut>(timeout: Duration, poll_interval: Duration, mut body: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(), String>>,

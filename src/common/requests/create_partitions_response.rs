@@ -108,12 +108,12 @@ mod tests {
         ok.set_error_code(Errors::None.code());
         let mut bad = CreatePartitionsTopicResult::new();
         bad.set_name("bad".to_string());
-        bad.set_error_code(Errors::InvalidTopicException.code());
+        bad.set_error_code(Errors::InvalidTopicError.code());
         data.set_results(vec![ok, bad]);
         let response = CreatePartitionsResponse::new(data);
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::None), Some(&1));
-        assert_eq!(counts.get(&Errors::InvalidTopicException), Some(&1));
+        assert_eq!(counts.get(&Errors::InvalidTopicError), Some(&1));
     }
 
     #[test]

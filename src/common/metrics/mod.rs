@@ -22,7 +22,7 @@
 
 pub mod compound_stat;
 pub mod gauge;
-pub mod internals;
+pub(crate) mod internals;
 pub mod kafka_metric;
 pub mod measurable;
 pub mod measurable_stat;
@@ -32,6 +32,7 @@ pub mod metric_value_provider;
 pub mod metrics;
 pub mod metrics_reporter;
 pub mod quota;
+pub mod quota_violation_error;
 pub mod sensor;
 pub mod stat;
 pub mod stats;
@@ -50,6 +51,7 @@ pub use metric_value_provider::MetricValueProvider;
 pub use metrics::Metrics;
 pub use metrics_reporter::MetricsReporter;
 pub use quota::Quota;
+pub use quota_violation_error::QuotaViolationError;
 pub use sensor::{RecordingLevel, Sensor};
 pub use stat::Stat;
 pub use time::{SystemTime, Time};

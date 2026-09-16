@@ -395,7 +395,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
     // The leader lookup never succeeds, so the driver fails the key when the
     // API timeout elapses.
     assert!(
-        err.is_retriable() || matches!(err.error(), Errors::RequestTimedOut),
+        err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
         "{backend} backend: expected a timeout, got {err:?}"
     );
 
