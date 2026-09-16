@@ -215,7 +215,7 @@ type PartitionDequeRef<'a> = dashmap::mapref::one::Ref<'a, i32, Mutex<VecDeque<P
 /// Java's `TxnPartitionEntry` (`TxnPartitionEntry.java:62-65`) holds *references*
 /// to the in-flight batches, so no batch ever leaves its owner and Java's
 /// `TxnPartitionMap` looks a partition up directly
-/// (`TxnPartitionMap.java:36/43/118`). Rust cannot store those references in the
+/// (`TxnPartitionMap.java:36/43/114`). Rust cannot store those references in the
 /// entry (`.claude/rules/producer-transactions.md` §7), so the pool is assembled
 /// by borrowing the batches straight out of their owners. To match Java's O(1)
 /// lookup — rather than scanning the whole Sender map — each requested partition's
@@ -2103,7 +2103,7 @@ impl RecordAccumulator {
         // before the guard re-inserts.
         //
         // A direct `remove` per requested partition matches Java, which never scans:
-        // `TxnPartitionMap.java:43` `get(tp)` and `:118` `adjustSequencesDueToFailedBatch`
+        // `TxnPartitionMap.java:43` `get(tp)` and `:114` `adjustSequencesDueToFailedBatch`
         // both look the partition up directly in the `HashMap` at `:36`, and
         // `TransactionManager.java:612/673/1066` call `startSequencesAtBeginning(tp, ..)`
         // once per partition while `:836` calls `adjustSequencesDueToFailedBatch(batch)`.
