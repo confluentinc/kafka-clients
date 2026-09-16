@@ -176,18 +176,14 @@ internal static class Translate
 
     /// <summary>
     /// The producer sibling of <see cref="UnknownConsumer"/>: the hand-crafted
-    /// <c>ILLEGAL_STATE</c> error returned when a producer RPC names an unknown
+    /// <c>LOCAL_ILLEGAL_STATE</c> error returned when a producer RPC names an unknown
     /// <c>producer_id</c> (Python parity — <c>grpc_server.py</c>'s <c>ProducerService</c>
-    /// returns the same <c>{variant=ILLEGAL_STATE, code=-1, "unknown producer_id N",
-    /// retriable=false, fatal=true}</c>).
+    /// returns the same <c>{code=LOCAL_ILLEGAL_STATE, "unknown producer_id N"}</c>).
     /// </summary>
     internal static Proto.KafkaError UnknownProducer(ulong producerId) => new Proto.KafkaError
     {
-        Variant = Proto.KafkaError.Types.Variant.IllegalState,
-        Code = -1,
+        Code = LocalIllegalStateCode,
         Message = $"unknown producer_id {producerId}",
-        IsRetriable = false,
-        IsFatal = true,
     };
 
     /// <summary>Proto <c>TopicPartition</c> -&gt; binding <see cref="TopicPartition"/>.</summary>
