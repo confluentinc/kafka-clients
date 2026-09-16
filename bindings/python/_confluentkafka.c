@@ -364,7 +364,7 @@ typedef struct BatchNode {
     kafka_producer_ProducerRecord_t* producer_structs[PRODUCER_RECORD_SLOT_CAPACITY];
     PyObject* complete_cbs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_producer_FutureRecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_KafkaError_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
+    kafka_common_Error_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
     struct BatchNode* next_batch;
 } BatchNode;
 
@@ -401,7 +401,7 @@ typedef struct {
 static void Producer_complete_callback(PyObject* cb,
     ProducerRecordObject *record_obj,
     kafka_producer_RecordMetadata_t *metadata,
-    kafka_common_KafkaError_t *error) {
+    kafka_common_Error_t *error) {
     // Pass raw pointers as Python ints — the Python wrapper
     // calls accessor/destroy functions on them.
     PyObject *result_long = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)metadata);
@@ -427,7 +427,7 @@ static void Producer_complete_callbacks(
     // Phase 1: Block on all futures at once WITHOUT the GIL.
     // Uses a single tokio runtime for the entire batch.
     kafka_producer_RecordMetadata_t *metadata_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_KafkaError_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
+    kafka_common_Error_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_producer_FutureRecordMetadata_get_all(
         futures, count, metadata_ptrs, error_ptrs);
     kafka_producer_FutureRecordMetadata_destroy_all(futures, count);
@@ -729,16 +729,16 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
         kafka_producer_ProducerProperties_put(props, k, v);
     }
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *kafka_producer =
         kafka_producer_KafkaProducer_new(props, &err);
     kafka_producer_ProducerProperties_destroy(props);
 
     if (kafka_producer == NULL) {
         if (err != NULL) {
-            const char *msg = kafka_common_KafkaError_message(err);
+            const char *msg = kafka_common_Error_message(err);
             PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create KafkaProducer");
-            kafka_common_KafkaError_destroy(err);
+            kafka_common_Error_destroy(err);
         } else {
             PyErr_SetString(PyExc_RuntimeError, "Failed to create KafkaProducer");
         }
@@ -904,7 +904,7 @@ static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
 
 // cb(error_int): void-returning producer async op (flush, close). Mirrors the
 // consumer's consumer_op_trampoline.
-static void producer_op_trampoline(kafka_common_KafkaError_t* error, void* user_data) {
+static void producer_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
@@ -917,7 +917,7 @@ static void producer_op_trampoline(kafka_common_KafkaError_t* error, void* user_
 // kafka_consumer_PartitionInfoList_t (shared with the consumer FFI) that Python
 // drains via PartitionInfoList_drain.
 static void producer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_t* list,
-                                               kafka_common_KafkaError_t* error, void* user_data) {
+                                               kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "KK",
@@ -1124,7 +1124,7 @@ static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
     }
 
     Producer* producer = (Producer*)producer_ptr;
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     // Blocking FFI call: release the GIL. flush() parks until every in-flight
     // send completes, and each completion fires the on_delivery trampoline on
     // the dispatcher thread, which needs the GIL.
@@ -1146,7 +1146,7 @@ static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "Ks", &producer_ptr, &topic)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
     kafka_consumer_PartitionInfoList_t* list = NULL;
-    kafka_common_KafkaError_t* err;
+    kafka_common_Error_t* err;
     // Blocking FFI call (metadata round trip): release the GIL, so a delivery
     // callback firing meanwhile can take it.
     Py_BEGIN_ALLOW_THREADS
@@ -1282,7 +1282,7 @@ static PyObject* py_Producer_init_transactions(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     Py_BEGIN_ALLOW_THREADS
     err = kafka_producer_Producer_init_transactions(producer->producer);
     Py_END_ALLOW_THREADS
@@ -1294,7 +1294,7 @@ static PyObject* py_Producer_begin_transaction(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
     // Pure state transition, never waits (Java beginTransaction) — no GIL release.
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_begin_transaction(producer->producer);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
 }
@@ -1303,7 +1303,7 @@ static PyObject* py_Producer_commit_transaction(PyObject* self, PyObject* args) 
     unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     Py_BEGIN_ALLOW_THREADS
     err = kafka_producer_Producer_commit_transaction(producer->producer);
     Py_END_ALLOW_THREADS
@@ -1314,7 +1314,7 @@ static PyObject* py_Producer_abort_transaction(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     Py_BEGIN_ALLOW_THREADS
     err = kafka_producer_Producer_abort_transaction(producer->producer);
     Py_END_ALLOW_THREADS
@@ -1387,7 +1387,7 @@ static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObjec
             return NULL;
         }
     }
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     Py_BEGIN_ALLOW_THREADS
     err = kafka_producer_Producer_send_offsets_to_transaction(
         producer->producer, topics, parts, offs, epochs, metas, (int32_t)n, gm);
@@ -1440,15 +1440,15 @@ static PyObject* py_RecordMetadata_copy(PyObject* self, PyObject* args) {
 static PyObject* py_KafkaError_code(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
-    return PyLong_FromLong(kafka_common_KafkaError_code(e));
+    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
+    return PyLong_FromLong(kafka_common_Error_code(e));
 }
 
 static PyObject* py_KafkaError_message(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
-    const char *msg = kafka_common_KafkaError_message(e);
+    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
+    const char *msg = kafka_common_Error_message(e);
     if (msg == NULL) Py_RETURN_NONE;
     return PyUnicode_FromString(msg);
 }
@@ -1456,29 +1456,58 @@ static PyObject* py_KafkaError_message(PyObject* self, PyObject* args) {
 static PyObject* py_KafkaError_is_retriable(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_KafkaError_is_retriable(e) ? 1 : 0);
+    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
+    return PyBool_FromLong(kafka_common_Error_is_retriable_error(e) ? 1 : 0);
+}
+
+// `RequestUtils.isFatalException` composed from the exported predicates and the
+// error code, which is what the FFI's own note on
+// kafka_common_Error_is_retriable_error prescribes: fatality lives in
+// `org.apache.kafka.common.requests`, a package Kafka disclaims as unsupported,
+// so CLAUDE.md §3 forbids giving it a C binding of its own.
+//
+// The composition mirrors `request_utils::is_fatal_error` term for term — the
+// two authorization/authentication predicates, plus the five coded classes it
+// lists — so `KafkaError.is_fatal`, which this backs, keeps answering exactly
+// what it did before.
+static int error_is_fatal(const kafka_common_Error_t* e) {
+    if (e == NULL) return 0;
+    if (kafka_common_Error_is_authentication_error(e)) return 1;
+    if (kafka_common_Error_is_authorization_error(e)) return 1;
+    switch (kafka_common_Error_code(e)) {
+        case kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE:
+        case kafka_common_ErrorCode_SECURITY_DISABLED:
+        case kafka_common_ErrorCode_UNSUPPORTED_VERSION:
+        case kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE:
+        case kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT:
+            return 1;
+        default:
+            return 0;
+    }
 }
 
 static PyObject* py_KafkaError_is_fatal(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_KafkaError_is_fatal(e) ? 1 : 0);
+    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
+    return PyBool_FromLong(error_is_fatal(e) ? 1 : 0);
 }
 
+// Java's `TransactionAbortableException` test. The Python-visible name stays
+// `txn_requires_abort` (librdkafka's spelling, and the public API); only the
+// FFI symbol it calls was renamed by the error redesign.
 static PyObject* py_KafkaError_txn_requires_abort(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_KafkaError_txn_requires_abort(e) ? 1 : 0);
+    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
+    return PyBool_FromLong(kafka_common_Error_is_transaction_abortable_error(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
-    kafka_common_KafkaError_destroy(e);
+    kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
+    kafka_common_Error_destroy(e);
     Py_RETURN_NONE;
 }
 
@@ -1752,7 +1781,7 @@ static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records) {
 // copies them into owned Rust data synchronously before returning, so freeing
 // the arrays right after the call is safe.
 
-// list[str] -> char* array. Returns count (>=0), or -1 on error (exception set).
+// list[str] -> char* array. Returns count (>=0), or -1 on error (Python error set).
 // On success the caller must PyMem_Free(*out).
 static Py_ssize_t topics_to_array(PyObject* list, const char*** out) {
     Py_ssize_t n = PySequence_Size(list);
@@ -1967,7 +1996,7 @@ static PyObject* py_Producer_send_offsets_to_transaction_async(PyObject* self, P
 // ---- trampolines (run on the Rust dispatcher thread) -----------------------
 
 // op callback: (error, user_data) -> py_cb(error_int)
-static void consumer_op_trampoline(kafka_common_KafkaError_t* error, void* user_data) {
+static void consumer_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
@@ -1978,7 +2007,7 @@ static void consumer_op_trampoline(kafka_common_KafkaError_t* error, void* user_
 
 // poll callback: (records, error, user_data) -> py_cb(records_int, error_int)
 static void consumer_poll_trampoline(kafka_consumer_ConsumerRecords_t* records,
-                                     kafka_common_KafkaError_t* error, void* user_data) {
+                                     kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "KK",
@@ -1991,7 +2020,7 @@ static void consumer_poll_trampoline(kafka_consumer_ConsumerRecords_t* records,
 
 // position callback: (i64, error, user_data) -> py_cb(position, error_int)
 static void consumer_position_trampoline(int64_t position,
-                                         kafka_common_KafkaError_t* error, void* user_data) {
+                                         kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "LK",
@@ -2005,7 +2034,7 @@ static void consumer_position_trampoline(int64_t position,
 // offsets_for_times, beginning/end offsets, partitions_for, list_topics):
 // hand the opaque result handle + error back to Python as ints. Python then
 // drains the handle via the matching *_drain function.
-static void fire_handle_cb(void* handle, kafka_common_KafkaError_t* error, void* user_data) {
+static void fire_handle_cb(void* handle, kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "KK",
@@ -2017,15 +2046,15 @@ static void fire_handle_cb(void* handle, kafka_common_KafkaError_t* error, void*
 }
 
 static void consumer_committed_trampoline(kafka_consumer_OffsetMap_t* m,
-                                          kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(m, e, ud); }
+                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
 static void consumer_oft_trampoline(kafka_consumer_OffsetAndTimestampMap_t* m,
-                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(m, e, ud); }
+                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
 static void consumer_long_offsets_trampoline(kafka_consumer_LongOffsetMap_t* m,
-                                             kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(m, e, ud); }
+                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
 static void consumer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_t* l,
-                                               kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(l, e, ud); }
+                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(l, e, ud); }
 static void consumer_list_topics_trampoline(kafka_consumer_TopicPartitionInfoMap_t* m,
-                                            kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(m, e, ud); }
+                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
 
 // Converts + destroys an owned TopicPartitionList (defined with the state reads).
 static PyObject* topic_partition_list_to_py(kafka_consumer_TopicPartitionList_t* list);
@@ -2045,7 +2074,7 @@ static PyObject* topic_partition_list_to_py(kafka_consumer_TopicPartitionList_t*
 // into Python.
 //
 // Returns null on success. A Python exception is converted into a
-// kafka_common_KafkaError_t carrying its message verbatim — ownership passes to
+// kafka_common_Error_t carrying its message verbatim — ownership passes to
 // Rust, which reads and frees it, so it must NOT be destroyed here. This
 // mirrors a Java listener throwing out of onPartitionsRevoked/Assigned/Lost:
 // the rebalance (and the poll that drove it) fails with that message.
@@ -2057,25 +2086,25 @@ static PyObject* topic_partition_list_to_py(kafka_consumer_TopicPartitionList_t*
 
 // Convert the currently set Python exception into an error handle, clearing the
 // indicator (it must be clean before returning into Rust). The GIL must be held.
-static kafka_common_KafkaError_t* error_from_py_exception(const char* fallback) {
+static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
     PyObject *type = NULL, *value = NULL, *tb = NULL;
     PyErr_Fetch(&type, &value, &tb);  // clears the indicator
     PyErr_NormalizeException(&type, &value, &tb);
     PyObject* text = value ? PyObject_Str(value) : NULL;
     const char* msg = text ? PyUnicode_AsUTF8(text) : NULL;
-    kafka_common_KafkaError_t* err =
-        kafka_common_KafkaError_new(PY_LISTENER_ERROR_CODE, msg ? msg : fallback);
+    kafka_common_Error_t* err =
+        kafka_common_Error_new(PY_LISTENER_ERROR_CODE, msg ? msg : fallback);
     Py_XDECREF(text);
     Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
     PyErr_Clear();  // defensive: PyObject_Str / NormalizeException may re-set it
     return err;
 }
 
-static kafka_common_KafkaError_t* listener_invoke(const char* method,
+static kafka_common_Error_t* listener_invoke(const char* method,
                                                   kafka_consumer_TopicPartitionList_t* list,
                                                   void* user_data) {
     PyObject* adapter = (PyObject*)user_data;
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* partitions = topic_partition_list_to_py(list);  // destroys `list`
     if (partitions == NULL) {
@@ -2093,17 +2122,17 @@ static kafka_common_KafkaError_t* listener_invoke(const char* method,
     return err;
 }
 
-static kafka_common_KafkaError_t* listener_on_revoked_trampoline(
+static kafka_common_Error_t* listener_on_revoked_trampoline(
         kafka_consumer_TopicPartitionList_t* list, void* ud) {
     return listener_invoke("_on_revoked", list, ud);
 }
 
-static kafka_common_KafkaError_t* listener_on_assigned_trampoline(
+static kafka_common_Error_t* listener_on_assigned_trampoline(
         kafka_consumer_TopicPartitionList_t* list, void* ud) {
     return listener_invoke("_on_assigned", list, ud);
 }
 
-static kafka_common_KafkaError_t* listener_on_lost_trampoline(
+static kafka_common_Error_t* listener_on_lost_trampoline(
         kafka_consumer_TopicPartitionList_t* list, void* ud) {
     return listener_invoke("_on_lost", list, ud);
 }
@@ -2129,7 +2158,7 @@ static void listener_user_data_destroy_trampoline(void* user_data) {
 // OffsetCommitCallback.onComplete returns void and has nowhere to report a
 // failure, so an exception is only printed.
 static void consumer_commit_callback_trampoline(kafka_consumer_OffsetMap_t* offsets,
-                                                kafka_common_KafkaError_t* error,
+                                                kafka_common_Error_t* error,
                                                 void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
@@ -2153,11 +2182,11 @@ static void commit_callback_user_data_destroy_trampoline(void* user_data) {
 // Equivalent to Java's commitAsync(offsets, null) — the commit happens, nothing
 // is reported back. Touches no Python objects, so it needs no GIL.
 static void consumer_commit_discard_trampoline(kafka_consumer_OffsetMap_t* offsets,
-                                               kafka_common_KafkaError_t* error,
+                                               kafka_common_Error_t* error,
                                                void* user_data) {
     (void)user_data;
     if (offsets) kafka_consumer_OffsetMap_destroy(offsets);
-    if (error) kafka_common_KafkaError_destroy(error);
+    if (error) kafka_common_Error_destroy(error);
 }
 
 // ---- constructors / lifecycle ----------------------------------------------
@@ -2196,13 +2225,13 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
         }
         kafka_consumer_ConsumerProperties_put(props, k, v);
     }
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     kafka_consumer_Consumer_t* c = kafka_consumer_KafkaConsumer_new(props, &err);
     kafka_consumer_ConsumerProperties_destroy(props);
     if (c == NULL) {
-        const char* msg = err ? kafka_common_KafkaError_message(err) : NULL;
+        const char* msg = err ? kafka_common_Error_message(err) : NULL;
         PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create KafkaConsumer");
-        if (err) kafka_common_KafkaError_destroy(err);
+        if (err) kafka_common_Error_destroy(err);
         return NULL;
     }
     return PyLong_FromVoidPtr(c);
@@ -2494,7 +2523,7 @@ static PyObject* py_Consumer_seek_with_metadata_async(PyObject* self, PyObject* 
 static PyObject* py_Consumer_enforce_rebalance(PyObject* self, PyObject* args) {
     unsigned long long h; const char* reason;  // None -> ""
     if (!PyArg_ParseTuple(args, "Kz", &h, &reason)) return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_Consumer_enforce_rebalance(
+    kafka_common_Error_t* e = kafka_consumer_Consumer_enforce_rebalance(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, reason);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
@@ -2513,7 +2542,7 @@ static PyObject* py_Consumer_commit_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* cb = Py_None;
     if (!PyArg_ParseTuple(args, "K|O", &h, &cb)) return NULL;
     const kafka_consumer_Consumer_t* c = (const kafka_consumer_Consumer_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     if (cb == Py_None) {
         Py_BEGIN_ALLOW_THREADS
         e = kafka_consumer_Consumer_commit_async(c);
@@ -2538,7 +2567,7 @@ static PyObject* py_Consumer_commit_async_offsets(PyObject* self, PyObject* args
     Py_ssize_t n = offsets_to_arrays(offsets, &a);
     if (n < 0) return NULL;
     const kafka_consumer_Consumer_t* c = (const kafka_consumer_Consumer_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     if (cb == Py_None) {
         Py_BEGIN_ALLOW_THREADS
         e = kafka_consumer_Consumer_commit_async_offsets_with_callback(
@@ -2974,7 +3003,7 @@ static PyObject* py_ConsumerHandle_paused(PyObject* self, PyObject* args) {
 // assign / seek_to_beginning / seek_to_end / pause / resume: (handle,
 // list[(topic, partition)]) -> error_int.
 static PyObject* handle_tp_op(PyObject* args,
-        kafka_common_KafkaError_t* (*ffi)(const kafka_consumer_ConsumerHandle_t*,
+        kafka_common_Error_t* (*ffi)(const kafka_consumer_ConsumerHandle_t*,
                                          const char* const*, const int32_t*, int32_t)) {
     unsigned long long h; PyObject* tps;
     if (!PyArg_ParseTuple(args, "KO", &h, &tps)) return NULL;
@@ -2983,7 +3012,7 @@ static PyObject* handle_tp_op(PyObject* args,
     if (n < 0) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = ffi(handle, topics, parts, (int32_t)n);
     Py_END_ALLOW_THREADS
@@ -3012,7 +3041,7 @@ static PyObject* py_ConsumerHandle_seek(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "KsiL", &h, &topic, &partition, &offset)) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_seek(handle, topic, partition, offset);
     Py_END_ALLOW_THREADS
@@ -3026,7 +3055,7 @@ static PyObject* py_ConsumerHandle_seek_with_metadata(PyObject* self, PyObject* 
                           &leader_epoch, &metadata)) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_seek_with_metadata(handle, topic, partition, offset,
                                                         leader_epoch, metadata);
@@ -3041,7 +3070,7 @@ static PyObject* py_ConsumerHandle_position(PyObject* self, PyObject* args) {
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
     int64_t pos = 0;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_position(handle, topic, partition, &pos);
     Py_END_ALLOW_THREADS
@@ -3054,7 +3083,7 @@ static PyObject* py_ConsumerHandle_position_timeout(PyObject* self, PyObject* ar
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
     int64_t pos = 0;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_position_timeout(handle, topic, partition,
                                                       timeout_ms, &pos);
@@ -3075,7 +3104,7 @@ static PyObject* py_ConsumerHandle_committed(PyObject* self, PyObject* args) {
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
     kafka_consumer_OffsetMap_t* map = NULL;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_committed(handle, topics, parts, (int32_t)n, &map);
     Py_END_ALLOW_THREADS
@@ -3093,7 +3122,7 @@ static PyObject* py_ConsumerHandle_beginning_offsets(PyObject* self, PyObject* a
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
     kafka_consumer_LongOffsetMap_t* map = NULL;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_beginning_offsets(handle, topics, parts, (int32_t)n, &map);
     Py_END_ALLOW_THREADS
@@ -3111,7 +3140,7 @@ static PyObject* py_ConsumerHandle_end_offsets(PyObject* self, PyObject* args) {
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
     kafka_consumer_LongOffsetMap_t* map = NULL;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_end_offsets(handle, topics, parts, (int32_t)n, &map);
     Py_END_ALLOW_THREADS
@@ -3144,7 +3173,7 @@ static PyObject* py_ConsumerHandle_offsets_for_times(PyObject* self, PyObject* a
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
     kafka_consumer_OffsetAndTimestampMap_t* map = NULL;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_offsets_for_times(handle, topics, parts, tss,
                                                        (int32_t)n, &map);
@@ -3159,7 +3188,7 @@ static PyObject* py_ConsumerHandle_commit_sync(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_commit_sync(handle);
     Py_END_ALLOW_THREADS
@@ -3171,7 +3200,7 @@ static PyObject* py_ConsumerHandle_commit_async(PyObject* self, PyObject* args) 
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_commit_async(handle);
     Py_END_ALLOW_THREADS
@@ -3190,7 +3219,7 @@ static PyObject* py_ConsumerHandle_commit_sync_offsets(PyObject* self, PyObject*
     if (n < 0) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_commit_sync_offsets(handle, a.topics, a.parts,
                                                          a.offs, a.epochs, a.metas,
@@ -3208,7 +3237,7 @@ static PyObject* py_ConsumerHandle_commit_async_offsets(PyObject* self, PyObject
     if (n < 0) return NULL;
     const kafka_consumer_ConsumerHandle_t* handle =
         (const kafka_consumer_ConsumerHandle_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_ConsumerHandle_commit_async_offsets(handle, a.topics, a.parts,
                                                           a.offs, a.epochs, a.metas,
@@ -3231,7 +3260,7 @@ static PyObject* py_MockConsumer_rebalance(PyObject* self, PyObject* args) {
     Py_ssize_t n = tp_to_arrays(tps, &topics, &parts);
     if (n < 0) return NULL;
     const kafka_consumer_Consumer_t* c = (const kafka_consumer_Consumer_t*)(uintptr_t)h;
-    kafka_common_KafkaError_t* e;
+    kafka_common_Error_t* e;
     Py_BEGIN_ALLOW_THREADS
     e = kafka_consumer_MockConsumer_rebalance(c, topics, parts, (int32_t)n);
     Py_END_ALLOW_THREADS
@@ -3259,7 +3288,7 @@ static PyObject* py_MockConsumer_add_record(PyObject* self, PyObject* args) {
         }
         have_val = 1; val_ptr = (const uint8_t*)value.buf; val_len = (int32_t)value.len;
     }
-    kafka_common_KafkaError_t* e = kafka_consumer_MockConsumer_add_record(
+    kafka_common_Error_t* e = kafka_consumer_MockConsumer_add_record(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition, offset,
         key_ptr, key_len, val_ptr, val_len);
     if (have_key) PyBuffer_Release(&key);
@@ -3270,7 +3299,7 @@ static PyObject* py_MockConsumer_add_record(PyObject* self, PyObject* args) {
 static PyObject* py_MockConsumer_update_end_offsets(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition; long long offset;
     if (!PyArg_ParseTuple(args, "KsiL", &h, &topic, &partition, &offset)) return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_MockConsumer_update_end_offsets(
+    kafka_common_Error_t* e = kafka_consumer_MockConsumer_update_end_offsets(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition, offset);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
@@ -3278,7 +3307,7 @@ static PyObject* py_MockConsumer_update_end_offsets(PyObject* self, PyObject* ar
 static PyObject* py_MockConsumer_update_beginning_offsets(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition; long long offset;
     if (!PyArg_ParseTuple(args, "KsiL", &h, &topic, &partition, &offset)) return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_MockConsumer_update_beginning_offsets(
+    kafka_common_Error_t* e = kafka_consumer_MockConsumer_update_beginning_offsets(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition, offset);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
@@ -3288,7 +3317,7 @@ static PyObject* py_MockConsumer_update_partitions(PyObject* self, PyObject* arg
     int leader_id; const char* leader_host; int leader_port;
     if (!PyArg_ParseTuple(args, "Ksiisi", &h, &topic, &partition_count, &leader_id, &leader_host, &leader_port))
         return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_MockConsumer_update_partitions(
+    kafka_common_Error_t* e = kafka_consumer_MockConsumer_update_partitions(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition_count, leader_id, leader_host, leader_port);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
@@ -3296,7 +3325,7 @@ static PyObject* py_MockConsumer_update_partitions(PyObject* self, PyObject* arg
 static PyObject* py_MockConsumer_set_poll_error(PyObject* self, PyObject* args) {
     unsigned long long h; const char* message;
     if (!PyArg_ParseTuple(args, "Ks", &h, &message)) return NULL;
-    kafka_common_KafkaError_t* e = kafka_consumer_MockConsumer_set_poll_error(
+    kafka_common_Error_t* e = kafka_consumer_MockConsumer_set_poll_error(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, message);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
@@ -3313,7 +3342,7 @@ static PyObject* py_MockConsumer_set_poll_error(PyObject* self, PyObject* args) 
 // ---- trampolines -----------------------------------------------------------
 
 // void-op callback (close): (error, user_data) -> py_cb(error_int)
-static void admin_op_trampoline(kafka_common_KafkaError_t* error, void* user_data) {
+static void admin_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
     PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
@@ -3323,17 +3352,17 @@ static void admin_op_trampoline(kafka_common_KafkaError_t* error, void* user_dat
 }
 
 static void admin_create_topics_trampoline(kafka_admin_CreateTopicsResult_t* r,
-                                          kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_delete_topics_trampoline(kafka_admin_DeleteTopicsResult_t* r,
-                                          kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_topics_trampoline(kafka_admin_ListTopicsResult_t* r,
-                                        kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                        kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_topics_trampoline(kafka_admin_DescribeTopicsResult_t* r,
-                                            kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_create_partitions_trampoline(kafka_admin_CreatePartitionsResult_t* r,
-                                              kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_delete_records_trampoline(kafka_admin_DeleteRecordsResult_t* r,
-                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- constructors / lifecycle ----------------------------------------------
 
@@ -3372,13 +3401,13 @@ static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
         }
         kafka_admin_AdminClientProperties_put(props, k, v);
     }
-    kafka_common_KafkaError_t* err = NULL;
+    kafka_common_Error_t* err = NULL;
     kafka_admin_AdminClient_t* a = kafka_admin_AdminClient_new(props, &err);
     kafka_admin_AdminClientProperties_destroy(props);
     if (a == NULL) {
-        const char* msg = err ? kafka_common_KafkaError_message(err) : NULL;
+        const char* msg = err ? kafka_common_Error_message(err) : NULL;
         PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create AdminClient");
-        if (err) kafka_common_KafkaError_destroy(err);
+        if (err) kafka_common_Error_destroy(err);
         return NULL;
     }
     return PyLong_FromVoidPtr(a);
@@ -3406,7 +3435,7 @@ static PyObject* py_Admin_close_async(PyObject* self, PyObject* args) {
 static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObject* args) {
     unsigned long long h; int n;
     if (!PyArg_ParseTuple(args, "Ki", &h, &n)) return NULL;
-    kafka_common_KafkaError_t* e = kafka_admin_MockAdminClient_timeout_next_request(
+    kafka_common_Error_t* e = kafka_admin_MockAdminClient_timeout_next_request(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, n);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
@@ -3414,7 +3443,7 @@ static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObjec
 // Mock: seed beginning/end offsets. `spec` is a sequence of
 // (topic:str, partition:int, offset:int); returns the error handle as an int.
 static PyObject* mock_update_offsets(PyObject* args,
-                                     kafka_common_KafkaError_t* (*update)(
+                                     kafka_common_Error_t* (*update)(
                                          const kafka_admin_AdminClient_t*,
                                          const char* const*, const int32_t*, const int64_t*,
                                          int32_t)) {
@@ -3441,7 +3470,7 @@ static PyObject* mock_update_offsets(PyObject* args,
         }
         topics[i] = topic; partitions[i] = (int32_t)p; offsets[i] = (int64_t)off;
     }
-    kafka_common_KafkaError_t* e = update((kafka_admin_AdminClient_t*)(uintptr_t)h, topics,
+    kafka_common_Error_t* e = update((kafka_admin_AdminClient_t*)(uintptr_t)h, topics,
                                           partitions, offsets, (int32_t)n);
     PyMem_Free(topics); PyMem_Free(partitions); PyMem_Free(offsets);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
@@ -3795,12 +3824,12 @@ static PyObject* py_Admin_delete_records_async(PyObject* self, PyObject* args) {
 // or None when the key succeeded. Borrowed errors die with their result handle,
 // so they must be copied before the drain destroys it — and must NOT be passed
 // to KafkaError_destroy.
-static PyObject* borrowed_error_to_py(const kafka_common_KafkaError_t* e) {
+static PyObject* borrowed_error_to_py(const kafka_common_Error_t* e) {
     if (e == NULL) Py_RETURN_NONE;
-    return Py_BuildValue("(isii)", kafka_common_KafkaError_code(e),
-                         kafka_common_KafkaError_message(e),
-                         kafka_common_KafkaError_is_retriable(e) ? 1 : 0,
-                         kafka_common_KafkaError_is_fatal(e) ? 1 : 0);
+    return Py_BuildValue("(isii)", kafka_common_Error_code(e),
+                         kafka_common_Error_message(e),
+                         kafka_common_Error_is_retriable_error(e) ? 1 : 0,
+                         error_is_fatal(e) ? 1 : 0);
 }
 
 // Builds the (error, value) pair every admin `*_drain` maps a key to, consuming
@@ -4101,21 +4130,21 @@ static PyObject* py_DeleteRecordsResult_drain(PyObject* self, PyObject* args) {
 // ---- trampolines -----------------------------------------------------------
 
 static void admin_describe_cluster_trampoline(kafka_admin_DescribeClusterResult_t* r,
-                                              kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_configs_trampoline(kafka_admin_DescribeConfigsResult_t* r,
-                                              kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_configs_trampoline(kafka_admin_AlterConfigsResult_t* r,
-                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_config_resources_trampoline(kafka_admin_ListConfigResourcesResult_t* r,
-                                                   kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                   kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_client_metrics_trampoline(kafka_admin_ListClientMetricsResourcesResult_t* r,
-                                                 kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                 kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_log_dirs_trampoline(kafka_admin_DescribeLogDirsResult_t* r,
-                                               kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_replica_log_dirs_trampoline(kafka_admin_AlterReplicaLogDirsResult_t* r,
-                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_replica_log_dirs_trampoline(kafka_admin_DescribeReplicaLogDirsResult_t* r,
-                                                       kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                       kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- input marshaling helpers ----------------------------------------------
 
@@ -4632,15 +4661,15 @@ static PyObject* py_DescribeReplicaLogDirsResult_drain(PyObject* self, PyObject*
 // ---- trampolines -----------------------------------------------------------
 
 static void admin_elect_leaders_trampoline(kafka_admin_ElectLeadersResult_t* r,
-                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_partition_reassignments_trampoline(
     kafka_admin_AlterPartitionReassignmentsResult_t* r,
-    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_partition_reassignments_trampoline(
     kafka_admin_ListPartitionReassignmentsResult_t* r,
-    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_offsets_trampoline(kafka_admin_ListOffsetsResult_t* r,
-                                          kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- shared (topic, partition) spec reader ---------------------------------
 
@@ -4981,23 +5010,23 @@ static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
 // ---------------------------------------------------------------------------
 
 static void admin_list_groups_trampoline(kafka_admin_ListGroupsResult_t* r,
-                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_consumer_groups_trampoline(kafka_admin_ListConsumerGroupsResult_t* r,
-                                                  kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                  kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_consumer_groups_trampoline(kafka_admin_DescribeConsumerGroupsResult_t* r,
-                                                      kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                      kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_classic_groups_trampoline(kafka_admin_DescribeClassicGroupsResult_t* r,
-                                                     kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_consumer_group_offsets_trampoline(kafka_admin_ListConsumerGroupOffsetsResult_t* r,
-                                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_consumer_group_offsets_trampoline(kafka_admin_AlterConsumerGroupOffsetsResult_t* r,
-                                                          kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_delete_consumer_group_offsets_trampoline(kafka_admin_DeleteConsumerGroupOffsetsResult_t* r,
-                                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_delete_consumer_groups_trampoline(kafka_admin_DeleteConsumerGroupsResult_t* r,
-                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_remove_members_trampoline(kafka_admin_RemoveMembersFromConsumerGroupResult_t* r,
-                                            kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- shared string-array reader --------------------------------------------
 
@@ -5714,15 +5743,15 @@ static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, P
 // ---------------------------------------------------------------------------
 
 static void admin_create_acls_trampoline(kafka_admin_CreateAclsResult_t* r,
-                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_acls_trampoline(kafka_admin_DescribeAclsResult_t* r,
-                                           kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_delete_acls_trampoline(kafka_admin_DeleteAclsResult_t* r,
-                                         kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_client_quotas_trampoline(kafka_admin_DescribeClientQuotasResult_t* r,
-                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_client_quotas_trampoline(kafka_admin_AlterClientQuotasResult_t* r,
-                                                 kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                 kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- ACL request marshaling -------------------------------------------------
 
@@ -6211,22 +6240,22 @@ static PyObject* py_AlterClientQuotasResult_drain(PyObject* self, PyObject* args
 
 static void admin_describe_user_scram_credentials_trampoline(
     kafka_admin_DescribeUserScramCredentialsResult_t* r,
-    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_user_scram_credentials_trampoline(
     kafka_admin_AlterUserScramCredentialsResult_t* r,
-    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_create_delegation_token_trampoline(kafka_admin_CreateDelegationTokenResult_t* r,
-                                                     kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_renew_delegation_token_trampoline(kafka_admin_RenewDelegationTokenResult_t* r,
-                                                    kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_expire_delegation_token_trampoline(kafka_admin_ExpireDelegationTokenResult_t* r,
-                                                     kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_delegation_token_trampoline(kafka_admin_DescribeDelegationTokenResult_t* r,
-                                                       kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                       kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_features_trampoline(kafka_admin_DescribeFeaturesResult_t* r,
-                                               kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_update_features_trampoline(kafka_admin_UpdateFeaturesResult_t* r,
-                                             kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- value converters -------------------------------------------------------
 
@@ -6554,7 +6583,7 @@ static PyObject* py_MockAdminClient_set_feature_levels(PyObject* self, PyObject*
         min_levels[i] = (int16_t)min_level;
         max_levels[i] = (int16_t)max_level;
     }
-    kafka_common_KafkaError_t* e = kafka_admin_MockAdminClient_set_feature_levels(
+    kafka_common_Error_t* e = kafka_admin_MockAdminClient_set_feature_levels(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, features, levels, min_levels, max_levels,
         (int32_t)n);
     PyMem_Free((void*)features); PyMem_Free(levels); PyMem_Free(min_levels); PyMem_Free(max_levels);
@@ -6773,13 +6802,13 @@ static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
 // ---------------------------------------------------------------------------
 
 static void admin_describe_producers_trampoline(kafka_admin_DescribeProducersResult_t* r,
-                                                kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_transactions_trampoline(kafka_admin_DescribeTransactionsResult_t* r,
-                                                   kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                                   kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_fence_producers_trampoline(kafka_admin_FenceProducersResult_t* r,
-                                             kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_transactions_trampoline(kafka_admin_ListTransactionsResult_t* r,
-                                               kafka_common_KafkaError_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 static PyObject* py_Admin_describe_producers_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int has_broker_id; int broker_id; int timeout_ms;

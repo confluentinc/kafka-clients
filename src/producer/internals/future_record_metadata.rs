@@ -17,7 +17,7 @@
 //! Translated from `org.apache.kafka.clients.producer.internals.FutureRecordMetadata`.
 //!
 //! In Java, `FutureRecordMetadata` implements `Future<RecordMetadata>`. In Rust, we provide
-//! async methods that return `Result<RecordMetadata, KafkaError>`.
+//! async methods that return `Result<RecordMetadata, Error>`.
 //!
 //! Each `FutureRecordMetadata` holds an `Arc<ProduceRequestResult>` (shared per batch) and
 //! its own record-specific metadata (batch index, timestamp, sizes). It waits for the
@@ -27,7 +27,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::kafka_future::KafkaFutureOps;
 use crate::common::record::internal::RecordBatch;
@@ -92,11 +92,10 @@ impl FutureRecordMetadata {
     /// This is the Rust equivalent of Java's `KafkaProducer.FutureFailure`.
     /// When `do_send` catches an `ApiException`, it returns this so the caller
     /// gets back a future whose `get()` immediately returns the error.
-    pub fn failed(topic_partition: TopicPartition, error: KafkaError) -> Self {
+    pub fn failed(topic_partition: TopicPartition, error: Error) -> Self {
         let result = Arc::new(ProduceRequestResult::new(topic_partition));
         let error_clone = error.clone();
-        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-            Arc::new(move |_| Some(error_clone.clone()));
+        let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(move |_| Some(error_clone.clone()));
         result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         result.done();
         Self {
@@ -124,7 +123,7 @@ impl FutureRecordMetadata {
     /// Returns the error from the produce response if the record failed.
     pub fn get(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
         Box::pin(async move {
             // Step 1: Await THIS node's result (no lock held across await)
             self.result.await_completion().await;
@@ -161,19 +160,28 @@ impl FutureRecordMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::Timeout`] if the timeout elapses before the result is available.
+    /// Returns [`Error::Timeout`] if the timeout elapses before the result is available.
     /// Returns the error from the produce response if the record failed.
     pub fn get_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
         Box::pin(async move {
             let deadline = tokio::time::Instant::now() + timeout;
 
             // Step 1: Await THIS node's result with timeout
+            //
+            // Java throws `java.util.concurrent.TimeoutException` here
+            // (`FutureRecordMetadata.java:25` imports it; the throw is at `:76`),
+            // which is what `Future.get(timeout, unit)` declares — NOT
+            // `org.apache.kafka.common.errors.TimeoutException`. The two share a
+            // simple name but are unrelated: the Kafka one is a
+            // `RetriableException` with wire code 7, so spelling this
+            // `Error::timeout` would make a local await deadline look like a
+            // broker-reported retriable failure.
             let occurred = self.result.await_timeout(timeout).await;
             if !occurred {
-                return Err(KafkaError::timeout(format!(
+                return Err(Error::local_timeout(format!(
                     "Timeout after waiting for {} ms.",
                     timeout.as_millis()
                 )));
@@ -197,11 +205,12 @@ impl FutureRecordMetadata {
 
     /// Check for errors and return metadata or error.
     ///
-    /// Returns the typed [`KafkaError`] directly from the produce result,
-    /// preserving error code information (retriable, fatal, etc.) through the
-    /// pipeline. This matches Java's `valueOrError()` which wraps the
-    /// `RuntimeException` in an `ExecutionException`.
-    fn value_or_error(&self) -> Result<RecordMetadata, KafkaError> {
+    /// Returns the typed [`Error`] directly from the produce result, so the
+    /// caller keeps the error code and its `extends` chain (`is_retriable_error`
+    /// and the rest) rather than a stringified copy. This matches Java's
+    /// `valueOrError()`, which wraps the `RuntimeException` in an
+    /// `ExecutionException`.
+    fn value_or_error(&self) -> Result<RecordMetadata, Error> {
         if let Some(error) = self.result.error(self.batch_index) {
             Err(error)
         } else {
@@ -272,14 +281,14 @@ impl FutureRecordMetadata {
 }
 
 impl KafkaFutureOps<RecordMetadata> for FutureRecordMetadata {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
         FutureRecordMetadata::get(self)
     }
 
     fn get_timeout(
         &self,
         timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
         FutureRecordMetadata::get_timeout(self, timeout)
     }
 
@@ -406,9 +415,9 @@ mod tests {
 
         let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
 
-        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|idx| {
+        let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|idx| {
             if idx == 0 {
-                Some(KafkaError::new(Errors::RecordListTooLarge))
+                Some(Error::new(Errors::RecordListTooLarge))
             } else {
                 None
             }
@@ -428,7 +437,15 @@ mod tests {
         let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
 
         let err = future.get_timeout(std::time::Duration::from_millis(10)).await.unwrap_err();
-        assert!(matches!(err, KafkaError::Timeout(_)));
+        // Java throws `java.util.concurrent.TimeoutException` here
+        // (`FutureRecordMetadata.java:25` imports it, `:76` throws it), which
+        // `Future.get(timeout, unit)` declares — not the retriable Kafka
+        // `TimeoutException`. So no predicate holds and there is no wire code.
+        assert!(matches!(err, Error::LocalTimeout(_)), "got {err:?}");
+        assert_eq!("Timeout after waiting for 10 ms.", err.message());
+        assert!(!err.is_retriable_error());
+        assert!(!err.is_api_error());
+        assert!(!err.is_kafka_error());
     }
 
     #[tokio::test]

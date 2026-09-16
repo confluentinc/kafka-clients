@@ -84,7 +84,7 @@ static int wait_for(atomic_int *flag, int expected) {
 
 /* Commit callback: records the delivered map/error, then destroys both. */
 static void on_commit(kafka_consumer_OffsetMap_t *offsets,
-                      kafka_common_KafkaError_t *error,
+                      kafka_common_Error_t *error,
                       void *user_data) {
     commit_result_t *r = (commit_result_t *)user_data;
     r->thread_id = pthread_self();
@@ -113,9 +113,9 @@ static void on_commit(kafka_consumer_OffsetMap_t *offsets,
     }
     if (error != NULL) {
         r->had_error = 1;
-        r->error_code = kafka_common_KafkaError_code(error);
+        r->error_code = kafka_common_Error_code(error);
         /* The callee owns the delivered error. */
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
 
     atomic_fetch_add(&r->fired, 1);
@@ -134,7 +134,7 @@ static void commit_result_init(commit_result_t *r) {
 }
 
 /* Assigns a single (topic, partition) to the consumer. */
-static kafka_common_KafkaError_t *assign_one(kafka_consumer_Consumer_t *c,
+static kafka_common_Error_t *assign_one(kafka_consumer_Consumer_t *c,
                                             const char *topic,
                                             int32_t partition) {
     const char *topics[1] = {topic};
@@ -166,11 +166,11 @@ static void on_user_data_destroy(void *user_data) {
  * frees the delivered handles (it must NOT reinterpret `user_data` as a
  * `commit_result_t`). */
 static void on_commit_counting(kafka_consumer_OffsetMap_t *offsets,
-                               kafka_common_KafkaError_t *error,
+                               kafka_common_Error_t *error,
                                void *user_data) {
     destroy_counter_t *counter = (destroy_counter_t *)user_data;
     kafka_consumer_OffsetMap_destroy(offsets);
-    kafka_common_KafkaError_destroy(error);
+    kafka_common_Error_destroy(error);
     atomic_fetch_add(&counter->callback_calls, 1);
 }
 
@@ -185,7 +185,7 @@ static void test_commit_async_with_callback_fires_with_offsets_null_error(void) 
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "test", 0, 0,
                                                             NULL, -1,
                                                             value, (int32_t)sizeof(value)));
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(c, 100, &poll_err);
     TEST_ASSERT_NULL(poll_err);
@@ -195,7 +195,7 @@ static void test_commit_async_with_callback_fires_with_offsets_null_error(void) 
     commit_result_t result;
     commit_result_init(&result);
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_commit_async_with_callback(c, on_commit, &result, NULL);
     TEST_ASSERT_NULL(err);
 
@@ -239,7 +239,7 @@ static void test_commit_async_offsets_with_callback_echoes_offsets(void) {
     commit_result_t result;
     commit_result_init(&result);
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_commit_async_offsets_with_callback(
             c, topics, partitions, offsets, leader_epochs, metadata, 1,
             on_commit, &result, NULL);
@@ -282,7 +282,7 @@ static void test_commit_callback_runs_on_dispatcher_thread(void) {
     commit_result_t result;
     commit_result_init(&result);
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_commit_async_with_callback(c, on_commit, &result, NULL);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
@@ -306,7 +306,7 @@ static void test_commit_callback_user_data_destroy_fires_exactly_once(void) {
     atomic_init(&counter->destroy_calls, 0);
     atomic_init(&counter->callback_calls, 0);
 
-    kafka_common_KafkaError_t *err = kafka_consumer_Consumer_commit_async_with_callback(
+    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_async_with_callback(
         c, on_commit_counting, counter, on_user_data_destroy);
     TEST_ASSERT_NULL(err);
     /* The mock drops the registration inside the commit, so by the time the
@@ -332,7 +332,7 @@ static void test_commit_callback_user_data_destroy_fires_exactly_once(void) {
         c, topics, partitions, offsets, leader_epochs, NULL, 1,
         on_commit_counting, failed, on_user_data_destroy);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&failed->callback_calls));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&failed->destroy_calls));
     free(failed);
@@ -363,7 +363,7 @@ static void test_commit_returns_only_after_callback_returns(void) {
     commit_result_init(&result);
     result.slow = 1;
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_commit_async_with_callback(c, on_commit, &result, NULL);
     TEST_ASSERT_NULL(err);
 
@@ -378,10 +378,11 @@ static void test_commit_returns_only_after_callback_returns(void) {
 // kafka_consumer_ConsumerHandle_t — the reentrancy handle
 // ---------------------------------------------------------------------------
 
-/* ConcurrentModificationError maps to the UnknownServerError numeric code (-1),
- * since it carries no embedded Kafka `Errors` value (see `KafkaError::error()`).
- * A handle op must NEVER produce it. */
-#define CONCURRENT_MODIFICATION_CODE (-1)
+/* `LocalConcurrentModificationError` has a code of its own: every error class is
+ * now injective over `kafka_common_ErrorCode_t`, so a client-side class no longer
+ * collapses onto UnknownServerError (-1) the way it once did. A handle op must
+ * NEVER produce it. */
+#define CONCURRENT_MODIFICATION_CODE (kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION)
 
 /* Substring of the core's `unsupported_version` message for a handle obtained
  * from a MockConsumer (`ConsumerHandle::async_state`). */
@@ -389,12 +390,12 @@ static void test_commit_returns_only_after_callback_returns(void) {
 
 /* Asserts that `err` is a non-null "unsupported on a mock handle" error, then
  * frees it. */
-static void assert_unsupported_on_mock(kafka_common_KafkaError_t *err) {
+static void assert_unsupported_on_mock(kafka_common_Error_t *err) {
     TEST_ASSERT_NOT_NULL(err);
-    const char *message = kafka_common_KafkaError_message(err);
+    const char *message = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, MOCK_HANDLE_UNSUPPORTED), message);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 }
 
 static void test_consumer_handle_new_destroy(void) {
@@ -516,11 +517,11 @@ static void test_consumer_handle_async_ops_unsupported_on_mock(void) {
     /* A marshaling failure is reported before the op is driven, so it yields
      * the validation error rather than the unsupported-on-mock one. */
     int64_t bad_offsets[1] = {-1};
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_ConsumerHandle_commit_sync_offsets(h, topics, partitions, bad_offsets, leader_epochs, NULL, 1);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "negative offset"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "negative offset"));
+    kafka_common_Error_destroy(err);
 
     kafka_consumer_ConsumerHandle_destroy(h);
     kafka_consumer_Consumer_destroy(c);
@@ -538,11 +539,11 @@ static void test_consumer_handle_wakeup(void) {
 
     kafka_consumer_ConsumerHandle_wakeup(h);
 
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
-    kafka_common_KafkaError_destroy(poll_err);
+    kafka_common_Error_destroy(poll_err);
 
     /* The flag was consumed, so the next poll succeeds. */
     poll_err = NULL;
@@ -580,16 +581,16 @@ typedef struct {
 } guard_probe_t;
 
 static void on_commit_probing_guard(kafka_consumer_OffsetMap_t *offsets,
-                                   kafka_common_KafkaError_t *error,
+                                   kafka_common_Error_t *error,
                                    void *user_data) {
     guard_probe_t *p = (guard_probe_t *)user_data;
     kafka_consumer_OffsetMap_destroy(offsets);
-    kafka_common_KafkaError_destroy(error);
+    kafka_common_Error_destroy(error);
 
     /* The guard IS held right now: a plain consumer op is rejected. */
-    kafka_common_KafkaError_t *owner_err = kafka_consumer_Consumer_commit_sync(p->consumer);
-    p->owner_commit_error_code = owner_err != NULL ? kafka_common_KafkaError_code(owner_err) : 0;
-    kafka_common_KafkaError_destroy(owner_err);
+    kafka_common_Error_t *owner_err = kafka_consumer_Consumer_commit_sync(p->consumer);
+    p->owner_commit_error_code = owner_err != NULL ? kafka_common_Error_code(owner_err) : 0;
+    kafka_common_Error_destroy(owner_err);
 
     /* The handle bypasses it: the getter succeeds... */
     kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
@@ -599,12 +600,12 @@ static void on_commit_probing_guard(kafka_consumer_OffsetMap_t *offsets,
 
     /* ...and the async op reaches the core (mock => unsupported, NOT the
      * ConcurrentModification the guarded path would have produced). */
-    kafka_common_KafkaError_t *handle_err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
+    kafka_common_Error_t *handle_err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
     if (handle_err != NULL) {
-        p->handle_commit_error_code = kafka_common_KafkaError_code(handle_err);
+        p->handle_commit_error_code = kafka_common_Error_code(handle_err);
         snprintf(p->handle_commit_message, sizeof(p->handle_commit_message), "%s",
-                 kafka_common_KafkaError_message(handle_err));
-        kafka_common_KafkaError_destroy(handle_err);
+                 kafka_common_Error_message(handle_err));
+        kafka_common_Error_destroy(handle_err);
     }
 
     atomic_fetch_add(&p->fired, 1);
@@ -622,7 +623,7 @@ static void test_consumer_handle_usable_while_op_in_flight(void) {
     probe.handle = h;
     probe.handle_commit_error_code = INT32_MAX; /* sentinel: callback ran */
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_commit_async_with_callback(c, on_commit_probing_guard, &probe, NULL);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_TRUE(wait_for(&probe.fired, 1));
@@ -662,7 +663,7 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
     };
     kafka_consumer_ConsumerProperties_t *props = kafka_consumer_ConsumerProperties_from_configs(configs);
     TEST_ASSERT_NOT_NULL(props);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *c = kafka_consumer_KafkaConsumer_new(props, &err);
     kafka_consumer_ConsumerProperties_destroy(props);
     TEST_ASSERT_NULL(err);
@@ -695,13 +696,13 @@ static void test_consumer_handle_shares_state_with_real_consumer(void) {
     /* An async op reaches the real implementation: `position` on a partition
      * that is not assigned fails immediately (no broker round trip). */
     int64_t position = -7;
-    kafka_common_KafkaError_t *pos_err =
+    kafka_common_Error_t *pos_err =
         kafka_consumer_ConsumerHandle_position_timeout(h, "handle-topic", 0, 100, &position);
     TEST_ASSERT_NOT_NULL(pos_err);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(pos_err), "partitions assigned"),
-                                 kafka_common_KafkaError_message(pos_err));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_Error_message(pos_err), "partitions assigned"),
+                                 kafka_common_Error_message(pos_err));
     TEST_ASSERT_EQUAL_INT64(-7, position);
-    kafka_common_KafkaError_destroy(pos_err);
+    kafka_common_Error_destroy(pos_err);
 
     kafka_consumer_ConsumerHandle_destroy(h);
     kafka_consumer_Consumer_destroy(c);
@@ -749,7 +750,7 @@ static void listener_result_init(listener_result_t *r) {
     r->assigned.count = -1;
 }
 
-static kafka_common_KafkaError_t *on_revoked(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+static kafka_common_Error_t *on_revoked(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
     listener_result_t *r = (listener_result_t *)user_data;
     r->revoked_thread = pthread_self();
     take_and_destroy_list(partitions, &r->revoked);
@@ -759,7 +760,7 @@ static kafka_common_KafkaError_t *on_revoked(kafka_consumer_TopicPartitionList_t
 
 #define LISTENER_ERROR_MESSAGE "listener refused the assignment"
 
-static kafka_common_KafkaError_t *on_assigned(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+static kafka_common_Error_t *on_assigned(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
     listener_result_t *r = (listener_result_t *)user_data;
     r->assigned_thread = pthread_self();
     take_and_destroy_list(partitions, &r->assigned);
@@ -767,7 +768,7 @@ static kafka_common_KafkaError_t *on_assigned(kafka_consumer_TopicPartitionList_
     if (r->assigned_fails) {
         /* The C equivalent of the Java listener throwing: ownership of the
          * handle transfers to the client, which turns it back into an `Err`. */
-        return kafka_common_KafkaError_new(-1, LISTENER_ERROR_MESSAGE);
+        return kafka_common_Error_new(-1, LISTENER_ERROR_MESSAGE);
     }
     return NULL;
 }
@@ -785,7 +786,7 @@ static kafka_consumer_Consumer_t *make_subscribed_mock(const char *topic, listen
 }
 
 /* Drives `MockConsumer.rebalance` with a (topic, partition) list. */
-static kafka_common_KafkaError_t *rebalance_to(kafka_consumer_Consumer_t *c,
+static kafka_common_Error_t *rebalance_to(kafka_consumer_Consumer_t *c,
                                               const char *const *topics,
                                               const int32_t *partitions,
                                               int32_t count) {
@@ -856,11 +857,11 @@ static void test_rebalance_requires_a_subscription_and_a_mock(void) {
 
     /* Manual assignment: no dynamic assignment allowed. */
     kafka_consumer_Consumer_t *manual = make_assigned_mock("test", 0);
-    kafka_common_KafkaError_t *err = rebalance_to(manual, topics, partitions, 1);
+    kafka_common_Error_t *err = rebalance_to(manual, topics, partitions, 1);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(err), "manual assignment in use"),
-                                 kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_Error_message(err), "manual assignment in use"),
+                                 kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
     kafka_consumer_Consumer_destroy(manual);
 
     /* A real consumer has no rebalance driver. */
@@ -872,7 +873,7 @@ static void test_rebalance_requires_a_subscription_and_a_mock(void) {
     };
     kafka_consumer_ConsumerProperties_t *props = kafka_consumer_ConsumerProperties_from_configs(configs);
     TEST_ASSERT_NOT_NULL(props);
-    kafka_common_KafkaError_t *new_err = NULL;
+    kafka_common_Error_t *new_err = NULL;
     kafka_consumer_Consumer_t *real = kafka_consumer_KafkaConsumer_new(props, &new_err);
     kafka_consumer_ConsumerProperties_destroy(props);
     TEST_ASSERT_NULL(new_err);
@@ -880,9 +881,9 @@ static void test_rebalance_requires_a_subscription_and_a_mock(void) {
 
     err = rebalance_to(real, topics, partitions, 1);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(err), "only supported on a MockConsumer"),
-                                 kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_Error_message(err), "only supported on a MockConsumer"),
+                                 kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
     kafka_consumer_Consumer_destroy(real);
 }
 
@@ -932,10 +933,10 @@ typedef struct {
     int listener_return_seq;
     int rebalance_return_seq;
     atomic_int rebalance_returned;
-    kafka_common_KafkaError_t *rebalance_error;
+    kafka_common_Error_t *rebalance_error;
 } parking_listener_t;
 
-static kafka_common_KafkaError_t *on_assigned_parking(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_assigned_parking(kafka_consumer_TopicPartitionList_t *partitions,
                                                      void *user_data) {
     parking_listener_t *p = (parking_listener_t *)user_data;
     kafka_consumer_TopicPartitionList_destroy(partitions);
@@ -951,7 +952,7 @@ static kafka_common_KafkaError_t *on_assigned_parking(kafka_consumer_TopicPartit
     return NULL;
 }
 
-static kafka_common_KafkaError_t *on_revoked_parking(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_revoked_parking(kafka_consumer_TopicPartitionList_t *partitions,
                                                     void *user_data) {
     (void)user_data;
     kafka_consumer_TopicPartitionList_destroy(partitions);
@@ -1040,19 +1041,19 @@ typedef struct {
     int owner_commit_error_code;
 } listener_reentrancy_t;
 
-static kafka_common_KafkaError_t *on_assigned_reentrant(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_assigned_reentrant(kafka_consumer_TopicPartitionList_t *partitions,
                                                        void *user_data) {
     listener_reentrancy_t *p = (listener_reentrancy_t *)user_data;
     kafka_consumer_TopicPartitionList_destroy(partitions);
 
     /* The sanctioned reentrancy path: a blocking handle op from inside the
      * listener returns (it does not deadlock and is not guard-rejected). */
-    kafka_common_KafkaError_t *handle_err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
+    kafka_common_Error_t *handle_err = kafka_consumer_ConsumerHandle_commit_sync(p->handle);
     if (handle_err != NULL) {
-        p->handle_commit_error_code = kafka_common_KafkaError_code(handle_err);
+        p->handle_commit_error_code = kafka_common_Error_code(handle_err);
         snprintf(p->handle_commit_message, sizeof(p->handle_commit_message), "%s",
-                 kafka_common_KafkaError_message(handle_err));
-        kafka_common_KafkaError_destroy(handle_err);
+                 kafka_common_Error_message(handle_err));
+        kafka_common_Error_destroy(handle_err);
     }
 
     kafka_consumer_TopicPartitionList_t *asg = kafka_consumer_ConsumerHandle_assignment(p->handle);
@@ -1061,15 +1062,15 @@ static kafka_common_KafkaError_t *on_assigned_reentrant(kafka_consumer_TopicPart
 
     /* The plain API is not: the app thread driving the rebalance holds the
      * access guard. */
-    kafka_common_KafkaError_t *owner_err = kafka_consumer_Consumer_commit_sync(p->consumer);
-    p->owner_commit_error_code = owner_err != NULL ? kafka_common_KafkaError_code(owner_err) : 0;
-    kafka_common_KafkaError_destroy(owner_err);
+    kafka_common_Error_t *owner_err = kafka_consumer_Consumer_commit_sync(p->consumer);
+    p->owner_commit_error_code = owner_err != NULL ? kafka_common_Error_code(owner_err) : 0;
+    kafka_common_Error_destroy(owner_err);
 
     atomic_fetch_add(&p->fired, 1);
     return NULL;
 }
 
-static kafka_common_KafkaError_t *on_revoked_noop(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
+static kafka_common_Error_t *on_revoked_noop(kafka_consumer_TopicPartitionList_t *partitions, void *user_data) {
     (void)user_data;
     kafka_consumer_TopicPartitionList_destroy(partitions);
     return NULL;
@@ -1125,13 +1126,13 @@ static void test_listener_error_propagates(void) {
 
     const char *topics[1] = {"test"};
     int32_t partitions[1] = {0};
-    kafka_common_KafkaError_t *err = rebalance_to(c, topics, partitions, 1);
+    kafka_common_Error_t *err = rebalance_to(c, topics, partitions, 1);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.assigned_calls));
     /* The core propagates the listener's error with `?`, so the message is the
      * one the C callback supplied, verbatim. */
-    TEST_ASSERT_EQUAL_STRING(LISTENER_ERROR_MESSAGE, kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_EQUAL_STRING(LISTENER_ERROR_MESSAGE, kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     kafka_consumer_Consumer_destroy(c);
 }
@@ -1146,7 +1147,7 @@ static void test_listener_error_propagates(void) {
 
 /* Listener callbacks paired with `destroy_counter_t` user_data — they must NOT
  * reinterpret it as a `listener_result_t`. */
-static kafka_common_KafkaError_t *on_revoked_counting(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_revoked_counting(kafka_consumer_TopicPartitionList_t *partitions,
                                                      void *user_data) {
     destroy_counter_t *counter = (destroy_counter_t *)user_data;
     kafka_consumer_TopicPartitionList_destroy(partitions);
@@ -1154,7 +1155,7 @@ static kafka_common_KafkaError_t *on_revoked_counting(kafka_consumer_TopicPartit
     return NULL;
 }
 
-static kafka_common_KafkaError_t *on_assigned_counting(kafka_consumer_TopicPartitionList_t *partitions,
+static kafka_common_Error_t *on_assigned_counting(kafka_consumer_TopicPartitionList_t *partitions,
                                                       void *user_data) {
     destroy_counter_t *counter = (destroy_counter_t *)user_data;
     kafka_consumer_TopicPartitionList_destroy(partitions);
@@ -1252,19 +1253,19 @@ typedef struct {
 } subscribe_reject_t;
 
 static void on_commit_subscribing(kafka_consumer_OffsetMap_t *offsets,
-                                  kafka_common_KafkaError_t *error,
+                                  kafka_common_Error_t *error,
                                   void *user_data) {
     subscribe_reject_t *p = (subscribe_reject_t *)user_data;
     kafka_consumer_OffsetMap_destroy(offsets);
-    kafka_common_KafkaError_destroy(error);
+    kafka_common_Error_destroy(error);
 
     kafka_consumer_ConsumerRebalanceListener_t *listener = kafka_consumer_ConsumerRebalanceListener_new(
         on_revoked_counting, on_assigned_counting, NULL, p->counter, on_user_data_destroy);
     const char *topics[1] = {"test"};
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_subscribe_with_listener(p->consumer, topics, 1, listener);
-    p->subscribe_error_code = err != NULL ? kafka_common_KafkaError_code(err) : 0;
-    kafka_common_KafkaError_destroy(err);
+    p->subscribe_error_code = err != NULL ? kafka_common_Error_code(err) : 0;
+    kafka_common_Error_destroy(err);
 
     atomic_fetch_add(&p->fired, 1);
 }
@@ -1304,7 +1305,7 @@ static kafka_consumer_Consumer_t *make_real_consumer(const char *group) {
     };
     kafka_consumer_ConsumerProperties_t *props = kafka_consumer_ConsumerProperties_from_configs(configs);
     TEST_ASSERT_NOT_NULL(props);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *c = kafka_consumer_KafkaConsumer_new(props, &err);
     kafka_consumer_ConsumerProperties_destroy(props);
     TEST_ASSERT_NULL(err);
@@ -1329,12 +1330,12 @@ static void test_subscribe_failing_inside_the_core_keeps_the_listener(void) {
     destroy_counter_t *counter = new_destroy_counter();
     const char *topics[1] = {"test"};
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_subscribe_with_listener(c, topics, 1, new_counting_listener(counter));
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_KafkaError_message(err), "mutually exclusive"),
-                                 kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(kafka_common_Error_message(err), "mutually exclusive"),
+                                 kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* The core kept the registration: NOT released, despite the error. Give the
      * consumer a moment so a wrong implementation has time to release. */
@@ -1424,12 +1425,12 @@ typedef struct {
     int32_t error_code;
 } op_result_t;
 
-static void on_subscribe_done(kafka_common_KafkaError_t *error, void *user_data) {
+static void on_subscribe_done(kafka_common_Error_t *error, void *user_data) {
     op_result_t *r = (op_result_t *)user_data;
     if (error != NULL) {
         r->had_error = 1;
-        r->error_code = kafka_common_KafkaError_code(error);
-        kafka_common_KafkaError_destroy(error);
+        r->error_code = kafka_common_Error_code(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }

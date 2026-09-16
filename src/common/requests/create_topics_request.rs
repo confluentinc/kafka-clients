@@ -211,12 +211,12 @@ mod tests {
         let mut data = CreateTopicsRequestData::new();
         data.set_topics(vec![topic("a", 1, 1), topic("b", 1, 1)]);
         let request = CreateTopicsRequest::new(data, 7);
-        let response = request.get_error_response(100, &Errors::InvalidTopicException);
+        let response = request.get_error_response(100, &Errors::InvalidTopicError);
         if let ConcreteResponse::CreateTopics(r) = response {
             assert_eq!(r.data().topics.len(), 2);
             assert_eq!(r.data().throttle_time_ms, 100);
             for t in &r.data().topics {
-                assert_eq!(t.error_code, Errors::InvalidTopicException.code());
+                assert_eq!(t.error_code, Errors::InvalidTopicError.code());
             }
         } else {
             panic!("expected CreateTopics response");

@@ -35,7 +35,7 @@ use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::requests::consumer_group_heartbeat_request::{
     JOIN_GROUP_MEMBER_EPOCH, LEAVE_GROUP_MEMBER_EPOCH, LEAVE_GROUP_STATIC_MEMBER_EPOCH,
 };
-use crate::common::{KafkaError, TopicPartition, Uuid};
+use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::close_options::GroupMembershipOperation;
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 #[cfg(test)]
@@ -164,7 +164,7 @@ enum PendingReconcile {
     /// and retained-partition fetching proceeds; the bg loop `try_recv`s the
     /// commit result on a later iteration (§31 — never awaited).
     AwaitingCommit {
-        commit_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        commit_rx: oneshot::Receiver<Result<(), Error>>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
@@ -175,7 +175,7 @@ enum PendingReconcile {
     /// `onPartitionsRevoked` was enqueued (`reconcile` step 9). On ack we
     /// resume at step 10 (abort check → assign-callback enqueue).
     AfterRevoke {
-        ack_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        ack_rx: oneshot::Receiver<Result<(), Error>>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
@@ -185,7 +185,7 @@ enum PendingReconcile {
     /// `onPartitionsAssigned` was enqueued (`reconcile` step 13). On ack we
     /// resume at step 14 (enable-partitions / failure path → ACKNOWLEDGING).
     AfterAssign {
-        ack_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        ack_rx: oneshot::Receiver<Result<(), Error>>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
@@ -205,17 +205,17 @@ enum PendingRelease {
     /// `transitionToFenced` release tail: `clearAssignment()` then, if still
     /// `FENCED`, `transitionToJoining()`.
     Fenced {
-        ack_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        ack_rx: oneshot::Receiver<Result<(), Error>>,
     },
     /// `transitionToFatal` release tail: `clearAssignment()`.
     Fatal {
-        ack_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        ack_rx: oneshot::Receiver<Result<(), Error>>,
     },
     /// `transitionToStale` release tail: `clearAssignment()`, clear the
     /// release-pending flag, and (if a timer reset requested a rejoin while
     /// the release was in flight) `transitionToJoining()`.
     Stale {
-        ack_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        ack_rx: oneshot::Receiver<Result<(), Error>>,
     },
 }
 
@@ -375,12 +375,12 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `transitionToJoining()`.
-    pub(crate) fn transition_to_joining(&self) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_joining(&self) -> Result<(), Error> {
         self.abstract_mm.transition_to_joining(self.join_group_epoch())
     }
 
     /// Java: `transitionToSendingLeaveGroup(boolean dueToExpiredPollTimer)`.
-    pub(crate) fn transition_to_sending_leave_group(&self, due_to_expired_poll_timer: bool) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_sending_leave_group(&self, due_to_expired_poll_timer: bool) -> Result<(), Error> {
         self.abstract_mm
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
     }
@@ -388,12 +388,12 @@ impl ConsumerMembershipManager {
     /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)`.
     /// Updates member info and state from a successful response.
     ///
-    /// Returns `Err(KafkaError)` for unexpected errors in the response
+    /// Returns `Err(Error)` for unexpected errors in the response
     /// body — Java throws `IllegalArgumentException`.
-    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), KafkaError> {
+    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         let data = response.data();
         if data.error_code != Errors::None.code() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected error in Heartbeat response. Expected no error, but received: {:?}",
                 Errors::for_code(data.error_code)
             )));
@@ -492,7 +492,7 @@ impl ConsumerMembershipManager {
     /// (mirroring Java dropping the in-flight reconcile future when the
     /// member leaves `RECONCILING`), so a fresh post-rejoin reconcile can
     /// start immediately instead of being gated on the stale ack draining.
-    pub(crate) fn transition_to_fatal(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_fatal(&self, current_time_ms: i64) -> Result<(), Error> {
         // Issue 1: abandon any in-flight reconcile — the member is leaving
         // RECONCILING, so the stored reconcile continuation is stale.
         self.clear_pending_reconcile();
@@ -542,7 +542,7 @@ impl ConsumerMembershipManager {
     /// Java: `transitionToFenced()`. Same shape as `transition_to_fatal`
     /// but transitions to FENCED and then JOINING after the listener
     /// completes (so the member rejoins).
-    pub(crate) fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), Error> {
         // Issue 1: abandon any in-flight reconcile — the member is leaving
         // RECONCILING, so the stored reconcile continuation is stale.
         self.clear_pending_reconcile();
@@ -612,7 +612,7 @@ impl ConsumerMembershipManager {
 
     /// Release tail of `transition_to_fenced` (Java's `whenComplete`):
     /// `clearAssignment()` then, if still `FENCED`, `transitionToJoining()`.
-    fn continue_after_fenced_release(&self) -> Result<(), KafkaError> {
+    fn continue_after_fenced_release(&self) -> Result<(), Error> {
         self.abstract_mm.clear_assignment();
 
         // Now transition to JOINING if still FENCED.
@@ -654,7 +654,7 @@ impl ConsumerMembershipManager {
     /// the end; if `maybe_rejoin_stale_member` was called while the release
     /// was in flight, the member is transitioned to JOINING now — exactly
     /// Java's `staleMemberAssignmentRelease.whenComplete(__ -> transitionToJoining())`.
-    pub(crate) fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), Error> {
         // Issue 1: abandon any in-flight reconcile — the member is leaving
         // RECONCILING, so the stored reconcile continuation is stale.
         self.clear_pending_reconcile();
@@ -683,7 +683,7 @@ impl ConsumerMembershipManager {
     /// `staleMemberAssignmentRelease.whenComplete(...)`): `clearAssignment()`,
     /// clear the release-pending flag, and (if a timer reset requested a
     /// rejoin while the release was in flight) `transitionToJoining()`.
-    fn continue_after_stale_release(&self) -> Result<(), KafkaError> {
+    fn continue_after_stale_release(&self) -> Result<(), Error> {
         self.abstract_mm.clear_assignment();
 
         let rejoin = {
@@ -728,7 +728,7 @@ impl ConsumerMembershipManager {
     ///
     /// Java: `maybeReconcile(boolean canCommit)`
     /// (`AbstractMembershipManager.java:824`).
-    pub(crate) async fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), KafkaError> {
+    pub(crate) async fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
         // Phase 41b: if a reconcile rebalance callback is already in
         // flight, drive it non-blockingly instead of starting a new
         // reconciliation. The loop is NOT frozen on the ack: we `try_recv`
@@ -962,7 +962,7 @@ impl ConsumerMembershipManager {
     /// failure branches, which is why the logging is separated from them —
     /// exactly as Java's `whenComplete` logs, then unconditionally runs
     /// `if (!maybeAbortReconciliation()) revokeAndAssign(...)`.
-    fn log_commit_result(&self, commit_result: Result<(), KafkaError>) {
+    fn log_commit_result(&self, commit_result: Result<(), Error>) {
         match commit_result {
             Ok(()) => {
                 log::debug!("Auto-commit before reconciling new assignment completed successfully.");
@@ -1001,7 +1001,7 @@ impl ConsumerMembershipManager {
         added: HashSet<TopicPartition>,
         revoked: HashSet<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         // 8b. Abort check, immediately after the commit resolves. Java:
         // `commitResult.whenComplete((__, commitReqError) -> { ...;
         // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
@@ -1096,7 +1096,7 @@ impl ConsumerMembershipManager {
     /// the broker to kick the member out after the reconciliation commit
     /// timeout, giving a RECONCILING -> FENCED transition. Only the flag is
     /// cleared.
-    fn fail_reconciliation(&self, err: KafkaError) -> KafkaError {
+    fn fail_reconciliation(&self, err: Error) -> Error {
         log::error!("Reconciliation failed: {err}");
         self.abstract_mm.mark_reconciliation_completed();
         err
@@ -1192,7 +1192,7 @@ impl ConsumerMembershipManager {
         &self,
         assigned_partitions: &HashSet<TopicPartition>,
         added_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let assigned_vec: Vec<TopicPartition> = assigned_partitions.iter().cloned().collect();
         {
             let mut subs = match self.abstract_mm.subscriptions.lock() {
@@ -1233,7 +1233,7 @@ impl ConsumerMembershipManager {
         &self,
         partitions: Vec<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<Option<oneshot::Receiver<Result<(), KafkaError>>>, KafkaError> {
+    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
         if partitions.is_empty() {
             return Ok(None);
         }
@@ -1281,7 +1281,7 @@ impl ConsumerMembershipManager {
     /// A listener error is logged and the release tail still runs — Java's
     /// `whenComplete` logs the `onPartitionsLost` error and proceeds with
     /// `clearAssignment()` (and the fence/stale rejoin) regardless.
-    pub(crate) async fn drive_pending_release(&self) -> Result<(), KafkaError> {
+    pub(crate) async fn drive_pending_release(&self) -> Result<(), Error> {
         // Pop under the lock, then `try_recv` outside it (no guard across the
         // resumed work). If the ack is not ready, put it back.
         let pending = {
@@ -1297,7 +1297,7 @@ impl ConsumerMembershipManager {
         };
 
         // Destructure by value to own the receiver + a kind discriminator.
-        let (mut ack_rx, kind, log_ctx): (oneshot::Receiver<Result<(), KafkaError>>, ReleaseKind, &'static str) =
+        let (mut ack_rx, kind, log_ctx): (oneshot::Receiver<Result<(), Error>>, ReleaseKind, &'static str) =
             match pending {
                 PendingRelease::Fenced { ack_rx } => {
                     (ack_rx, ReleaseKind::Fenced, "got fenced. Member will rejoin the group anyways")
@@ -1361,7 +1361,7 @@ impl ConsumerMembershipManager {
     /// `current_time_ms` is the live bg-loop iteration time, used for the
     /// resumed steps (assign-callback enqueue, `reset_auto_commit_timer`),
     /// mirroring Java's `whenComplete` running at completion time.
-    async fn drive_pending_reconcile(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    async fn drive_pending_reconcile(&self, current_time_ms: i64) -> Result<(), Error> {
         // Pop the pending state out under the lock (so the lock is never
         // held across the resumed `.await`), then `try_recv`. If the ack is
         // not ready, put it back and return.
@@ -1488,7 +1488,7 @@ impl ConsumerMembershipManager {
                     Err(oneshot::error::TryRecvError::Closed) => {
                         // App side dropped the receiver before responding.
                         self.abstract_mm.mark_reconciliation_completed();
-                        Err(KafkaError::illegal_state(
+                        Err(Error::local_illegal_state(
                             "Rebalance listener ack receiver dropped before completion",
                         ))
                     },
@@ -1523,7 +1523,7 @@ impl ConsumerMembershipManager {
                 },
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.abstract_mm.mark_reconciliation_completed();
-                    Err(KafkaError::illegal_state(
+                    Err(Error::local_illegal_state(
                         "Rebalance listener ack receiver dropped before completion",
                     ))
                 },
@@ -1548,13 +1548,13 @@ impl ConsumerMembershipManager {
     #[allow(clippy::too_many_arguments)]
     async fn continue_after_revoke(
         &self,
-        revoke_result: Result<(), KafkaError>,
+        revoke_result: Result<(), Error>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
         added: HashSet<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         revoke_result.map_err(|e| self.fail_reconciliation(e))?;
 
         // 10. Abort check between steps (state may have moved because of a
@@ -1591,13 +1591,13 @@ impl ConsumerMembershipManager {
     /// callback has completed. Synchronous (no `.await`).
     fn continue_after_assign(
         &self,
-        assigned_callback_result: Result<(), KafkaError>,
+        assigned_callback_result: Result<(), Error>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
         added: HashSet<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         // 14. Enable fetching for assigned partitions (only if the callback
         // succeeded — Java's `subscriptions.enablePartitionsAwaitingCallback`).
         match assigned_callback_result {
@@ -1699,7 +1699,7 @@ impl ConsumerMembershipManager {
     /// can assert the post-callback state. Bounded so a stuck test fails
     /// fast instead of looping forever.
     #[cfg(test)]
-    pub(crate) async fn reconcile_drive_to_completion(&self, can_commit: bool) -> Result<(), KafkaError> {
+    pub(crate) async fn reconcile_drive_to_completion(&self, can_commit: bool) -> Result<(), Error> {
         for _ in 0..10_000 {
             self.reconcile(0, can_commit).await?;
             if !self.has_pending_reconcile() {
@@ -1707,7 +1707,7 @@ impl ConsumerMembershipManager {
             }
             tokio::task::yield_now().await;
         }
-        Err(KafkaError::illegal_state(
+        Err(Error::local_illegal_state(
             "reconcile_drive_to_completion did not settle within the iteration budget",
         ))
     }
@@ -1720,7 +1720,7 @@ impl ConsumerMembershipManager {
     /// `onPartitionsLost` event and sends the ack gets to run) until the
     /// release tail has run. Bounded so a stuck test fails fast.
     #[cfg(test)]
-    pub(crate) async fn drive_release_to_completion(&self) -> Result<(), KafkaError> {
+    pub(crate) async fn drive_release_to_completion(&self) -> Result<(), Error> {
         for _ in 0..10_000 {
             if !self.has_pending_release() {
                 return Ok(());
@@ -1731,7 +1731,7 @@ impl ConsumerMembershipManager {
             }
             tokio::task::yield_now().await;
         }
-        Err(KafkaError::illegal_state(
+        Err(Error::local_illegal_state(
             "drive_release_to_completion did not settle within the iteration budget",
         ))
     }
@@ -1764,7 +1764,7 @@ impl ConsumerMembershipManager {
     /// Translated as `pub(crate)` because the Java method is
     /// `protected`-on-subclass and the test module reaches into it via
     /// the §31 event channel.
-    pub(crate) async fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) async fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<(), Error> {
         // Snapshot the dropped partitions + epoch under a single short
         // lock; drop both guards before any .await.
         let (dropped_partitions, member_epoch) = {
@@ -1808,14 +1808,14 @@ impl ConsumerMembershipManager {
         &self,
         membership_operation: GroupMembershipOperation,
         current_time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.set_leave_group_operation(membership_operation);
         self.leave_group_inner(false, current_time_ms).await
     }
 
     /// Java: `AbstractMembershipManager.leaveGroup()`. Invoked by
     /// `Consumer::unsubscribe()`. Runs callbacks during the leave.
-    pub(crate) async fn leave_group(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) async fn leave_group(&self, current_time_ms: i64) -> Result<(), Error> {
         self.leave_group_inner(true, current_time_ms).await
     }
 
@@ -1836,7 +1836,7 @@ impl ConsumerMembershipManager {
     /// 4. Unsubscribe + clear assignment.
     /// 5. Transition to `LEAVING` so the next heartbeat sends the
     ///    leave-group request.
-    async fn leave_group_inner(&self, run_callbacks: bool, current_time_ms: i64) -> Result<(), KafkaError> {
+    async fn leave_group_inner(&self, run_callbacks: bool, current_time_ms: i64) -> Result<(), Error> {
         // Step 1: already-out-of-group fast path.
         let pre_state = {
             let guard = match self.abstract_mm.inner.lock() {
@@ -2083,10 +2083,10 @@ mod tests {
     struct NoopListener;
     #[async_trait]
     impl ConsumerRebalanceListener for NoopListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             Ok(())
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             Ok(())
         }
     }
@@ -2998,7 +2998,7 @@ mod tests {
             // fails (simulated by acking Err).
             let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
             mgr_arc.apply_assignment(&assigned_set, &added_partitions).unwrap();
-            ack.send(Err(KafkaError::timeout("listener error"))).unwrap();
+            ack.send(Err(Error::timeout("listener error"))).unwrap();
         }
         let result = bg.await.unwrap();
         assert!(result.is_err());
@@ -3024,6 +3024,7 @@ mod tests {
     // ===================================================================
 
     use crate::common::Node;
+    use crate::common::errors::InterruptError;
     use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
     use crate::metadata_response_data::{
@@ -3148,7 +3149,7 @@ mod tests {
     /// point (storing the cross-iteration pending state) and returns. Used by
     /// tests that want to observe the parked reconcile state without a
     /// concurrent driver loop.
-    async fn reconcile_once(mgr: &ConsumerMembershipManager, can_commit: bool) -> Result<(), KafkaError> {
+    async fn reconcile_once(mgr: &ConsumerMembershipManager, can_commit: bool) -> Result<(), Error> {
         mgr.reconcile(0, can_commit).await
     }
 
@@ -3630,7 +3631,7 @@ mod tests {
         // `commitResult.completeExceptionally(new KafkaException(...))`.
         let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
         loop {
-            if commit_mgr.fail_first_unsent_commit_for_test(KafkaError::new(Errors::OffsetMetadataTooLarge)) {
+            if commit_mgr.fail_first_unsent_commit_for_test(Error::new(Errors::OffsetMetadataTooLarge)) {
                 break;
             }
             tokio::task::yield_now().await;
@@ -5060,7 +5061,7 @@ mod tests {
         mgr: Option<&ConsumerMembershipManager>,
         expected_method: ConsumerRebalanceListenerMethodName,
         expected_partitions: &[TopicPartition],
-        result: Result<(), KafkaError>,
+        result: Result<(), Error>,
     ) {
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
@@ -5174,12 +5175,18 @@ mod tests {
     /// kinds, mirroring Java's three error types.
     #[tokio::test]
     async fn listener_callbacks_throws_error_on_partitions_revoked() {
-        // Java loops over WakeupException, InterruptException,
-        // IllegalArgumentException. We mirror with three KafkaError kinds.
-        let errors: Vec<fn() -> KafkaError> = vec![
-            || KafkaError::wakeup("Intentional onPartitionsRevoked() error"),
-            || KafkaError::timeout("Intentional onPartitionsRevoked() error"),
-            || KafkaError::illegal_argument("Intentional onPartitionsRevoked() error"),
+        // Java's three, class for class (`ConsumerMembershipManagerTest.java:1957-1959`):
+        // `WakeupException`, `InterruptException`, `IllegalArgumentException`.
+        // `Interrupt` is not interchangeable with any other class here: together
+        // with `Wakeup` it is one of the two that
+        // `ConsumerRebalanceListenerInvoker` rethrows verbatim
+        // (`Error::Wakeup(_) | Error::Interrupt(_) => Err(err)`) rather than
+        // wrapping, so substituting a wrapped class would leave that branch
+        // uncovered and duplicate the `LocalIllegalArgument` case.
+        let errors: Vec<fn() -> Error> = vec![
+            || Error::wakeup("Intentional onPartitionsRevoked() error"),
+            || Error::Interrupt(InterruptError::new("Intentional onPartitionsRevoked() error")),
+            || Error::local_illegal_argument("Intentional onPartitionsRevoked() error"),
         ];
         for make_err in errors {
             let (mgr, mut rx) = make(None, None, None);
@@ -5314,7 +5321,7 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         };
         // Fail the assigned callback.
-        ack.send(Err(KafkaError::illegal_state("onPartitionsAssigned failed!")))
+        ack.send(Err(Error::local_illegal_state("onPartitionsAssigned failed!")))
             .unwrap();
         let result = bg.await.unwrap();
         assert!(result.is_err());
@@ -5348,12 +5355,12 @@ mod tests {
     /// clears its assignment and rejoins. Looped over multiple error kinds.
     #[tokio::test]
     async fn on_partitions_lost_error() {
-        on_partitions_lost_impl(Err(KafkaError::illegal_state("Intentional error for test"))).await;
-        on_partitions_lost_impl(Err(KafkaError::wakeup("Intentional error for test"))).await;
-        on_partitions_lost_impl(Err(KafkaError::timeout("Intentional error for test"))).await;
+        on_partitions_lost_impl(Err(Error::local_illegal_state("Intentional error for test"))).await;
+        on_partitions_lost_impl(Err(Error::wakeup("Intentional error for test"))).await;
+        on_partitions_lost_impl(Err(Error::timeout("Intentional error for test"))).await;
     }
 
-    async fn on_partitions_lost_impl(callback_result: Result<(), KafkaError>) {
+    async fn on_partitions_lost_impl(callback_result: Result<(), Error>) {
         let (mgr, mut rx) = make(None, None, None);
         subscribe_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
@@ -5502,7 +5509,7 @@ mod tests {
 
         // Complete the pending assignment event exceptionally (simulating the
         // app skipping it during unsubscribe, KAFKA-20428).
-        ack.send(Err(KafkaError::with_message(
+        ack.send(Err(Error::with_message(
             Errors::UnknownServerError,
             "Assignment event skipped because consumer is unsubscribing",
         )))

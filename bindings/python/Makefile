@@ -4,8 +4,7 @@ CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test test-performance grpc-image grpc-image-async \
-	grpc-image-macos grpc-image-async-macos clean
+.PHONY: build test test-soak test-performance grpc-image grpc-image-async clean
 
 build:
 	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
@@ -15,7 +14,15 @@ build:
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
+	$(MAKE) test-soak
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python
+
+# Soak client unit tests (soak/test): the payload round-trip, the
+# duplicate/gap accounting and the startup config validation. Pure logic, no
+# broker and no container, so they belong in `test` above rather than alongside
+# the broker-backed suites.
+test-soak:
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest soak/test -v
 
 # Kept out of `test`: they assert latency budgets, so only meaningful on an
 # otherwise-idle machine. Run via `make test-integration-perf-python` at the root.
@@ -36,23 +43,6 @@ grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async \
-		$(RUST_PROJECT_ROOT)
-
-# macOS variants: build libconfluent_kafka.so inside the image (see
-# Dockerfile.grpc.macos), no host build needed. --platform pins the arm64
-# manifest on Colima's plain docker driver.
-grpc-image-macos:
-	docker build \
-		--platform linux/arm64 \
-		-t $(GRPC_IMAGE_TAG) \
-		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.macos \
-		$(RUST_PROJECT_ROOT)
-
-grpc-image-async-macos:
-	docker build \
-		--platform linux/arm64 \
-		-t $(GRPC_ASYNC_IMAGE_TAG) \
-		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async.macos \
 		$(RUST_PROJECT_ROOT)
 
 clean:

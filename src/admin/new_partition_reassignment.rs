@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.NewPartitionReassignment`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// A new partition reassignment, which can be applied via
 /// `Admin::alter_partition_reassignments`.
@@ -36,9 +36,9 @@ impl NewPartitionReassignment {
     ///
     /// Returns an error (invalid argument) if no replicas are supplied,
     /// mirroring Java's `IllegalArgumentException`.
-    pub fn new(target_replicas: Vec<i32>) -> Result<Self, KafkaError> {
+    pub fn new(target_replicas: Vec<i32>) -> Result<Self, Error> {
         if target_replicas.is_empty() {
-            return Err(KafkaError::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "Cannot create a new partition reassignment without any replicas",
             ));
         }

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 
 /// A callback interface that the user can implement to trigger custom actions
@@ -64,5 +64,5 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     ///   applies to
     /// * `error` - `Some(&error)` if the commit failed, `None` if it
     ///   completed successfully
-    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>);
+    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>);
 }

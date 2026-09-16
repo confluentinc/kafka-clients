@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetCommitRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::kafka_warn;
 use crate::offset_commit_request_data::{
@@ -206,7 +206,15 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for AlterConsumerGroupOffs
         self.validate_keys(group_ids);
 
         let ConcreteResponse::OffsetCommit(response) = response else {
-            panic!("AlterConsumerGroupOffsetsHandler received an unexpected response type: {response:?}");
+            // Java's `(OffsetCommitResponse) abstractResponse` downcast throws
+            // `ClassCastException`, which `KafkaAdminClient.java:1387-1391` catches
+            // and turns into `call.fail(now, t)` — this RPC fails, the client keeps
+            // serving everything else. A `panic!` here instead killed the admin
+            // background task and poisoned the driver mutex.
+            return ApiResult::failed_all(
+                group_ids,
+                Error::local_illegal_state("AlterConsumerGroupOffsetsHandler received an unexpected response type"),
+            );
         };
 
         let mut groups_to_unmap = HashSet::new();
