@@ -79,7 +79,7 @@ fn test_long_constructor() {
         .set_headers(headers.clone())
         .build()
         .unwrap();
-    let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(options);
+    let record: ConsumerRecord<&str, &str> = ConsumerRecord::with_options(options);
 
     assert_eq!(record.topic(), topic);
     assert_eq!(record.partition(), partition);
@@ -112,7 +112,7 @@ fn test_long_constructor() {
         .set_delivery_count(delivery_count)
         .build()
         .unwrap();
-    let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(options);
+    let record: ConsumerRecord<&str, &str> = ConsumerRecord::with_options(options);
 
     assert_eq!(record.topic(), topic);
     assert_eq!(record.partition(), partition);

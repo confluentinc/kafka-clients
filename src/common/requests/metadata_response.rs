@@ -64,12 +64,12 @@ impl MetadataResponse {
     pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
 
     /// Creates a new `MetadataResponse` from data and version.
-    pub fn new_version(data: MetadataResponseData, version: i16) -> Self {
-        Self::new_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version))
+    pub fn with_version(data: MetadataResponseData, version: i16) -> Self {
+        Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version))
     }
 
     /// Creates a new `MetadataResponse` from data with explicit epoch reliability flag.
-    pub fn new_has_reliable_leader_epochs(data: MetadataResponseData, has_reliable_leader_epochs: bool) -> Self {
+    pub fn with_has_reliable_leader_epochs(data: MetadataResponseData, has_reliable_leader_epochs: bool) -> Self {
         Self { data, has_reliable_leader_epochs, holder: OnceLock::new() }
     }
 
@@ -187,7 +187,7 @@ impl MetadataResponse {
                 }
             }
         }
-        Cluster::new_invalid_topics_controller_topic_ids(
+        Cluster::with_invalid_topics_controller_topic_ids(
             self.data.cluster_id.clone(),
             self.brokers().to_vec(),
             partitions,
@@ -207,7 +207,7 @@ impl MetadataResponse {
         let isr = convert_to_node_vec(&metadata.in_sync_replica_ids, nodes_by_id);
         let offline = convert_to_node_vec(&metadata.offline_replica_ids, nodes_by_id);
 
-        PartitionInfo::new_offline_replicas(
+        PartitionInfo::with_offline_replicas(
             metadata.topic_partition.topic().to_string(),
             metadata.topic_partition.partition(),
             leader,
@@ -273,7 +273,7 @@ impl MetadataResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
         let data = MetadataResponseData::read(readable, version)?;
-        Ok(Self::new_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version)))
+        Ok(Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version)))
     }
 
     /// Returns whether the client should throttle upon receiving this response.
@@ -335,7 +335,7 @@ impl MetadataResponse {
         response_data.set_cluster_authorized_operations(cluster_authorized_operations);
         response_data.set_topics(topics);
 
-        Self::new_has_reliable_leader_epochs(response_data, has_reliable_epoch)
+        Self::with_has_reliable_leader_epochs(response_data, has_reliable_epoch)
     }
 }
 
@@ -386,7 +386,7 @@ impl Holder {
     fn create_brokers(data: &MetadataResponseData) -> HashMap<i32, Node> {
         let mut map = HashMap::new();
         for b in &data.brokers {
-            let node = Node::new_rack(b.node_id, b.host.clone(), b.port, b.rack.clone());
+            let node = Node::with_rack(b.node_id, b.host.clone(), b.port, b.rack.clone());
             map.insert(b.node_id, node);
         }
         map
@@ -630,7 +630,7 @@ mod tests {
         let mut data = MetadataResponseData::new();
         data.set_topics(topics);
 
-        let metadata_response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
+        let metadata_response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
         let cluster = metadata_response.build_cluster();
         assert!(cluster.topic_name(&Uuid::zero()).is_none());
         assert!(cluster.topic_name(&zero_uuid).is_none());

@@ -57,7 +57,7 @@ impl NodeApiVersions {
                 api_versions.push(ApiVersionsResponse::to_api_version(api_key));
             }
         }
-        Self::new_node_finalized_features_finalized_features_epoch(&api_versions, &[], &[], -1)
+        Self::with_node_finalized_features_finalized_features_epoch(&api_versions, &[], &[], -1)
     }
 
     /// Create a `NodeApiVersions` object with a single ApiKey. Mainly used in tests.
@@ -71,12 +71,12 @@ impl NodeApiVersions {
 
     /// Create a `NodeApiVersions` from API versions and supported features.
     pub fn new(node_api_versions: &[ApiVersion], node_supported_features: &[SupportedFeatureKey]) -> Self {
-        Self::new_node_finalized_features_finalized_features_epoch(node_api_versions, node_supported_features, &[], -1)
+        Self::with_node_finalized_features_finalized_features_epoch(node_api_versions, node_supported_features, &[], -1)
     }
 
     /// Create a `NodeApiVersions` from API versions, supported features,
     /// finalized features, and epoch.
-    pub fn new_node_finalized_features_finalized_features_epoch(
+    pub fn with_node_finalized_features_finalized_features_epoch(
         node_api_versions: &[ApiVersion],
         node_supported_features: &[SupportedFeatureKey],
         node_finalized_features: &[FinalizedFeatureKey],
@@ -96,10 +96,10 @@ impl NodeApiVersions {
 
         let mut supported_features = HashMap::new();
         for supported_feature in node_supported_features {
-            // SupportedVersionRange::new_min_version returns Result; since the data comes from the broker
+            // SupportedVersionRange::with_min_version returns Result; since the data comes from the broker
             // we trust the values are valid, but handle the error gracefully.
             if let Ok(range) =
-                SupportedVersionRange::new_min_version(supported_feature.min_version, supported_feature.max_version)
+                SupportedVersionRange::with_min_version(supported_feature.min_version, supported_feature.max_version)
             {
                 supported_features.insert(supported_feature.name.clone(), range);
             }
@@ -516,7 +516,7 @@ mod tests {
         finalized_feature.set_max_version_level(2);
         finalized_feature.set_min_version_level(2);
 
-        let versions = NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+        let versions = NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
             &[],
             &[supported_feature],
             &[finalized_feature],

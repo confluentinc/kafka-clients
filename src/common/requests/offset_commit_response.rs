@@ -53,7 +53,7 @@ impl OffsetCommitResponse {
     /// Creates a new `OffsetCommitResponse` from the underlying data.
     ///
     /// Mirrors Java's constructor `OffsetCommitResponse(OffsetCommitResponseData)`.
-    pub fn new_data(data: OffsetCommitResponseData) -> Self {
+    pub fn with_data(data: OffsetCommitResponseData) -> Self {
         Self { data }
     }
 
@@ -61,7 +61,7 @@ impl OffsetCommitResponse {
     /// caller-provided throttle time.
     ///
     /// Mirrors Java's `OffsetCommitResponse(int, Map<TopicPartition, Errors>)`.
-    pub fn new_throttle_time_ms_response_data(
+    pub fn with_throttle_time_ms_response_data(
         throttle_time_ms: i32,
         response_data: &HashMap<TopicPartition, Errors>,
     ) -> Self {
@@ -133,7 +133,7 @@ impl OffsetCommitResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetCommitResponseData::read(readable, version)?;
-        Ok(Self::new_data(data))
+        Ok(Self::with_data(data))
     }
 
     /// Whether the client should throttle on this response (v4+).
@@ -175,7 +175,7 @@ mod tests {
         topic.partitions = vec![p0, p1, p2];
         data.set_topics(vec![topic]);
 
-        let response = OffsetCommitResponse::new_data(data);
+        let response = OffsetCommitResponse::with_data(data);
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::NotCoordinator).copied().unwrap_or(0), 2);
         assert_eq!(counts.get(&Errors::None).copied().unwrap_or(0), 1);
@@ -184,7 +184,7 @@ mod tests {
     /// `should_client_throttle` returns true only for v4+.
     #[test]
     fn should_client_throttle_v4_threshold() {
-        let response = OffsetCommitResponse::new_data(OffsetCommitResponseData::new());
+        let response = OffsetCommitResponse::with_data(OffsetCommitResponseData::new());
         assert!(!response.should_client_throttle(3));
         assert!(response.should_client_throttle(4));
         assert!(response.should_client_throttle(10));
@@ -197,14 +197,14 @@ mod tests {
         assert!(OffsetCommitResponse::use_topic_ids(10));
     }
 
-    /// `new_throttle_time_ms_response_data` builds the per-topic / per-partition structure
+    /// `with_throttle_time_ms_response_data` builds the per-topic / per-partition structure
     /// with the caller-provided throttle time.
     #[test]
     fn from_response_data_populates_topics() {
         let mut input: HashMap<TopicPartition, Errors> = HashMap::new();
         input.insert(TopicPartition::new("t".to_string(), 0), Errors::None);
         input.insert(TopicPartition::new("t".to_string(), 1), Errors::IllegalGeneration);
-        let response = OffsetCommitResponse::new_throttle_time_ms_response_data(42, &input);
+        let response = OffsetCommitResponse::with_throttle_time_ms_response_data(42, &input);
         assert_eq!(response.throttle_time_ms(), 42);
         // Both partitions are under one "t" topic.
         let topic = response.topics().iter().find(|t| t.name == "t").expect("topic present");
@@ -214,7 +214,7 @@ mod tests {
     /// `maybe_set_throttle_time_ms` propagates the new value.
     #[test]
     fn maybe_set_throttle_time_ms_updates_field() {
-        let mut response = OffsetCommitResponse::new_data(OffsetCommitResponseData::new());
+        let mut response = OffsetCommitResponse::with_data(OffsetCommitResponseData::new());
         response.maybe_set_throttle_time_ms(123);
         assert_eq!(response.throttle_time_ms(), 123);
     }

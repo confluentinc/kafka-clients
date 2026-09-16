@@ -360,7 +360,7 @@ impl ConfigEntry {
     /// * `name` - the non-null config name
     /// * `value` - the config value or `None`
     pub fn new(name: String, value: Option<String>) -> Self {
-        Self::new_options(
+        Self::with_options(
             ConfigEntryOptionsBuilder::new()
                 .set_name(name)
                 .set_value(value)
@@ -377,7 +377,7 @@ impl ConfigEntry {
     /// parameter and carries all of them.
     ///
     /// * `options` - every parameter of Java's widest constructor
-    pub fn new_options(options: ConfigEntryOptions) -> Self {
+    pub fn with_options(options: ConfigEntryOptions) -> Self {
         let ConfigEntryOptions {
             name,
             value,
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn is_default_only_for_default_config_source() {
-        let default = ConfigEntry::new_options(
+        let default = ConfigEntry::with_options(
             ConfigEntryOptionsBuilder::new()
                 .set_name("k".to_string())
                 .set_value(None)
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn display_redacts_sensitive_value() {
-        let entry = ConfigEntry::new_options(
+        let entry = ConfigEntry::with_options(
             ConfigEntryOptionsBuilder::new()
                 .set_name("password".to_string())
                 .set_value(Some("secret".to_string()))

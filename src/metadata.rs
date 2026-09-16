@@ -2704,7 +2704,7 @@ mod tests {
         data.set_brokers(Vec::new());
 
         metadata.update_with_current_request_version(
-            &MetadataResponse::new_version(data.clone(), ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data.clone(), ApiKeys::METADATA.latest_version()),
             false,
             100,
         );
@@ -2722,7 +2722,7 @@ mod tests {
         data.set_topics(vec![topic_metadata]);
 
         metadata.update_with_current_request_version(
-            &MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()),
             false,
             101,
         );
@@ -2940,7 +2940,7 @@ mod tests {
         data1.set_topics(build_topic_collection(tp.topic(), first_partition_metadata));
         data1.set_brokers(build_broker_collection(&[&node0, &node1, &node2]));
         metadata.update_with_current_request_version(
-            &MetadataResponse::new_version(data1, ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data1, ApiKeys::METADATA.latest_version()),
             false,
             10,
         );
@@ -2949,7 +2949,7 @@ mod tests {
         data2.set_topics(build_topic_collection(tp.topic(), second_partition_metadata));
         data2.set_brokers(build_broker_collection(&[&node1, &node2]));
         metadata.update_with_current_request_version(
-            &MetadataResponse::new_version(data2, ApiKeys::METADATA.latest_version()),
+            &MetadataResponse::with_version(data2, ApiKeys::METADATA.latest_version()),
             false,
             20,
         );

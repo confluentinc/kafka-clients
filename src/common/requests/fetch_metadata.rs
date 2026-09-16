@@ -102,7 +102,7 @@ impl FetchMetadata {
     }
 
     /// Returns metadata for the first incremental fetch in a new session.
-    pub fn new_incremental(session_id: i32) -> Self {
+    pub fn with_incremental(session_id: i32) -> Self {
         Self { session_id, epoch: FetchMetadata::next_epoch(FetchMetadata::INITIAL_EPOCH) }
     }
 
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_incremental_not_full() {
-        let inc = FetchMetadata::new_incremental(42);
+        let inc = FetchMetadata::with_incremental(42);
         assert!(!inc.is_full());
         assert_eq!(42, inc.session_id());
         assert_eq!(1, inc.epoch());
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_next_close_existing() {
-        let inc = FetchMetadata::new_incremental(42);
+        let inc = FetchMetadata::with_incremental(42);
         let closed = inc.next_close_existing();
         assert_eq!(42, closed.session_id());
         assert_eq!(FetchMetadata::FINAL_EPOCH, closed.epoch());
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_next_close_existing_attempt_new() {
-        let inc = FetchMetadata::new_incremental(42);
+        let inc = FetchMetadata::with_incremental(42);
         let reset = inc.next_close_existing_attempt_new();
         assert_eq!(42, reset.session_id());
         assert_eq!(FetchMetadata::INITIAL_EPOCH, reset.epoch());

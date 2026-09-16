@@ -224,13 +224,13 @@ impl MockClient {
     /// only `fetchNodes()` (`:783-791`) — so Java's no-nodes form is exactly the
     /// static-nodes form with an empty list, which is what this forwards to.
     pub fn new(time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
-        Self::new_nodes(Vec::new(), time_provider)
+        Self::with_static_nodes(Vec::new(), time_provider)
     }
 
-    /// Creates a new `MockClient` with the given nodes and time provider.
+    /// Creates a new `MockClient` with the given static nodes and time provider.
     ///
     /// Translates `MockClient(Time time, List<Node> staticNodes)` (`MockClient.java:105-107`).
-    pub fn new_nodes(nodes: Vec<Node>, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+    pub fn with_static_nodes(static_nodes: Vec<Node>, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
         Self {
             correlation: AtomicI32::new(0),
             time_provider,
@@ -238,7 +238,7 @@ impl MockClient {
             requests: VecDeque::new(),
             responses: VecDeque::new(),
             future_responses: VecDeque::new(),
-            nodes,
+            nodes: static_nodes,
             max_in_flight_one: false,
             can_send_more: true,
             poll_timeouts: Vec::new(),
@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn test_new_matches_new_nodes_with_no_nodes() {
         let plain = MockClient::new(time_provider());
-        let explicit = MockClient::new_nodes(Vec::new(), time_provider());
+        let explicit = MockClient::with_static_nodes(Vec::new(), time_provider());
         assert!(plain.nodes.is_empty());
         assert_eq!(plain.nodes, explicit.nodes);
     }

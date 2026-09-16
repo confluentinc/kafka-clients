@@ -84,7 +84,7 @@ async fn produce_single_record_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
         .await
         .expect("Failed to create producer");
 
-    let record = ProducerRecord::new_key(topic.clone(), Some(b("test-key")), Some(b("test-value")));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("test-key")), Some(b("test-value")));
     let future = producer.send(record).await.expect("send should succeed");
 
     let metadata = future
@@ -116,7 +116,7 @@ async fn produce_with_key_inner<F: ProducerBackendFactory>(ctx: &mut TestContext
     let mut partitions = Vec::new();
 
     for i in 0..5 {
-        let record = ProducerRecord::new_key(topic.clone(), Some(key.clone()), Some(b(&format!("value-{i}"))));
+        let record = ProducerRecord::with_key(topic.clone(), Some(key.clone()), Some(b(&format!("value-{i}"))));
         let future = producer.send(record).await.expect("send should succeed");
         let metadata = future
             .get_with_timeout(Duration::from_secs(30))
@@ -147,7 +147,7 @@ async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(ctx:
 
     let mut offsets = Vec::new();
     for i in 0..5 {
-        let record = ProducerRecord::new_partition_key(
+        let record = ProducerRecord::with_partition_key(
             topic.clone(),
             Some(0),
             Some(b(&format!("key-{i}"))),
@@ -187,7 +187,7 @@ async fn produce_with_compression_inner<F: ProducerBackendFactory>(ctx: &mut Tes
         let producer = factory.create(config).await.expect("Failed to create producer");
 
         let record =
-            ProducerRecord::new_key(topic.clone(), Some(b("key")), Some(b(&format!("value-compressed-with-{name}"))));
+            ProducerRecord::with_key(topic.clone(), Some(b("key")), Some(b(&format!("value-compressed-with-{name}"))));
         let future = producer.send(record).await.expect("send should succeed");
 
         let metadata = future
@@ -263,7 +263,7 @@ async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut 
     let mut futures = Vec::new();
     for i in 0..5 {
         let record =
-            ProducerRecord::new_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
+            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
         let future = producer.send(record).await.expect("send should succeed");
         futures.push(future);
     }
@@ -293,7 +293,7 @@ async fn close_flushes_pending_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
     let mut futures = Vec::new();
     for i in 0..3 {
         let record =
-            ProducerRecord::new_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
+            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
         let future = producer.send(record).await.expect("send should succeed");
         futures.push(future);
     }
@@ -349,7 +349,7 @@ async fn produce_too_large_record_acks_zero_inner<F: ProducerBackendFactory>(ctx
 
     // Any record under acks=0 returns offset=-1; the "too large" framing in
     // the Java test is incidental.
-    let record = ProducerRecord::new_key(topic.clone(), Some(b("key")), Some(vec![0u8; 16_000]));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("key")), Some(vec![0u8; 16_000]));
     let future = producer.send(record).await.expect("send should succeed");
     let metadata = future
         .get_with_timeout(Duration::from_secs(30))
@@ -372,7 +372,7 @@ async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx:
     config.insert("acks".to_string(), "1".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
-    let record = ProducerRecord::new_key(topic.clone(), Some(b("key")), Some(vec![0u8; 16_000]));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("key")), Some(vec![0u8; 16_000]));
     let future = producer.send(record).await.expect("send should accept the request");
     let result = future.get_with_timeout(Duration::from_secs(30)).await;
 
@@ -406,7 +406,7 @@ async fn produce_to_non_existent_topic_inner<F: ProducerBackendFactory>(ctx: &mu
     let producer = factory.create(config).await.expect("Failed to create producer");
 
     let topic = ctx.topic("never_existed");
-    let record = ProducerRecord::new_key(topic, Some(b("key")), Some(b("value")));
+    let record = ProducerRecord::with_key(topic, Some(b("key")), Some(b("value")));
     let future = producer.send(record).await.expect("send should accept the request");
     let result = future.get_with_timeout(Duration::from_secs(30)).await;
 
@@ -436,7 +436,7 @@ async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(_ctx: &
     config.insert("max.block.ms".to_string(), "3000".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
-    let record = ProducerRecord::new_key("any-topic".to_string(), Some(b("key")), Some(b("value")));
+    let record = ProducerRecord::with_key("any-topic".to_string(), Some(b("key")), Some(b("value")));
     let future = producer.send(record).await.expect("send should accept the request");
     let result = future.get_with_timeout(Duration::from_secs(30)).await;
 
@@ -461,7 +461,7 @@ async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut Te
     let producer = factory.create(config).await.expect("Failed to create producer");
 
     // First, create the topic with 1 partition by sending to partition 0.
-    let warmup = ProducerRecord::new_partition_key(topic.clone(), Some(0), Some(b("k")), Some(b("v")))
+    let warmup = ProducerRecord::with_partition_key(topic.clone(), Some(0), Some(b("k")), Some(b("v")))
         .expect("record creation should succeed");
     producer
         .send(warmup)
@@ -472,7 +472,7 @@ async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut Te
         .expect("warmup send should succeed");
 
     // Now send to partition 99 which doesn't exist.
-    let record = ProducerRecord::new_partition_key(topic, Some(99), Some(b("k")), Some(b("v")))
+    let record = ProducerRecord::with_partition_key(topic, Some(99), Some(b("k")), Some(b("v")))
         .expect("record creation should succeed");
     let future = producer.send(record).await.expect("send should accept the request");
     let result = future.get_with_timeout(Duration::from_secs(30)).await;
@@ -497,7 +497,7 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
         .expect("Failed to create producer");
 
     // Warmup to ensure metadata is fresh, mirroring the Java test.
-    let record = ProducerRecord::new_key(topic.clone(), Some(b("key")), Some(b("value")));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("key")), Some(b("value")));
     producer
         .send(record.clone())
         .await
@@ -537,7 +537,7 @@ async fn produce_batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut Test
 
     for i in 0..5 {
         let record =
-            ProducerRecord::new_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
+            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
         let future = producer.send(record).await.expect("send should succeed");
         let metadata = future
             .get_with_timeout(Duration::from_secs(30))
@@ -563,7 +563,7 @@ async fn produce_non_blocking_max_block_zero_inner<F: ProducerBackendFactory>(ct
 
     // Cold metadata + max.block.ms=0 → producer can't wait, send fails
     // immediately with Timeout (the future is already resolved).
-    let record = ProducerRecord::new_key(topic, Some(b("key")), Some(b("value")));
+    let record = ProducerRecord::with_key(topic, Some(b("key")), Some(b("value")));
     let future = producer.send(record).await.expect("send should accept the request");
     assert!(future.is_done(), "max.block.ms=0 future should be immediately done");
     let result = future.get().await;
@@ -608,7 +608,7 @@ async fn produce_partitions_for_inner<F: ProducerBackendFactory>(ctx: &mut TestC
     let topic = ctx.topic("partitions_for");
     let producer = factory.create(make_config(&bootstrap_for(factory, ctx))).await.expect("create");
     // Produce one record so the topic exists.
-    let record = ProducerRecord::new_key(topic.clone(), Some(b("k")), Some(b("v")));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("k")), Some(b("v")));
     producer
         .send(record)
         .await
@@ -648,7 +648,7 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
     let mut futures = Vec::new();
     for i in 0..5 {
         let record =
-            ProducerRecord::new_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
+            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
         futures.push(producer.send(record).await.expect("send should succeed"));
     }
     producer.flush().await.expect("flush should succeed");
@@ -823,13 +823,12 @@ async fn test_close_with_zero_timeout_aborts_pending() {
     props.insert("linger.ms".to_string(), "60000".to_string());
     props.insert("delivery.timeout.ms".to_string(), "120000".to_string());
     let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
-    let producer =
-        KafkaProducer::new_config(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-            .expect("Failed to create producer");
+    let producer = KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        .expect("Failed to create producer");
 
     let mut futures = Vec::new();
     for i in 0..5 {
-        let record = ProducerRecord::new_partition_key(
+        let record = ProducerRecord::with_partition_key(
             topic.clone(),
             Some(0),
             Some(b(&format!("key-{i}"))),
@@ -871,11 +870,10 @@ async fn test_wrong_serializer_errors_send() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     let props = make_config(ctx.bootstrap_servers());
     let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
-    let producer =
-        KafkaProducer::new_config(producer_config, Box::new(ByteArraySerializer), Box::new(FailingSerializer))
-            .expect("Failed to create producer");
+    let producer = KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(FailingSerializer))
+        .expect("Failed to create producer");
 
-    let record = ProducerRecord::new_key("any-topic".to_string(), Some(b("key")), Some(b("value")));
+    let record = ProducerRecord::with_key("any-topic".to_string(), Some(b("key")), Some(b("value")));
     // UFCS to call the trait method past the inherent shadow.
     let send_result = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record).await;
 
@@ -919,7 +917,7 @@ async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &
         .await
         .expect("create producer with callback log");
 
-    let record = ProducerRecord::new_key(topic.clone(), Some(b("dk")), Some(b("dv")));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("dk")), Some(b("dv")));
     let future = log
         .send_with_logging_callback(&producer, record)
         .await

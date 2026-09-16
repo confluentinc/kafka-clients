@@ -207,7 +207,7 @@ pub struct ProducerConfig {
     /// [`Partitioner`](crate::producer::Partitioner) is instead passed as an
     /// instance through
     /// [`KafkaProducer`](crate::producer::KafkaProducer)'s
-    /// `with_config_partitioner` constructor. Unlike Java, this Rust
+    /// `with_partitioner` constructor. Unlike Java, this Rust
     /// client's default key hash is CRC-32, not murmur2 — see
     /// `design/current/partitioner.md`.
     pub(crate) partitioner_class: Option<String>,
@@ -680,7 +680,7 @@ impl ProducerConfig {
     ///   partitioner's keyed path is used (see [`key_hasher`](Self::key_hasher)).
     ///
     /// A user-supplied `Partitioner` is instead passed as an instance through
-    /// [`KafkaProducer::with_config_partitioner`](crate::producer::KafkaProducer::with_config_partitioner).
+    /// [`KafkaProducer::with_partitioner`](crate::producer::KafkaProducer::with_partitioner).
     ///
     /// `from_properties` has already rejected any value that is neither a
     /// built-in name nor `RoundRobinPartitioner`, so no unknown string reaches

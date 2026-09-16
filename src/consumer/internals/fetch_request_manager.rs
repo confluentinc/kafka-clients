@@ -794,7 +794,7 @@ mod tests {
     fn build_fetch_client_response(response: Option<FetchResponse>) -> crate::ClientResponse {
         use crate::common::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::FETCH)
                 .set_request_version(ApiKeys::FETCH.latest_version())
@@ -804,7 +804,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header");
-        crate::ClientResponse::new_timed_out(
+        crate::ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -973,7 +973,9 @@ mod round_trip {
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
+    use crate::common::record::internal::{
+        MemoryRecords, MemoryRecordsBuilderOptionsBuilder, RecordBatch, SimpleRecord, SimpleRecordOptionsBuilder,
+    };
     use crate::common::requests::FetchRequest;
     use crate::common::requests::FetchResponse;
     use crate::common::serialization::Deserializer;
@@ -1035,12 +1037,18 @@ mod round_trip {
         let simple: Vec<SimpleRecord> = (0..count)
             .map(|i| {
                 let value = (first_message_id + i as i64).to_string();
-                SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some(b"key".to_vec()), Some(value.into_bytes()))
             })
             .collect();
-        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            base_offset,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// Like [`build_records`] but stamps the batch's partition leader epoch,
@@ -1056,31 +1064,45 @@ mod round_trip {
         let simple: Vec<SimpleRecord> = (0..count)
             .map(|i| {
                 let value = (first_message_id + i as i64).to_string();
-                SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some(b"key".to_vec()), Some(value.into_bytes()))
             })
             .collect();
-        MemoryRecords::with_records_at_offset_plep(base_offset, Compression::none(), partition_leader_epoch, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
+            base_offset,
+            Compression::none(),
+            partition_leader_epoch,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// A single record carrying headers, at `base_offset` (for `testHeaders`).
     fn build_records_with_headers(base_offset: i64, value: &[u8], headers: Vec<RecordHeader>) -> Vec<u8> {
-        let simple = vec![SimpleRecord::new(
-            0,
-            Some(b"key".to_vec()),
-            Some(value.to_vec()),
-            headers,
+        let simple = vec![SimpleRecord::with_options(
+            SimpleRecordOptionsBuilder::new()
+                .set_timestamp(0)
+                .set_key(Some(b"key".to_vec()))
+                .set_value(Some(value.to_vec()))
+                .set_headers(headers)
+                .build()
+                .expect("SimpleRecordOptionsBuilder::build: every mandatory parameter is set above"),
         )];
-        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            base_offset,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// Records at explicit (non-contiguous) offsets, for
     /// `testFetchNonContinuousRecords` / compacted-topic gap tests.
     fn build_records_at_offsets(offsets: &[i64]) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             1024,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1104,20 +1126,23 @@ mod round_trip {
         is_transactional: bool,
         is_control_batch: bool,
     ) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1,
-            producer_id,
-            0,
-            0,
-            is_transactional,
-            is_control_batch,
-            -1,
-            512,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(producer_id)
+                .set_producer_epoch(0)
+                .set_base_sequence(0)
+                .set_is_transactional(is_transactional)
+                .set_is_control_batch(is_control_batch)
+                .set_partition_leader_epoch(-1)
+                .set_write_limit(512)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for i in 0..count {
             let offset = base_offset + i as i64;
@@ -1133,11 +1158,16 @@ mod round_trip {
     fn build_records_with_leader_epoch_values(base_offset: i64, count: i32, partition_leader_epoch: i32) -> Vec<u8> {
         let value = partition_leader_epoch.to_string();
         let simple: Vec<SimpleRecord> = (0..count)
-            .map(|_| SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.clone().into_bytes()), vec![]))
+            .map(|_| SimpleRecord::with_timestamp_key_value(0, Some(b"key".to_vec()), Some(value.clone().into_bytes())))
             .collect();
-        MemoryRecords::with_records_at_offset_plep(base_offset, Compression::none(), partition_leader_epoch, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
+            base_offset,
+            Compression::none(),
+            partition_leader_epoch,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// An empty v2 batch header declaring `[base_offset, last_offset]` with no
@@ -1168,7 +1198,7 @@ mod round_trip {
     /// The CRC is NOT recomputed after the overwrite, so the buffer must be
     /// decoded with `check.crcs=false`.
     fn build_records_with_missing_last(base_offset: i64, present_count: i32) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             1024,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1203,20 +1233,23 @@ mod round_trip {
     /// A transactional v2 batch at explicit `offsets` for producer `pid`,
     /// optionally a control batch.
     fn build_batch_full_offsets(base_offset: i64, offsets: &[i64], pid: i64, is_transactional: bool) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1,
-            pid,
-            0,
-            0,
-            is_transactional,
-            false,
-            -1,
-            512,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(pid)
+                .set_producer_epoch(0)
+                .set_base_sequence(0)
+                .set_is_transactional(is_transactional)
+                .set_is_control_batch(false)
+                .set_partition_leader_epoch(-1)
+                .set_write_limit(512)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for &off in offsets {
             let value = off.to_string();
@@ -2166,7 +2199,7 @@ mod round_trip {
         // The same shape `NetworkClientDelegate::maybe_return_auth_failure`
         // produces, plus a cause so the `source()` assertion is meaningful.
         let cause = Error::with_message(Errors::SaslAuthenticationFailed, "invalid credentials");
-        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::new_source(
+        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::with_source(
             "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256",
             cause,
         ));

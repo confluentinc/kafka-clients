@@ -479,9 +479,8 @@ async fn buffer_limit_case(bootstrap: &str) -> Result<bool, String> {
         ("max.block.ms".to_string(), "10000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("buffer config: {e}"))?;
-    let producer: StringProducer =
-        KafkaProducer::new_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("building the buffer producer: {e}"))?;
+    let producer: StringProducer = KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .map_err(|e| format!("building the buffer producer: {e}"))?;
 
     // 100 KB into a 64 KiB budget: unsatisfiable no matter how long we wait, so
     // Java rejects it outright rather than blocking (`BufferPool.allocate`'s
@@ -540,9 +539,8 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
         ("transaction.two.phase.commit.enable".to_string(), "true".to_string()),
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("2pc config: {e}"))?;
-    let producer: StringProducer =
-        KafkaProducer::new_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("building the 2pc producer: {e}"))?;
+    let producer: StringProducer = KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .map_err(|e| format!("building the 2pc producer: {e}"))?;
     match tokio::time::timeout(Duration::from_secs(15), producer.init_transactions()).await {
         Ok(Err(error)) => {
             ok &= report(

@@ -78,7 +78,7 @@ impl AdminApiHandler<TopicPartition, ()> for MockApiHandler {
 
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         vec![RequestAndKeys {
-            request: Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false))
+            request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false))
                 as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
@@ -160,7 +160,7 @@ fn metadata_response_with_partition_leaders(mapping: &[(TopicPartition, i32)]) -
         }
     }
     data.set_topics(topics);
-    ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
+    ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
 }
 
 fn list_offsets_response(keys: &HashSet<TopicPartition>, error: Errors) -> ConcreteResponse {

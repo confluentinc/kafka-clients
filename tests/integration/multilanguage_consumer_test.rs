@@ -77,10 +77,10 @@ async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
     ]);
     let config = ProducerConfig::new(&props).expect("producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::new_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
             .expect("create producer");
     for &(k, v) in records {
-        let record = ProducerRecord::new_key(topic.to_string(), Some(b(k)), Some(b(v)));
+        let record = ProducerRecord::with_key(topic.to_string(), Some(b(k)), Some(b(v)));
         // Fully-qualified trait call: KafkaProducer also has an inherent
         // 2-arg send(record, callback) that would otherwise shadow this.
         let fut = Producer::send(&producer, record).await.expect("send");
@@ -370,7 +370,7 @@ async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContex
     let tp = TopicPartition::new(topic.clone(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
-    let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::new_metadata(1, "ck").expect("oam"))]);
+    let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::with_metadata(1, "ck").expect("oam"))]);
     consumer
         .commit_sync_with_offsets(offsets)
         .await

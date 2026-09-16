@@ -654,7 +654,7 @@ impl OffsetsRequestManager {
         commit_request_manager: Option<Arc<CommitRequestManager>>,
         positions_validator: Arc<PositionsValidator>,
     ) -> Self {
-        let offset_fetcher_utils = Arc::new(OffsetFetcherUtils::new_positions_validator(
+        let offset_fetcher_utils = Arc::new(OffsetFetcherUtils::with_positions_validator(
             metadata.clone(),
             subscription_state.clone(),
             api_versions.clone(),
@@ -1798,7 +1798,7 @@ mod tests {
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::EARLIEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -1868,7 +1868,7 @@ mod tests {
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::EARLIEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -1978,7 +1978,7 @@ mod tests {
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::EARLIEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -2115,7 +2115,7 @@ mod tests {
             assert!(subs.is_assigned(&tp));
         }
 
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &ConsumerConfig::new(&std::collections::HashMap::from([
                 ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
                 ("group.id".to_string(), "g".to_string()),
@@ -2157,7 +2157,7 @@ mod tests {
             assert!(!subs.initializing_partitions().contains(&tp));
         }
 
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &ConsumerConfig::new(&std::collections::HashMap::from([
                 ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
                 ("group.id".to_string(), "g".to_string()),
@@ -2697,7 +2697,7 @@ mod tests {
     /// to resolve the request's response receiver — mirrors the Java test
     /// helper `buildClientResponse`.
     fn build_list_offsets_client_response(response: ListOffsetsResponse) -> ClientResponse {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::LIST_OFFSETS)
                 .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
@@ -2707,7 +2707,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header");
-        ClientResponse::new_timed_out(
+        ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -2724,7 +2724,7 @@ mod tests {
     /// Build a synthesised disconnect-style `ClientResponse` so the test
     /// can drive a transport-level failure into the request handler.
     fn build_disconnected_client_response() -> ClientResponse {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::LIST_OFFSETS)
                 .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
@@ -2734,7 +2734,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header");
-        ClientResponse::new_timed_out(
+        ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -2759,7 +2759,7 @@ mod tests {
     /// `NetworkException` (Java's transport-level disconnect) rather than
     /// the SASL-authentication failure path.
     fn build_network_disconnect_client_response() -> ClientResponse {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::LIST_OFFSETS)
                 .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
@@ -2769,7 +2769,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header");
-        ClientResponse::new_timed_out(header, None, "0", 0, 0, true, false, None, None, None)
+        ClientResponse::with_timed_out(header, None, "0", 0, 0, true, false, None, None, None)
     }
 
     /// Build a single-topic, multi-partition `ListOffsetsResponse` from a
@@ -4133,7 +4133,7 @@ mod tests {
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::EARLIEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -4397,7 +4397,7 @@ mod tests {
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::EARLIEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -4505,7 +4505,7 @@ mod tests {
     /// test can drive `unsent.handler().on_complete(...)`. Mirrors the
     /// ListOffsets helper `build_list_offsets_client_response`.
     fn build_oitle_client_response(response: OffsetsForLeaderEpochResponse) -> ClientResponse {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::OFFSET_FOR_LEADER_EPOCH)
                 .set_request_version(ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version())
@@ -4515,7 +4515,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header");
-        ClientResponse::new_timed_out(
+        ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -4859,7 +4859,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -5041,7 +5041,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subscription_state.clone(),
             ClusterResourceListeners::new(),
@@ -5228,7 +5228,7 @@ mod tests {
         // shared `build_disconnected_client_response` helper carries an auth
         // exception, which would map to a non-retriable
         // SaslAuthenticationFailed; build a clean disconnect inline instead.
-        let disconnect_header = RequestHeader::new_options(
+        let disconnect_header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::LIST_OFFSETS)
                 .set_request_version(ApiKeys::LIST_OFFSETS.latest_version())
@@ -5238,7 +5238,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header");
-        let disconnect_response = ClientResponse::new_timed_out(
+        let disconnect_response = ClientResponse::with_timed_out(
             disconnect_header,
             None,
             "0",

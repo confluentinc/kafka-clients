@@ -1663,7 +1663,7 @@ mod tests {
 
     fn make_metadata(subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {
         let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
-        Arc::new(ConsumerMetadata::new_config(&config, subs, ClusterResourceListeners::new()))
+        Arc::new(ConsumerMetadata::with_config(&config, subs, ClusterResourceListeners::new()))
     }
 
     fn make_subscriptions() -> Arc<Mutex<SubscriptionState>> {
@@ -2785,7 +2785,7 @@ mod tests {
     }
 
     fn make_offset_and_metadata(offset: i64, epoch: Option<i32>) -> OffsetAndMetadata {
-        OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, "").expect("valid offset")
+        OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, "").expect("valid offset")
     }
 
     // -------------------------------------------------------------------
@@ -3687,7 +3687,7 @@ mod tests {
         topic.set_partitions(vec![partition]);
         data.set_topics(vec![topic]);
 
-        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
         metadata
             .metadata_arc()
             .update_with_current_request_version(&response, false, 1_000);

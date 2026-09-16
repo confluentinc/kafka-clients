@@ -189,7 +189,7 @@ impl Subscription {
     ///
     /// Mirrors `Subscription(List)` (`:130`).
     pub fn new(topics: Vec<String>) -> Self {
-        Self::new_options(
+        Self::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(topics)
                 .build()
@@ -200,8 +200,8 @@ impl Subscription {
     /// Creates a subscription from topics and optional user data.
     ///
     /// Mirrors `Subscription(List, ByteBuffer)` (`:126`).
-    pub fn new_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
-        Self::new_options(
+    pub fn with_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
+        Self::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(topics)
                 .set_user_data(user_data)
@@ -214,12 +214,12 @@ impl Subscription {
     /// partitions (default generation, no rack).
     ///
     /// Mirrors `Subscription(List, ByteBuffer, List)` (`:122`).
-    pub fn new_user_data_owned_partitions(
+    pub fn with_user_data_owned_partitions(
         topics: Vec<String>,
         user_data: Option<Vec<u8>>,
         owned_partitions: Vec<TopicPartition>,
     ) -> Self {
-        Self::new_options(
+        Self::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(topics)
                 .set_user_data(user_data)
@@ -237,7 +237,7 @@ impl Subscription {
     ///
     /// A `generation_id` less than zero is mapped to `None`, matching Java's
     /// `generationId < 0 ? Optional.empty() : Optional.of(generationId)`.
-    pub fn new_options(options: SubscriptionOptions) -> Self {
+    pub fn with_options(options: SubscriptionOptions) -> Self {
         let SubscriptionOptions { topics, user_data, owned_partitions, generation_id, rack_id } = options;
         Self {
             topics,
@@ -304,13 +304,13 @@ impl Assignment {
     ///
     /// Mirrors `Assignment(List)` (`:184`).
     pub fn new(partitions: Vec<TopicPartition>) -> Self {
-        Self::new_user_data(partitions, None)
+        Self::with_user_data(partitions, None)
     }
 
     /// Creates an assignment with partitions and optional user data.
     ///
     /// Mirrors `Assignment(List, ByteBuffer)` (`:179`).
-    pub fn new_user_data(partitions: Vec<TopicPartition>, user_data: Option<Vec<u8>>) -> Self {
+    pub fn with_user_data(partitions: Vec<TopicPartition>, user_data: Option<Vec<u8>>) -> Self {
         Self { partitions, user_data }
     }
 
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn subscription_negative_generation_is_none() {
-        let s = Subscription::new_options(
+        let s = Subscription::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(vec!["t".to_string()])
                 .set_generation_id(-1)
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn subscription_non_negative_generation_is_some() {
-        let s = Subscription::new_options(
+        let s = Subscription::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(vec!["t".to_string()])
                 .set_generation_id(5)

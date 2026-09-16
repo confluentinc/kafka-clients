@@ -291,14 +291,14 @@ impl OffsetFetchResponseBuilder {
     /// Construct a builder over a single group's response.
     ///
     /// Mirrors Java's `Builder(OffsetFetchResponseGroup)`.
-    pub fn new_group(group: OffsetFetchResponseGroup) -> Self {
+    pub fn with_group(group: OffsetFetchResponseGroup) -> Self {
         Self { groups: vec![group] }
     }
 
     /// Construct a builder over multiple groups (v8+ batched).
     ///
     /// Mirrors Java's `Builder(List<OffsetFetchResponseGroup>)`.
-    pub fn new_groups(groups: Vec<OffsetFetchResponseGroup>) -> Self {
+    pub fn with_groups(groups: Vec<OffsetFetchResponseGroup>) -> Self {
         Self { groups }
     }
 
@@ -466,7 +466,7 @@ mod tests {
             g.set_group_id("b".to_string());
             g
         };
-        let builder = OffsetFetchResponseBuilder::new_groups(vec![g1, g2]);
+        let builder = OffsetFetchResponseBuilder::with_groups(vec![g1, g2]);
         let err = builder.build(7).unwrap_err();
         assert!(err.to_string().contains("only supports one group"));
     }
@@ -487,7 +487,7 @@ mod tests {
         topic.set_partitions(vec![partition]);
         group.set_topics(vec![topic]);
 
-        let response = OffsetFetchResponseBuilder::new_group(group).build(5).expect("build ok");
+        let response = OffsetFetchResponseBuilder::with_group(group).build(5).expect("build ok");
         assert_eq!(response.data().topics.len(), 1);
         assert_eq!(response.data().topics[0].partitions[0].committed_offset, 123);
     }

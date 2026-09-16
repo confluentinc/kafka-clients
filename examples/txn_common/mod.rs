@@ -93,7 +93,7 @@ pub fn transactional_producer_with(
         props.insert((*key).to_string(), (*value).to_string());
     }
     let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::new_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
         .map_err(|e| format!("building the producer: {e}"))
 }
 
@@ -108,7 +108,7 @@ pub fn plain_producer(bootstrap: &str, client_id: &str) -> Result<StringProducer
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::new_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
         .map_err(|e| format!("building the producer: {e}"))
 }
 
@@ -153,7 +153,7 @@ pub fn string_record(topic: &str, value: &str) -> Result<ProducerRecord<String, 
         .set_key(Some(format!("key-{value}")))
         .build()
         .map_err(|e| format!("building the record {value}: {e}"))?;
-    ProducerRecord::new_options(options).map_err(|e| format!("building the record {value}: {e}"))
+    ProducerRecord::with_options(options).map_err(|e| format!("building the record {value}: {e}"))
 }
 
 /// Sends one record to partition 0 and awaits its broker ack.

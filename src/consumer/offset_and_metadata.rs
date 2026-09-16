@@ -47,7 +47,7 @@ impl OffsetAndMetadata {
     /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative
     /// (matching Java's `IllegalArgumentException`).
     pub fn new(offset: i64) -> Result<Self, Error> {
-        Self::new_leader_epoch_metadata(offset, None, String::new())
+        Self::with_leader_epoch_metadata(offset, None, String::new())
     }
 
     /// Construct a new `OffsetAndMetadata` with the given offset and metadata.
@@ -57,8 +57,8 @@ impl OffsetAndMetadata {
     /// # Errors
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
-    pub fn new_metadata(offset: i64, metadata: impl Into<String>) -> Result<Self, Error> {
-        Self::new_leader_epoch_metadata(offset, None, metadata)
+    pub fn with_metadata(offset: i64, metadata: impl Into<String>) -> Result<Self, Error> {
+        Self::with_leader_epoch_metadata(offset, None, metadata)
     }
 
     /// Construct a new `OffsetAndMetadata` with offset, optional leader epoch,
@@ -70,7 +70,7 @@ impl OffsetAndMetadata {
     /// # Errors
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
-    pub fn new_leader_epoch_metadata(
+    pub fn with_leader_epoch_metadata(
         offset: i64,
         leader_epoch: Option<i32>,
         metadata: impl Into<String>,
@@ -162,14 +162,14 @@ mod tests {
 
     #[test]
     fn test_new_metadata() {
-        let o = OffsetAndMetadata::new_metadata(10, "m").unwrap();
+        let o = OffsetAndMetadata::with_metadata(10, "m").unwrap();
         assert_eq!(o.metadata(), "m");
         assert_eq!(o.leader_epoch(), None);
     }
 
     #[test]
     fn test_new_leader_epoch_metadata() {
-        let o = OffsetAndMetadata::new_leader_epoch_metadata(10, Some(2), "m").unwrap();
+        let o = OffsetAndMetadata::with_leader_epoch_metadata(10, Some(2), "m").unwrap();
         assert_eq!(o.leader_epoch(), Some(2));
     }
 
@@ -181,13 +181,13 @@ mod tests {
 
     #[test]
     fn test_negative_leader_epoch_treated_as_none() {
-        let o = OffsetAndMetadata::new_leader_epoch_metadata(10, Some(-1), "m").unwrap();
+        let o = OffsetAndMetadata::with_leader_epoch_metadata(10, Some(-1), "m").unwrap();
         assert_eq!(o.leader_epoch(), None);
     }
 
     #[test]
     fn test_display() {
-        let o = OffsetAndMetadata::new_leader_epoch_metadata(10, Some(2), "m").unwrap();
+        let o = OffsetAndMetadata::with_leader_epoch_metadata(10, Some(2), "m").unwrap();
         assert_eq!(o.to_string(), "OffsetAndMetadata{offset=10, leaderEpoch=2, metadata='m'}");
 
         let o = OffsetAndMetadata::new(10).unwrap();
@@ -196,8 +196,8 @@ mod tests {
 
     #[test]
     fn test_equals_with_null_and_negative_leader_epoch() {
-        let with_none = OffsetAndMetadata::new_leader_epoch_metadata(100, None, "metadata").unwrap();
-        let with_neg = OffsetAndMetadata::new_leader_epoch_metadata(100, Some(-1), "metadata").unwrap();
+        let with_none = OffsetAndMetadata::with_leader_epoch_metadata(100, None, "metadata").unwrap();
+        let with_neg = OffsetAndMetadata::with_leader_epoch_metadata(100, Some(-1), "metadata").unwrap();
         assert_eq!(with_none, with_neg);
         assert_eq!(hash_of(&with_none), hash_of(&with_neg));
     }

@@ -726,7 +726,7 @@ impl Admin for MockAdminClient {
             }
             let partitions: Vec<TopicPartitionInfo> = (0..number_of_partitions)
                 .map(|i| {
-                    TopicPartitionInfo::new_elr_last_known_elr(
+                    TopicPartitionInfo::with_elr_last_known_elr(
                         i,
                         Some(leader.clone()),
                         replicas.clone(),
@@ -871,7 +871,7 @@ impl Admin for MockAdminClient {
                     }
                     match state.all_topics.get(requested) {
                         Some(metadata) if !metadata.marked_for_deletion => {
-                            handle.complete(TopicDescription::new_authorized_operations_topic_id(
+                            handle.complete(TopicDescription::with_authorized_operations_topic_id(
                                 requested.clone(),
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
@@ -912,7 +912,7 @@ impl Admin for MockAdminClient {
                         .filter(|(_, m)| !m.marked_for_deletion);
                     match found {
                         Some((name, metadata)) => {
-                            handle.complete(TopicDescription::new_authorized_operations_topic_id(
+                            handle.complete(TopicDescription::with_authorized_operations_topic_id(
                                 name,
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
@@ -1263,7 +1263,7 @@ impl Admin for MockAdminClient {
                     );
                     map.insert(
                         log_dir.clone(),
-                        LogDirDescription::new_total_bytes_usable_bytes(
+                        LogDirDescription::with_total_bytes_usable_bytes(
                             existing.error().cloned(),
                             replica_infos,
                             existing.total_bytes().unwrap_or(DescribeLogDirsResponse::UNKNOWN_VOLUME_BYTES),
@@ -1530,7 +1530,7 @@ impl Admin for MockAdminClient {
         let listings: Vec<Result<ConsumerGroupListing, Error>> = state
             .group_configs
             .keys()
-            .map(|g| Ok(ConsumerGroupListing::new_group_state_group_type(g.clone(), None, None, false)))
+            .map(|g| Ok(ConsumerGroupListing::with_group_state_group_type(g.clone(), None, None, false)))
             .collect();
         let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
@@ -2262,7 +2262,7 @@ mod tests {
     async fn create_then_list_and_describe() {
         let client = admin();
         let result = client.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("t", Some(2), Some(2))],
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(2), Some(2))],
             CreateTopicsOptions::new(),
         );
         result.all().get().await.unwrap();
@@ -2295,7 +2295,7 @@ mod tests {
         let client = admin();
         client
             .create_topics_with_options(
-                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
                 CreateTopicsOptions::new(),
             )
             .all()
@@ -2303,7 +2303,7 @@ mod tests {
             .await
             .unwrap();
         let result = client.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
         let err = result.values()["t"].get().await.unwrap_err();
@@ -2315,7 +2315,7 @@ mod tests {
     async fn create_with_replication_factor_too_large_fails() {
         let client = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = client.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(5))],
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(5))],
             CreateTopicsOptions::new(),
         );
         let err = result.values()["t"].get().await.unwrap_err();
@@ -2327,7 +2327,7 @@ mod tests {
         let client = admin();
         client.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
         let result = client.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
         let err = result.values()["t"].get().await.unwrap_err();
@@ -2351,7 +2351,7 @@ mod tests {
         let client = admin();
         client
             .create_topics_with_options(
-                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
                 CreateTopicsOptions::new(),
             )
             .all()
@@ -2392,13 +2392,13 @@ mod tests {
         let client = admin();
         client.timeout_next_request(1);
         let result = client.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
         assert!(matches!(result.values()["t"].get().await, Err(Error::Timeout(_))));
         // Next request succeeds.
         let result2 = client.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("t2", Some(1), Some(1))],
+            &[NewTopic::with_num_partitions_replication_factor("t2", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
         result2.all().get().await.unwrap();
@@ -2435,7 +2435,7 @@ mod tests {
         let client = admin();
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
-        let new_topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs);
+        let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs);
         client
             .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
             .all()
@@ -2500,7 +2500,7 @@ mod tests {
         let client = admin();
         client
             .create_topics_with_options(
-                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
                 CreateTopicsOptions::new(),
             )
             .all()
@@ -2660,7 +2660,7 @@ mod tests {
         let client = admin();
         client
             .create_topics_with_options(
-                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
                 CreateTopicsOptions::new(),
             )
             .all()
@@ -2687,7 +2687,7 @@ mod tests {
         let client = admin();
         client
             .create_topics_with_options(
-                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
                 CreateTopicsOptions::new(),
             )
             .all()
@@ -2909,7 +2909,7 @@ mod tests {
     /// Seeds one topic and reassigns its only partition.
     async fn admin_with_reassignment() -> (MockAdminClient, TopicPartition) {
         let client = admin();
-        let new_topic = NewTopic::new_num_partitions_replication_factor("rt", Some(1), Some(3));
+        let new_topic = NewTopic::with_num_partitions_replication_factor("rt", Some(1), Some(3));
         client
             .create_topics_with_options(std::slice::from_ref(&new_topic), CreateTopicsOptions::new())
             .all()
@@ -3012,7 +3012,7 @@ mod tests {
     #[tokio::test]
     async fn list_partition_reassignments_after_topic_shrink_fails_the_future() {
         let client = admin();
-        let wide = NewTopic::new_num_partitions_replication_factor("rt2", Some(2), Some(3));
+        let wide = NewTopic::with_num_partitions_replication_factor("rt2", Some(2), Some(3));
         client
             .create_topics_with_options(std::slice::from_ref(&wide), CreateTopicsOptions::new())
             .all()
@@ -3044,7 +3044,7 @@ mod tests {
             .await
             .unwrap();
 
-        let narrow = NewTopic::new_num_partitions_replication_factor("rt2", Some(1), Some(3));
+        let narrow = NewTopic::with_num_partitions_replication_factor("rt2", Some(1), Some(3));
         client
             .create_topics_with_options(std::slice::from_ref(&narrow), CreateTopicsOptions::new())
             .all()
@@ -3068,7 +3068,7 @@ mod tests {
     /// Builds a `TopicPartitionInfo` with the given leader / replicas / isr and
     /// no offline, ELR or last-known-ELR replicas.
     fn partition_info(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> TopicPartitionInfo {
-        TopicPartitionInfo::new_elr_last_known_elr(partition, leader, replicas, isr, Vec::new(), Vec::new())
+        TopicPartitionInfo::with_elr_last_known_elr(partition, leader, replicas, isr, Vec::new(), Vec::new())
     }
 
     /// The nodes `MockAdminClient::create` seeds, so a test can name a broker

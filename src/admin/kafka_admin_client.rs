@@ -286,7 +286,7 @@ impl KafkaAdminClient {
     ///
     /// Returns an error if the bootstrap addresses cannot be resolved or the
     /// channel builder cannot be created.
-    pub fn new_config(config: AdminClientConfig) -> Result<Self, Error> {
+    pub fn new(config: AdminClientConfig) -> Result<Self, Error> {
         // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
         // every failure (`KafkaAdminClient.java:569-573` / `:592-595`):
         //
@@ -300,11 +300,10 @@ impl KafkaAdminClient {
         // Java's catch is not needed here: the `Selector` / `NetworkClient` are
         // RVO'd locals that `Drop` cleans up, and every fallible point precedes
         // their construction.
-        Self::new_config_inner(config)
-            .map_err(|e| Error::kafka_message_source("Failed to create new KafkaAdminClient", e))
+        Self::new_inner(config).map_err(|e| Error::kafka_message_source("Failed to create new KafkaAdminClient", e))
     }
 
-    fn new_config_inner(config: AdminClientConfig) -> Result<Self, Error> {
+    fn new_inner(config: AdminClientConfig) -> Result<Self, Error> {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
 
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
@@ -338,7 +337,7 @@ impl KafkaAdminClient {
         )
         // `ConfigException` in Java (`SslFactory.java:104-107`), i.e. inside the
         // `KafkaException` hierarchy; `illegal_argument` put it outside, where
-        // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::new_config`.
+        // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::new`.
         .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
@@ -347,7 +346,7 @@ impl KafkaAdminClient {
         );
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::new_metadata_updater(
+        let client = NetworkClient::with_metadata_updater(
             selector,
             metadata_manager.updater(),
             config.client_id(),
@@ -384,7 +383,7 @@ impl KafkaAdminClient {
         let shutdown = Arc::new(ShutdownSignal::new());
         // Propagated rather than `expect`ed: Java's constructor-wide
         // `catch (Throwable exc)` (`KafkaAdminClient.java:569-573`) converts every
-        // construction failure into a `KafkaException`, and `new_config` is where
+        // construction failure into a `KafkaException`, and `new` is where
         // that wrap happens. `ExponentialBackoff::new` only rejects an
         // out-of-range jitter, so this is unreachable with the constant above — but
         // panicking on the admin construction path is precisely what Java does not.
@@ -552,7 +551,7 @@ impl KafkaAdminClient {
             // Empty topic list (just the broker list), matching Java's
             // MetadataRequest with setTopics(emptyList).setAllowAutoTopicCreation(true).
             Ok(
-                Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true))
+                Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true))
                     as Box<dyn RequestBuilder>,
             )
         });
@@ -706,7 +705,7 @@ impl KafkaAdminClient {
         request_data.set_resources(wire_resources);
 
         let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::new_data(request_data.clone()))
+            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::with_data(request_data.clone()))
                 as Box<dyn RequestBuilder>)
         });
 
@@ -1566,7 +1565,7 @@ fn get_create_delegation_token_call(
             resp_handle.complete_with_error(Error::new(create_response.error()));
         } else {
             let data = create_response.data();
-            let token_info = TokenInformation::new_token_requester(
+            let token_info = TokenInformation::with_token_requester(
                 data.token_id.clone(),
                 KafkaPrincipal::new(data.principal_type.clone(), data.principal_name.clone()),
                 KafkaPrincipal::new(
@@ -2092,7 +2091,7 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 )
             })
             .collect();
-        ConfigEntry::new_options(
+        ConfigEntry::with_options(
             ConfigEntryOptionsBuilder::new()
                 .set_name(config.name.clone())
                 .set_value(config.value.clone())
@@ -2236,7 +2235,7 @@ fn log_dir_descriptions(response: &DescribeLogDirsResponse) -> HashMap<String, L
         }
         result.insert(
             log_dir_result.log_dir.clone(),
-            LogDirDescription::new_total_bytes_usable_bytes_is_cordoned(
+            LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 api_error_for_code(log_dir_result.error_code),
                 replica_info_map,
                 log_dir_result.total_bytes,
@@ -2487,7 +2486,7 @@ fn topic_description_from_cluster(
         })
         .collect();
     partitions.sort_by_key(|p| p.partition());
-    TopicDescription::new_authorized_operations_topic_id(
+    TopicDescription::with_authorized_operations_topic_id(
         topic_name,
         is_internal,
         partitions,
@@ -2562,11 +2561,11 @@ fn get_create_topics_call(
                     future.complete_with_error(api_error(result.error_code, &result.error_message));
                 }
             } else if result.topic_config_error_code != Errors::None.code() {
-                future.complete(TopicMetadataAndConfig::new_error(Error::new(Errors::for_code(
+                future.complete(TopicMetadataAndConfig::with_error(Error::new(Errors::for_code(
                     result.topic_config_error_code,
                 ))));
             } else if result.num_partitions == CreateTopicsResult::UNKNOWN {
-                future.complete(TopicMetadataAndConfig::new_error(Error::unsupported_version(
+                future.complete(TopicMetadataAndConfig::with_error(Error::unsupported_version(
                     "Topic metadata and configs in CreateTopics response not supported",
                 )));
             } else {
@@ -2575,7 +2574,7 @@ fn get_create_topics_call(
                     .as_ref()
                     .map(|configs| {
                         Config::new(configs.iter().map(|c| {
-                            ConfigEntry::new_options(
+                            ConfigEntry::with_options(
                                 ConfigEntryOptionsBuilder::new()
                                     .set_name(c.name.clone())
                                     .set_value(c.value.clone())
@@ -3481,7 +3480,7 @@ impl Admin for KafkaAdminClient {
                 data.set_topics(Some(Vec::new()));
                 data.set_allow_auto_topic_creation(true);
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
-                Ok(Box::new(MetadataRequestBuilder::new_data(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
             } else {
                 if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
                     return Err(Error::local_illegal_argument(
@@ -4159,7 +4158,7 @@ impl Admin for KafkaAdminClient {
             };
             Some((
                 group.group_id.clone(),
-                ConsumerGroupListing::new_group_state_group_type(
+                ConsumerGroupListing::with_group_state_group_type(
                     group.group_id.clone(),
                     group_state,
                     group_type,
@@ -5034,7 +5033,7 @@ fn get_describe_topics_by_names_call(
             ));
             data.set_allow_auto_topic_creation(false);
             data.set_include_topic_authorized_operations(include_authorized_operations);
-            Ok(Box::new(MetadataRequestBuilder::new_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
         } else {
             Ok(Box::new(MetadataRequestBuilder::all_topics()) as Box<dyn RequestBuilder>)
         }
@@ -5112,7 +5111,7 @@ fn get_describe_topics_by_ids_call(
         ));
         data.set_allow_auto_topic_creation(false);
         data.set_include_topic_authorized_operations(include_authorized_operations);
-        Ok(Box::new(MetadataRequestBuilder::new_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -5302,7 +5301,7 @@ mod tests {
             .map(|i| Node::new(i, "localhost".to_string(), 9092 + i))
             .collect();
         let controller_node = nodes.iter().find(|n| n.id() == controller).cloned();
-        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             Some("mock-cluster".to_string()),
             nodes.clone(),
             Vec::new(),
@@ -5323,7 +5322,7 @@ mod tests {
         // 1000 for the same reason).
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::new_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
         let config = test_config();
         let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
         (admin, runnable, time, nodes)
@@ -5336,7 +5335,7 @@ mod tests {
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::new_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
@@ -5356,7 +5355,7 @@ mod tests {
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(num_nodes, 0);
-        let client = MockClient::new_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
@@ -6044,13 +6043,13 @@ mod tests {
 
         let alterations: Vec<UserScramCredentialAlteration> = vec![
             UserScramCredentialDeletion::new(user0_name, user0_mechanism).into(),
-            UserScramCredentialUpsertion::new_str(
+            UserScramCredentialUpsertion::with_str(
                 user1_name,
                 ScramCredentialInfo::new(user1_mechanism, 8192),
                 "password",
             )
             .into(),
-            UserScramCredentialUpsertion::new_str(
+            UserScramCredentialUpsertion::with_str(
                 user2_name,
                 ScramCredentialInfo::new(user2_mechanism, 4096),
                 "password",
@@ -6102,13 +6101,13 @@ mod tests {
             ));
 
         let alterations: Vec<UserScramCredentialAlteration> = vec![
-            UserScramCredentialUpsertion::new_bytes(
+            UserScramCredentialUpsertion::with_bytes(
                 "user0",
                 ScramCredentialInfo::new(PublicScramMechanism::ScramSha256, 4096),
                 Vec::new(),
             )
             .into(),
-            UserScramCredentialUpsertion::new_str(
+            UserScramCredentialUpsertion::with_str(
                 "user1",
                 ScramCredentialInfo::new(PublicScramMechanism::ScramSha512, 8192),
                 "password",
@@ -6163,13 +6162,13 @@ mod tests {
 
         let alterations: Vec<UserScramCredentialAlteration> = vec![
             UserScramCredentialDeletion::new(user0_name, user0_mechanism0).into(),
-            UserScramCredentialUpsertion::new_str(
+            UserScramCredentialUpsertion::with_str(
                 user0_name,
                 ScramCredentialInfo::new(user0_mechanism1, 8192),
                 "password",
             )
             .into(),
-            UserScramCredentialUpsertion::new_str(
+            UserScramCredentialUpsertion::with_str(
                 user1_name,
                 ScramCredentialInfo::new(user1_mechanism0, 8192),
                 "password",
@@ -6195,7 +6194,7 @@ mod tests {
     async fn test_create_topics_success() {
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
                 Some(1),
@@ -6215,7 +6214,11 @@ mod tests {
     async fn test_create_topics_error_surfaces_message() {
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("bad", Some(1), Some(1))],
+            &[NewTopic::with_num_partitions_replication_factor(
+                "bad",
+                Some(1),
+                Some(1),
+            )],
             CreateTopicsOptions::new(),
         );
         runnable.client_mut().prepare_response(create_response(vec![create_result(
@@ -6234,8 +6237,8 @@ mod tests {
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics_with_options(
             &[
-                NewTopic::new_num_partitions_replication_factor("present", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("missing", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("present", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("missing", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new(),
         );
@@ -6256,7 +6259,7 @@ mod tests {
     async fn test_create_topics_retries_on_disconnect() {
         let (admin, mut runnable, time, _nodes) = env();
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
                 Some(1),
@@ -6290,7 +6293,7 @@ mod tests {
         let retry_backoff = 5000;
         let (admin, mut runnable, time, _nodes) = env_with_props(&[("retry.backoff.ms", &retry_backoff.to_string())]);
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
                 Some(1),
@@ -6346,7 +6349,7 @@ mod tests {
             .client_mut()
             .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
                 Some(1),
@@ -6387,9 +6390,9 @@ mod tests {
 
         let result = admin.create_topics_with_options(
             &[
-                NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic1", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic2", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -6413,9 +6416,9 @@ mod tests {
         ));
         let result = admin.create_topics_with_options(
             &[
-                NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic1", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic2", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -6447,9 +6450,9 @@ mod tests {
         ));
         let result = admin.create_topics_with_options(
             &[
-                NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
-                NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic1", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic2", Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -6863,7 +6866,7 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "not-a-host-port".to_string());
         let config = AdminClientConfig::new(&props).expect("the config itself parses");
 
-        let error = KafkaAdminClient::new_config(config)
+        let error = KafkaAdminClient::new(config)
             .err()
             .expect("an unparseable bootstrap.servers entry must fail construction");
 
@@ -7180,7 +7183,7 @@ mod tests {
         use crate::create_topics_response_data::CreatableTopicConfigs;
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
                 Some(1),
@@ -7209,7 +7212,7 @@ mod tests {
     async fn test_create_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor("", Some(1), Some(1))],
+            &[NewTopic::with_num_partitions_replication_factor("", Some(1), Some(1))],
             CreateTopicsOptions::new(),
         );
         let err = result.values()[""].get().await.unwrap_err();
@@ -7476,10 +7479,10 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::new_before_offset(3));
-        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::new_before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::new_before_offset(10));
-        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::new_before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 0), RecordsToDelete::with_before_offset(3));
+        records.insert(TopicPartition::new("my_topic", 1), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 2), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("my_topic", 3), RecordsToDelete::with_before_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7512,7 +7515,7 @@ mod tests {
         ));
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::new_before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_before_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -7547,8 +7550,8 @@ mod tests {
         );
 
         let mut records = HashMap::new();
-        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::new_before_offset(10));
-        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::new_before_offset(10));
+        records.insert(TopicPartition::new("foo", 0), RecordsToDelete::with_before_offset(10));
+        records.insert(TopicPartition::new("foo", 1), RecordsToDelete::with_before_offset(10));
         let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
 
         let values = result.low_watermarks();
@@ -9308,7 +9311,7 @@ mod tests {
     // --- MockAdminClient log-dir methods -------------------------------------
 
     fn mock_topic_partition_info(partition: i32, leader: &Node, replicas: Vec<Node>) -> TopicPartitionInfo {
-        TopicPartitionInfo::new_elr_last_known_elr(
+        TopicPartitionInfo::with_elr_last_known_elr(
             partition,
             Some(leader.clone()),
             replicas,
@@ -9464,7 +9467,7 @@ mod tests {
         let mut data = ElectLeadersResponseData::new();
         data.set_error_code(top_error.code());
         data.set_replica_election_results(results);
-        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new_data(data))
+        ConcreteResponse::ElectLeaders(ElectLeadersResponse::with_data(data))
     }
 
     fn election_result(topic: &str, partitions: &[(i32, Errors, Option<&str>)]) -> ReplicaElectionResult {
@@ -10416,7 +10419,7 @@ mod tests {
         // node1 leaves the cluster: foo-0 is now led by node0, and node1 is gone
         // from the admin client's metadata. The partition-leader cache still
         // points foo-0 at node1.
-        let shrunk = Cluster::new_invalid_topics_controller_topic_ids(
+        let shrunk = Cluster::with_invalid_topics_controller_topic_ids(
             Some("mock-cluster".to_string()),
             vec![node0.clone()],
             Vec::new(),
@@ -11476,7 +11479,7 @@ mod tests {
     fn offset_commit_resp(entries: &[(TopicPartition, Errors)]) -> ConcreteResponse {
         let map: HashMap<TopicPartition, Errors> = entries.iter().cloned().collect();
         ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &map),
+            crate::common::requests::OffsetCommitResponse::with_throttle_time_ms_response_data(0, &map),
         )
     }
 
@@ -12815,7 +12818,7 @@ mod tests {
     async fn an_admin_authentication_failure_is_not_reported_as_sasl() {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let inner = MockClient::new_nodes(nodes.clone(), time.provider());
+        let inner = MockClient::with_static_nodes(nodes.clone(), time.provider());
         let client = AuthFailingClient::new(
             inner,
             Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
@@ -12991,7 +12994,7 @@ mod tests {
     async fn an_unrealized_future_fails_with_a_bare_api_error() {
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 "myTopic",
                 Some(1),
                 Some(1),
@@ -13339,7 +13342,8 @@ mod tests {
     async fn close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline() {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = WaitingClient::new(MockClient::new_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client =
+            WaitingClient::new(MockClient::with_static_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
         let poll_timeouts = client.poll_timeouts();
         let advance_clock = client.advance_clock();
         let config = test_config();
@@ -13423,7 +13427,8 @@ mod tests {
     async fn close_returns_within_its_timeout_even_when_the_io_task_cannot_exit() {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = WaitingClient::new(MockClient::new_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client =
+            WaitingClient::new(MockClient::with_static_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
         let stuck = client.stuck();
         let config = test_config();
         let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());

@@ -1716,7 +1716,7 @@ fn box_group_metadata(meta: ConsumerGroupMetadata) -> *mut kafka_consumer_Consum
 /// - `group_id` and `member_id` must be valid NUL-terminated C strings.
 /// - `group_instance_id` must be null or a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-#[allow(deprecated)] // ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
+#[allow(deprecated)] // ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     group_id: *const c_char,
     generation_id: i32,
@@ -1730,7 +1730,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     } else {
         Some(unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().to_string())
     };
-    let meta = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+    let meta = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
         group_id,
         generation_id,
         member_id,
@@ -3541,7 +3541,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
@@ -3575,7 +3575,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => {
             // Marshaling failed: fire inline with the error (no guard taken).
@@ -3802,7 +3802,7 @@ pub(crate) unsafe fn read_offset_map(
                 unsafe { CStr::from_ptr(m) }.to_string_lossy().to_string()
             }
         };
-        let oam = OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, meta)?;
+        let oam = OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, meta)?;
         map.insert(TopicPartition::new(topic, partition), oam);
     }
     Ok(map)

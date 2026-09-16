@@ -220,7 +220,7 @@ pub async fn wait_for_all_partitions_metadata_with_context(
 pub async fn create_topic(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
     admin
         .create_topics_with_options(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 topic.to_string(),
                 Some(num_partitions),
                 Some(replication_factor),

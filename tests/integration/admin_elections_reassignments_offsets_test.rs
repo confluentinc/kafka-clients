@@ -74,12 +74,12 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     ]);
     let config = ProducerConfig::new(&props).expect("valid producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::new_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
             .expect("build producer");
     let value = vec![b'x'; value_len];
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::new_partition_key(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(format!("key {i}").into_bytes()),
@@ -525,7 +525,7 @@ async fn list_offsets_honours_isolation_level_and_timeout<F: AdminBackendFactory
 
     // A deliberately odd millisecond count, so the value is not one a truncating
     // conversion would land on by chance.
-    let options = ListOffsetsOptions::new_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(20_001));
+    let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(20_001));
     assert_eq!(
         options.isolation_level(),
         IsolationLevel::ReadCommitted,

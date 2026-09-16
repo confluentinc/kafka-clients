@@ -85,14 +85,14 @@ impl OffsetAndTimestampInternal {
     ///
     /// # Errors
     ///
-    /// Returns the underlying `OffsetAndTimestamp::new_leader_epoch`
+    /// Returns the underlying `OffsetAndTimestamp::with_leader_epoch`
     /// error (`Error::LocalIllegalArgument`) if either `offset` or
     /// `timestamp` is negative. Callers that route values from a
     /// `LATEST` / `EARLIEST` ListOffsets must NOT call this — those
     /// values carry `timestamp == -1`. Use [`Self::offset`] directly
     /// for those flows.
     pub(crate) fn build_offset_and_timestamp(&self) -> Result<OffsetAndTimestamp, crate::common::Error> {
-        OffsetAndTimestamp::new_leader_epoch(self.offset, self.timestamp, self.leader_epoch)
+        OffsetAndTimestamp::with_leader_epoch(self.offset, self.timestamp, self.leader_epoch)
     }
 }
 

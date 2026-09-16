@@ -403,7 +403,7 @@ mod tests {
     /// Mirrors `testBuildRequestMultipleTopicsWithReadCommitted`.
     #[test]
     fn build_request_multiple_topics_with_read_committed() {
-        let handler = handler(ListOffsetsOptions::new_isolation_level(IsolationLevel::ReadCommitted));
+        let handler = handler(ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted));
         let keys: HashSet<TopicPartition> = offset_timestamps().into_keys().collect();
         let builder = handler.build_batched_request(node().id(), &keys);
         assert_eq!(builder.data().topics.len(), 3);
@@ -428,7 +428,7 @@ mod tests {
             .build_batched_request(node().id(), &[tp("t0", 0), tp("t0", 1), tp("t1", 0)].into_iter().collect());
         assert_eq!(builder.oldest_allowed_version(), 1);
 
-        let read_committed = handler(ListOffsetsOptions::new_isolation_level(IsolationLevel::ReadCommitted));
+        let read_committed = handler(ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted));
         let builder = read_committed
             .build_batched_request(node().id(), &[tp("t0", 0), tp("t0", 1), tp("t1", 0)].into_iter().collect());
         assert_eq!(builder.oldest_allowed_version(), 2);

@@ -2131,7 +2131,7 @@ mod tests {
                 .unwrap();
         }
         let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -2172,10 +2172,10 @@ mod tests {
 
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
         let metrics_manager = Arc::new(ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subs)));
         let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -2281,7 +2281,7 @@ mod tests {
                 .unwrap();
         }
         let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -3075,7 +3075,7 @@ mod tests {
             })
             .collect();
         data.set_topics(response_topics);
-        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Feed REAL topic-name metadata to the manager so that

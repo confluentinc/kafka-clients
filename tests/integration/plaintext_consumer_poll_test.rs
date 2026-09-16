@@ -246,7 +246,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 /// Build a [`KafkaProducer`] for byte-array keys/values matching what
 /// Java's `cluster.producer()` returns.
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::new_config(
+    KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -268,14 +268,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::new_partition_timestamp_key(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -1359,13 +1359,13 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
 /// (a no-op record is just appended).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {
-        let record = ProducerRecord::new_partition_key(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(b"__provisioner__".to_vec()),
             Some(b"__provisioner__".to_vec()),
         )
-        .expect("ProducerRecord::new_partition_key should succeed");
+        .expect("ProducerRecord::with_partition_key should succeed");
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
             .await
             .expect("provisioner send should succeed");

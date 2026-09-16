@@ -47,7 +47,7 @@ impl ListOffsetsOptions {
     /// Creates options with the given isolation level.
     ///
     /// Mirrors `new ListOffsetsOptions(IsolationLevel)`.
-    pub fn new_isolation_level(isolation_level: IsolationLevel) -> Self {
+    pub fn with_isolation_level(isolation_level: IsolationLevel) -> Self {
         Self { timeout_ms: None, isolation_level }
     }
 
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn new_isolation_level_and_timeout() {
-        let options = ListOffsetsOptions::new_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(200));
+        let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(200));
         assert_eq!(options.isolation_level(), IsolationLevel::ReadCommitted);
         assert_eq!(options.timeout_ms(), Some(200));
     }

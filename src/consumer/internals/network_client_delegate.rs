@@ -80,13 +80,13 @@ impl PollResult {
     ///
     /// Java: `PollResult.EMPTY`.
     pub(crate) fn empty() -> Self {
-        Self::new_time_until_next_poll_ms(Self::WAIT_FOREVER)
+        Self::with_time_until_next_poll_ms(Self::WAIT_FOREVER)
     }
 
     /// A result with the given wait time and an empty request list.
     ///
     /// Java: `new PollResult(long timeUntilNextPollMs)`.
-    pub(crate) fn new_time_until_next_poll_ms(time_until_next_poll_ms: i64) -> Self {
+    pub(crate) fn with_time_until_next_poll_ms(time_until_next_poll_ms: i64) -> Self {
         Self { time_until_next_poll_ms, unsent_requests: Vec::new(), try_connect: Vec::new() }
     }
 
@@ -170,7 +170,7 @@ impl UnsentRequest {
     ///
     /// Java: `new UnsentRequest(AbstractRequest.Builder<?>, Optional<Node>)`.
     pub(crate) fn new(request_builder: Box<dyn RequestBuilder>, node: Option<Node>) -> Self {
-        let (handler, rx) = FutureCompletionHandler::new_with_receiver();
+        let (handler, rx) = FutureCompletionHandler::new();
         Self {
             request_builder: Some(request_builder),
             handler,
@@ -304,7 +304,7 @@ impl FutureCompletionHandler {
     /// results off the receiver; the manager calls `on_complete` /
     /// `on_failure` on the handle. Each `UnsentRequest` owns the
     /// receiver inside `UnsentRequest::new`.
-    pub(crate) fn new_with_receiver() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
+    pub(crate) fn new() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
         let (tx, rx) = oneshot::channel();
         let inner = Arc::new(FutureCompletionInner { sender: Mutex::new(Some(tx)), completion_time_ms: Mutex::new(0) });
         (Self { inner }, rx)
@@ -387,7 +387,7 @@ impl FutureCompletionHandler {
         let version_mismatch = response.version_mismatch().map(|s| s.to_string());
         let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
-        let owned = ClientResponse::new_timed_out(
+        let owned = ClientResponse::with_timed_out(
             request_header,
             None,
             &destination,
@@ -934,7 +934,7 @@ mod tests {
             let time = Arc::clone(&time);
             Arc::new(move || time.load(Ordering::SeqCst))
         };
-        let client = MockClient::new_nodes(vec![mock_node()], Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(vec![mock_node()], Arc::clone(&time_provider));
         let metadata = Arc::new(Metadata::new(100, 1_000, 60_000, ClusterResourceListeners::new()));
         let config = test_config();
         let delegate = NetworkClientDelegate::new(&config, client, Arc::clone(&metadata), handler, notify_via_queue);
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn poll_result_from_wait_carries_value() {
-        let res = PollResult::new_time_until_next_poll_ms(500);
+        let res = PollResult::with_time_until_next_poll_ms(500);
         assert_eq!(res.time_until_next_poll_ms, 500);
         assert!(res.unsent_requests.is_empty());
     }
@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn future_completion_handler_idempotent_send() {
-        let (handle, rx) = FutureCompletionHandler::new_with_receiver();
+        let (handle, rx) = FutureCompletionHandler::new();
         assert!(!handle.is_done());
 
         handle.on_failure(123, Error::timeout("boom"));
@@ -1141,7 +1141,7 @@ mod tests {
         // Build a synthetic, non-disconnected response carrying a
         // FindCoordinator body. The handler's on_complete pulls
         // `received_time_ms` off the response and stores it.
-        let header = crate::common::requests::RequestHeader::new_options(
+        let header = crate::common::requests::RequestHeader::with_options(
             crate::common::requests::RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&crate::common::ApiKeys::FIND_COORDINATOR)
                 .set_request_version(0)
@@ -1152,7 +1152,7 @@ mod tests {
         )
         .expect("header ok");
         let body = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
-        let response = ClientResponse::new_timed_out(
+        let response = ClientResponse::with_timed_out(
             header,
             None,
             "0",

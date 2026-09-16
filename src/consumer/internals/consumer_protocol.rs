@@ -112,7 +112,7 @@ impl ConsumerProtocol {
     /// through [`Error::source`].
     fn map_decode_error(e: std::io::Error, part: &str) -> Error {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            Error::Serialization(SerializationError::new_source(
+            Error::Serialization(SerializationError::with_source(
                 format!("Buffer underflow while parsing consumer protocol's {part}"),
                 Error::serialization(e.to_string()),
             ))
@@ -205,7 +205,7 @@ impl ConsumerProtocol {
             _ => None,
         };
 
-        Ok(Subscription::new_options(
+        Ok(Subscription::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(data.topics.clone())
                 .set_user_data(data.user_data.clone())
@@ -321,7 +321,7 @@ impl ConsumerProtocol {
             }
         }
 
-        Ok(Assignment::new_user_data(assigned_partitions, data.user_data.clone()))
+        Ok(Assignment::with_user_data(assigned_partitions, data.user_data.clone()))
     }
 
     /// Deserializes an assignment, reading the version header from the buffer.
@@ -481,7 +481,7 @@ mod tests {
     /// Round-trips an assignment carrying user data.
     #[test]
     fn assignment_round_trip_with_user_data() {
-        let assignment = Assignment::new_user_data(vec![tp("t", 3)], Some(vec![1, 2, 3, 4]));
+        let assignment = Assignment::with_user_data(vec![tp("t", 3)], Some(vec![1, 2, 3, 4]));
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
         assert_eq!(decoded.partitions(), &[tp("t", 3)]);
@@ -500,7 +500,7 @@ mod tests {
     /// Round-trips a subscription including owned partitions and generation.
     #[test]
     fn subscription_round_trip() {
-        let subscription = Subscription::new_options(
+        let subscription = Subscription::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(vec!["b".to_string(), "a".to_string()])
                 .set_owned_partitions(vec![tp("a", 0), tp("a", 1)])
@@ -571,7 +571,7 @@ mod tests {
     /// `serialize_subscription` / `deserialize_consumer_protocol_subscription`.
     #[test]
     fn consumer_protocol_subscription_data_round_trip() {
-        let subscription = Subscription::new_options(
+        let subscription = Subscription::with_options(
             SubscriptionOptionsBuilder::new()
                 .set_topics(vec!["b".to_string(), "a".to_string()])
                 .set_owned_partitions(vec![tp("a", 0)])

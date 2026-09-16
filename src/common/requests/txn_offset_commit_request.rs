@@ -250,7 +250,7 @@ impl TxnOffsetCommitRequest {
         response
             .set_throttle_time_ms(throttle_time_ms)
             .set_topics(Self::get_error_response_topics(&self.data.topics, error));
-        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new_data(response))
+        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::with_data(response))
     }
 
     /// Parses a `TxnOffsetCommitRequest` from a readable buffer at the given
@@ -292,7 +292,7 @@ pub struct TxnOffsetCommitRequestBuilder {
 /// counterpart: it exists solely to satisfy that naming rule (DoD #7).
 ///
 /// Because the cap applies to the *whole* group, Java's `:50` and `:67` forms
-/// derive the same name — `new_options` — so they collapse into the single
+/// derive the same name — `with_options` — so they collapse into the single
 /// constructor below, whose only parameter is this struct. `:50`'s three
 /// literals (`JoinGroupRequest.UNKNOWN_MEMBER_ID`, `UNKNOWN_GENERATION_ID`,
 /// `Optional.empty()`) become this struct's initial `member_id`,
@@ -476,7 +476,7 @@ impl TxnOffsetCommitRequestBuilder {
     /// `:50`'s behaviour leave the options' `member_id`, `generation_id` and
     /// `group_instance_id` at their initial values — exactly what its Java body
     /// forwards.
-    pub fn new_options(options: TxnOffsetCommitRequestBuilderOptions<'_>) -> Self {
+    pub fn with_options(options: TxnOffsetCommitRequestBuilderOptions<'_>) -> Self {
         let TxnOffsetCommitRequestBuilderOptions {
             transactional_id,
             consumer_group_id,
@@ -513,7 +513,7 @@ impl TxnOffsetCommitRequestBuilder {
     /// Corresponds to Java's single-argument `Builder(TxnOffsetCommitRequestData)`
     /// (`TxnOffsetCommitRequest.java:89`), which hardcodes
     /// `isTransactionV2Enabled = true`.
-    pub fn new_data(data: TxnOffsetCommitRequestData) -> Self {
+    pub fn with_data(data: TxnOffsetCommitRequestData) -> Self {
         Self {
             data,
             is_transaction_v2_enabled: true,
@@ -607,7 +607,7 @@ mod tests {
     }
 
     fn builder_with_metadata() -> TxnOffsetCommitRequestBuilder {
-        TxnOffsetCommitRequestBuilder::new_options(
+        TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn test_without_group_metadata_uses_sentinels() {
-        let builder = TxnOffsetCommitRequestBuilder::new_options(
+        let builder = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -658,7 +658,7 @@ mod tests {
     /// `group_metadata_set` is an OR: **any** of the three fields triggers it.
     #[test]
     fn test_group_metadata_set_is_an_or_across_all_three_fields() {
-        let none = TxnOffsetCommitRequestBuilder::new_options(
+        let none = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -671,7 +671,7 @@ mod tests {
         );
         assert!(!none.group_metadata_set());
 
-        let member_only = TxnOffsetCommitRequestBuilder::new_options(
+        let member_only = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -685,7 +685,7 @@ mod tests {
         );
         assert!(member_only.group_metadata_set(), "member id alone must count");
 
-        let generation_only = TxnOffsetCommitRequestBuilder::new_options(
+        let generation_only = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -699,7 +699,7 @@ mod tests {
         );
         assert!(generation_only.group_metadata_set(), "generation id alone must count");
 
-        let instance_only = TxnOffsetCommitRequestBuilder::new_options(
+        let instance_only = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("t")
                 .set_consumer_group_id("g")
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn test_build_allows_low_versions_without_group_metadata() {
         for version in 0..3 {
-            let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+            let mut builder = TxnOffsetCommitRequestBuilder::with_options(
                 TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                     .set_transactional_id("txn-1")
                     .set_consumer_group_id("group-1")
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn test_group_metadata_check_precedes_the_version_clamp() {
         // `is_transaction_v2_enabled` is false, so clamping stays active.
-        let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+        let mut builder = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -783,7 +783,7 @@ mod tests {
             "the clamp is only meaningful if the API supports higher versions"
         );
 
-        let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+        let mut builder = TxnOffsetCommitRequestBuilder::with_options(
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id("txn-1")
                 .set_consumer_group_id("group-1")
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn test_from_data_defaults_transaction_v2_to_enabled() {
-        let builder = TxnOffsetCommitRequestBuilder::new_data(TxnOffsetCommitRequestData::new());
+        let builder = TxnOffsetCommitRequestBuilder::with_data(TxnOffsetCommitRequestData::new());
         assert!(builder.is_transaction_v2_enabled(), "Java hardcodes true in this constructor");
     }
 
@@ -924,7 +924,7 @@ mod tests {
     fn test_serialization_round_trip_all_versions() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             // No group metadata, so every version including 0-2 is legal.
-            let mut builder = TxnOffsetCommitRequestBuilder::new_options(
+            let mut builder = TxnOffsetCommitRequestBuilder::with_options(
                 TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                     .set_transactional_id("txn-1")
                     .set_consumer_group_id("group-1")
@@ -995,7 +995,7 @@ mod tests {
 
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             let mut builder = if version < 3 {
-                TxnOffsetCommitRequestBuilder::new_options(
+                TxnOffsetCommitRequestBuilder::with_options(
                     TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                         .set_transactional_id("transactionalId")
                         .set_consumer_group_id("group-1")
@@ -1007,7 +1007,7 @@ mod tests {
                         .unwrap(),
                 )
             } else {
-                TxnOffsetCommitRequestBuilder::new_options(
+                TxnOffsetCommitRequestBuilder::with_options(
                     TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                         .set_transactional_id("transactionalId")
                         .set_consumer_group_id("group-1")
@@ -1056,7 +1056,7 @@ mod tests {
     #[test]
     fn test_version_support_for_group_metadata() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
-            TxnOffsetCommitRequestBuilder::new_options(
+            TxnOffsetCommitRequestBuilder::with_options(
                 TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                     .set_transactional_id("txn-1")
                     .set_consumer_group_id("group-1")

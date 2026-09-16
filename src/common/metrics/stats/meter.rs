@@ -37,7 +37,7 @@ pub struct Meter {
 impl Meter {
     /// Construct a `Meter` with seconds as time unit, backed by a `WindowedSum`.
     pub fn new(rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
-        Self::new_unit_rate_stat(
+        Self::with_unit_rate_stat(
             TimeUnit::Seconds,
             Arc::new(WindowedSum::new().into_sampled_stat()),
             rate_metric_name,
@@ -46,8 +46,8 @@ impl Meter {
     }
 
     /// Construct a `Meter` with the provided time unit, backed by a `WindowedSum`.
-    pub fn new_unit(unit: TimeUnit, rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
-        Self::new_unit_rate_stat(
+    pub fn with_unit(unit: TimeUnit, rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
+        Self::with_unit_rate_stat(
             unit,
             Arc::new(WindowedSum::new().into_sampled_stat()),
             rate_metric_name,
@@ -56,12 +56,12 @@ impl Meter {
     }
 
     /// Construct a `Meter` with seconds as time unit and a provided rate stat.
-    pub fn new_rate_stat(
+    pub fn with_rate_stat(
         rate_stat: Arc<SampledStat>,
         rate_metric_name: MetricName,
         total_metric_name: MetricName,
     ) -> Self {
-        Self::new_unit_rate_stat(TimeUnit::Seconds, rate_stat, rate_metric_name, total_metric_name)
+        Self::with_unit_rate_stat(TimeUnit::Seconds, rate_stat, rate_metric_name, total_metric_name)
     }
 
     /// Construct a `Meter` with the provided time unit and rate stat.
@@ -69,7 +69,7 @@ impl Meter {
     /// Panics if `rate_stat` is not a `WindowedSum`/`WindowedCount`, mirroring
     /// Java's `IllegalArgumentException` — this is a construction-time
     /// programming error (Meter is only meaningful with a windowed sum/count).
-    pub fn new_unit_rate_stat(
+    pub fn with_unit_rate_stat(
         unit: TimeUnit,
         rate_stat: Arc<SampledStat>,
         rate_metric_name: MetricName,
@@ -83,7 +83,7 @@ impl Meter {
         Self {
             rate_metric_name,
             total_metric_name,
-            rate: Arc::new(Rate::new_unit_stat(unit, rate_stat)),
+            rate: Arc::new(Rate::with_unit_stat(unit, rate_stat)),
             total: Arc::new(CumulativeSum::new()),
             rate_stat_is_windowed_count,
         }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn record_routes_count_total_as_one() {
         let meter =
-            Meter::new_rate_stat(Arc::new(WindowedCount::new().into_sampled_stat()), name("rate"), name("total"));
+            Meter::with_rate_stat(Arc::new(WindowedCount::new().into_sampled_stat()), name("rate"), name("total"));
         let config = MetricConfig::new();
         meter.record(&config, 42.0, 0);
         meter.record(&config, 7.0, 0);
@@ -197,6 +197,6 @@ mod tests {
             }
         }
         let stat = Arc::new(SampledStat::new(0.0, Box::new(NotSum)));
-        let _ = Meter::new_rate_stat(stat, name("rate"), name("total"));
+        let _ = Meter::with_rate_stat(stat, name("rate"), name("total"));
     }
 }

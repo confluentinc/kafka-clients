@@ -211,7 +211,7 @@ impl ConsumerUtils {
             // code's default message instead would silently discard the only
             // diagnostic the error carries.
             let message = err.to_string();
-            Error::KafkaError(KafkaError::new_message_source(Errors::UnknownServerError, message, err))
+            Error::KafkaError(KafkaError::with_message_source(Errors::UnknownServerError, message, err))
         }
     }
 
@@ -249,7 +249,7 @@ impl ConsumerUtils {
             // original unreachable to a programmatic caller.
             // Java wraps into `KafkaException` here.
             log::debug!("Wrapping non-Kafka error into the Kafka error hierarchy: cause={err}");
-            Error::KafkaError(KafkaError::new_message_source(
+            Error::KafkaError(KafkaError::with_message_source(
                 Errors::UnknownServerError,
                 message.to_string(),
                 err,
@@ -523,7 +523,7 @@ mod tests {
 
         let cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let subs = Arc::new(Mutex::new(ConsumerUtils::create_subscription_state(&cfg).unwrap()));
-        let metadata = ConsumerMetadata::new_config(&cfg, Arc::clone(&subs), ClusterResourceListeners::new());
+        let metadata = ConsumerMetadata::with_config(&cfg, Arc::clone(&subs), ClusterResourceListeners::new());
 
         let tp = TopicPartition::new("t".to_string(), 0);
         {
@@ -536,7 +536,7 @@ mod tests {
         let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::new_leader_epoch_metadata(42, Some(7), "metadata".to_string()).unwrap(),
+            OffsetAndMetadata::with_leader_epoch_metadata(42, Some(7), "metadata".to_string()).unwrap(),
         );
 
         ConsumerUtils::refresh_committed_offsets(&offsets, &metadata, &subs);
@@ -551,14 +551,14 @@ mod tests {
     fn refresh_committed_offsets_skips_unassigned_partition() {
         let cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let subs = Arc::new(Mutex::new(ConsumerUtils::create_subscription_state(&cfg).unwrap()));
-        let metadata = ConsumerMetadata::new_config(&cfg, Arc::clone(&subs), ClusterResourceListeners::new());
+        let metadata = ConsumerMetadata::with_config(&cfg, Arc::clone(&subs), ClusterResourceListeners::new());
 
         // No assignment — partition is unknown.
         let tp = TopicPartition::new("t".to_string(), 0);
         let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::new_leader_epoch_metadata(99, Some(5), String::new()).unwrap(),
+            OffsetAndMetadata::with_leader_epoch_metadata(99, Some(5), String::new()).unwrap(),
         );
 
         // Must not panic and must not seek anything.

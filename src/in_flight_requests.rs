@@ -70,7 +70,7 @@ impl InFlightRequest {
     /// Creates a new `InFlightRequest` from a `ClientRequest` and additional send-time metadata.
     ///
     /// This corresponds to the Java constructor that takes a `ClientRequest`.
-    pub fn new_client_request(
+    pub fn with_client_request(
         client_request: &mut super::ClientRequest,
         header: RequestHeader,
         is_internal_request: bool,
@@ -164,7 +164,7 @@ impl InFlightRequest {
     ///
     /// A timed-out request is also considered disconnected.
     pub fn timed_out(&mut self, time_ms: i64) -> ClientResponse {
-        ClientResponse::new_timed_out(
+        ClientResponse::with_timed_out(
             self.header.clone(),
             self.callback.take(),
             &self.destination,
@@ -459,7 +459,7 @@ mod tests {
         let id = *correlation_id;
         *correlation_id += 1;
 
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(0)

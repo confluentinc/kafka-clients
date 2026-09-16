@@ -295,7 +295,7 @@ impl<K, V> ConsumerRecord<K, V> {
     /// [`ConsumerRecord::NULL_SIZE`], headers to an empty [`RecordHeaders`], and both
     /// `leader_epoch` and `delivery_count` to `None`.
     pub fn new(topic: impl Into<Arc<str>>, partition: i32, offset: i64, key: Option<K>, value: Option<V>) -> Self {
-        Self::new_options(
+        Self::with_options(
             ConsumerRecordOptionsBuilder::new()
                 .set_topic(topic)
                 .set_partition(partition)
@@ -319,12 +319,12 @@ impl<K, V> ConsumerRecord<K, V> {
     /// Java's intermediate 11-arg constructor (`ConsumerRecord.java:107`) is
     /// *not* a separate Rust method: its body is literally this one with
     /// `deliveryCount = Optional.empty()`, and under CLAUDE.md §2 both derive
-    /// the same name `new_options` once the surplus parameters move into
+    /// the same name `with_options` once the surplus parameters move into
     /// [`ConsumerRecordOptions`]. Callers get the 11-arg form by leaving
     /// [`ConsumerRecordOptions::delivery_count`] at `None`.
     ///
     /// * `options` - every parameter of Java's widest constructor
-    pub fn new_options(options: ConsumerRecordOptions<K, V>) -> Self {
+    pub fn with_options(options: ConsumerRecordOptions<K, V>) -> Self {
         // Java validates `topic != null` and `headers != null`; both are
         // type-system invariants in Rust (Arc<str> and RecordHeaders).
         let ConsumerRecordOptions {

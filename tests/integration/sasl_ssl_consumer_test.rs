@@ -140,7 +140,7 @@ fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> Producer
 
 /// Produce `num_records` byte records to `tp` over SASL_SSL, then flush.
 async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &TopicPartition, num_records: usize) {
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new_config(
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_sasl_ssl_producer_config(bootstrap, ca_cert_pem),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -149,13 +149,13 @@ async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &Topic
 
     let mut last_future = None;
     for i in 0..num_records {
-        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::new_partition_key(
+        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(format!("key {i}").into_bytes()),
             Some(format!("value {i}").into_bytes()),
         )
-        .expect("ProducerRecord::new_partition_key should not fail for a non-negative partition");
+        .expect("ProducerRecord::with_partition_key should not fail for a non-negative partition");
         // Call the `Producer` trait `send` (1-arg) via fully-qualified syntax
         // so the inherent zero-copy
         // `KafkaProducer::<Vec<u8>,Vec<u8>>::send(record, callback)` does not

@@ -185,7 +185,7 @@ enum ProducerKind {
     /// A real Kafka producer connected to a cluster.
     ///
     /// The `Runtime` is stored alongside the producer so that:
-    /// 1. The sender background task (spawned by `new_config`) has a runtime to run on.
+    /// 1. The sender background task (spawned by `with_config`) has a runtime to run on.
     /// 2. Async trait methods (`send`, `flush`, `close`) are driven via `runtime.block_on()`.
     ///
     /// Drop order is left-to-right: the producer is dropped first (its `Drop`
@@ -366,7 +366,7 @@ fn producer_send(
                 .set_key(key.map(|k| k.to_vec()))
                 .build()
                 .and_then(|options| {
-                    ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+                    ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
                 })?;
             rt.block_on(mock.send(owned_record))
         },
@@ -396,7 +396,7 @@ fn producer_send_with_callback(
                 .set_key(key.map(|k| k.to_vec()))
                 .build()
                 .and_then(|options| {
-                    ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+                    ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
                 })?;
             rt.block_on(mock.send_with_callback(owned_record, Some(callback)))
         },
@@ -826,7 +826,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                     .set_headers(Some(headers))
                     .build()
                     .and_then(|options| {
-                        ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+                        ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
                     }) {
                     Ok(record) => {
                         if let Err(e) = mp.send_with_callback(record, Some(callback)).await {
@@ -947,7 +947,7 @@ pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut k
         .enable_all()
         .build()
         .expect("failed to create tokio runtime for MockProducer");
-    let kind = ProducerKind::Mock(Box::new(MockProducer::new_auto_complete(auto_complete)), runtime);
+    let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(auto_complete)), runtime);
     build_producer_handle(kind)
 }
 
@@ -1135,9 +1135,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         },
     };
 
-    // Enter the runtime so that KafkaProducer::new_config can call tokio::task::spawn.
+    // Enter the runtime so that KafkaProducer::new can call tokio::task::spawn.
     let _guard = runtime.enter();
-    let producer = match KafkaProducer::<Vec<u8>, Vec<u8>>::new_config(
+    let producer = match KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         config,
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -1308,7 +1308,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
         .set_key(key_slice)
         .build()
         .and_then(|options| {
-            ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+            ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
         }) {
         Ok(r) => r,
         Err(e) => {
@@ -1454,7 +1454,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
         .set_key(key_slice)
         .build()
         .and_then(|options| {
-            ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+            ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
         }) {
         Ok(r) => r,
         Err(e) => {
@@ -1577,7 +1577,7 @@ unsafe fn send_batch_inner(
             .set_key(key)
             .build()
             .and_then(|options| {
-                ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+                ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
             }) {
             Ok(r) => r,
             Err(e) => {
@@ -1751,7 +1751,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         .set_key(key_slice)
         .build()
         .and_then(|options| {
-            ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+            ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
         }) {
         Ok(r) => r,
         Err(e) => {
@@ -1865,7 +1865,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
             .set_key(key)
             .build()
             .and_then(|options| {
-                ProducerRecord::new_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
+                ProducerRecord::with_options(options).map_err(|e| Error::local_illegal_argument(e.message()))
             }) {
             Ok(r) => r,
             Err(e) => {
@@ -4766,7 +4766,7 @@ mod tests {
     /// The caller reclaims the handle with `reclaim_producer_handle`.
     fn dead_submission_handle() -> *mut kafka_producer_Producer_t {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let kind = ProducerKind::Mock(Box::new(MockProducer::new_auto_complete(true)), runtime);
+        let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(true)), runtime);
         // A disconnected completion channel: nothing fires on the drain-failure path,
         // so the sender is never used, but the field must be present.
         let (completion_tx, _completion_rx) = std::sync::mpsc::channel::<CompletionJob>();

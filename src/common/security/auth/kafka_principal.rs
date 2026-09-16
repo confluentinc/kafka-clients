@@ -41,13 +41,13 @@ impl KafkaPrincipal {
     ///
     /// Mirrors `new KafkaPrincipal(principalType, name)`.
     pub fn new(principal_type: impl Into<String>, name: impl Into<String>) -> Self {
-        Self::new_token_authenticated(principal_type, name, false)
+        Self::with_token_authenticated(principal_type, name, false)
     }
 
     /// Creates a new principal from a type, name, and token-authenticated flag.
     ///
     /// Mirrors `new KafkaPrincipal(principalType, name, tokenAuthenticated)`.
-    pub fn new_token_authenticated(
+    pub fn with_token_authenticated(
         principal_type: impl Into<String>,
         name: impl Into<String>,
         token_authenticated: bool,
@@ -143,8 +143,8 @@ mod tests {
 
     #[test]
     fn equals_and_hash_ignore_token_authenticated() {
-        let a = KafkaPrincipal::new_token_authenticated(KafkaPrincipal::USER_TYPE, "bob", false);
-        let b = KafkaPrincipal::new_token_authenticated(KafkaPrincipal::USER_TYPE, "bob", true);
+        let a = KafkaPrincipal::with_token_authenticated(KafkaPrincipal::USER_TYPE, "bob", false);
+        let b = KafkaPrincipal::with_token_authenticated(KafkaPrincipal::USER_TYPE, "bob", true);
         assert_eq!(a, b);
         assert_eq!(hash_of(&a), hash_of(&b));
     }

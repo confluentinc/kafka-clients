@@ -119,7 +119,7 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
         ("acks".to_string(), "all".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new_config(
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         ProducerConfig::new(&props).expect("producer config"),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -127,7 +127,7 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
     .expect("build producer");
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::new_partition_timestamp_key(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(1_700_000_000_000 + i as i64),
@@ -427,7 +427,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     let altered = admin
         .alter_consumer_group_offsets(
             &group_id,
-            &HashMap::from([(tp0.clone(), OffsetAndMetadata::new_metadata(5, "rewound by admin").unwrap())]),
+            &HashMap::from([(tp0.clone(), OffsetAndMetadata::with_metadata(5, "rewound by admin").unwrap())]),
             AlterConsumerGroupOffsetsOptions::new(),
         )
         .await

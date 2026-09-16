@@ -42,7 +42,7 @@
 //!
 //! The blocker is therefore client-side and out of scope here
 //! (`PLAN-multilanguage-admin.md` §0): `AdminClientConfig` recognises no
-//! `security.protocol` / `sasl.*` key and `KafkaAdminClient::new_config`
+//! `security.protocol` / `sasl.*` key and `KafkaAdminClient::new`
 //! (`src/admin/kafka_admin_client.rs:283-291`) passes a literal
 //! `SecurityProtocol::Plaintext`, so the admin client cannot authenticate at all.
 //! The fixture *does* already expose SASL_PLAINTEXT and SASL_SSL listeners with a
@@ -208,7 +208,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     let info = token.token_info();
     assert_eq!(info.owner(), &alice, "{backend} backend: the mock makes renewers[0] the owner");
     // `TokenInformation::new` sets the requester equal to the owner, and the
-    // harness rebuilds through `new_token_requester`, so this pins that the requester
+    // harness rebuilds through `with_token_requester`, so this pins that the requester
     // crossed as its own field rather than being re-derived from the owner.
     assert_eq!(
         info.token_requester(),

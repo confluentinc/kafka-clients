@@ -60,7 +60,7 @@ impl GroupAuthorizationError {
         let group_id = group_id.into();
         let message = format!("Not authorized to access group: {group_id}");
         Self {
-            kafka_error: KafkaError::new_message(Errors::GroupAuthorizationFailed, message),
+            kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
             group_id,
         }
     }
@@ -91,7 +91,7 @@ impl GroupAuthorizationError {
     /// the plain name (CLAUDE.md §2).
     pub fn new(group_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            kafka_error: KafkaError::new_message(Errors::GroupAuthorizationFailed, message),
+            kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
             group_id: group_id.into(),
         }
     }

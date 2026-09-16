@@ -55,8 +55,7 @@ fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    KafkaProducer::new_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-        .expect("build producer")
+    KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer)).expect("build producer")
 }
 
 /// Produce `num` records to `(topic, partition)`, waiting for the broker acks.
@@ -64,7 +63,7 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     let producer = build_producer(bootstrap);
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::new_partition_key(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(format!("key {i}").into_bytes()),
@@ -316,7 +315,7 @@ async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut
 
     // Delete everything before offset 5; the low watermark advances to 5.
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::new_before_offset(5))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(5))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -347,7 +346,7 @@ async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &
     produce_records(&bootstrap, &topic, 0, 5).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::new_before_offset(1000))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(1000))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -384,7 +383,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
 
     // Partition 5 does not exist (topic has only partition 0).
     let tp = TopicPartition::new(topic.clone(), 5);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::new_before_offset(0))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(0))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await

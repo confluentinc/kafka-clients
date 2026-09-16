@@ -108,19 +108,19 @@ impl KafkaError {
 
     /// Create a `KafkaError` from an error code with a custom message.
     /// Mirrors Java's `KafkaException(String message)`.
-    pub fn new_message(error: Errors, message: impl Into<String>) -> Self {
+    pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
         Self { error, custom_message: Some(message.into()), source: None }
     }
 
     /// Create a `KafkaError` from an error code, a custom message, and the error
     /// that caused it. Mirrors Java's `KafkaException(String message, Throwable cause)`.
-    pub fn new_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
+    pub fn with_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
         Self { error, custom_message: Some(message.into()), source: Some(Box::new(source)) }
     }
 
     /// Create a `KafkaError` from an error code and the error that caused it,
     /// keeping the code's default message. Mirrors `KafkaException(Throwable cause)`.
-    pub fn new_source(error: Errors, source: Error) -> Self {
+    pub fn with_source(error: Errors, source: Error) -> Self {
         Self { error, custom_message: None, source: Some(Box::new(source)) }
     }
 

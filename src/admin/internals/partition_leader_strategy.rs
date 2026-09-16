@@ -210,7 +210,7 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
                 topics.push(tp.topic());
             }
         }
-        Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(
+        Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(
             Some(&topics),
             false,
         ))
@@ -386,7 +386,7 @@ mod tests {
             }
         }
         data.set_topics(topics);
-        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn response_with_topic_error(topic: &str, error: Errors) -> ConcreteResponse {
@@ -395,7 +395,7 @@ mod tests {
         t.set_name(Some(topic.to_string()));
         t.set_error_code(error.code());
         data.set_topics(vec![t]);
-        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn handle(keys: &[TopicPartition], response: &ConcreteResponse) -> LookupResult<TopicPartition> {

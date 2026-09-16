@@ -80,7 +80,7 @@ impl PartitionData {
     /// Constructs a partition entry with all fields explicit.
     ///
     /// Translates the 6-arg Java constructor.
-    pub fn new_last_fetched_epoch(
+    pub fn with_last_fetched_epoch(
         topic_id: Uuid,
         fetch_offset: i64,
         log_start_offset: i64,
@@ -202,8 +202,8 @@ impl FetchRequest {
                 topic_names.get(&topic.topic_id).cloned().unwrap_or_default()
             };
             for fp in &topic.partitions {
-                let tip = TopicIdPartition::new_partition_topic(topic.topic_id, fp.partition, name.clone());
-                let pd = PartitionData::new_last_fetched_epoch(
+                let tip = TopicIdPartition::with_partition_topic(topic.topic_id, fp.partition, name.clone());
+                let pd = PartitionData::with_last_fetched_epoch(
                     topic.topic_id,
                     fp.fetch_offset,
                     fp.log_start_offset,
@@ -657,8 +657,8 @@ mod tests {
     #[test]
     fn test_build_removed_partitions_v12_no_replaced() {
         let id = Uuid::random_uuid();
-        let removed = vec![TopicIdPartition::new_partition_topic(id, 5, "x")];
-        let replaced = vec![TopicIdPartition::new_partition_topic(id, 6, "y")];
+        let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
             .set_removed(removed)
             .set_replaced(replaced);
@@ -672,8 +672,8 @@ mod tests {
     #[test]
     fn test_build_removed_and_replaced_v13() {
         let id = Uuid::random_uuid();
-        let removed = vec![TopicIdPartition::new_partition_topic(id, 5, "x")];
-        let replaced = vec![TopicIdPartition::new_partition_topic(id, 6, "y")];
+        let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
             .set_removed(removed)
             .set_replaced(replaced);
@@ -690,8 +690,8 @@ mod tests {
         assert!(builder.removed().is_empty());
         assert!(builder.replaced().is_empty());
 
-        let removed = vec![TopicIdPartition::new_partition_topic(id, 5, "x")];
-        let replaced = vec![TopicIdPartition::new_partition_topic(id, 6, "y")];
+        let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
         let builder = builder.set_removed(removed.clone()).set_replaced(replaced.clone());
         assert_eq!(removed.as_slice(), builder.removed());
         assert_eq!(replaced.as_slice(), builder.replaced());

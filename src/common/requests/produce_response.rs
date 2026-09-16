@@ -155,7 +155,7 @@ pub struct PartitionResponse {
 /// satisfy that naming rule (DoD #7).
 ///
 /// Because the cap applies to the *whole* group, Java's `:184` and `:188` forms
-/// derive the same name — `new_options`, differing only in whether they supply
+/// derive the same name — `with_options`, differing only in whether they supply
 /// `currentLeader`. They therefore collapse into the single constructor below,
 /// with `:184`'s `new ProduceResponseData.LeaderIdAndEpoch()` becoming this
 /// struct's initial `current_leader`.
@@ -317,7 +317,7 @@ impl PartitionResponse {
     ///
     /// Corresponds to Java's `PartitionResponse(Errors, String)`
     /// (`ProduceResponse.java:172`).
-    pub fn new_error_message(error: Errors, error_message: Option<String>) -> Self {
+    pub fn with_error_message(error: Errors, error_message: Option<String>) -> Self {
         Self {
             error,
             base_offset: ProduceResponse::INVALID_OFFSET,
@@ -339,7 +339,7 @@ impl PartitionResponse {
     /// [`PartitionResponseOptions`]. Leaving that struct's `current_leader` at
     /// its initial value — `:184`'s own `new LeaderIdAndEpoch()` — gives `:184`'s
     /// behaviour.
-    pub fn new_options(options: PartitionResponseOptions) -> Self {
+    pub fn with_options(options: PartitionResponseOptions) -> Self {
         let PartitionResponseOptions {
             error,
             base_offset,
@@ -390,7 +390,7 @@ pub struct RecordError {
 
 impl RecordError {
     /// Creates a `RecordError` with batch index and optional message.
-    pub fn new_message(batch_index: i32, message: Option<String>) -> Self {
+    pub fn with_message(batch_index: i32, message: Option<String>) -> Self {
         Self { batch_index, message }
     }
 
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_record_error_display() {
-        let re = RecordError::new_message(5, Some("bad record".to_string()));
+        let re = RecordError::with_message(5, Some("bad record".to_string()));
         assert_eq!(re.to_string(), "RecordError(batchIndex=5, message='bad record')");
 
         let re_none = RecordError::new(3);

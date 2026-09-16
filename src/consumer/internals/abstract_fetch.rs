@@ -516,7 +516,7 @@ impl AbstractFetch {
             // `partition` is the owned loop key; move it into the
             // CompletedFetch (its topic is an Arc<str>, so even the prior
             // clone was an Arc bump, not a String copy — §27 topic-name rule).
-            let cf = CompletedFetch::new_full(
+            let cf = CompletedFetch::with_full(
                 self.subscriptions.clone(),
                 self.decompression_buffer_supplier.clone(),
                 partition,
@@ -543,7 +543,7 @@ impl AbstractFetch {
             let mut leader_nodes: Vec<Node> = Vec::new();
             for endpoint in &response_node_endpoints {
                 if endpoint.node_id != -1 {
-                    leader_nodes.push(Node::new_rack(
+                    leader_nodes.push(Node::with_rack(
                         endpoint.node_id,
                         endpoint.host.clone(),
                         endpoint.port,
@@ -1379,9 +1379,15 @@ mod tests {
 
     fn encode_records(starting_offset: i64, count: i32) -> Vec<u8> {
         let records: Vec<SimpleRecord> = (0..count)
-            .map(|i| SimpleRecord::new(0, Some(b"key".to_vec()), Some(format!("value-{i}").into_bytes()), vec![]))
+            .map(|i| {
+                SimpleRecord::with_timestamp_key_value(
+                    0,
+                    Some(b"key".to_vec()),
+                    Some(format!("value-{i}").into_bytes()),
+                )
+            })
             .collect();
-        let mr = MemoryRecords::with_records_at_offset(
+        let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
             Compression::none(),

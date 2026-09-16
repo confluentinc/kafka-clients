@@ -104,7 +104,7 @@ use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelop
 /// behavior-equivalent at the channel / shutdown level:
 ///
 ///   - [`BgJoin::Spawned`] — a `tokio::spawn`ed task on the caller's
-///     runtime. Used by unit tests and `new_with_components` (no-op
+///     runtime. Used by unit tests and `with_components` (no-op
 ///     handle). Joined on close via `JoinHandle::await`.
 ///   - [`BgJoin::Dedicated`] — the production strategy (Phase 21): the
 ///     bg loop runs on its own dedicated `std::thread` hosting a
@@ -1030,7 +1030,7 @@ pub(crate) struct NetworkThreadCloseHandle {
 }
 
 impl NetworkThreadCloseHandle {
-    /// Constructor used by `new_with_components` and unit tests. The
+    /// Constructor used by `with_components` and unit tests. The
     /// closures capture the concrete `ConsumerNetworkThread<K>` clones
     /// of the close / wakeup state so the outer struct can stay
     /// non-generic over `K`. The bg loop runs as a `tokio::spawn`ed task.
@@ -1051,7 +1051,7 @@ impl NetworkThreadCloseHandle {
     /// hosting a `current_thread` tokio runtime; `done` resolves when
     /// the bg loop has finished `cleanup()`, and `thread` is the OS
     /// thread handle reaped afterwards.
-    pub(crate) fn new_dedicated(
+    pub(crate) fn with_dedicated(
         signal_close_fn: Box<dyn Fn() + Send + Sync>,
         wakeup_fn: Box<dyn Fn() + Send + Sync>,
         done: tokio::sync::oneshot::Receiver<()>,
@@ -1473,7 +1473,7 @@ impl ConsumerStateNotifier {
         };
         let mut guard = self.group_metadata.lock().unwrap();
         #[allow(deprecated)]
-        let next = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+        let next = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
             self.group_id.clone(),
             epoch,
             member_id.to_string(),
@@ -1511,7 +1511,7 @@ impl ConsumerStateNotifier {
             // build fresh metadata with UNKNOWN epoch + member, preserving
             // the old group_id + group_instance_id.
             #[allow(deprecated)]
-            let next = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+            let next = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
                 old.group_id().to_string(),
                 -1, // JoinGroupRequest.UNKNOWN_GENERATION_ID
                 "", // JoinGroupRequest.UNKNOWN_MEMBER_ID
@@ -1665,7 +1665,7 @@ where
     ///   `ConsumerMembershipManager` (PLAN.md §"State-notifier
     ///   registration").
     /// - **Commit (3/N):** Adds bg-task spawn + `NetworkThreadCloseHandle`
-    ///   assembly + `Self::new_with_components(...)` call. After commit
+    ///   assembly + `Self::with_components(...)` call. After commit
     ///   (3/N) this constructor compiles end-to-end.
     ///
     /// PLAINTEXT only in Phase 12 (PLAN.md §"Out of scope" — SSL/SASL
@@ -1691,8 +1691,29 @@ where
     /// The other half of Java's catch body — `close(Duration.ZERO, ...)` to
     /// release partially-built resources (KAFKA-2121) — has no counterpart
     /// here: every fallible step in `new_inner` precedes the `tokio::spawn`,
-    /// which happens inside the infallible `new_with_components`, so no
+    /// which happens inside the infallible `with_components`, so no
     /// resource needing shutdown exists yet on any error path.
+    /// # Java's no-deserializer constructors are deliberately not translated
+    ///
+    /// Java's public entry point is `KafkaConsumer`, which has four
+    /// constructors; the two without deserializers — `KafkaConsumer(Map)`
+    /// (`KafkaConsumer.java:557`) and `KafkaConsumer(Properties)` (`:570`) —
+    /// delegate to `this(configs, null, null)` and rely on
+    /// `config.getConfiguredInstance(KEY_DESERIALIZER_CLASS_CONFIG,
+    /// Deserializer.class)` to instantiate the class named by
+    /// `key.deserializer` reflectively. Rust has no reflection and a
+    /// deserializer is typed in this consumer's own `K` / `V`, so the
+    /// deserializers are always supplied here as instances, and
+    /// [`ConsumerConfig`](crate::consumer::ConsumerConfig) carries no
+    /// deserializer state — no field, no config-key constant, and no setter.
+    /// A `key.deserializer` / `value.deserializer` entry in the property map is
+    /// therefore an unrecognised key, warned about and ignored, exactly as
+    /// `key.serializer` is on the producer side.
+    ///
+    /// This mirrors the producer exactly, including the CLAUDE.md §2
+    /// consequence for the plain name `new` — see
+    /// [`KafkaProducer::new`](crate::producer::KafkaProducer::new) for the full
+    /// reasoning, which is not repeated here.
     pub fn new(
         config: ConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
@@ -1704,7 +1725,7 @@ where
             // `KafkaException` too, so there is no `is_kafka_error()` guard
             // here. "Failed to construct kafka consumer" is the string users
             // match on.
-            Error::KafkaError(crate::common::KafkaError::new_message_source(
+            Error::KafkaError(crate::common::KafkaError::with_message_source(
                 crate::common::Errors::UnknownServerError,
                 "Failed to construct kafka consumer",
                 err,
@@ -1750,7 +1771,7 @@ where
         let auto_commit_enabled = config.enable_auto_commit();
         // Java line 397 — `defaultApiTimeoutMs = Duration.ofMillis(...)`.
         // Read but stored on the consumer struct via
-        // `new_with_components`.
+        // `with_components`.
         let _default_api_timeout_ms = config.default_api_timeout_ms;
 
         // Java lines 393-394 — `backgroundEventQueue` /
@@ -1783,7 +1804,7 @@ where
         let cluster_resource_listeners = ClusterResourceListeners::new();
 
         // Java line 415 — `metadata = metadataFactory.build(...)`.
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             Arc::clone(&subscriptions),
             cluster_resource_listeners,
@@ -1796,7 +1817,7 @@ where
         metadata.bootstrap(addresses);
 
         // Java line 420 — `fetchConfig = new FetchConfig(config)`.
-        let fetch_config = FetchConfig::new_consumer_config(&config)?;
+        let fetch_config = FetchConfig::with_consumer_config(&config)?;
         // Java line 421 — `isolationLevel = fetchConfig.isolationLevel`.
         let _isolation_level = fetch_config.isolation_level;
 
@@ -1858,7 +1879,7 @@ where
 
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
-        // `new_config` Selector / NetworkClient wiring at
+        // `with_config` Selector / NetworkClient wiring at
         // `src/producer/kafka_producer.rs:278-292`.
         //
         // Mirrors Java's `AsyncKafkaConsumer` `LogContext` prefix
@@ -1889,7 +1910,7 @@ where
             log_context.clone(),
         );
         let shared_metadata = metadata.metadata_arc();
-        let network_client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
+        let network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             selector,
             shared_metadata,
             config.client_id(),
@@ -1951,7 +1972,7 @@ where
         // `ConsumerInterceptors` for both the consumer and this invoker, so
         // the two are behaviorally identical today (both hold empty Vecs).
         // The seam that CAN carry a non-empty interceptor chain is
-        // `new_with_components` (`pub(crate)`); when reflective interceptor
+        // `with_components` (`pub(crate)`); when reflective interceptor
         // loading is added in a future milestone, share the consumer's
         // interceptor Arc here so the invoker dispatches through the same
         // loaded list rather than this empty one.
@@ -1960,7 +1981,7 @@ where
 
         // Java line 447 — `groupMetadata.set(initializeGroupMetadata(...))`
         // — only when `group.id` is present. The cache itself lives on
-        // the consumer struct (built inside `new_with_components`).
+        // the consumer struct (built inside `with_components`).
         //
         // `initializeGroupMetadata(String, Optional<String>)`
         // (`AsyncKafkaConsumer.java:747-757`) rejects a present-but-empty
@@ -2272,7 +2293,7 @@ where
         // hand-off (so `Consumer::group_metadata()` reads the same slot).
         //
         // Issue 2 from the Phase-12 Critic review: previously the ctor
-        // built TWO notifiers (one here, one inside `new_with_components`),
+        // built TWO notifiers (one here, one inside `with_components`),
         // so `group_metadata` updates went to a slot the app side never
         // read. Single-notifier wiring now closes that gap.
         let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
@@ -2498,12 +2519,12 @@ where
             .expect("spawn consumer io thread");
 
         let network_thread_close =
-            NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
+            NetworkThreadCloseHandle::with_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
 
         // ── Assemble `AsyncKafkaConsumerComponents` and hand off ──
         //
         // The Phase-11 test seam stays — the production path builds the
-        // components struct and calls `Self::new_with_components(...)`.
+        // components struct and calls `Self::with_components(...)`.
         // Phase-12 Issue 2 (Critic review) consolidated to a single
         // `ConsumerStateNotifier`: the Arc registered on the membership
         // manager earlier in this ctor and the Arc stored on the consumer
@@ -2541,7 +2562,7 @@ where
             state_notifier,
         };
 
-        Ok(Self::new_with_components(components))
+        Ok(Self::with_components(components))
     }
 
     /// Builds the consumer's `Metrics` registry and `FetchMetricsManager`.
@@ -2569,7 +2590,7 @@ where
             .set_record_level(recording_level)
             .set_tags(tags);
 
-        let metrics = Arc::new(Metrics::new_default_config(Arc::new(metric_config)));
+        let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
 
         // `client-id` is a default config tag, so it is added automatically to
         // every metric name; the registry's template tag set therefore lists
@@ -2582,7 +2603,7 @@ where
         (metrics, manager)
     }
 
-    pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
+    pub(crate) fn with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
         let auto_commit_enabled = components.config.enable_auto_commit();
         let default_api_timeout_ms = components.config.default_api_timeout_ms as i64;
         let retry_backoff_ms = components.config.retry_backoff_ms();
@@ -5157,7 +5178,7 @@ where
                 // `OffsetsForTimes`; see COMMENTS.DONE.1.md Issue 6
                 // for the regression where the `None`→drop filter
                 // silently elided every entry due to
-                // OffsetAndTimestamp::new_leader_epoch rejecting
+                // OffsetAndTimestamp::with_leader_epoch rejecting
                 // negative timestamps.
                 let mut out = HashMap::with_capacity(offsets_map.len());
                 for (tp, opt) in offsets_map {
@@ -6201,7 +6222,7 @@ mod tests {
         let client_id: Arc<str> = Arc::from(config.client_id.as_str());
 
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -6334,7 +6355,7 @@ mod tests {
             state_notifier,
         };
         (
-            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::with_components(components),
             ConsumerTestHandles {
                 app_event_rx,
                 bg_event_tx,
@@ -6612,7 +6633,7 @@ mod tests {
     /// registered listeners; we assert that the `CommitRequestManager`'s
     /// `member_info.member_id` updated to match the membership
     /// manager's auto-generated UUID. Reverting the listener
-    /// registration in `new_with_components` makes this test fail with
+    /// registration in `with_components` makes this test fail with
     /// an empty `member_id`.
     /// Java wraps the whole `AsyncKafkaConsumer` constructor body in
     /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
@@ -11143,7 +11164,7 @@ mod tests {
     //
     // The production `AsyncKafkaConsumer::new()` runs the bg loop on a
     // dedicated `std::thread` hosting a `current_thread` runtime and
-    // builds a `NetworkThreadCloseHandle::new_dedicated(...)`. These
+    // builds a `NetworkThreadCloseHandle::with_dedicated(...)`. These
     // tests model that exact construction (running flag → bg loop →
     // wakeup → `done` oneshot → OS thread reap) without needing a broker,
     // and assert the close path joins the dedicated thread cleanly within
@@ -11194,7 +11215,7 @@ mod tests {
             wakeup_wake.notify_one();
         });
 
-        let handle = NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
+        let handle = NetworkThreadCloseHandle::with_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
         (handle, running, wake)
     }
 
@@ -11254,7 +11275,7 @@ mod tests {
             .expect("spawn panicking test io thread");
 
         let mut handle =
-            NetworkThreadCloseHandle::new_dedicated(Box::new(|| {}), Box::new(|| {}), done_rx, thread_handle);
+            NetworkThreadCloseHandle::with_dedicated(Box::new(|| {}), Box::new(|| {}), done_rx, thread_handle);
 
         let result = tokio::time::timeout(Duration::from_secs(5), handle.await_join())
             .await

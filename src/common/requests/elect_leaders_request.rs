@@ -97,7 +97,7 @@ impl ElectLeadersRequest {
                 election_results.push(election_result);
             }
         }
-        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new_options(
+        ConcreteResponse::ElectLeaders(ElectLeadersResponse::with_options(
             ElectLeadersResponseOptionsBuilder::new()
                 .set_throttle_time_ms(throttle_time_ms)
                 .set_error_code(error.code())

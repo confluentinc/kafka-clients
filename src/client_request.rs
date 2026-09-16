@@ -101,7 +101,7 @@ impl ClientRequest {
     ///
     /// Returns an error if the API key is not recognized.
     pub fn make_header(&self, version: i16) -> io::Result<RequestHeader> {
-        RequestHeader::new_options(
+        RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(self.api_key())
                 .set_request_version(version)

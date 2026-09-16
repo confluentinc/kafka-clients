@@ -62,7 +62,7 @@ impl ByteBufferSend {
     ///
     /// This constructor allows specifying the size explicitly, which may differ from the
     /// sum of buffer lengths if buffers have already been partially consumed.
-    pub fn new_size(buffers: Vec<Bytes>, size: usize) -> Self {
+    pub fn with_size(buffers: Vec<Bytes>, size: usize) -> Self {
         let buffers = buffers.into_iter().map(|b| (b, 0)).collect();
         Self { buffers, size, remaining: size, pending: false }
     }

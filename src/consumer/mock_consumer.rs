@@ -452,8 +452,8 @@ where
     fn group_metadata(&self) -> ConsumerGroupMetadata {
         // Java line 692-693: hard-coded sentinel values.
         #[allow(deprecated)]
-        // ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id is the only way to set the fields.
-        ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id("dummy.group.id", 1, "1", None)
+        // ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id is the only way to set the fields.
+        ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id("dummy.group.id", 1, "1", None)
     }
 
     fn client_id(&self) -> &str {
@@ -688,7 +688,7 @@ where
                     self.subscriptions.set_position(&tp, new_position)?;
 
                     // Build the next-offsets entry (Java line 307).
-                    let oam = OffsetAndMetadata::new_leader_epoch_metadata(next_offset, leader_epoch, String::new())?;
+                    let oam = OffsetAndMetadata::with_leader_epoch_metadata(next_offset, leader_epoch, String::new())?;
                     next_offset_and_metadata.insert(tp.clone(), oam);
 
                     num_poll_records += 1;
@@ -707,7 +707,7 @@ where
             // `remove` above — no further action needed.
         }
 
-        Ok(ConsumerRecords::new_next_offsets(results, next_offset_and_metadata))
+        Ok(ConsumerRecords::with_next_offsets(results, next_offset_and_metadata))
     }
 
     // ── Commit ─────────────────────────────────────────────────────────

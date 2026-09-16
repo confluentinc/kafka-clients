@@ -578,7 +578,7 @@ pub(crate) mod test_support {
     /// request's key set, so the response body is never inspected (mirrors the
     /// Java tests, which always pass an empty `MetadataResponse`).
     pub(crate) fn placeholder_response() -> ConcreteResponse {
-        ConcreteResponse::Metadata(MetadataResponse::new_version(
+        ConcreteResponse::Metadata(MetadataResponse::with_version(
             MetadataResponseData::new(),
             ApiKeys::METADATA.latest_version(),
         ))
@@ -684,7 +684,7 @@ pub(crate) mod test_support {
                 self.expected.lock().unwrap().contains_key(&set),
                 "Unexpected lookup request for keys {set:?}"
             );
-            Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false))
+            Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false))
         }
 
         fn handle_response(&self, keys: &HashSet<String>, _response: &ConcreteResponse) -> LookupResult<String> {
@@ -723,7 +723,7 @@ pub(crate) mod test_support {
                 "Unexpected fulfillment request for keys {set:?}"
             );
             vec![RequestAndKeys {
-                request: Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false)),
+                request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false)),
                 keys: keys.clone(),
             }]
         }

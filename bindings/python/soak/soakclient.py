@@ -156,7 +156,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "interceptor.classes",
     "internal.throw.on.fetch.stable.offset.unsupported",
     "isolation.level",
-    "key.deserializer",
     "max.partition.fetch.bytes",
     "max.poll.interval.ms",
     "max.poll.records",
@@ -184,7 +183,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "share.acquire.mode",
     "socket.connection.setup.timeout.max.ms",
     "socket.connection.setup.timeout.ms",
-    "value.deserializer",
 ])
 
 # Both configs route every `ssl.*` key to apply_ssl_config_key() rather than

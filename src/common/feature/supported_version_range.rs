@@ -42,7 +42,7 @@ impl SupportedVersionRange {
     ///
     /// # Errors
     /// Returns an error if `min_version < 0`, `max_version < 0`, or `max_version < min_version`.
-    pub fn new_min_version(min_version: i16, max_version: i16) -> Result<Self, String> {
+    pub fn with_min_version(min_version: i16, max_version: i16) -> Result<Self, String> {
         if min_version < 0 || max_version < 0 || max_version < min_version {
             return Err(format!(
                 "Expected minValue >= 0, maxValue >= 0 and maxValue >= minValue, \
@@ -58,7 +58,7 @@ impl SupportedVersionRange {
     /// # Errors
     /// Returns an error if `max_version < 0`.
     pub fn new(max_version: i16) -> Result<Self, String> {
-        Self::new_min_version(0, max_version)
+        Self::with_min_version(0, max_version)
     }
 
     /// Creates a `SupportedVersionRange` from a map with `min_version` and `max_version` keys.
@@ -68,7 +68,7 @@ impl SupportedVersionRange {
     pub fn from_map(version_range_map: &HashMap<&str, i16>) -> Result<Self, String> {
         let min = value_or_err(MIN_VERSION_KEY_LABEL, version_range_map)?;
         let max = value_or_err(MAX_VERSION_KEY_LABEL, version_range_map)?;
-        Self::new_min_version(min, max)
+        Self::with_min_version(min, max)
     }
 
     /// Returns the minimum version.
@@ -139,19 +139,19 @@ mod tests {
     #[test]
     fn test_fail_due_to_invalid_params() {
         // min and max can't be < 0.
-        assert!(SupportedVersionRange::new_min_version(-1, -1).is_err());
+        assert!(SupportedVersionRange::with_min_version(-1, -1).is_err());
         // min can't be < 0.
-        assert!(SupportedVersionRange::new_min_version(-1, 0).is_err());
+        assert!(SupportedVersionRange::with_min_version(-1, 0).is_err());
         // max can't be < 0.
-        assert!(SupportedVersionRange::new_min_version(0, -1).is_err());
+        assert!(SupportedVersionRange::with_min_version(0, -1).is_err());
         // min can't be > max.
-        assert!(SupportedVersionRange::new_min_version(2, 1).is_err());
+        assert!(SupportedVersionRange::with_min_version(2, 1).is_err());
     }
 
     /// Translated from `SupportedVersionRangeTest.testFromToMap`
     #[test]
     fn test_from_to_map() {
-        let version_range = SupportedVersionRange::new_min_version(1, 2).unwrap();
+        let version_range = SupportedVersionRange::with_min_version(1, 2).unwrap();
         assert_eq!(1, version_range.min());
         assert_eq!(2, version_range.max());
 
@@ -210,26 +210,26 @@ mod tests {
     fn test_to_string() {
         assert_eq!(
             "SupportedVersionRange[min_version:1, max_version:1]",
-            SupportedVersionRange::new_min_version(1, 1).unwrap().to_string()
+            SupportedVersionRange::with_min_version(1, 1).unwrap().to_string()
         );
         assert_eq!(
             "SupportedVersionRange[min_version:1, max_version:2]",
-            SupportedVersionRange::new_min_version(1, 2).unwrap().to_string()
+            SupportedVersionRange::with_min_version(1, 2).unwrap().to_string()
         );
     }
 
     /// Translated from `SupportedVersionRangeTest.testEquals`
     #[test]
     fn test_equals() {
-        let tested = SupportedVersionRange::new_min_version(1, 1).unwrap();
+        let tested = SupportedVersionRange::with_min_version(1, 1).unwrap();
         assert_eq!(tested, tested);
-        assert_ne!(SupportedVersionRange::new_min_version(1, 2).unwrap(), tested);
+        assert_ne!(SupportedVersionRange::with_min_version(1, 2).unwrap(), tested);
     }
 
     /// Translated from `SupportedVersionRangeTest.testMinMax`
     #[test]
     fn test_min_max() {
-        let version_range = SupportedVersionRange::new_min_version(1, 2).unwrap();
+        let version_range = SupportedVersionRange::with_min_version(1, 2).unwrap();
         assert_eq!(1, version_range.min());
         assert_eq!(2, version_range.max());
     }
@@ -237,12 +237,12 @@ mod tests {
     /// Translated from `SupportedVersionRangeTest.testIsIncompatibleWith`
     #[test]
     fn test_is_incompatible_with() {
-        assert!(!SupportedVersionRange::new_min_version(1, 1).unwrap().is_incompatible_with(1));
-        assert!(!SupportedVersionRange::new_min_version(1, 4).unwrap().is_incompatible_with(2));
-        assert!(!SupportedVersionRange::new_min_version(1, 4).unwrap().is_incompatible_with(1));
-        assert!(!SupportedVersionRange::new_min_version(1, 4).unwrap().is_incompatible_with(4));
+        assert!(!SupportedVersionRange::with_min_version(1, 1).unwrap().is_incompatible_with(1));
+        assert!(!SupportedVersionRange::with_min_version(1, 4).unwrap().is_incompatible_with(2));
+        assert!(!SupportedVersionRange::with_min_version(1, 4).unwrap().is_incompatible_with(1));
+        assert!(!SupportedVersionRange::with_min_version(1, 4).unwrap().is_incompatible_with(4));
 
-        assert!(SupportedVersionRange::new_min_version(2, 3).unwrap().is_incompatible_with(1));
-        assert!(SupportedVersionRange::new_min_version(2, 3).unwrap().is_incompatible_with(4));
+        assert!(SupportedVersionRange::with_min_version(2, 3).unwrap().is_incompatible_with(1));
+        assert!(SupportedVersionRange::with_min_version(2, 3).unwrap().is_incompatible_with(4));
     }
 }

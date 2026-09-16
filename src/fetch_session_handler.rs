@@ -245,7 +245,7 @@ impl FetchSessionHandler {
                     self.node,
                     response.session_id()
                 );
-                self.next_metadata = FetchMetadata::new_incremental(response.session_id());
+                self.next_metadata = FetchMetadata::with_incremental(response.session_id());
                 true
             }
         } else {

@@ -659,7 +659,7 @@ mod tests {
     fn setup() -> Fixture {
         let time = Arc::new(MockTime::new());
         let config = Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info));
-        let metrics = Arc::new(Metrics::new_default_config_reporters_time(
+        let metrics = Arc::new(Metrics::with_default_config_reporters_time(
             config,
             Vec::new(),
             time.clone() as Arc<_>,

@@ -185,7 +185,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 /// All records are fired to the producer up front, then `flush()` waits
 /// for the broker acks. The producer is then closed.
 async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new_config(
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -198,14 +198,14 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::new_partition_timestamp_key(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
                 .await

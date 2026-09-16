@@ -818,7 +818,7 @@ impl RecordAccumulator {
     }
 
     fn records_builder(&self, buffer: Vec<u8>) -> MemoryRecordsBuilder {
-        MemoryRecords::builder_with_buffer(
+        MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             self.compression.clone(),
@@ -3240,7 +3240,7 @@ mod tests {
         let k = key();
 
         let builder_buffer = vec![0u8; small_batch_size as usize];
-        let mut builder = MemoryRecords::builder_with_buffer(
+        let mut builder = MemoryRecords::builder_with_buffer_magic(
             builder_buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
@@ -3690,14 +3690,14 @@ mod tests {
 
         // Create a big batch manually
         let buffer = vec![0u8; 4096];
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let mut batch = ProducerBatch::with_split(tp1(), builder, now, true);
 
         let v = vec![0u8; 1024];
         let acked = Arc::new(std::sync::atomic::AtomicI32::new(0));
@@ -3883,14 +3883,14 @@ mod tests {
 
         // Create an oversized batch manually that will need splitting
         let buffer = vec![0u8; 4096];
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, 0, true);
+        let mut big_batch = ProducerBatch::with_split(tp1(), builder, 0, true);
 
         // Append enough records to fill the batch
         for _ in 0..20 {
@@ -3912,9 +3912,9 @@ mod tests {
             let num_split = accum.split_and_reenqueue(
                 // We need to consume the batch, but drain returns owned ProducerBatch
                 // We'll just verify the split mechanics work.
-                ProducerBatch::new_with_split(
+                ProducerBatch::with_split(
                     tp1(),
-                    MemoryRecords::builder_with_buffer(
+                    MemoryRecords::builder_with_buffer_magic(
                         vec![0u8; 2048],
                         RecordBatch::CURRENT_MAGIC_VALUE,
                         Compression::none(),
@@ -4012,14 +4012,14 @@ mod tests {
 
         // Create a large producer batch manually
         let buffer = vec![0u8; batch_size as usize];
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let mut big_batch = ProducerBatch::with_split(tp1(), builder, now, true);
 
         // Populate with 100 records of 1KB each
         let large_value = vec![0u8; 1024];
@@ -4367,14 +4367,14 @@ mod tests {
         // sub-batch. The producer state is assigned as the drain would
         // (`RecordAccumulator.java:918`), which is the precondition
         // `assignProducerStateToBatches` needs.
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 4096],
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
             TimestampType::CreateTime,
             0,
         );
-        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let mut big_batch = ProducerBatch::with_split(tp1(), builder, now, true);
         let payload = vec![0u8; 1024];
         for _ in 0..2 {
             assert!(

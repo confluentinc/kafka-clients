@@ -152,7 +152,7 @@ impl DescribeDelegationTokenResponse {
     /// Corresponds to Java's
     /// `DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData)`
     /// (`DescribeDelegationTokenResponse.java:73`).
-    pub fn new_data(data: DescribeDelegationTokenResponseData) -> Self {
+    pub fn with_data(data: DescribeDelegationTokenResponseData) -> Self {
         Self { data }
     }
 
@@ -161,7 +161,7 @@ impl DescribeDelegationTokenResponse {
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors,
     /// List<DelegationToken>)` (`DescribeDelegationTokenResponse.java:38`). The
     /// token requester is only encoded on v3+.
-    pub fn new_options(options: DescribeDelegationTokenResponseOptions<'_>) -> Self {
+    pub fn with_options(options: DescribeDelegationTokenResponseOptions<'_>) -> Self {
         let DescribeDelegationTokenResponseOptions { version, throttle_time_ms, error, tokens } = options;
         let described: Vec<DescribedDelegationToken> = tokens
             .iter()
@@ -197,15 +197,15 @@ impl DescribeDelegationTokenResponse {
         data.throttle_time_ms = throttle_time_ms;
         data.error_code = error.code();
         data.tokens = described;
-        Self::new_data(data)
+        Self::with_data(data)
     }
 
     /// Builds an error response with no tokens.
     ///
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`
     /// (`DescribeDelegationTokenResponse.java:69`).
-    pub fn new_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
-        Self::new_options(
+    pub fn with_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
+        Self::with_options(
             DescribeDelegationTokenResponseOptionsBuilder::new()
                 .set_version(version)
                 .set_throttle_time_ms(throttle_time_ms)
@@ -257,7 +257,7 @@ impl DescribeDelegationTokenResponse {
                     .iter()
                     .map(|r| KafkaPrincipal::new(r.principal_type.clone(), r.principal_name.clone()))
                     .collect();
-                let info = TokenInformation::new_token_requester(
+                let info = TokenInformation::with_token_requester(
                     ddt.token_id.clone(),
                     KafkaPrincipal::new(ddt.principal_type.clone(), ddt.principal_name.clone()),
                     KafkaPrincipal::new(
@@ -296,7 +296,7 @@ impl DescribeDelegationTokenResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeDelegationTokenResponseData::read(readable, version)?;
-        Ok(Self::new_data(data))
+        Ok(Self::with_data(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
@@ -322,7 +322,7 @@ mod tests {
     use super::*;
 
     fn token(id: &str) -> DelegationToken {
-        let info = TokenInformation::new_token_requester(
+        let info = TokenInformation::with_token_requester(
             id,
             KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice"),
             KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "requester"),
@@ -338,7 +338,7 @@ mod tests {
     fn tokens_round_trip_through_response_v3() {
         let version = 3;
         let tokens = vec![token("id-1"), token("id-2")];
-        let response = DescribeDelegationTokenResponse::new_options(
+        let response = DescribeDelegationTokenResponse::with_options(
             DescribeDelegationTokenResponseOptionsBuilder::new()
                 .set_version(version)
                 .set_throttle_time_ms(0)
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn requester_not_encoded_below_v3() {
         let tokens = vec![token("id-1")];
-        let response = DescribeDelegationTokenResponse::new_options(
+        let response = DescribeDelegationTokenResponse::with_options(
             DescribeDelegationTokenResponseOptionsBuilder::new()
                 .set_version(2)
                 .set_throttle_time_ms(0)
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn error_only_has_no_tokens() {
-        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(
+        let response = DescribeDelegationTokenResponse::with_version_throttle_time_ms_error(
             3,
             25,
             Errors::DelegationTokenAuthDisabled,
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn display_redacts_token_id_and_hmac() {
-        let response = DescribeDelegationTokenResponse::new_options(
+        let response = DescribeDelegationTokenResponse::with_options(
             DescribeDelegationTokenResponseOptionsBuilder::new()
                 .set_version(3)
                 .set_throttle_time_ms(0)
@@ -404,7 +404,7 @@ mod tests {
     fn known_wire_vector_v3_error_only() {
         use crate::common::requests::ConcreteResponse;
         let response =
-            DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(3, 9, Errors::DelegationTokenNotFound);
+            DescribeDelegationTokenResponse::with_version_throttle_time_ms_error(3, 9, Errors::DelegationTokenNotFound);
         let mut response = ConcreteResponse::DescribeDelegationToken(response);
         let bytes = response.serialize(3).unwrap().into_buffer();
         let expected: Vec<u8> = vec![

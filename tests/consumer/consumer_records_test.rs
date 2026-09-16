@@ -84,7 +84,7 @@ fn test_records_by_partition() {
             } else {
                 assert_eq!(record_size as usize, records.len());
                 let last_record = records.last().unwrap();
-                let expected = OffsetAndMetadata::new_leader_epoch_metadata(
+                let expected = OffsetAndMetadata::with_leader_epoch_metadata(
                     last_record.offset() + 1,
                     last_record.leader_epoch(),
                     "",
@@ -184,7 +184,7 @@ fn build_topic_test_records(
                         .set_serialized_value_size(0)
                         .build()
                         .unwrap();
-                    let r: ConsumerRecord<i32, String> = ConsumerRecord::new_options(options);
+                    let r: ConsumerRecord<i32, String> = ConsumerRecord::with_options(options);
                     records.push(r);
                 }
             }
@@ -192,11 +192,11 @@ fn build_topic_test_records(
             partition_to_records.insert(tp.clone(), records);
             next_offsets.insert(
                 tp,
-                OffsetAndMetadata::new_leader_epoch_metadata(record_size as i64, None, "").unwrap(),
+                OffsetAndMetadata::with_leader_epoch_metadata(record_size as i64, None, "").unwrap(),
             );
         }
     }
-    ConsumerRecords::new_next_offsets(partition_to_records, next_offsets)
+    ConsumerRecords::with_next_offsets(partition_to_records, next_offsets)
 }
 
 fn validate_empty_partition(record: &ConsumerRecord<i32, String>, empty_partition_index: i32) {

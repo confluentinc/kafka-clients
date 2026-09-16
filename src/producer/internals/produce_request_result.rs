@@ -266,6 +266,11 @@ impl ProduceRequestResult {
     /// completion. The receiver yields `true` when `done()` is called.
     /// The actual result data can be read from the `ProduceRequestResult` methods
     /// after the subscription fires.
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.rx.clone()
     }

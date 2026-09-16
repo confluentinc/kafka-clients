@@ -61,7 +61,7 @@ impl ApiVersionsRequest {
     }
 
     /// Creates a new `ApiVersionsRequest` with an optional unsupported request version.
-    pub fn new_unsupported_request_version(
+    pub fn with_unsupported_request_version(
         data: ApiVersionsRequestData,
         version: i16,
         unsupported_request_version: Option<i16>,
@@ -171,7 +171,7 @@ impl ApiVersionsRequestBuilder {
     }
 
     /// Creates a builder that targets a specific version.
-    pub fn new_version(version: i16) -> Self {
+    pub fn with_version(version: i16) -> Self {
         let mut builder = Self::new();
         builder.oldest_allowed_version = version;
         builder.latest_allowed_version = version;
@@ -179,7 +179,7 @@ impl ApiVersionsRequestBuilder {
     }
 
     /// Creates a builder from custom data and version range.
-    pub fn new_data_oldest_allowed_version_latest_allowed_version(
+    pub fn with_data_oldest_allowed_version_latest_allowed_version(
         data: ApiVersionsRequestData,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_builder_new_version() {
-        let builder = ApiVersionsRequestBuilder::new_version(2);
+        let builder = ApiVersionsRequestBuilder::with_version(2);
         assert_eq!(builder.oldest_allowed_version(), 2);
         assert_eq!(builder.latest_allowed_version(), 2);
     }
@@ -274,7 +274,7 @@ mod tests {
         let request = ApiVersionsRequest::new(data.clone(), 0);
         assert!(!request.has_unsupported_request_version());
 
-        let request = ApiVersionsRequest::new_unsupported_request_version(data, 0, Some(99));
+        let request = ApiVersionsRequest::with_unsupported_request_version(data, 0, Some(99));
         assert!(request.has_unsupported_request_version());
     }
 

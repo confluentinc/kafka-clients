@@ -36,22 +36,22 @@ impl UserScramCredentialUpsertion {
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, String)`,
     /// which encodes the password with UTF-8.
-    pub fn new_str(user: impl Into<String>, credential_info: ScramCredentialInfo, password: &str) -> Self {
-        Self::new_bytes(user, credential_info, password.as_bytes().to_vec())
+    pub fn with_str(user: impl Into<String>, credential_info: ScramCredentialInfo, password: &str) -> Self {
+        Self::with_bytes(user, credential_info, password.as_bytes().to_vec())
     }
 
     /// Constructor that accepts a byte password and generates a random salt.
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[])`.
-    pub fn new_bytes(user: impl Into<String>, credential_info: ScramCredentialInfo, password: Vec<u8>) -> Self {
+    pub fn with_bytes(user: impl Into<String>, credential_info: ScramCredentialInfo, password: Vec<u8>) -> Self {
         let salt = generate_random_salt();
-        Self::new_salt(user, credential_info, password, salt)
+        Self::with_salt(user, credential_info, password, salt)
     }
 
     /// Constructor that accepts an explicit salt.
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[], byte[])`.
-    pub fn new_salt(
+    pub fn with_salt(
         user: impl Into<String>,
         credential_info: ScramCredentialInfo,
         password: Vec<u8>,
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn string_constructor_encodes_password_utf8_and_generates_salt() {
-        let upsertion = UserScramCredentialUpsertion::new_str(
+        let upsertion = UserScramCredentialUpsertion::with_str(
             "alice",
             ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4096),
             "pw",
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn explicit_salt_is_preserved() {
-        let upsertion = UserScramCredentialUpsertion::new_salt(
+        let upsertion = UserScramCredentialUpsertion::with_salt(
             "bob",
             ScramCredentialInfo::new(ScramMechanism::ScramSha512, 8192),
             b"secret".to_vec(),

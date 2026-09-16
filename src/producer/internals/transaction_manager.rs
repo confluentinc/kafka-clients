@@ -1251,7 +1251,7 @@ impl TransactionManager {
     /// the untranslated transactional arms stayed unreachable, is gone: Phase 5a
     /// implemented the transactional state machine and Phase 5b the four request
     /// handlers, Transaction V2 and two-phase commit, so nothing is deferred here
-    /// any more. `KafkaProducer::new_config` keeps its own guard on
+    /// any more. `KafkaProducer::new` keeps its own guard on
     /// `transactional.id` until Phase 6 wires the public API (PLAN §7.1), so the
     /// only way to build a transactional manager today is directly.
     pub(crate) fn new(
@@ -1547,7 +1547,7 @@ impl TransactionManager {
     /// identically there.
     ///
     /// The Sender is currently the *only* live caller, since
-    /// `KafkaProducer::new_config` still rejects `transactional.id` until Phase 6
+    /// `KafkaProducer::new` still rejects `transactional.id` until Phase 6
     /// (PLAN §7.1) — so hardcoding [`Caller::App`] was wrong for the one caller that
     /// exists.
     ///
@@ -1711,7 +1711,7 @@ impl TransactionManager {
                 .insert(topic_partition.clone(), committed_offset);
         }
 
-        let builder = TxnOffsetCommitRequestBuilder::new_options(
+        let builder = TxnOffsetCommitRequestBuilder::with_options(
             // `ensureTransactional()` has already run, so the id is present.
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
@@ -2548,7 +2548,7 @@ impl TransactionManager {
             ),
             // Java: `new IllegalStateException(msg, lastError)` — the cause is
             // carried, so the caller can see which transition poisoned the manager.
-            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::new_source(
+            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::with_source(
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
@@ -2564,7 +2564,7 @@ impl TransactionManager {
             _ => {
                 const MESSAGE: &str = "Cannot execute transactional method because we are in an error state";
                 match &self.last_error {
-                    Some(cause) => Error::KafkaError(KafkaError::new_message_source(
+                    Some(cause) => Error::KafkaError(KafkaError::with_message_source(
                         Errors::UnknownServerError,
                         MESSAGE,
                         cause.clone(),
@@ -2623,7 +2623,7 @@ impl TransactionManager {
             // error as `last_error`, so this is the value `maybe_fail_with_error`
             // hands the application, and its `source()` must be the original.
             let error = if error.is_retriable_error() || error.error() == Errors::InvalidTxnState {
-                Error::TransactionAbortable(TransactionAbortableError::new_source(
+                Error::TransactionAbortable(TransactionAbortableError::with_source(
                     "Transaction Request was aborted after exhausting retries.",
                     error.clone(),
                 ))
@@ -4349,7 +4349,7 @@ impl TransactionManager {
     /// Both builders snapshot the topic collection at construction — Java's
     /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
     /// and
-    /// [`TxnOffsetCommitRequestBuilder::new_options`]
+    /// [`TxnOffsetCommitRequestBuilder::with_options`]
     /// takes the map by reference and
     /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
     /// since the handler outlives the call). `reenqueue()` (Java 1394) and
@@ -4844,7 +4844,7 @@ mod tests {
         let api_versions = Arc::new(ApiVersions::new());
         api_versions.update(
             "0",
-            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[
                     api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
                     api_version(
@@ -4911,7 +4911,7 @@ mod tests {
         init_producer_id.set_max_version(3);
         api_versions.update(
             "0",
-            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[init_producer_id],
                 &transaction_version_supported_features(level),
                 &transaction_version_finalized_features(level),
@@ -4922,7 +4922,8 @@ mod tests {
 
     /// A single-record batch, mirroring `batchWithValue` (Java 840).
     fn batch_with_value(topic_partition: &TopicPartition, value: &str) -> ProducerBatch {
-        let builder = MemoryRecords::builder(64, Compression::none(), TimestampType::CreateTime, 0);
+        let builder =
+            MemoryRecords::builder_with_initial_capacity(64, Compression::none(), TimestampType::CreateTime, 0);
         let mut batch = ProducerBatch::new(topic_partition.clone(), builder, 0);
         assert!(
             batch.try_append(0, Some(&[]), Some(value.as_bytes()), &[], None, 0).is_ok(),
@@ -5262,7 +5263,7 @@ mod tests {
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
         let response = ConcreteResponse::TxnOffsetCommit(
-            TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &error_map),
+            TxnOffsetCommitResponse::with_request_throttle_ms_response_data(0, &error_map),
         );
         manager.handle_response(handler, &response, coordinators, pending_requests)
     }
@@ -5617,7 +5618,7 @@ mod tests {
             manager
                 .fail_pending_requests(
                     pending_requests,
-                    &Error::Authentication(crate::common::errors::AuthenticationError::new_source(
+                    &Error::Authentication(crate::common::errors::AuthenticationError::with_source(
                         error.message(),
                         error.clone(),
                     )),
@@ -5916,7 +5917,7 @@ mod tests {
     /// So what the pair pins is a **contract**, not a live path: the poisoning
     /// asymmetry must already hold when Phase 6 opens the application-side caller
     /// (`KafkaProducer.abortTransaction`) and removes
-    /// `KafkaProducer::new_config`'s `transactional.id` guard. That is worth as much
+    /// `KafkaProducer::new`'s `transactional.id` guard. That is worth as much
     /// — it is the guarantee Java's shutdown loop is written against
     /// (`Sender.java:269-271`) — and it is why an unreachable-today invalid source is
     /// a fine choice.
@@ -6979,7 +6980,7 @@ mod tests {
         let mut pending = PendingRequests::new();
         let mut coordinators = CoordinatorNodes::new();
         #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+        let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             fenced_member_id,
@@ -7049,7 +7050,7 @@ mod tests {
             let mut pending = PendingRequests::new();
             let mut coordinators = CoordinatorNodes::new();
             #[allow(deprecated)]
-            let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+            let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
                 CONSUMER_GROUP_ID,
                 generation_id,
                 member_id,
@@ -9549,7 +9550,12 @@ mod tests {
                 .set_max_version(max_version);
             api_versions.update(
                 broker_node().id_string(),
-                NodeApiVersions::new_node_finalized_features_finalized_features_epoch(&[init_producer_id], &[], &[], 0),
+                NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
+                    &[init_producer_id],
+                    &[],
+                    &[],
+                    0,
+                ),
             );
             let mut manager = TransactionManager::new(
                 LogContext::empty(),
@@ -9716,7 +9722,7 @@ mod tests {
 
             // First batch succeeds
             let b1_append_time = 0;
-            let b1_response = PartitionResponse::new_options(
+            let b1_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::None)
                     .set_base_offset(500)
@@ -9734,7 +9740,7 @@ mod tests {
                 .expect("the completion is recorded");
 
             // We get an UNKNOWN_PRODUCER_ID, so bump the epoch and set sequence numbers back to 0
-            let b2_response = PartitionResponse::new_options(
+            let b2_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::UnknownProducerId)
                     .set_base_offset(-1)
@@ -9799,7 +9805,7 @@ mod tests {
             let tp0b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
 
-            let tp0b1_response = PartitionResponse::new_options(
+            let tp0b1_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::None)
                     .set_base_offset(-1)
@@ -9815,7 +9821,7 @@ mod tests {
                 .handle_completed_batch(&tp0b1, &tp0b1_response)
                 .expect("the completion is recorded");
 
-            let tp1b1_response = PartitionResponse::new_options(
+            let tp1b1_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::None)
                     .set_base_offset(-1)
@@ -9836,7 +9842,7 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp0()), 2);
             assert_eq!(manager.sequence_number(&tp1()), 2);
 
-            let b1_response = PartitionResponse::new_options(
+            let b1_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::UnknownProducerId)
                     .set_base_offset(-1)
@@ -9860,7 +9866,7 @@ mod tests {
                     .expect("the retry decision is made")
             );
 
-            let b2_response = PartitionResponse::new_options(
+            let b2_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::None)
                     .set_base_offset(-1)
@@ -9937,7 +9943,7 @@ mod tests {
             initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID + 1, 0);
 
             // We continue to track the state of tp0 until in-flight requests complete
-            let b1_response = PartitionResponse::new_options(
+            let b1_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::None)
                     .set_base_offset(500)
@@ -9967,7 +9973,7 @@ mod tests {
                 Some(epoch)
             );
 
-            let b2_response = PartitionResponse::new_options(
+            let b2_response = PartitionResponse::with_options(
                 PartitionResponseOptionsBuilder::new()
                     .set_error(Errors::None)
                     .set_base_offset(500)
@@ -10064,7 +10070,7 @@ mod tests {
             manager
                 .handle_completed_batch(
                     &b1,
-                    &PartitionResponse::new_options(
+                    &PartitionResponse::with_options(
                         PartitionResponseOptionsBuilder::new()
                             .set_error(Errors::None)
                             .set_base_offset(500)
@@ -10160,7 +10166,7 @@ mod tests {
             manager
                 .handle_completed_batch(
                     &b3,
-                    &PartitionResponse::new_options(
+                    &PartitionResponse::with_options(
                         PartitionResponseOptionsBuilder::new()
                             .set_error(Errors::None)
                             .set_base_offset(500)
@@ -10209,7 +10215,7 @@ mod tests {
             manager
                 .handle_completed_batch(
                     &b2,
-                    &PartitionResponse::new_options(
+                    &PartitionResponse::with_options(
                         PartitionResponseOptionsBuilder::new()
                             .set_error(Errors::None)
                             .set_base_offset(500)

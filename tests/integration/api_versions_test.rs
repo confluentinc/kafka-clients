@@ -71,7 +71,7 @@ async fn send_api_versions_request(selector: &mut Selector) -> ApiVersionsRespon
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header = RequestHeader::new_options(
+    let header = RequestHeader::with_options(
         RequestHeaderOptionsBuilder::new()
             .set_request_api_key(api_key)
             .set_request_version(version)

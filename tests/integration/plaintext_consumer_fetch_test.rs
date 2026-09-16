@@ -204,7 +204,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 /// Build a [`KafkaProducer`] for byte-array keys/values matching what
 /// Java's `cluster.producer()` returns.
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::new_config(
+    KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -241,14 +241,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64 * inc;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::new_partition_timestamp_key(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -782,13 +782,13 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
     // produce a record that is larger than the configured fetch size
     let expected_key = b"key".to_vec();
     let expected_value = vec![0u8; producer_record_size];
-    let record = ProducerRecord::new_partition_key(
+    let record = ProducerRecord::with_partition_key(
         tp.topic().to_string(),
         Some(tp.partition()),
         Some(expected_key.clone()),
         Some(expected_value.clone()),
     )
-    .expect("ProducerRecord::new_partition_key should succeed");
+    .expect("ProducerRecord::with_partition_key should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
         .await
         .expect("send should not fail");
@@ -866,7 +866,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 
     let small_key = b"small".to_vec();
     let small_value = b"value".to_vec();
-    let small_record = ProducerRecord::new_partition_key(
+    let small_record = ProducerRecord::with_partition_key(
         tp.topic().to_string(),
         Some(tp.partition()),
         Some(small_key.clone()),
@@ -876,7 +876,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 
     let large_key = b"large".to_vec();
     let large_value = vec![0u8; large_producer_record_size];
-    let large_record = ProducerRecord::new_partition_key(
+    let large_record = ProducerRecord::with_partition_key(
         tp.topic().to_string(),
         Some(tp.partition()),
         Some(large_key),

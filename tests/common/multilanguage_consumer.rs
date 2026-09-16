@@ -678,7 +678,7 @@ fn tp_from_proto(tp: proto::TopicPartition) -> TopicPartition {
 }
 
 fn offset_and_metadata_from_proto(o: proto::OffsetAndMetadata) -> OffsetAndMetadata {
-    OffsetAndMetadata::new_leader_epoch_metadata(o.offset, o.leader_epoch, o.metadata)
+    OffsetAndMetadata::with_leader_epoch_metadata(o.offset, o.leader_epoch, o.metadata)
         .expect("invalid OffsetAndMetadata from backend")
 }
 
@@ -751,7 +751,7 @@ fn offset_and_timestamp_map_from_proto(
         .filter_map(|e| {
             let tp = tp_from_proto(e.partition?);
             let o = e.offset?;
-            let oat = OffsetAndTimestamp::new_leader_epoch(o.offset, o.timestamp, o.leader_epoch).ok()?;
+            let oat = OffsetAndTimestamp::with_leader_epoch(o.offset, o.timestamp, o.leader_epoch).ok()?;
             Some((tp, oat))
         })
         .collect()
@@ -780,7 +780,7 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
     let headers =
-        RecordHeaders::new_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
+        RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
     let options = ConsumerRecordOptionsBuilder::new()
@@ -797,7 +797,7 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
         .set_leader_epoch(r.leader_epoch)
         .build()
         .unwrap();
-    ConsumerRecord::new_options(options)
+    ConsumerRecord::with_options(options)
 }
 
 /// Records bucketed by topic-partition, in the shape `ConsumerRecords::new` takes.
@@ -819,5 +819,5 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
             next_offsets.insert(tp.clone(), oam);
         }
     }
-    ConsumerRecords::new_next_offsets(by_partition, next_offsets)
+    ConsumerRecords::with_next_offsets(by_partition, next_offsets)
 }

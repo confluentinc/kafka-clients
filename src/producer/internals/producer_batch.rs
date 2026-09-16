@@ -122,11 +122,11 @@ pub struct ProducerBatch {
 impl ProducerBatch {
     /// Create a new `ProducerBatch`.
     pub fn new(tp: TopicPartition, records_builder: MemoryRecordsBuilder, created_ms: i64) -> Self {
-        Self::new_with_split(tp, records_builder, created_ms, false)
+        Self::with_split(tp, records_builder, created_ms, false)
     }
 
     /// Create a new `ProducerBatch`, optionally marking it as a split batch.
-    pub fn new_with_split(
+    pub fn with_split(
         tp: TopicPartition,
         mut records_builder: MemoryRecordsBuilder,
         created_ms: i64,
@@ -603,14 +603,14 @@ impl ProducerBatch {
         ))
         .max(batch_size) as usize;
 
-        let builder = MemoryRecords::builder_with_magic(
+        let builder = MemoryRecords::builder_with_initial_capacity_magic(
             initial_size,
             self.magic(),
             self.records_builder.compression().clone(),
             TimestampType::CreateTime,
             0,
         );
-        ProducerBatch::new_with_split(self.topic_partition.clone(), builder, self.created_ms, true)
+        ProducerBatch::with_split(self.topic_partition.clone(), builder, self.created_ms, true)
     }
 
     /// Returns whether the batch uses compression.
@@ -746,6 +746,11 @@ impl ProducerBatch {
     }
 
     /// Returns a reference to the underlying buffer.
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn buffer(&self) -> &Vec<u8> {
         self.records_builder.buffer()
     }
@@ -764,6 +769,7 @@ impl ProducerBatch {
     }
 
     /// Whether the batch is still writable (not closed).
+    #[allow(dead_code)]
     pub fn is_writable(&self) -> bool {
         !self.records_builder.is_closed()
     }
@@ -829,11 +835,13 @@ impl ProducerBatch {
     }
 
     /// The current leader epoch (visible for testing).
+    #[allow(dead_code)]
     pub fn current_leader_epoch(&self) -> Option<i32> {
         self.current_leader_epoch
     }
 
     /// The attempt number when the leader was last changed (visible for testing).
+    #[allow(dead_code)]
     pub fn attempts_when_leader_last_changed(&self) -> i32 {
         self.attempts_when_leader_last_changed
     }
@@ -872,7 +880,7 @@ mod tests {
     }
 
     fn make_builder() -> MemoryRecordsBuilder {
-        MemoryRecords::builder(512, Compression::none(), TimestampType::CreateTime, 128)
+        MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128)
     }
 
     /// Translated from `ProducerBatchTest.testBatchAbort`.
@@ -1055,7 +1063,7 @@ mod tests {
     /// in record-level iteration.
     #[test]
     fn test_split_preserves_headers() {
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
@@ -1245,7 +1253,7 @@ mod tests {
         assert!(!batch.is_split_batch());
 
         let builder2 = make_builder();
-        let batch2 = ProducerBatch::new_with_split(make_tp(), builder2, NOW, true);
+        let batch2 = ProducerBatch::with_split(make_tp(), builder2, NOW, true);
         assert!(batch2.is_split_batch());
     }
 
@@ -1265,7 +1273,7 @@ mod tests {
     fn test_split_preserves_magic_and_compression_type() {
         // We only support magic V2 and NONE compression for record-level iteration.
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
             Compression::none(),

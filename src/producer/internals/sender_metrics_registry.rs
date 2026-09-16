@@ -309,7 +309,7 @@ mod tests {
         let mut tags = BTreeMap::new();
         tags.insert("client-id".to_string(), "clientA".to_string());
         let config = MetricConfig::new().set_tags(tags);
-        Arc::new(Metrics::new_default_config(Arc::new(config)))
+        Arc::new(Metrics::with_default_config(Arc::new(config)))
     }
 
     /// `all_templates()` contains all 22 client-level + 9 topic-level = 31

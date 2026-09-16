@@ -2655,7 +2655,7 @@ mod tests {
             TimestampType::LogAppendTime,
             Some(vec![1, 2, 3]),
             Some(vec![4, 5]),
-            Some(RecordHeaders::new_header_iter(vec![RecordHeader::new(
+            Some(RecordHeaders::with_header_iter(vec![RecordHeader::new(
                 "h1".to_string(),
                 Some(vec![9, 9]),
             )])),
@@ -2731,7 +2731,7 @@ mod tests {
 
     #[test]
     fn duplicate_resource_payload() {
-        let error = box_error(Error::DuplicateResource(DuplicateResourceError::new_resource("res1", "m")));
+        let error = box_error(Error::DuplicateResource(DuplicateResourceError::with_resource("res1", "m")));
         unsafe {
             let handle = kafka_common_Error_duplicate_resource(error);
             assert!(!handle.is_null());
@@ -2755,7 +2755,7 @@ mod tests {
 
     #[test]
     fn resource_not_found_payload() {
-        let error = box_error(Error::ResourceNotFound(ResourceNotFoundError::new_resource("res2", "m")));
+        let error = box_error(Error::ResourceNotFound(ResourceNotFoundError::with_resource("res2", "m")));
         unsafe {
             let handle = kafka_common_Error_resource_not_found(error);
             assert!(!handle.is_null());
@@ -2977,7 +2977,7 @@ mod tests {
     fn record_too_large_payload() {
         let mut partitions = HashMap::new();
         partitions.insert(TopicPartition::new("t", 0), 999i64);
-        let error = box_error(Error::RecordTooLarge(RecordTooLargeError::new_record_too_large_partitions(
+        let error = box_error(Error::RecordTooLarge(RecordTooLargeError::with_record_too_large_partitions(
             "m", partitions,
         )));
         unsafe {

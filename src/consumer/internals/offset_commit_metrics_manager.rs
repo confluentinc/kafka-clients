@@ -88,7 +88,7 @@ impl OffsetCommitMetricsManager {
         );
         // Java: `new Meter(new WindowedCount(), commitRate, commitTotal)`.
         commit_sensor
-            .add(Box::new(Meter::new_rate_stat(
+            .add(Box::new(Meter::with_rate_stat(
                 Arc::new(WindowedCount::new().into_sampled_stat()),
                 commit_rate.clone(),
                 commit_total.clone(),
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn test_offset_commit_metrics() {
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::new_time(time));
+        let metrics = Arc::new(Metrics::with_time(time));
         let manager = OffsetCommitMetricsManager::new(&metrics);
 
         // Assert the existence of metrics.

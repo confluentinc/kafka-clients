@@ -298,7 +298,7 @@ mod tests {
     }
 
     fn response(partition_results: &PartitionErrors) -> ConcreteResponse {
-        ConcreteResponse::OffsetCommit(OffsetCommitResponse::new_throttle_time_ms_response_data(0, partition_results))
+        ConcreteResponse::OffsetCommit(OffsetCommitResponse::with_throttle_time_ms_response_data(0, partition_results))
     }
 
     fn partition_errors(error: Errors) -> PartitionErrors {

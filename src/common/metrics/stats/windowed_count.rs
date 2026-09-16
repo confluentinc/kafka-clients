@@ -63,7 +63,7 @@ impl WindowedCount {
     /// See [`crate::common::metrics::stats::WindowedSum::into_sampled_stat`].
     ///
     /// Used to build a count-based [`crate::common::metrics::stats::Meter`]
-    /// (`Meter::new_rate_stat(WindowedCount::new().into_sampled_stat(), ...)`), as the
+    /// (`Meter::with_rate_stat(WindowedCount::new().into_sampled_stat(), ...)`), as the
     /// consumer fetch/commit "occurrences" meters do. The production callers land
     /// with the FetchMetricsManager wiring in Phase M3; exercised here by the
     /// Meter tests. Kept `pub(crate)` API now to mirror Java's

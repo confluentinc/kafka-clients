@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_send_builder_creates_size_prefixed_buffer() {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(ApiKeys::METADATA.latest_version())

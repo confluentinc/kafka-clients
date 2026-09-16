@@ -1989,7 +1989,7 @@ fn handle_offset_fetch_response(
                 } else {
                     None
                 };
-                match OffsetAndMetadata::new_leader_epoch_metadata(
+                match OffsetAndMetadata::with_leader_epoch_metadata(
                     partition.committed_offset,
                     leader_epoch,
                     partition.metadata.clone().unwrap_or_default(),
@@ -2728,7 +2728,7 @@ mod tests {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -2775,7 +2775,7 @@ mod tests {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -2808,7 +2808,7 @@ mod tests {
     /// Wrap a `ConcreteResponse` in a `ClientResponse` with the appropriate
     /// API key header. Mirrors the Java test's `ClientResponse` construction.
     fn client_response_for(api_key: &ApiKeys, version: i16, response: ConcreteResponse) -> ClientResponse {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(api_key)
                 .set_request_version(version)
@@ -2825,8 +2825,10 @@ mod tests {
     /// map. Mirrors Java's `mockOffsetCommitResponse` /
     /// `buildOffsetCommitClientResponse`.
     fn offset_commit_response(per_partition: HashMap<TopicPartition, Errors>) -> ClientResponse {
-        let response =
-            ConcreteResponse::OffsetCommit(OffsetCommitResponse::new_throttle_time_ms_response_data(0, &per_partition));
+        let response = ConcreteResponse::OffsetCommit(OffsetCommitResponse::with_throttle_time_ms_response_data(
+            0,
+            &per_partition,
+        ));
         client_response_for(&ApiKeys::OFFSET_COMMIT, 1, response)
     }
 
@@ -3208,9 +3210,9 @@ mod tests {
         let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
         response_data.insert(tp.clone(), Errors::None);
         let response = ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
+            crate::common::requests::OffsetCommitResponse::with_throttle_time_ms_response_data(0, &response_data),
         );
-        let header = crate::common::requests::RequestHeader::new_options(
+        let header = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
                 .set_request_version(0)
@@ -3539,9 +3541,9 @@ mod tests {
         let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
         response_data.insert(tp.clone(), Errors::None);
         let response = ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
+            crate::common::requests::OffsetCommitResponse::with_throttle_time_ms_response_data(0, &response_data),
         );
-        let header = crate::common::requests::RequestHeader::new_options(
+        let header = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
                 .set_request_version(0)
@@ -3940,7 +3942,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::with_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
         // Seed a lower epoch so the commit path's update is observable (Java
         // verifies the call on a mock; the Rust Metadata only replaces an
@@ -3970,7 +3972,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::with_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
         seed_partition_leader_epoch(&manager, &tp, 0);
 
@@ -4184,7 +4186,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::with_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
 
         let mut public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
@@ -5128,7 +5130,7 @@ mod tests {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -5989,7 +5991,7 @@ mod tests {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),

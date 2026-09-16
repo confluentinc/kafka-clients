@@ -1409,7 +1409,7 @@ impl<C: KafkaClient> Sender<C> {
         // credentials as `UnknownServerError` (code -1) made a fatal condition look
         // like a generic broker error to every caller and across the C FFI.
         let authentication_error =
-            Error::Authentication(AuthenticationError::new_source(error.message(), error.clone()));
+            Error::Authentication(AuthenticationError::with_source(error.message(), error.clone()));
         {
             // `pending_requests` before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -2088,7 +2088,7 @@ impl<C: KafkaClient> Sender<C> {
                 request_header,
                 response.destination()
             );
-            let part_resp = PartitionResponse::new_error_message(
+            let part_resp = PartitionResponse::with_error_message(
                 Errors::RequestTimedOut,
                 Some(format!("Disconnected from node {} due to timeout", response.destination())),
             );
@@ -2103,7 +2103,7 @@ impl<C: KafkaClient> Sender<C> {
                 request_header,
                 response.destination()
             );
-            let part_resp = PartitionResponse::new_error_message(
+            let part_resp = PartitionResponse::with_error_message(
                 Errors::NetworkError,
                 Some(format!("Disconnected from node {}", response.destination())),
             );
@@ -2119,7 +2119,7 @@ impl<C: KafkaClient> Sender<C> {
                 response.destination(),
                 response.version_mismatch().unwrap_or("unknown")
             );
-            let part_resp = PartitionResponse::new_error_message(
+            let part_resp = PartitionResponse::with_error_message(
                 Errors::UnsupportedVersion,
                 response.version_mismatch().map(|s| s.to_string()),
             );
@@ -2144,10 +2144,10 @@ impl<C: KafkaClient> Sender<C> {
                             let record_errors: Vec<RecordError> = partition_resp
                                 .record_errors
                                 .iter()
-                                .map(|e| RecordError::new_message(e.batch_index, e.batch_index_error_message.clone()))
+                                .map(|e| RecordError::with_message(e.batch_index, e.batch_index_error_message.clone()))
                                 .collect();
 
-                            let part_resp = PartitionResponse::new_options(
+                            let part_resp = PartitionResponse::with_options(
                                 PartitionResponseOptionsBuilder::new()
                                     .set_error(error)
                                     .set_base_offset(partition_resp.base_offset)
@@ -2195,7 +2195,7 @@ impl<C: KafkaClient> Sender<C> {
                             .data()
                             .node_endpoints
                             .iter()
-                            .map(|e| crate::common::Node::new_rack(e.node_id, e.host.clone(), e.port, e.rack.clone()))
+                            .map(|e| crate::common::Node::with_rack(e.node_id, e.host.clone(), e.port, e.rack.clone()))
                             .filter(|n| !n.is_empty())
                             .collect();
 
@@ -2980,7 +2980,7 @@ mod tests {
             .set_max_version(6);
         api_versions.update(
             "0",
-            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            crate::NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[init_producer_id],
                 &[],
                 &[],
@@ -3142,7 +3142,7 @@ mod tests {
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-            let client = MockClient::new_nodes(nodes, Arc::clone(&time_provider));
+            let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
@@ -3151,7 +3151,7 @@ mod tests {
             // `SenderTest.testSenderMetricsTemplates` (`clientA`).
             let mut client_tags = std::collections::BTreeMap::new();
             client_tags.insert("client-id".to_string(), "clientA".to_string());
-            let metrics = Arc::new(Metrics::new_default_config(Arc::new(
+            let metrics = Arc::new(Metrics::with_default_config(Arc::new(
                 crate::common::metrics::MetricConfig::new().set_tags(client_tags),
             )));
             let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
@@ -3516,14 +3516,14 @@ mod tests {
 
         // The javadoc example, verbatim apart from the §2 rename.
         let resp_with_msg =
-            PartitionResponse::new_error_message(Errors::NetworkError, Some("Disconnected from node 0".to_string()));
+            PartitionResponse::with_error_message(Errors::NetworkError, Some("Disconnected from node 0".to_string()));
         assert_eq!(
             Sender::<MockClient>::format_partition_response_err(&resp_with_msg),
             "NETWORK_ERROR. Error Message: Disconnected from node 0"
         );
 
         // Java treats an empty `errorMessage` as absent (`errorMessage.isEmpty()`).
-        let resp_empty = PartitionResponse::new_error_message(Errors::CorruptMessage, Some(String::new()));
+        let resp_empty = PartitionResponse::with_error_message(Errors::CorruptMessage, Some(String::new()));
         assert_eq!(
             Sender::<MockClient>::format_partition_response_err(&resp_empty),
             "CORRUPT_MESSAGE"
@@ -4786,7 +4786,7 @@ mod tests {
         ));
 
         let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-        let client = MockClient::new_nodes(nodes, Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
@@ -5000,7 +5000,7 @@ mod tests {
     fn test_maybe_register_topic_metrics() {
         let mut client_tags = std::collections::BTreeMap::new();
         client_tags.insert("client-id".to_string(), "clientA".to_string());
-        let metrics = Arc::new(Metrics::new_default_config(Arc::new(
+        let metrics = Arc::new(Metrics::with_default_config(Arc::new(
             crate::common::metrics::MetricConfig::new().set_tags(client_tags),
         )));
         let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
@@ -5129,7 +5129,7 @@ mod tests {
         use crate::common::ApiKeys;
         use crate::common::requests::{InitProducerIdResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::INIT_PRODUCER_ID)
                 .set_request_version(0)
@@ -6249,7 +6249,7 @@ mod tests {
         let sequence = manager.sequence_number(tp);
         manager.increment_sequence_number(tp, 1).expect("the entry exists");
 
-        let builder = crate::common::record::internal::MemoryRecords::builder(
+        let builder = crate::common::record::internal::MemoryRecords::builder_with_initial_capacity(
             64,
             Compression::none(),
             TimestampType::CreateTime,
@@ -6397,7 +6397,7 @@ mod tests {
 
         // First batch of each partition succeeds.
         let b1_append_time = 0;
-        let t0b1_response = PartitionResponse::new_options(
+        let t0b1_response = PartitionResponse::with_options(
             PartitionResponseOptionsBuilder::new()
                 .set_error(Errors::None)
                 .set_base_offset(500)
@@ -6414,7 +6414,7 @@ mod tests {
             .unwrap()
             .handle_completed_batch(&tp0b1, &t0b1_response)
             .expect("the completion is recorded");
-        let t1b1_response = PartitionResponse::new_options(
+        let t1b1_response = PartitionResponse::with_options(
             PartitionResponseOptionsBuilder::new()
                 .set_error(Errors::None)
                 .set_base_offset(500)
@@ -6434,7 +6434,7 @@ mod tests {
 
         // An UNKNOWN_PRODUCER_ID on tp0 requests the epoch bump and sets tp0's
         // sequences back to 0.
-        let t0b2_response = PartitionResponse::new_options(
+        let t0b2_response = PartitionResponse::with_options(
             PartitionResponseOptionsBuilder::new()
                 .set_error(Errors::UnknownProducerId)
                 .set_base_offset(-1)
@@ -6522,7 +6522,7 @@ mod tests {
 
         // Partition failover: tp1 returns NOT_LEADER_OR_FOLLOWER. Despite having the
         // old epoch, the batch retries.
-        let t1b2_response = PartitionResponse::new_options(
+        let t1b2_response = PartitionResponse::with_options(
             PartitionResponseOptionsBuilder::new()
                 .set_error(Errors::NotLeaderOrFollower)
                 .set_base_offset(-1)
@@ -9669,7 +9669,7 @@ mod tests {
         let api_versions = Arc::new(crate::ApiVersions::new());
         api_versions.update(
             "0",
-            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            crate::NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[
                     api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
                     api_version(
@@ -10135,7 +10135,7 @@ mod tests {
 
         let error_map: HashMap<TopicPartition, Errors> = responses.iter().cloned().collect();
         let response = ConcreteResponse::TxnOffsetCommit(
-            TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &error_map),
+            TxnOffsetCommitResponse::with_request_throttle_ms_response_data(0, &error_map),
         );
         ctx.sender.client_mut().prepare_response_matcher(matcher, response);
     }
@@ -10324,7 +10324,7 @@ mod tests {
     /// Optional.of(groupInstanceId))` (Java 2691).
     fn full_consumer_group_metadata() -> ConsumerGroupMetadata {
         #[allow(deprecated)]
-        ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+        ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             MEMBER_ID,
@@ -10432,7 +10432,7 @@ mod tests {
         let manager = manager.lock().unwrap();
         manager.api_versions().update(
             "0",
-            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(&entries, &[], &[], 0),
+            crate::NodeApiVersions::with_node_finalized_features_finalized_features_epoch(&entries, &[], &[], 0),
         );
     }
 
@@ -13415,7 +13415,7 @@ mod tests {
         let api_versions = Arc::new(crate::ApiVersions::new());
         api_versions.update(
             "0",
-            crate::NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            crate::NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[init_producer_id],
                 &[],
                 &[],

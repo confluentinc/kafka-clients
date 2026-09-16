@@ -157,7 +157,7 @@ async fn metadata_roundtrip_case(bootstrap: &str, suffix: &str) -> Result<bool, 
     producer.begin_transaction().map_err(|e| format!("meta: begin: {e}"))?;
     let offsets = HashMap::from([(
         tp.clone(),
-        OffsetAndMetadata::new_metadata(2, "checkpoint-42").map_err(|e| format!("with_metadata: {e}"))?,
+        OffsetAndMetadata::with_metadata(2, "checkpoint-42").map_err(|e| format!("with_metadata: {e}"))?,
     )]);
     producer
         .send_offsets_to_transaction(offsets, consumer.group_metadata())

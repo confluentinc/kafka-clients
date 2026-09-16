@@ -34,7 +34,7 @@
 //! Phase 7b is exactly:
 //!
 //! - 2 × user-supplied `Deserializer::<T>::deserialize` (key + value).
-//! - 1 × `RecordHeaders::new_header_iter` (owned headers per §27's
+//! - 1 × `RecordHeaders::with_header_iter` (owned headers per §27's
 //!   milestone-8 ruling).
 //!
 //! Specifically NOT in the per-record budget:
@@ -421,7 +421,7 @@ where
             return Err(e);
         }
 
-        Ok(ConsumerRecords::new_with_position_advanced(
+        Ok(ConsumerRecords::with_position_advanced(
             records_by_partition,
             next_offsets,
             position_advanced,
@@ -610,7 +610,7 @@ where
                 }
 
                 let metadata =
-                    match OffsetAndMetadata::new_leader_epoch_metadata(cf.next_fetch_offset(), cf.last_epoch(), "") {
+                    match OffsetAndMetadata::with_leader_epoch_metadata(cf.next_fetch_offset(), cf.last_epoch(), "") {
                         Ok(m) => m,
                         Err(e) => return Err(Box::new((cf, e))),
                     };
@@ -1040,15 +1040,14 @@ mod tests {
     fn make_records(starting_offset: i64, count: i32) -> Vec<u8> {
         let records: Vec<SimpleRecord> = (0..count)
             .map(|i| {
-                SimpleRecord::new(
+                SimpleRecord::with_timestamp_key_value(
                     0,
                     Some("key".as_bytes().to_vec()),
                     Some(format!("value-{i}").into_bytes()),
-                    vec![],
                 )
             })
             .collect();
-        let mr = MemoryRecords::with_records_at_offset(
+        let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
             Compression::none(),
@@ -1121,7 +1120,7 @@ mod tests {
             partition_data.set_error_code(e.code());
         }
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
@@ -1158,7 +1157,7 @@ mod tests {
         assert!(!fetch.is_empty());
         assert_eq!(record_count as usize, fetch.count());
         assert_eq!(1, fetch.next_offsets().len());
-        let expected_meta = OffsetAndMetadata::new_leader_epoch_metadata(record_count as i64, None, "").unwrap();
+        let expected_meta = OffsetAndMetadata::with_leader_epoch_metadata(record_count as i64, None, "").unwrap();
         assert_eq!(&expected_meta, fetch.next_offsets().get(&partition).unwrap());
 
         // Buffer queue empty, next-in-line still has the cf.
@@ -1499,7 +1498,7 @@ mod tests {
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
         }
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
@@ -1905,21 +1904,45 @@ mod tests {
     fn txn_data_batch(base_offset: i64, count: i32, producer_id: i64, plep: i32) -> Vec<u8> {
         use crate::common::compress::Compression;
         use crate::common::record::TimestampType;
-        use crate::common::record::internal::{MemoryRecords, RecordBatch};
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1,          // log_append_time
-            producer_id, // producer_id
-            0,           // producer_epoch
-            0,           // base_sequence
-            true,        // is_transactional
-            false,       // is_control_batch
-            plep,        // partition_leader_epoch
-            512,
+        use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, RecordBatch};
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(
+                    // log_append_time
+                    producer_id,
+                )
+                .set_producer_epoch(
+                    // producer_id
+                    0,
+                )
+                .set_base_sequence(
+                    // producer_epoch
+                    0,
+                )
+                .set_is_transactional(
+                    // base_sequence
+                    true,
+                )
+                .set_is_control_batch(
+                    // is_transactional
+                    false,
+                )
+                .set_partition_leader_epoch(
+                    // is_control_batch
+                    plep,
+                )
+                .set_write_limit(
+                    // partition_leader_epoch
+                    512,
+                )
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for i in 0..count {
             let offset = base_offset + i as i64;
@@ -1949,7 +1972,7 @@ mod tests {
         partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
         partition_data.set_aborted_transactions(Some(vec![txn]));
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
@@ -2013,7 +2036,7 @@ mod tests {
         );
         assert_eq!(0, fetch.count(), "all records aborted ⇒ zero records");
         assert_eq!(1, fetch.next_offsets().len());
-        let expected = OffsetAndMetadata::new_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
+        let expected = OffsetAndMetadata::with_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
         assert_eq!(&expected, fetch.next_offsets().get(&partition).unwrap());
 
         // Second CompletedFetch: a committed (non-aborted) transactional data
@@ -2040,7 +2063,7 @@ mod tests {
         assert_eq!(record_count as usize, fetch.count(), "committed data records returned");
         assert_eq!(1, fetch.next_offsets().len());
         let expected2 =
-            OffsetAndMetadata::new_leader_epoch_metadata((start_offset + record_count) as i64, Some(0), "").unwrap();
+            OffsetAndMetadata::with_leader_epoch_metadata((start_offset + record_count) as i64, Some(0), "").unwrap();
         assert_eq!(&expected2, fetch.next_offsets().get(&partition).unwrap());
     }
 
@@ -2146,7 +2169,7 @@ mod tests {
     //     the `Vec<u8>` it owns came from `to_vec` above; counted)
     //   - 1 × `Vec<u8>::to_vec` for value
     //   - 1 × `String::from_utf8` for value
-    //   - 1 × `RecordHeaders::new_header_iter` (Vec backing the headers list,
+    //   - 1 × `RecordHeaders::with_header_iter` (Vec backing the headers list,
     //     which may or may not allocate depending on input size)
     //   - 1 × `ConsumerRecord` push to the per-partition `Vec`
     //     (amortized; only counts on grow)
@@ -2419,7 +2442,7 @@ mod tests {
         assert_eq!(0, fetch.count(), "the aborted batch yields no records");
         assert!(!fetch.is_fetch_empty(), "Fetch.isEmpty() must be false — the position advanced");
         // The position progress the swallow exists to preserve.
-        let expected = OffsetAndMetadata::new_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
+        let expected = OffsetAndMetadata::with_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
         assert_eq!(Some(&expected), fetch.next_offsets().get(&advancing));
         // And the entry Java's first condition keeps queued, so the next poll
         // reconsiders it instead of losing it.
@@ -2472,7 +2495,7 @@ mod tests {
         partition_data.set_high_watermark(1000);
         partition_data.set_records(Some(bytes::Bytes::from(records)));
         let aggregator = agg_for(&partition);
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             h.subs.clone(),
             Arc::new(crate::common::memory::BufferSupplier::create()),
             partition,
@@ -2622,7 +2645,7 @@ mod tests {
             partition_data.set_partition_index(partition.partition());
             partition_data.set_high_watermark(1000);
             partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
-            CompletedFetch::new_full(
+            CompletedFetch::with_full(
                 h.subs.clone(),
                 Arc::new(crate::common::memory::BufferSupplier::create()),
                 partition,

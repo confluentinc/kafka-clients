@@ -62,7 +62,7 @@ impl TopicAuthorizationError {
     pub fn new(unauthorized_topics: HashSet<String>) -> Self {
         let message = format!("Not authorized to access topics: {}", format_java_set(&unauthorized_topics));
         Self {
-            kafka_error: KafkaError::new_message(Errors::TopicAuthorizationFailed, message),
+            kafka_error: KafkaError::with_message(Errors::TopicAuthorizationFailed, message),
             unauthorized_topics,
         }
     }
@@ -90,9 +90,9 @@ impl TopicAuthorizationError {
     /// is exactly `TopicAuthorizationException(Set<String>)` (`:30`) — so
     /// [`new`](Self::new) keeps the plain name and this one is suffixed with the
     /// parameter beyond the intersection (CLAUDE.md §2).
-    pub fn new_message(unauthorized_topics: HashSet<String>, message: impl Into<String>) -> Self {
+    pub fn with_message(unauthorized_topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self {
-            kafka_error: KafkaError::new_message(Errors::TopicAuthorizationFailed, message),
+            kafka_error: KafkaError::with_message(Errors::TopicAuthorizationFailed, message),
             unauthorized_topics,
         }
     }

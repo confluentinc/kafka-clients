@@ -205,7 +205,7 @@ impl MemoryRecordsBuilder {
 
     /// Create a new builder with default delete_horizon_ms (NO_TIMESTAMP).
     #[allow(clippy::too_many_arguments)]
-    pub fn new_default(
+    pub fn with_default(
         buffer: Vec<u8>,
         initial_position: usize,
         magic: i8,
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn test_write_empty_record_set() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -959,7 +959,7 @@ mod tests {
         let sequence = 2342_i32;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -992,7 +992,7 @@ mod tests {
         let sequence = 2342_i32;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1027,7 +1027,7 @@ mod tests {
         let sequence = 2342_i32;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1062,7 +1062,7 @@ mod tests {
         let sequence = RecordBatch::NO_SEQUENCE;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn test_estimated_size_in_bytes() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1139,7 +1139,7 @@ mod tests {
         let log_append_time = 1_700_000_000_000_i64;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1180,7 +1180,7 @@ mod tests {
         let log_append_time = 1_700_000_000_000_i64;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1222,7 +1222,7 @@ mod tests {
     #[test]
     fn test_appended_checksum_consistency() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(512),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1253,7 +1253,7 @@ mod tests {
         let write_limit = 0;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(512),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1298,7 +1298,7 @@ mod tests {
         let log_append_time = 1_700_000_000_000_i64;
 
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(64),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn test_append_at_invalid_offset() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn test_throw_on_build_when_aborted() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1404,7 +1404,7 @@ mod tests {
     #[test]
     fn test_reset_buffer_on_abort() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1431,7 +1431,7 @@ mod tests {
     #[test]
     fn test_throw_on_close_when_aborted() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1459,7 +1459,7 @@ mod tests {
     #[test]
     fn test_throw_on_append_when_aborted() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1487,7 +1487,7 @@ mod tests {
     #[test]
     fn test_throw_on_append_when_closed() {
         for compression in all_compressions() {
-            let mut builder = MemoryRecordsBuilder::new_default(
+            let mut builder = MemoryRecordsBuilder::with_default(
                 Vec::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,

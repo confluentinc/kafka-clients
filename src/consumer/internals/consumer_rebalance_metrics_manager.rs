@@ -189,7 +189,7 @@ impl ConsumerRebalanceMetricsManager {
         successful_rebalance_sensor
             .add_metric_name(
                 rebalance_rate_per_hour.clone(),
-                Box::new(Rate::new_unit_stat_window(
+                Box::new(Rate::with_unit_stat_window(
                     TimeUnit::Hours,
                     Arc::new(WindowedCount::new().into_sampled_stat()),
                     1,
@@ -204,7 +204,7 @@ impl ConsumerRebalanceMetricsManager {
         failed_rebalance_sensor
             .add_metric_name(
                 failed_rebalance_rate.clone(),
-                Box::new(Rate::new_unit_stat_window(
+                Box::new(Rate::with_unit_stat_window(
                     TimeUnit::Hours,
                     Arc::new(WindowedCount::new().into_sampled_stat()),
                     1,
@@ -304,7 +304,7 @@ mod tests {
 
     /// Build a manager over a `MockTime`-backed `Metrics` plus a fresh
     /// `SubscriptionState`. Mirrors the Java test's `@BeforeEach setUp`
-    /// (MetricConfig defaults: 2 samples, 30s window — `Metrics::new_time`
+    /// (MetricConfig defaults: 2 samples, 30s window — `Metrics::with_time`
     /// uses the default `MetricConfig` which matches those defaults).
     fn setup() -> (
         Arc<MockTime>,
@@ -313,7 +313,7 @@ mod tests {
         ConsumerRebalanceMetricsManager,
     ) {
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
         let manager = ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subscriptions));
         (time, metrics, subscriptions, manager)

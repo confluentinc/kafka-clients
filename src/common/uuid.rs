@@ -86,7 +86,7 @@ impl Uuid {
     }
 
     /// Creates a UUID from a 16-byte array in big-endian order.
-    pub fn new_bytes(bytes: [u8; 16]) -> Self {
+    pub fn with_bytes(bytes: [u8; 16]) -> Self {
         let most_sig_bits = u64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
@@ -127,7 +127,7 @@ impl Uuid {
 
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&decoded);
-        Ok(Self::new_bytes(bytes))
+        Ok(Self::with_bytes(bytes))
     }
 
     /// Returns a base64 URL encoded string (without padding) of the UUID.
@@ -281,7 +281,7 @@ mod tests {
         let bytes = [
             0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
         ];
-        let uuid = Uuid::new_bytes(bytes);
+        let uuid = Uuid::with_bytes(bytes);
         assert_eq!(uuid.most_sig_bits(), 0x0123456789ABCDEF);
         assert_eq!(uuid.least_sig_bits(), 0xFEDCBA9876543210);
     }
@@ -339,7 +339,7 @@ mod tests {
     fn test_bytes_round_trip() {
         let original = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
         let bytes = original.to_bytes();
-        let parsed = Uuid::new_bytes(bytes);
+        let parsed = Uuid::with_bytes(bytes);
         assert_eq!(original, parsed);
     }
 

@@ -78,7 +78,7 @@ async fn run() -> Result<(), String> {
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("config: {e}"))?;
     let producer: KafkaProducer<String, String> =
-        KafkaProducer::new_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
             .map_err(|e| format!("build: {e}"))?;
 
     // Warm-up: enqueue-only — the outer await caches metadata and opens the

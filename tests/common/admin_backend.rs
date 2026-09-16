@@ -826,14 +826,14 @@ where
 // `ClientQuotaFilterComponent::{of_entity, of_default_entity, of_entity_type}`,
 // `ClientQuotaAlteration::new`, `Op::new`, `ScramCredentialInfo::new`,
 // `UserScramCredentialsDescription::new`, `FilterResult::new`,
-// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::new_token_requester`,
-// `KafkaPrincipal::new_token_authenticated`, `SupportedVersionRange::new` and
+// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_token_requester`,
+// `KafkaPrincipal::with_token_authenticated`, `SupportedVersionRange::new` and
 // `FinalizedVersionRange::new` are all public. (`ClientQuotaFilter::new` is
 // private, but it is an *input* the harness only reads, and its three public
 // factories cover both `strict` values.)
 //
 // Slice G4 added none either, for the same reason: `GroupListing::new`,
-// `ConsumerGroupListing::new_group_state_group_type`, `ConsumerGroupDescription::new`,
+// `ConsumerGroupListing::with_group_state_group_type`, `ConsumerGroupDescription::new`,
 // `ClassicGroupDescription::new`, `MemberDescription::new`,
 // `MemberAssignment::new`, `MemberToRemove::new` and
 // `OffsetAndMetadata::{new, new_metadata, new_leader_epoch_metadata}` are all public, so
@@ -888,7 +888,7 @@ pub struct ConfigSynonymView {
 /// One configuration entry as `describeConfigs` reports it, standing in for the
 /// production [`ConfigEntry`].
 ///
-/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::new_options` is public
+/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::with_options` is public
 /// but takes `Vec<ConfigSynonym>`, whose constructor is not. Dropping synonyms
 /// to keep the production type was rejected — `describeConfigs` reports all nine
 /// `ConfigEntry` fields through *every* binding (`kafka_admin_ConfigEntry_*`,
@@ -1850,7 +1850,7 @@ async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataA
         },
         // Any accessor failing means the object carries an exception. Report the
         // first one so the harness sees the same error a Java caller would.
-        (id, partitions, replication, config) => TopicMetadataAndConfig::new_error(
+        (id, partitions, replication, config) => TopicMetadataAndConfig::with_error(
             id.err()
                 .or_else(|| partitions.err())
                 .or_else(|| replication.err())
@@ -1889,7 +1889,7 @@ fn comparable_config(config: &Config) -> Config {
                     .set_is_read_only(entry.is_read_only())
                     .build()
                     .unwrap();
-                ConfigEntry::new_options(options)
+                ConfigEntry::with_options(options)
             })
             .collect::<Vec<_>>(),
     )
@@ -1976,7 +1976,7 @@ pub async fn wait_for_all_partitions_metadata<B: AdminBackend>(admin: &B, topic:
 pub async fn create_topic<B: AdminBackend>(admin: &B, topic: &str, num_partitions: i32, replication_factor: i16) {
     let created = admin
         .create_topics(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 topic.to_string(),
                 Some(num_partitions),
                 Some(replication_factor),

@@ -199,7 +199,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 }
 
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::new_config(
+    KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -220,14 +220,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::new_partition_timestamp_key(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::new_partition_timestamp_key should not fail");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -592,7 +592,7 @@ async fn test_async_consumer_commit_metadata() {
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // Sync commit: offset 5, leaderEpoch 15, metadata "foo".
-    let sync_metadata = OffsetAndMetadata::new_leader_epoch_metadata(5, Some(15), "foo").expect("OffsetAndMetadata");
+    let sync_metadata = OffsetAndMetadata::with_leader_epoch_metadata(5, Some(15), "foo").expect("OffsetAndMetadata");
     let mut sync_offsets = HashMap::new();
     sync_offsets.insert(tp.clone(), sync_metadata.clone());
     consumer
@@ -606,7 +606,7 @@ async fn test_async_consumer_commit_metadata() {
     assert_eq!(committed.get(&tp).expect("tp committed present"), &sync_metadata);
 
     // Async commit: offset 10, metadata "bar".
-    let async_metadata = OffsetAndMetadata::new_metadata(10, "bar").expect("OffsetAndMetadata");
+    let async_metadata = OffsetAndMetadata::with_metadata(10, "bar").expect("OffsetAndMetadata");
     let mut async_offsets = HashMap::new();
     async_offsets.insert(tp.clone(), async_metadata.clone());
     send_and_await_async_commit(consumer.as_mut(), async_offsets).await;

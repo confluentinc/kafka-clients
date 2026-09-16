@@ -1025,7 +1025,7 @@ impl Errors {
             },
             Self::InvalidTimestamp => Some(Error::InvalidTimestamp(InvalidTimestampError::new(message))),
             Self::InvalidTopicError => {
-                Some(Error::InvalidTopic(InvalidTopicError::new_message(HashSet::new(), message)))
+                Some(Error::InvalidTopic(InvalidTopicError::with_message(HashSet::new(), message)))
             },
             Self::InvalidTransactionTimeout => Some(Error::InvalidTxnTimeout(InvalidTxnTimeoutError::new(message))),
             Self::InvalidTxnState => Some(Error::InvalidTxnState(InvalidTxnStateError::new(message))),
@@ -1103,7 +1103,7 @@ impl Errors {
                 Some(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(0, message)))
             },
             Self::TopicAlreadyExists => Some(Error::TopicExists(TopicExistsError::new(message))),
-            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::new_message(
+            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::with_message(
                 HashSet::new(),
                 message,
             ))),

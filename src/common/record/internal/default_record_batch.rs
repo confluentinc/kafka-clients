@@ -168,7 +168,7 @@ impl DefaultRecordBatch {
     }
 
     /// Create a `DefaultRecordBatch` from a byte slice (copies the data).
-    pub fn new_slice(data: &[u8]) -> Self {
+    pub fn with_slice(data: &[u8]) -> Self {
         Self { buffer: data.to_vec() }
     }
 
@@ -1004,8 +1004,9 @@ impl std::hash::Hash for DefaultRecordBatch {
 mod tests {
     use super::*;
     use crate::common::record::internal::MemoryRecords;
+    use crate::common::record::internal::MemoryRecordsBuilderOptionsBuilder;
     use crate::common::record::internal::Record;
-    use crate::common::record::internal::SimpleRecord;
+    use crate::common::record::internal::{SimpleRecord, SimpleRecordOptionsBuilder};
 
     #[test]
     fn test_increment_sequence() {
@@ -1144,7 +1145,7 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.buildDefaultRecordBatch`.
     #[test]
     fn test_build_default_record_batch() {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             2048,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1178,16 +1179,19 @@ mod tests {
         let epoch = 145_i16;
         let base_sequence = 983_i32;
 
-        let mut builder = MemoryRecords::builder_with_producer(
-            2048,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            1234567,
-            RecordBatch::NO_TIMESTAMP,
-            pid,
-            epoch,
-            base_sequence,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(2048)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(1234567)
+                .set_log_append_time(RecordBatch::NO_TIMESTAMP)
+                .set_producer_id(pid)
+                .set_producer_epoch(epoch)
+                .set_base_sequence(base_sequence)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
         builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
@@ -1216,16 +1220,19 @@ mod tests {
         let epoch = 145_i16;
         let base_sequence = i32::MAX - 1;
 
-        let mut builder = MemoryRecords::builder_with_producer(
-            2048,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            1234567,
-            RecordBatch::NO_TIMESTAMP,
-            pid,
-            epoch,
-            base_sequence,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(2048)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(1234567)
+                .set_log_append_time(RecordBatch::NO_TIMESTAMP)
+                .set_producer_id(pid)
+                .set_producer_epoch(epoch)
+                .set_base_sequence(base_sequence)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
         builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
@@ -1260,10 +1267,18 @@ mod tests {
 
         let timestamp = 1_700_000_000_000_i64;
         let records = vec![
-            SimpleRecord::new_with_key_value(timestamp, Some(b"key".to_vec()), Some(b"value".to_vec())),
-            SimpleRecord::new_with_key_value(timestamp + 30000, None, Some(b"value".to_vec())),
-            SimpleRecord::new_with_key_value(timestamp + 60000, Some(b"key".to_vec()), None),
-            SimpleRecord::new(timestamp + 60000, Some(b"key".to_vec()), Some(b"value".to_vec()), headers),
+            SimpleRecord::with_timestamp_key_value(timestamp, Some(b"key".to_vec()), Some(b"value".to_vec())),
+            SimpleRecord::with_timestamp_key_value(timestamp + 30000, None, Some(b"value".to_vec())),
+            SimpleRecord::with_timestamp_key_value(timestamp + 60000, Some(b"key".to_vec()), None),
+            SimpleRecord::with_options(
+                SimpleRecordOptionsBuilder::new()
+                    .set_timestamp(timestamp + 60000)
+                    .set_key(Some(b"key".to_vec()))
+                    .set_value(Some(b"value".to_vec()))
+                    .set_headers(headers)
+                    .build()
+                    .expect("SimpleRecordOptionsBuilder::build: every mandatory parameter is set above"),
+            ),
         ];
         let actual_size = MemoryRecords::with_records(Compression::none(), &records).size_in_bytes();
         assert_eq!(actual_size, DefaultRecordBatch::size_in_bytes_of_simple_records(&records));
@@ -1272,15 +1287,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordSize`.
     #[test]
     fn test_invalid_record_size() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1300,7 +1315,7 @@ mod tests {
         invalid_count: i32,
     ) -> DefaultRecordBatch {
         let compression = Compression::of(compression_type);
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             512,
             RecordBatch::MAGIC_VALUE_V2,
             compression,
@@ -1332,7 +1347,7 @@ mod tests {
     #[test]
     fn test_corrupt_compressed_stream_fails_the_remaining_bytes_check() {
         let now = 1_700_000_000_000_i64;
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             512,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::of(CompressionType::Gzip),
@@ -1370,12 +1385,12 @@ mod tests {
     /// place both spellings must agree.
     #[test]
     fn test_try_compression_type_rejects_an_unknown_codec_id() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
-            &[SimpleRecord::new_with_key_value(
+            &[SimpleRecord::with_timestamp_key_value(
                 1,
                 Some(b"a".to_vec()),
                 Some(b"1".to_vec()),
@@ -1439,15 +1454,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidCrc`.
     #[test]
     fn test_invalid_crc() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1465,11 +1480,11 @@ mod tests {
     #[test]
     fn test_set_last_offset() {
         let simple_records = vec![
-            SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-            SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-            SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+            SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+            SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
         ];
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
@@ -1501,15 +1516,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetPartitionLeaderEpoch`.
     #[test]
     fn test_set_partition_leader_epoch() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1530,15 +1545,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetLogAppendTime`.
     #[test]
     fn test_set_log_append_time() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1567,15 +1582,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "Timestamp type must be provided")]
     fn test_set_no_timestamp_type_not_allowed() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
         let buf = records.buffer().to_vec();
@@ -1596,18 +1611,18 @@ mod tests {
             CompressionType::Zstd,
         ] {
             let compression = Compression::of(*compression_type);
-            let records = MemoryRecords::with_records_at_offset(
+            let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
                 RecordBatch::MAGIC_VALUE_V2,
                 0,
                 compression,
                 TimestampType::CreateTime,
                 &[
-                    SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                    SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                    SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                    SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                    SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                    SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
                 ],
             );
-            let batch = DefaultRecordBatch::new_slice(records.buffer());
+            let batch = DefaultRecordBatch::with_slice(records.buffer());
             let iter_records = batch
                 .iter_records()
                 .unwrap_or_else(|e| panic!("Failed for {:?}: {}", compression_type, e));

@@ -1144,7 +1144,7 @@ pub trait Admin: Send + Sync {
 /// Returns an error if the bootstrap addresses cannot be resolved or the
 /// network client cannot be constructed.
 pub fn new_admin_client(config: AdminClientConfig) -> Result<Box<dyn Admin>, Error> {
-    Ok(Box::new(KafkaAdminClient::new_config(config)?))
+    Ok(Box::new(KafkaAdminClient::new(config)?))
 }
 
 #[cfg(test)]
@@ -1168,7 +1168,7 @@ mod tests {
         mock.add_topic(
             false,
             "topic",
-            vec![TopicPartitionInfo::new_elr_last_known_elr(
+            vec![TopicPartitionInfo::with_elr_last_known_elr(
                 0,
                 Some(leader.clone()),
                 vec![leader.clone()],
@@ -1188,7 +1188,7 @@ mod tests {
     #[tokio::test]
     async fn create_topics_forwards_to_the_options_form() {
         let mock = admin();
-        mock.create_topics(&[NewTopic::new_num_partitions_replication_factor(
+        mock.create_topics(&[NewTopic::with_num_partitions_replication_factor(
             "created",
             Some(1),
             Some(1),
@@ -1201,7 +1201,7 @@ mod tests {
         let via_options = admin();
         via_options
             .create_topics_with_options(
-                &[NewTopic::new_num_partitions_replication_factor(
+                &[NewTopic::with_num_partitions_replication_factor(
                     "created",
                     Some(1),
                     Some(1),

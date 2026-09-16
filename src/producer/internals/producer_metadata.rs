@@ -76,6 +76,11 @@ impl ProducerMetadata {
     /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
     /// * `metadata_idle_ms` - If a topic hasn't been accessed for this many ms, it is removed
     /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn new(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -147,7 +152,7 @@ impl ProducerMetadata {
         let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
             let state = builder_inner.lock().unwrap();
             let topics: Vec<&str> = state.topics.keys().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&topics), true)
+            MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&topics), true)
         });
 
         // Closure for new_topics_request_builder_fn: returns a builder with just the new topics
@@ -156,7 +161,7 @@ impl ProducerMetadata {
             Box::new(move || {
                 let state = new_topics_inner.lock().unwrap();
                 let topics: Vec<&str> = state.new_topics.iter().map(|s| s.as_str()).collect();
-                MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&topics), true)
+                MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&topics), true)
             });
 
         // Closure for post_update_fn: tracks per-topic errors and removes confirmed
@@ -228,18 +233,21 @@ impl ProducerMetadata {
     }
 
     /// Returns the set of all tracked topic names (visible for testing).
+    #[allow(dead_code)]
     pub fn topics(&self) -> HashSet<String> {
         let state = self.inner.lock().unwrap();
         state.topics.keys().cloned().collect()
     }
 
     /// Returns the set of new (unconfirmed) topic names (visible for testing).
+    #[allow(dead_code)]
     pub fn new_topics(&self) -> HashSet<String> {
         let state = self.inner.lock().unwrap();
         state.new_topics.clone()
     }
 
     /// Returns whether the given topic is in the metadata cache.
+    #[allow(dead_code)]
     pub fn contains_topic(&self, topic: &str) -> bool {
         let state = self.inner.lock().unwrap();
         state.topics.contains_key(topic)
@@ -324,7 +332,7 @@ mod tests {
             .collect();
         data.set_topics(topic_list);
 
-        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `ProducerMetadataTest.testTimeToNextUpdateOverwriteBackoff`.
@@ -571,7 +579,7 @@ mod tests {
             .collect();
         data.set_topics(topic_list);
 
-        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Helper: create a metadata response with the metadata's current topic set.

@@ -28,7 +28,7 @@ impl RecordsToDelete {
     /// Delete all the records before the given `offset`.
     ///
     /// Use `-1` to truncate to the high watermark.
-    pub fn new_before_offset(offset: i64) -> Self {
+    pub fn with_before_offset(offset: i64) -> Self {
         Self { offset }
     }
 
@@ -52,13 +52,13 @@ mod tests {
 
     #[test]
     fn before_offset_round_trip() {
-        let r = RecordsToDelete::new_before_offset(10);
+        let r = RecordsToDelete::with_before_offset(10);
         assert_eq!(r.before_offset(), 10);
     }
 
     #[test]
     fn equality_and_hash_match_on_offset() {
-        assert_eq!(RecordsToDelete::new_before_offset(5), RecordsToDelete::new_before_offset(5));
-        assert_ne!(RecordsToDelete::new_before_offset(5), RecordsToDelete::new_before_offset(6));
+        assert_eq!(RecordsToDelete::with_before_offset(5), RecordsToDelete::with_before_offset(5));
+        assert_ne!(RecordsToDelete::with_before_offset(5), RecordsToDelete::with_before_offset(6));
     }
 }

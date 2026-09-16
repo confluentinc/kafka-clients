@@ -138,7 +138,7 @@ mod tests {
         let mut count_for_part2 = 0;
         let concrete = RoundRobinPartitioner::new();
         let partitioner: &dyn Partitioner<String, String> = &concrete;
-        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             vec![n[0].clone(), n[1].clone(), n[2].clone()],
             partitions,
@@ -179,7 +179,7 @@ mod tests {
             PartitionInfo::new(topic_a.to_string(), 2, Some(n[2].clone()), n.to_vec(), n.to_vec()),
             PartitionInfo::new(topic_b.to_string(), 0, Some(n[0].clone()), n.to_vec(), n.to_vec()),
         ];
-        let test_cluster = Cluster::new_invalid_topics_controller_topic_ids(
+        let test_cluster = Cluster::with_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             vec![n[0].clone(), n[1].clone(), n[2].clone()],
             all_partitions,

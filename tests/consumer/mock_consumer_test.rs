@@ -54,7 +54,7 @@ fn build_record(topic: &str, partition: i32, offset: i64, key: &str, value: &str
         .set_serialized_value_size(0)
         .build()
         .unwrap();
-    ConsumerRecord::new_options(options)
+    ConsumerRecord::with_options(options)
 }
 
 /// Builder helper: matches Java's 5-arg `new ConsumerRecord<>(topic,
@@ -106,7 +106,7 @@ async fn test_simple_mock() {
 
     assert_eq!(1, recs.next_offsets().len());
     assert_eq!(
-        &OffsetAndMetadata::new_leader_epoch_metadata(2, None, String::new()).unwrap(),
+        &OffsetAndMetadata::with_leader_epoch_metadata(2, None, String::new()).unwrap(),
         recs.next_offsets().get(&tp).unwrap(),
     );
 
@@ -159,7 +159,7 @@ async fn should_not_clear_records_for_paused_partitions() {
     assert_eq!(1, records_second_poll.count());
     assert_eq!(1, records_second_poll.next_offsets().len());
     assert_eq!(
-        &OffsetAndMetadata::new_leader_epoch_metadata(1, None, String::new()).unwrap(),
+        &OffsetAndMetadata::with_leader_epoch_metadata(1, None, String::new()).unwrap(),
         records_second_poll
             .next_offsets()
             .get(&TopicPartition::new("test".to_string(), 0))

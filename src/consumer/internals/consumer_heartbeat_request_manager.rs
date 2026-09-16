@@ -948,7 +948,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         };
 
         if !self.inner.heartbeat_request_state.can_send_request(current_time_ms) && !heartbeat_now {
-            return PollResult::new_time_until_next_poll_ms(
+            return PollResult::with_time_until_next_poll_ms(
                 self.inner.heartbeat_request_state.time_to_next_heartbeat_ms(current_time_ms),
             );
         }
@@ -1132,7 +1132,7 @@ mod tests {
     ) {
         let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1201,7 +1201,7 @@ mod tests {
     ) {
         let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1580,7 +1580,7 @@ mod tests {
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
                 .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
@@ -1590,7 +1590,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::new_timed_out(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -1701,7 +1701,7 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
                 .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
@@ -1711,7 +1711,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::new_timed_out(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -1881,7 +1881,7 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
                 .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
@@ -1891,7 +1891,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::new_timed_out(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -2874,7 +2874,7 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
                 .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
@@ -2884,7 +2884,7 @@ mod tests {
                 .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::new_timed_out(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",

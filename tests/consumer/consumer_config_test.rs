@@ -35,16 +35,14 @@ use std::collections::HashMap;
 
 use confluent_kafka::consumer::ConsumerConfig;
 
+/// Java's `ConsumerConfigTest` seeds `key.deserializer` / `value.deserializer`
+/// into every property map (`ConsumerConfigTest.java:60`) because Java's
+/// `ConfigDef` defines them with no default, so `new ConsumerConfig(props)`
+/// throws without them. Rust takes the deserializers as constructor arguments
+/// to `AsyncKafkaConsumer::new` instead, and `ConsumerConfig` holds no
+/// deserializer state at all, so the two keys are simply absent here.
 fn base_props() -> HashMap<String, String> {
     let mut props = HashMap::new();
-    props.insert(
-        ConsumerConfig::KEY_DESERIALIZER_CLASS_CONFIG.to_string(),
-        "org.apache.kafka.common.serialization.ByteArrayDeserializer".to_string(),
-    );
-    props.insert(
-        ConsumerConfig::VALUE_DESERIALIZER_CLASS_CONFIG.to_string(),
-        "org.apache.kafka.common.serialization.StringDeserializer".to_string(),
-    );
     props.insert(
         ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
         "localhost:9092".to_string(),

@@ -243,11 +243,15 @@ impl ApiVersionsResponse {
     ///
     /// Corresponds to `TestUtils.defaultApiVersionsResponse` in Java.
     pub fn default_api_versions_response(listener_type: ListenerType) -> Self {
-        Self::default_api_versions_response_with_options(listener_type, true, true)
+        Self::default_api_versions_response_with_enable_unstable_last_version_client_telemetry_enabled(
+            listener_type,
+            true,
+            true,
+        )
     }
 
     /// Creates a default API versions response with configurable options.
-    pub fn default_api_versions_response_with_options(
+    pub fn default_api_versions_response_with_enable_unstable_last_version_client_telemetry_enabled(
         listener_type: ListenerType,
         enable_unstable_last_version: bool,
         client_telemetry_enabled: bool,

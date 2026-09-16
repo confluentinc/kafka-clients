@@ -131,7 +131,7 @@ impl SampledStat {
 
     fn new_sample(initial_value: f64, time_window_ms: i64, time_ms: i64) -> Sample {
         if time_window_ms > 0 {
-            Sample::new_time_window_ms(initial_value, time_ms, time_window_ms)
+            Sample::with_time_window_ms(initial_value, time_ms, time_window_ms)
         } else {
             Sample::new(initial_value, time_ms)
         }
@@ -260,7 +260,7 @@ impl Sample {
     }
 
     /// Create a sample with an explicit time window.
-    pub fn new_time_window_ms(initial_value: f64, now: i64, time_window_ms: i64) -> Self {
+    pub fn with_time_window_ms(initial_value: f64, now: i64, time_window_ms: i64) -> Self {
         Self {
             initial_value,
             event_count: 0,

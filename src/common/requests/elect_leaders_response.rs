@@ -148,7 +148,7 @@ impl ElectLeadersResponse {
     ///
     /// Corresponds to Java's `ElectLeadersResponse(ElectLeadersResponseData)`
     /// (`ElectLeadersResponse.java:37`).
-    pub fn new_data(data: ElectLeadersResponseData) -> Self {
+    pub fn with_data(data: ElectLeadersResponseData) -> Self {
         Self { data }
     }
 
@@ -158,7 +158,7 @@ impl ElectLeadersResponse {
     /// Corresponds to Java's
     /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)`
     /// (`ElectLeadersResponse.java:42`) — the error code is only encoded for v1+.
-    pub fn new_options(options: ElectLeadersResponseOptions) -> Self {
+    pub fn with_options(options: ElectLeadersResponseOptions) -> Self {
         let ElectLeadersResponseOptions { throttle_time_ms, error_code, election_results, version } = options;
         let mut data = ElectLeadersResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -215,7 +215,7 @@ impl ElectLeadersResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ElectLeadersResponseData::read(readable, version)?;
-        Ok(Self::new_data(data))
+        Ok(Self::with_data(data))
     }
 
     /// Whether the client should throttle on this response (always true).
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn from_results_encodes_error_code_only_for_v1_plus() {
-        let v0 = ElectLeadersResponse::new_options(
+        let v0 = ElectLeadersResponse::with_options(
             ElectLeadersResponseOptionsBuilder::new()
                 .set_throttle_time_ms(0)
                 .set_error_code(Errors::NotController.code())
@@ -286,7 +286,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(v0.data().error_code, Errors::None.code());
-        let v1 = ElectLeadersResponse::new_options(
+        let v1 = ElectLeadersResponse::with_options(
             ElectLeadersResponseOptionsBuilder::new()
                 .set_throttle_time_ms(0)
                 .set_error_code(Errors::NotController.code())
@@ -337,7 +337,7 @@ mod tests {
         let mut data = ElectLeadersResponseData::new();
         data.set_error_code(Errors::None.code());
         data.set_replica_election_results(vec![result("t", 0, Errors::ClusterAuthorizationFailed, None)]);
-        let response = ElectLeadersResponse::new_data(data);
+        let response = ElectLeadersResponse::with_data(data);
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::None), Some(&1));
         assert_eq!(counts.get(&Errors::ClusterAuthorizationFailed), Some(&1));

@@ -240,7 +240,7 @@ impl AdminHandle {
 /// dispatcher thread, and returns the leaked C handle.
 ///
 /// `runtime` is passed in (rather than built here) because the production
-/// constructor must build it *first*: `KafkaAdminClient::new_config` calls
+/// constructor must build it *first*: `KafkaAdminClient::new` calls
 /// `tokio::spawn` for its background task, so it has to run inside the runtime
 /// context.
 fn build_admin_handle(
@@ -1027,13 +1027,13 @@ impl NewTopicBuilder {
     /// set, otherwise `NewTopic(name, Optional<Integer>, Optional<Short>)`.
     fn build(&self) -> NewTopic {
         let topic = if self.replicas_assignments.is_empty() {
-            NewTopic::new_num_partitions_replication_factor(
+            NewTopic::with_num_partitions_replication_factor(
                 self.name.clone(),
                 self.num_partitions,
                 self.replication_factor,
             )
         } else {
-            NewTopic::new_replicas_assignments(self.name.clone(), self.replicas_assignments.clone())
+            NewTopic::with_replicas_assignments(self.name.clone(), self.replicas_assignments.clone())
         };
         if self.configs.is_empty() {
             topic
@@ -1396,7 +1396,10 @@ unsafe fn read_records_to_delete(
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
         let partition = unsafe { *partitions.add(i) };
         let offset = unsafe { *before_offsets.add(i) };
-        out.insert(TopicPartition::new(name, partition), RecordsToDelete::new_before_offset(offset));
+        out.insert(
+            TopicPartition::new(name, partition),
+            RecordsToDelete::with_before_offset(offset),
+        );
     }
     out
 }
@@ -7260,7 +7263,7 @@ fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOff
     let level = u8::try_from(isolation_level)
         .map_err(|_| Error::local_illegal_argument(format!("Unknown isolation level {isolation_level}")))
         .and_then(IsolationLevel::for_id)?;
-    Ok(ListOffsetsOptions::new_isolation_level(level).set_timeout_ms(option_timeout(timeout_ms)))
+    Ok(ListOffsetsOptions::with_isolation_level(level).set_timeout_ms(option_timeout(timeout_ms)))
 }
 
 // ---------------------------------------------------------------------------
@@ -10049,7 +10052,7 @@ unsafe fn read_alter_group_offsets(
                 unsafe { CStr::from_ptr(text_ptr) }.to_string_lossy().to_string()
             }
         };
-        let offset = OffsetAndMetadata::new_leader_epoch_metadata(unsafe { *offsets.add(i) }, epoch, text)
+        let offset = OffsetAndMetadata::with_leader_epoch_metadata(unsafe { *offsets.add(i) }, epoch, text)
             .map_err(|e| Error::local_illegal_argument(format!("offset at index {i}: {}", e.message())))?;
         out.insert(tp, offset);
     }
@@ -15648,10 +15651,10 @@ unsafe fn read_scram_alterations(
         let supplied = !has_salts.is_null() && unsafe { *has_salts.add(index) };
         let upsertion = if supplied {
             let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
-            UserScramCredentialUpsertion::new_salt(user, info, password, salt)
+            UserScramCredentialUpsertion::with_salt(user, info, password, salt)
         } else {
             // No salt supplied: Java's three-argument constructor generates one.
-            UserScramCredentialUpsertion::new_bytes(user, info, password)
+            UserScramCredentialUpsertion::with_bytes(user, info, password)
         };
         out.push(UserScramCredentialAlteration::Upsertion(upsertion));
     }
@@ -20030,7 +20033,7 @@ mod tests {
 
     #[test]
     fn config_entry_c_carries_every_field_including_synonyms() {
-        let entry = ConfigEntry::new_options(
+        let entry = ConfigEntry::with_options(
             ConfigEntryOptionsBuilder::new()
                 .set_name("retention.ms".to_string())
                 .set_value(Some("604800000".to_string()))
@@ -20085,7 +20088,7 @@ mod tests {
 
     #[test]
     fn config_entry_c_is_default_tracks_the_default_config_source() {
-        let flat = ConfigEntryC::new(&ConfigEntry::new_options(
+        let flat = ConfigEntryC::new(&ConfigEntry::with_options(
             ConfigEntryOptionsBuilder::new()
                 .set_name("k".to_string())
                 .set_value(Some("v".to_string()))
@@ -20119,7 +20122,7 @@ mod tests {
     fn log_dir_description_carries_error_and_volume_bytes() {
         let mut replicas = HashMap::new();
         replicas.insert(TopicPartition::new("t".to_string(), 0), ReplicaInfo::new(100, 5, false));
-        let description = LogDirDescription::new_total_bytes_usable_bytes(
+        let description = LogDirDescription::with_total_bytes_usable_bytes(
             Some(Error::new(Errors::KafkaStorageError)),
             replicas,
             2_000,
@@ -21239,7 +21242,7 @@ mod tests {
     #[test]
     fn authorized_operation_counts_are_never_negative_and_absence_is_a_separate_bit() {
         let topic = |ops: Option<BTreeSet<AclOperation>>| {
-            TopicDescriptionInner::new(&TopicDescription::new_authorized_operations_topic_id(
+            TopicDescriptionInner::new(&TopicDescription::with_authorized_operations_topic_id(
                 "t",
                 false,
                 vec![],
@@ -21359,7 +21362,7 @@ mod tests {
     #[test]
     fn elr_counts_are_never_negative_and_absence_is_a_separate_bit() {
         let absent = TopicPartitionInfoInner::new(&TopicPartitionInfo::new(0, None, vec![], vec![]));
-        let reported_empty = TopicPartitionInfoInner::new(&TopicPartitionInfo::new_elr_last_known_elr(
+        let reported_empty = TopicPartitionInfoInner::new(&TopicPartitionInfo::with_elr_last_known_elr(
             0,
             None,
             vec![],
@@ -21367,7 +21370,7 @@ mod tests {
             vec![],
             vec![],
         ));
-        let reported = TopicPartitionInfoInner::new(&TopicPartitionInfo::new_elr_last_known_elr(
+        let reported = TopicPartitionInfoInner::new(&TopicPartitionInfo::with_elr_last_known_elr(
             0,
             None,
             vec![],
@@ -21476,7 +21479,7 @@ mod tests {
     #[allow(deprecated)]
     fn list_consumer_groups_result_exposes_both_state_views() {
         let outcome = (
-            vec![ConsumerGroupListing::new_group_state_group_type(
+            vec![ConsumerGroupListing::with_group_state_group_type(
                 "cg1",
                 Some(GroupState::Stable),
                 Some(GroupType::Classic),
@@ -21520,7 +21523,7 @@ mod tests {
         let offsets: GroupOffsets = HashMap::from([
             (
                 TopicPartition::new("ta", 0),
-                Some(OffsetAndMetadata::new_leader_epoch_metadata(100, Some(4), "meta-a").unwrap()),
+                Some(OffsetAndMetadata::with_leader_epoch_metadata(100, Some(4), "meta-a").unwrap()),
             ),
             // Java reports a requested partition the group never committed for
             // as present with a null value.
@@ -23182,7 +23185,7 @@ mod tests {
     fn delegation_token_handles_expose_the_whole_java_chain() {
         // The three principals are distinct, and the renewer list has two
         // entries, so a transposition of owner / requester / renewer is caught.
-        let info = TokenInformation::new_token_requester(
+        let info = TokenInformation::with_token_requester(
             "token-id-1".to_string(),
             KafkaPrincipal::new("User", "owner"),
             KafkaPrincipal::new("User", "requester"),

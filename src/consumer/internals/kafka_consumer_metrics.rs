@@ -293,7 +293,7 @@ mod tests {
         // so the first poll's `last_poll_ms` is distinguishable from the
         // "no poll yet" sentinel (0).
         time.sleep(1_000_000);
-        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
         let consumer_metrics = KafkaConsumerMetrics::new(Arc::clone(&metrics));
 
         // Default values: -1 / NaN / NaN.
@@ -347,7 +347,7 @@ mod tests {
 
         let time = Arc::new(MockTime::new());
         time.sleep(1_000_000);
-        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
         let consumer_metrics = KafkaConsumerMetrics::new(Arc::clone(&metrics));
 
         // Default value: NaN.

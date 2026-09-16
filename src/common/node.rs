@@ -33,16 +33,16 @@ static NO_NODE: std::sync::LazyLock<Node> = std::sync::LazyLock::new(|| Node::ne
 impl Node {
     /// Creates a new `Node` with no rack and not fenced.
     pub fn new(id: i32, host: String, port: i32) -> Self {
-        Self::new_rack(id, host, port, None)
+        Self::with_rack(id, host, port, None)
     }
 
     /// Creates a new `Node` with the given rack.
-    pub fn new_rack(id: i32, host: String, port: i32, rack: Option<String>) -> Self {
-        Self::new_rack_is_fenced(id, host, port, rack, false)
+    pub fn with_rack(id: i32, host: String, port: i32, rack: Option<String>) -> Self {
+        Self::with_rack_is_fenced(id, host, port, rack, false)
     }
 
     /// Creates a new `Node` with the given rack and fenced status.
-    pub fn new_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
+    pub fn with_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
         Self { id, id_string: id.to_string(), host, port, rack, is_fenced }
     }
 
@@ -148,14 +148,14 @@ mod tests {
 
     #[test]
     fn test_node_with_rack() {
-        let node = Node::new_rack(1, "localhost".to_string(), 9092, Some("rack1".to_string()));
+        let node = Node::with_rack(1, "localhost".to_string(), 9092, Some("rack1".to_string()));
         assert!(node.has_rack());
         assert_eq!(node.rack(), Some("rack1"));
     }
 
     #[test]
     fn test_node_with_fenced() {
-        let node = Node::new_rack_is_fenced(1, "localhost".to_string(), 9092, None, true);
+        let node = Node::with_rack_is_fenced(1, "localhost".to_string(), 9092, None, true);
         assert!(node.is_fenced());
     }
 
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_node_display() {
-        let node = Node::new_rack(1, "localhost".to_string(), 9092, Some("rack1".to_string()));
+        let node = Node::with_rack(1, "localhost".to_string(), 9092, Some("rack1".to_string()));
         let display = node.to_string();
         assert!(display.contains("localhost:9092"));
         assert!(display.contains("id: 1"));

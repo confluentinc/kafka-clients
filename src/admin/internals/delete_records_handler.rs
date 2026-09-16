@@ -236,7 +236,7 @@ mod tests {
     fn records_to_delete() -> HashMap<TopicPartition, RecordsToDelete> {
         [tp(0), tp(1), tp(2), tp(3)]
             .into_iter()
-            .map(|k| (k, RecordsToDelete::new_before_offset(10)))
+            .map(|k| (k, RecordsToDelete::with_before_offset(10)))
             .collect()
     }
 
@@ -419,7 +419,7 @@ mod tests {
         let keys: HashSet<TopicPartition> = records_to_delete().into_keys().collect();
         // Any other variant: `Metadata` is what the lookup stage of this same driver
         // uses, so it is the realistic mis-route.
-        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new_version(
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::with_version(
             crate::MetadataResponseData::new(),
             0,
         ));
@@ -474,7 +474,7 @@ mod tests {
         let mut metadata = MetadataResponseData::new();
         metadata.set_topics(vec![topic_metadata]);
         let metadata_response =
-            ConcreteResponse::Metadata(MetadataResponse::new_version(metadata, ApiKeys::METADATA.latest_version()));
+            ConcreteResponse::Metadata(MetadataResponse::with_version(metadata, ApiKeys::METADATA.latest_version()));
 
         let handler = handler();
         let strategy = handler.lookup_strategy();

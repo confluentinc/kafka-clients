@@ -160,12 +160,6 @@ pub struct ConsumerConfig {
     /// `metric.reporters`
     pub(crate) metric_reporter_classes: Vec<String>,
 
-    // --- Deserializers ---
-    /// `key.deserializer`
-    pub(crate) key_deserializer_class: Option<String>,
-    /// `value.deserializer`
-    pub(crate) value_deserializer_class: Option<String>,
-
     // --- Interceptors ---
     /// `interceptor.classes`
     pub(crate) interceptor_classes: Vec<String>,
@@ -254,9 +248,6 @@ impl Default for ConsumerConfig {
             metrics_num_samples: 2,
             metrics_recording_level: "INFO".to_string(),
             metric_reporter_classes: Vec::new(),
-
-            key_deserializer_class: None,
-            value_deserializer_class: None,
 
             interceptor_classes: Vec::new(),
 
@@ -394,11 +385,6 @@ impl ConsumerConfig {
     /// Config key: `metric.reporters`.
     pub const METRIC_REPORTER_CLASSES_CONFIG: &'static str = "metric.reporters";
 
-    /// Config key: `key.deserializer`.
-    pub const KEY_DESERIALIZER_CLASS_CONFIG: &'static str = "key.deserializer";
-    /// Config key: `value.deserializer`.
-    pub const VALUE_DESERIALIZER_CLASS_CONFIG: &'static str = "value.deserializer";
-
     /// Config key: `interceptor.classes`.
     pub const INTERCEPTOR_CLASSES_CONFIG: &'static str = "interceptor.classes";
 
@@ -477,14 +463,6 @@ impl ConsumerConfig {
     pub fn partition_assignment_strategy(&self) -> &[String] {
         &self.partition_assignment_strategy
     }
-    /// `key.deserializer`.
-    pub fn key_deserializer_class(&self) -> Option<&str> {
-        self.key_deserializer_class.as_deref()
-    }
-    /// `value.deserializer`.
-    pub fn value_deserializer_class(&self) -> Option<&str> {
-        self.value_deserializer_class.as_deref()
-    }
     /// `security.protocol` - the protocol name (e.g. `"PLAINTEXT"`, `"SASL_SSL"`).
     pub fn security_protocol(&self) -> &str {
         self.security_protocol.name()
@@ -540,16 +518,6 @@ impl ConsumerConfig {
     /// Set `enable.auto.commit`.
     pub fn set_enable_auto_commit(mut self, value: bool) -> Self {
         self.enable_auto_commit = value;
-        self
-    }
-    /// Set `key.deserializer`.
-    pub fn set_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
-        self.key_deserializer_class = Some(class.into());
-        self
-    }
-    /// Set `value.deserializer`.
-    pub fn set_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
-        self.value_deserializer_class = Some(class.into());
         self
     }
 
@@ -811,12 +779,6 @@ impl ConsumerConfig {
                 },
                 Self::METRIC_REPORTER_CLASSES_CONFIG => {
                     config.metric_reporter_classes = split_csv(value);
-                },
-                Self::KEY_DESERIALIZER_CLASS_CONFIG => {
-                    config.key_deserializer_class = if value.is_empty() { None } else { Some(value.clone()) };
-                },
-                Self::VALUE_DESERIALIZER_CLASS_CONFIG => {
-                    config.value_deserializer_class = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 Self::INTERCEPTOR_CLASSES_CONFIG => {
                     // Accepted silently per scope §20.

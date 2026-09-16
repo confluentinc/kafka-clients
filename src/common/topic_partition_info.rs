@@ -46,7 +46,7 @@ impl TopicPartitionInfo {
     /// * `isr` - the in-sync replicas
     /// * `elr` - the eligible leader replicas
     /// * `last_known_elr` - the last known eligible leader replicas
-    pub fn new_elr_last_known_elr(
+    pub fn with_elr_last_known_elr(
         partition: i32,
         leader: Option<Node>,
         replicas: Vec<Node>,
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn accessors_full_constructor() {
-        let info = TopicPartitionInfo::new_elr_last_known_elr(
+        let info = TopicPartitionInfo::with_elr_last_known_elr(
             0,
             Some(node(1)),
             vec![node(1), node(2)],

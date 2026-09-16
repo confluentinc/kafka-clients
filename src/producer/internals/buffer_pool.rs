@@ -159,7 +159,7 @@ impl BufferPool {
             std::collections::BTreeMap::new(),
         );
         wait_time_sensor
-            .add(Box::new(Meter::new_unit(
+            .add(Box::new(Meter::with_unit(
                 TimeUnit::Nanoseconds,
                 rate_metric_name,
                 total_ns_metric_name,

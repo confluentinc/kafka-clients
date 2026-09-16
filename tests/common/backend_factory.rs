@@ -167,7 +167,7 @@ impl ProducerBackendFactory for RustNativeFactory {
 
     async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
         let producer_config = ProducerConfig::new(&config)?;
-        KafkaProducer::new_config(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
     }
 
     async fn create_with_callback_log(

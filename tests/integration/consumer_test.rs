@@ -134,7 +134,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 /// values `v0..v{count-1}` to the given topic, blocking on each ack so
 /// the consumer is guaranteed to see them. Producer is closed on exit.
 async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usize) {
-    let producer: KafkaProducer<String, String> = KafkaProducer::new_config(
+    let producer: KafkaProducer<String, String> = KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(StringSerializer),
         Box::new(StringSerializer),
@@ -142,7 +142,7 @@ async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usiz
     .expect("Failed to build test producer");
 
     for i in 0..count {
-        let rec = ProducerRecord::new_key(topic.to_string(), Some(format!("k{}", i)), Some(format!("v{}", i)));
+        let rec = ProducerRecord::with_key(topic.to_string(), Some(format!("k{}", i)), Some(format!("v{}", i)));
         let future = producer.send(rec).await.expect("send should succeed");
         future
             .get_with_timeout(Duration::from_secs(30))

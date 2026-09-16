@@ -351,7 +351,7 @@ mod tests {
             ..Default::default()
         };
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = std::sync::Arc::new(ConsumerMetadata::new_config(
+        let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
             &config,
             std::sync::Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -373,7 +373,7 @@ mod tests {
             ..Default::default()
         };
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = std::sync::Arc::new(ConsumerMetadata::new_config(
+        let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),

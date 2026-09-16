@@ -176,7 +176,7 @@ mod tests {
 
         api_versions.update(
             "2",
-            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &default_versions,
                 &[supported_feature.clone()],
                 &[finalized_feature],
@@ -198,7 +198,7 @@ mod tests {
 
         api_versions.update(
             "1",
-            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+            NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &default_versions,
                 &[supported_feature],
                 &[finalized_feature_stale],

@@ -98,7 +98,7 @@ impl<K, V> ConsumerRecords<K, V> {
     /// rate-limited error explaining why it returned empty (KAFKA-20660).
     #[deprecated(
         since = "4.0.0",
-        note = "mirroring Java's `@Deprecated`; use `new_next_offsets` instead, which supplies next offsets"
+        note = "mirroring Java's `@Deprecated`; use `with_next_offsets` instead, which supplies next offsets"
     )]
     pub fn new(records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>) -> Self {
         Self { records, next_offsets: HashMap::new(), position_advanced: false, tainted: true }
@@ -109,7 +109,7 @@ impl<K, V> ConsumerRecords<K, V> {
     ///
     /// Corresponds to Java's `ConsumerRecords(Map, Map)`
     /// (`ConsumerRecords.java:62`).
-    pub fn new_next_offsets(
+    pub fn with_next_offsets(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Self {
@@ -120,7 +120,7 @@ impl<K, V> ConsumerRecords<K, V> {
     /// advanced (Java's internal `Fetch.positionAdvanced`). Used by
     /// `FetchCollector::collect_fetch` so the poll loop can mirror Java's
     /// `Fetch.isEmpty()` semantics.
-    pub(crate) fn new_with_position_advanced(
+    pub(crate) fn with_position_advanced(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         position_advanced: bool,
@@ -316,7 +316,7 @@ mod tests {
 
     fn one_record() -> IndexMap<TopicPartition, Vec<ConsumerRecord<i32, String>>> {
         let tp = TopicPartition::new("topic".to_string(), 0);
-        let record = ConsumerRecord::new_options(
+        let record = ConsumerRecord::with_options(
             ConsumerRecordOptionsBuilder::new()
                 .set_topic("topic")
                 .set_partition(0)
@@ -394,7 +394,7 @@ mod tests {
         next_offsets.insert(tp, OffsetAndMetadata::new(1).unwrap());
 
         let before = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);
-        let consumer_records = ConsumerRecords::new_next_offsets(records, next_offsets.clone());
+        let consumer_records = ConsumerRecords::with_next_offsets(records, next_offsets.clone());
 
         assert!(!consumer_records.next_offsets().is_empty());
         assert_eq!(&next_offsets, consumer_records.next_offsets());

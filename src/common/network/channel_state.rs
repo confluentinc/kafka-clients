@@ -139,12 +139,12 @@ impl ChannelState {
     }
 
     /// Creates a new `ChannelState` with the given state and remote address.
-    pub fn new_remote_address(state: State, remote_address: &str) -> Self {
+    pub fn with_remote_address(state: State, remote_address: &str) -> Self {
         Self { state, error: None, remote_address: Some(remote_address.to_string()) }
     }
 
     /// Creates a new `ChannelState` with the given state, error, and remote address.
-    pub fn new_error_remote_address(state: State, error: Error, remote_address: Option<&str>) -> Self {
+    pub fn with_error_remote_address(state: State, error: Error, remote_address: Option<&str>) -> Self {
         Self { state, error: Some(error), remote_address: remote_address.map(|s| s.to_string()) }
     }
 

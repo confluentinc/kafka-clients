@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_rebalance_callback_metrics() {
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
         let manager = RebalanceCallbackMetricsManager::new(&metrics);
 
         assert!(metrics.metric(&manager.partition_revoke_latency_avg).is_some());

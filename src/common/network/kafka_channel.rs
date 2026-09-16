@@ -216,7 +216,7 @@ impl KafkaChannel {
                 let error = Error::Authentication(AuthenticationError::new(message));
                 let remote_desc = self.remote_address.map(|a| a.to_string());
                 self.state =
-                    ChannelState::new_error_remote_address(State::AuthenticationFailed, error, remote_desc.as_deref());
+                    ChannelState::with_error_remote_address(State::AuthenticationFailed, error, remote_desc.as_deref());
                 if authenticating {
                     self.delay_close_on_authentication_failure();
                 }
@@ -238,7 +238,7 @@ impl KafkaChannel {
             && let Some(addr) = &self.remote_address
         {
             // If we captured the remote address we can provide more information
-            self.state = ChannelState::new_remote_address(State::NotConnected, &addr.to_string());
+            self.state = ChannelState::with_remote_address(State::NotConnected, &addr.to_string());
         }
         self.transport_layer.disconnect();
     }
@@ -269,7 +269,7 @@ impl KafkaChannel {
             if self.ready() {
                 self.state = ChannelState::READY.clone();
             } else if let Some(addr) = self.remote_address {
-                self.state = ChannelState::new_remote_address(State::Authenticate, &addr.to_string());
+                self.state = ChannelState::with_remote_address(State::Authenticate, &addr.to_string());
             } else {
                 self.state = ChannelState::AUTHENTICATE.clone();
             }
@@ -494,14 +494,14 @@ impl KafkaChannel {
             let error = Error::Authentication(AuthenticationError::new(message));
             let remote_desc = self.transport_layer.peer_addr().ok().map(|a| a.to_string());
             self.state =
-                ChannelState::new_error_remote_address(State::AuthenticationFailed, error, remote_desc.as_deref());
+                ChannelState::with_error_remote_address(State::AuthenticationFailed, error, remote_desc.as_deref());
         }
         e
     }
 
     pub async fn read(&mut self) -> io::Result<usize> {
         if self.receive.is_none() {
-            self.receive = Some(NetworkReceive::new_max_size_source(self.max_receive_size, &self.id));
+            self.receive = Some(NetworkReceive::with_max_size_source(self.max_receive_size, &self.id));
         }
 
         let bytes_received = {
@@ -539,7 +539,7 @@ impl KafkaChannel {
     /// and retries on the next selector iteration.
     pub fn try_read(&mut self) -> io::Result<usize> {
         if self.receive.is_none() {
-            self.receive = Some(NetworkReceive::new_max_size_source(self.max_receive_size, &self.id));
+            self.receive = Some(NetworkReceive::with_max_size_source(self.max_receive_size, &self.id));
         }
 
         let bytes_received = {

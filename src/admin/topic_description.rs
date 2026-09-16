@@ -60,7 +60,7 @@ impl TopicDescription {
     /// which passes `Collections.emptySet()` — a reported-but-empty set, i.e.
     /// `Some(empty)` rather than `None`.
     pub fn new(name: impl Into<String>, internal: bool, partitions: Vec<TopicPartitionInfo>) -> Self {
-        Self::new_authorized_operations(name, internal, partitions, Some(BTreeSet::new()))
+        Self::with_authorized_operations(name, internal, partitions, Some(BTreeSet::new()))
     }
 
     /// Create an instance with the specified parameters (zero topic id).
@@ -75,13 +75,13 @@ impl TopicDescription {
     ///
     /// Mirrors `TopicDescription(String, boolean, List<TopicPartitionInfo>,
     /// Set<AclOperation>)`, which passes `Uuid.ZERO_UUID`.
-    pub fn new_authorized_operations(
+    pub fn with_authorized_operations(
         name: impl Into<String>,
         internal: bool,
         partitions: Vec<TopicPartitionInfo>,
         authorized_operations: Option<BTreeSet<AclOperation>>,
     ) -> Self {
-        Self::new_authorized_operations_topic_id(name, internal, partitions, authorized_operations, Uuid::zero())
+        Self::with_authorized_operations_topic_id(name, internal, partitions, authorized_operations, Uuid::zero())
     }
 
     /// Create an instance with the specified parameters.
@@ -94,7 +94,7 @@ impl TopicDescription {
     /// * `authorized_operations` - authorized operations for this topic, or
     ///   `None` if this is not known (Java's nullable `Set<AclOperation>`)
     /// * `topic_id` - the topic id
-    pub fn new_authorized_operations_topic_id(
+    pub fn with_authorized_operations_topic_id(
         name: impl Into<String>,
         internal: bool,
         partitions: Vec<TopicPartitionInfo>,
@@ -171,7 +171,7 @@ mod tests {
         // Java's 4-arg constructor forwards with Uuid.ZERO_UUID
         // (TopicDescription.java:77).
         let ops = BTreeSet::from([AclOperation::Describe]);
-        let desc = TopicDescription::new_authorized_operations("t", true, vec![], Some(ops.clone()));
+        let desc = TopicDescription::with_authorized_operations("t", true, vec![], Some(ops.clone()));
         assert_eq!(desc.name(), "t");
         assert!(desc.is_internal());
         assert_eq!(desc.authorized_operations(), Some(&ops));
@@ -181,14 +181,14 @@ mod tests {
     #[test]
     fn equality_ignores_topic_id_like_java() {
         // Java TopicDescription.equals does NOT compare topicId.
-        let a = TopicDescription::new_authorized_operations_topic_id(
+        let a = TopicDescription::with_authorized_operations_topic_id(
             "t",
             false,
             vec![],
             Some(BTreeSet::new()),
             Uuid::new(1, 1),
         );
-        let b = TopicDescription::new_authorized_operations_topic_id(
+        let b = TopicDescription::with_authorized_operations_topic_id(
             "t",
             false,
             vec![],
@@ -210,8 +210,8 @@ mod tests {
     fn equality_separates_unreported_from_reported_empty_operations() {
         // Java's equals uses Objects.equals on the nullable set, so null and an
         // empty set are different topics.
-        let unreported = TopicDescription::new_authorized_operations_topic_id("t", false, vec![], None, Uuid::zero());
-        let reported_empty = TopicDescription::new_authorized_operations_topic_id(
+        let unreported = TopicDescription::with_authorized_operations_topic_id("t", false, vec![], None, Uuid::zero());
+        let reported_empty = TopicDescription::with_authorized_operations_topic_id(
             "t",
             false,
             vec![],

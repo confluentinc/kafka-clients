@@ -22,7 +22,7 @@
 //!   system) and `Option<String>` for the instance ID (`None` is the
 //!   "absent" sentinel). There is no equivalent runtime check to test.
 
-// `ConsumerGroupMetadata::new` and `new_generation_id_member_id_group_instance_id` are marked
+// `ConsumerGroupMetadata::new` and `with_generation_id_member_id_group_instance_id` are marked
 // `#[deprecated]` in Rust to mirror Java's
 // `@Deprecated(since = "4.2", forRemoval = true)`. These tests exercise
 // those public constructors directly and must suppress the warnings.
@@ -39,7 +39,7 @@ fn test_assignment_constructor() {
     let generation_id = 2;
     let group_instance_id = "instance";
 
-    let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+    let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
         GROUP_ID,
         generation_id,
         member_id,

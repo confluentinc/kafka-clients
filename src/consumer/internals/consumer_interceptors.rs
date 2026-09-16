@@ -349,7 +349,7 @@ mod tests {
                         .records_partition(&tp)
                         .iter()
                         .map(|r| {
-                            ConsumerRecord::new_options(
+                            ConsumerRecord::with_options(
                                 ConsumerRecordOptionsBuilder::new()
                                     .set_topic(r.topic().to_string())
                                     .set_partition(r.partition())
@@ -379,7 +379,7 @@ mod tests {
             // has already succeeded. If a panic occurred above, this
             // assignment is never reached and `*records` retains its
             // original value — Java's "previous-good batch" guarantee.
-            *records = ConsumerRecords::new_next_offsets(new_records, new_next_offsets);
+            *records = ConsumerRecords::with_next_offsets(new_records, new_next_offsets);
         }
 
         fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
@@ -396,7 +396,7 @@ mod tests {
         //   new ConsumerRecord<>(topic, partition, 0, 0L,
         //       TimestampType.CREATE_TIME, 0, 0, 1, 1, new RecordHeaders(),
         //       Optional.empty())
-        ConsumerRecord::new_options(
+        ConsumerRecord::with_options(
             // headers, leader_epoch and delivery_count keep the initial values
             // `ConsumerRecordOptionsBuilder::new` gives them, which are Java's.
             ConsumerRecordOptionsBuilder::new()
@@ -415,7 +415,7 @@ mod tests {
     }
 
     fn make_offset_and_metadata(offset: i64) -> OffsetAndMetadata {
-        OffsetAndMetadata::new_leader_epoch_metadata(offset, None, "").unwrap()
+        OffsetAndMetadata::with_leader_epoch_metadata(offset, None, "").unwrap()
     }
 
     fn validate_next_offsets(
@@ -473,7 +473,7 @@ mod tests {
         );
         next_offsets.insert(filter_topic_part2.clone(), make_offset_and_metadata(1));
 
-        ConsumerRecords::new_next_offsets(records, next_offsets)
+        ConsumerRecords::with_next_offsets(records, next_offsets)
     }
 
     /// Translates `ConsumerInterceptorsTest.testOnConsumeChain`.
@@ -630,7 +630,7 @@ mod tests {
         records.insert(tp.clone(), vec![make_consumer_record("t", 0)]);
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         next_offsets.insert(tp, make_offset_and_metadata(1));
-        let mut input = ConsumerRecords::new_next_offsets(records, next_offsets);
+        let mut input = ConsumerRecords::with_next_offsets(records, next_offsets);
 
         // No panic should escape `on_consume`. All three interceptors are
         // called; the middle (Counting) interceptor records once.

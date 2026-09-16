@@ -54,7 +54,7 @@ impl RecordTooLargeError {
     /// Create the error with the given message and an underlying cause,
     /// mirroring Java's `RecordTooLargeException(String message, Throwable cause)`
     /// (`:35`). Suffixed per [`new`](Self::new).
-    pub fn new_source(message: impl Into<String>, source: Error) -> Self {
+    pub fn with_source(message: impl Into<String>, source: Error) -> Self {
         Self {
             message: message.into(),
             record_too_large_partitions: None,
@@ -71,7 +71,7 @@ impl RecordTooLargeError {
     /// Create the error naming the offending partitions, mirroring Java's
     /// `RecordTooLargeException(String message, Map<TopicPartition, Long> recordTooLargePartitions)`
     /// (`:47`). Suffixed per [`new`](Self::new).
-    pub fn new_record_too_large_partitions(
+    pub fn with_record_too_large_partitions(
         message: impl Into<String>,
         record_too_large_partitions: HashMap<TopicPartition, i64>,
     ) -> Self {
@@ -159,7 +159,7 @@ mod tests {
     fn new_record_too_large_partitions_records_the_map() {
         let mut partitions = HashMap::new();
         partitions.insert(TopicPartition::new("topic", 0), 42_i64);
-        let err = RecordTooLargeError::new_record_too_large_partitions("too big", partitions.clone());
+        let err = RecordTooLargeError::with_record_too_large_partitions("too big", partitions.clone());
         assert_eq!(err.message(), "too big");
         assert_eq!(err.record_too_large_partitions(), Some(&partitions));
     }

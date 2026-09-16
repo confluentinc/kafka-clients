@@ -390,7 +390,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => return box_error(e),
     };

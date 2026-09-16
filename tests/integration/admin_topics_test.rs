@@ -78,7 +78,7 @@ async fn create_then_list_and_describe_topics<F: AdminBackendFactory>(ctx: &mut 
     let topic = ctx.topic("admin_create_list");
     let created = admin
         .create_topics(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 topic.clone(),
                 Some(2),
                 Some(1),
@@ -186,8 +186,8 @@ async fn create_multiple_topics_partition_round_trip<F: AdminBackendFactory>(ctx
     let created = admin
         .create_topics(
             &[
-                NewTopic::new_num_partitions_replication_factor(topic_a.clone(), Some(3), Some(1)),
-                NewTopic::new_num_partitions_replication_factor(topic_b.clone(), Some(1), Some(1)),
+                NewTopic::with_num_partitions_replication_factor(topic_a.clone(), Some(3), Some(1)),
+                NewTopic::with_num_partitions_replication_factor(topic_b.clone(), Some(1), Some(1)),
             ],
             CreateTopicsOptions::new(),
         )
@@ -340,7 +340,7 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
     let created = admin
         .create_topics(
             &[
-                NewTopic::new_num_partitions_replication_factor(topic.clone(), Some(2), Some(1))
+                NewTopic::with_num_partitions_replication_factor(topic.clone(), Some(2), Some(1))
                     .set_configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())])),
             ],
             CreateTopicsOptions::new(),
@@ -439,7 +439,7 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
     let assignments = BTreeMap::from([(0, vec![broker_id]), (1, vec![broker_id])]);
     let created = admin
         .create_topics(
-            &[NewTopic::new_replicas_assignments(topic.clone(), assignments)],
+            &[NewTopic::with_replicas_assignments(topic.clone(), assignments)],
             CreateTopicsOptions::new(),
         )
         .await
@@ -501,7 +501,7 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
     let topic = ctx.topic("admin_validate_only");
     let created = admin
         .create_topics(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 topic.clone(),
                 Some(1),
                 Some(1),
@@ -569,7 +569,7 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
     let topic = ctx.topic("admin_unreachable");
     let created = admin
         .create_topics(
-            &[NewTopic::new_num_partitions_replication_factor(
+            &[NewTopic::with_num_partitions_replication_factor(
                 topic.clone(),
                 Some(1),
                 Some(1),

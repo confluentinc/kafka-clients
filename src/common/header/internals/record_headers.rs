@@ -59,7 +59,7 @@ impl RecordHeaders {
     /// This corresponds to the Java behavior where null entries in the array
     /// cause a NullPointerException. In Rust, the Option type prevents null
     /// headers so this is safe by construction.
-    pub fn new_header_slice(headers: &[RecordHeader]) -> Self {
+    pub fn with_header_slice(headers: &[RecordHeader]) -> Self {
         Self { headers: headers.to_vec(), is_read_only: false }
     }
 
@@ -67,9 +67,9 @@ impl RecordHeaders {
     ///
     /// Translates Java's `RecordHeaders(Iterable<Header> headers)`
     /// (`RecordHeaders.java:43`) — see
-    /// [`new_header_slice`](RecordHeaders::new_header_slice) for why the type,
+    /// [`with_header_slice`](RecordHeaders::with_header_slice) for why the type,
     /// not the parameter name, supplies the suffix.
-    pub fn new_header_iter(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
+    pub fn with_header_iter(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
         Self { headers: headers.into_iter().collect(), is_read_only: false }
     }
 
@@ -79,11 +79,11 @@ impl RecordHeaders {
     /// (`RecordHeaders.java:43`), since `RecordHeaders` is itself an
     /// `Iterable<Header>`. Rust needs a distinct overload because
     /// `&RecordHeaders` iterates as `&RecordHeader`, not `RecordHeader`, so it
-    /// does not satisfy [`new_header_iter`](RecordHeaders::new_header_iter)'s
+    /// does not satisfy [`with_header_iter`](RecordHeaders::with_header_iter)'s
     /// bound. The suffix follows the type, as the sibling overloads do.
     ///
     /// The new instance is writable regardless of the source's read-only state.
-    pub fn new_record_headers(other: &RecordHeaders) -> Self {
+    pub fn with_record_headers(other: &RecordHeaders) -> Self {
         Self { headers: other.headers.clone(), is_read_only: false }
     }
 
@@ -435,7 +435,7 @@ mod tests {
             .unwrap();
         headers.set_read_only();
 
-        let mut new_headers = RecordHeaders::new_record_headers(&headers);
+        let mut new_headers = RecordHeaders::with_record_headers(&headers);
         new_headers
             .add_header(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
             .unwrap();

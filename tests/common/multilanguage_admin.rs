@@ -351,12 +351,16 @@ impl MultilanguageAdmin {
     /// hand-written `PartialEq` for `KafkaPrincipal` ignores it (as Java's
     /// `equals` does), so a comparison of whole principals could not see it.
     fn kafka_principal(&self, principal: proto::KafkaPrincipal) -> KafkaPrincipal {
-        KafkaPrincipal::new_token_authenticated(principal.principal_type, principal.name, principal.token_authenticated)
+        KafkaPrincipal::with_token_authenticated(
+            principal.principal_type,
+            principal.name,
+            principal.token_authenticated,
+        )
     }
 
     /// Rebuilds a [`TokenInformation`].
     ///
-    /// `new_token_requester` rather than `new`: `new` sets the requester equal to the
+    /// `with_token_requester` rather than `new`: `new` sets the requester equal to the
     /// owner, which would silently repair a backend that dropped or transposed the
     /// requester.
     fn token_information(&self, info: proto::TokenInformation) -> Result<TokenInformation, Error> {
@@ -366,7 +370,7 @@ impl MultilanguageAdmin {
         let requester = info
             .token_requester
             .ok_or_else(|| self.protocol_error("TokenInformation with no token_requester"))?;
-        Ok(TokenInformation::new_token_requester(
+        Ok(TokenInformation::with_token_requester(
             info.token_id,
             self.kafka_principal(owner),
             self.kafka_principal(requester),
@@ -497,7 +501,7 @@ impl MultilanguageAdmin {
             );
         }
         // `LogDirDescription::new` is the two-argument Java constructor, which
-        // records both volume sizes as absent; `new_total_bytes_usable_bytes` is the
+        // records both volume sizes as absent; `with_total_bytes_usable_bytes` is the
         // four-argument one. Java has no constructor for one present and the
         // other absent, and no broker sends that, so the mixed case is a
         // protocol error rather than a guess.
@@ -506,7 +510,7 @@ impl MultilanguageAdmin {
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::new_total_bytes_usable_bytes(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
@@ -603,7 +607,7 @@ impl MultilanguageAdmin {
             Some(name) => Some(self.group_type(name, "ConsumerGroupListing.group_type")?),
             None => None,
         };
-        let rebuilt = ConsumerGroupListing::new_group_state_group_type(
+        let rebuilt = ConsumerGroupListing::with_group_state_group_type(
             listing.group_id.clone(),
             group_state,
             group_type,
@@ -686,7 +690,7 @@ impl MultilanguageAdmin {
     /// endpoint.
     ///
     /// The coordinator is why this harness exists: it used to be a fabricated
-    /// `Node` with an empty host and port -1. `Node::new_rack` keeps whatever the
+    /// `Node` with an empty host and port -1. `Node::with_rack` keeps whatever the
     /// wire carried, and the scenarios cross-check it against `describeCluster`.
     fn consumer_group_description(
         &self,
@@ -768,19 +772,21 @@ impl MultilanguageAdmin {
 
     /// Rebuilds an [`OffsetAndMetadata`].
     ///
-    /// `OffsetAndMetadata::new_leader_epoch_metadata` rejects a negative offset (Java's
+    /// `OffsetAndMetadata::with_leader_epoch_metadata` rejects a negative offset (Java's
     /// `IllegalArgumentException("Invalid negative offset")`), so a backend that
     /// reported one is a protocol error rather than a panic.
     fn offset_and_metadata(&self, offset: proto::OffsetAndMetadata) -> Result<OffsetAndMetadata, Error> {
         // Java's `metadata` is never null (its constructor maps a null to ""),
         // hence a plain string on the wire. `leader_epoch` absent is Java's
         // `Optional.empty()`, which is not epoch 0.
-        OffsetAndMetadata::new_leader_epoch_metadata(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
-            self.protocol_error(format!(
-                "OffsetAndMetadata with offset {} is not constructible: {e}",
-                offset.offset
-            ))
-        })
+        OffsetAndMetadata::with_leader_epoch_metadata(offset.offset, offset.leader_epoch, offset.metadata).map_err(
+            |e| {
+                self.protocol_error(format!(
+                    "OffsetAndMetadata with offset {} is not constructible: {e}",
+                    offset.offset
+                ))
+            },
+        )
     }
 
     /// Reads the `broker_id` variant of a [`proto::ResultKey`].
@@ -901,7 +907,7 @@ impl MultilanguageAdmin {
             .into_iter()
             .map(|info| partition_info_from_proto(self.backend, info))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(TopicDescription::new_authorized_operations_topic_id(
+        Ok(TopicDescription::with_authorized_operations_topic_id(
             description.name,
             description.is_internal,
             partitions,
@@ -916,7 +922,7 @@ impl MultilanguageAdmin {
     fn topic_metadata_and_config(&self, value: proto::TopicMetadataAndConfig) -> Result<TopicMetadataAndConfig, Error> {
         match value.result {
             Some(proto::topic_metadata_and_config::Result::Error(e)) => {
-                Ok(TopicMetadataAndConfig::new_error(kafka_error_from_proto(e)))
+                Ok(TopicMetadataAndConfig::with_error(kafka_error_from_proto(e)))
             },
             Some(proto::topic_metadata_and_config::Result::Metadata(m)) => {
                 let topic_id = self.parse_uuid(&m.topic_id, "TopicMetadata.topic_id")?;
@@ -1030,7 +1036,7 @@ fn new_partitions_to_proto(topic: &str, new_partitions: &NewPartitions) -> proto
 }
 
 fn node_from_proto(node: proto::Node) -> Node {
-    Node::new_rack(node.id, node.host, node.port, node.rack)
+    Node::with_rack(node.id, node.host, node.port, node.rack)
 }
 
 /// Rebuilds a [`TopicPartitionInfo`], preserving whether the broker reported
@@ -1058,7 +1064,7 @@ fn partition_info_from_proto(
     let nodes = |list: proto::NodeList| list.nodes.into_iter().map(node_from_proto).collect::<Vec<_>>();
     match (info.elr, info.last_known_elr) {
         (None, None) => Ok(TopicPartitionInfo::new(partition, leader, replicas, isr)),
-        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::new_elr_last_known_elr(
+        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::with_elr_last_known_elr(
             partition,
             leader,
             replicas,
@@ -1271,7 +1277,7 @@ fn quota_alteration_to_proto(alteration: &ClientQuotaAlteration) -> proto::Clien
 ///
 /// The salt is always sent, because a Rust `UserScramCredentialUpsertion` has
 /// always materialised one by the time the harness holds it (`new` and
-/// `new_bytes` generate a random salt in the constructor). So the wire
+/// `with_bytes` generate a random salt in the constructor). So the wire
 /// field's *absent* state — Java's salt-generating three-argument constructor — is
 /// not reachable from a scenario, exactly as `removeMembersFromConsumerGroup`'s
 /// present-but-empty member list is not: the harness's own input type has no such
@@ -1346,7 +1352,7 @@ fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
         .set_is_read_only(entry.is_read_only)
         .build()
         .unwrap();
-    ConfigEntry::new_options(options)
+    ConfigEntry::with_options(options)
 }
 
 impl AdminBackend for MultilanguageAdmin {

@@ -114,7 +114,7 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
         ("linger.ms".to_string(), "0".to_string()),
         ("transaction.timeout.ms".to_string(), "60000".to_string()),
     ]);
-    KafkaProducer::new_config(
+    KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid transactional producer config"),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -158,7 +158,7 @@ fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Ve
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
-    KafkaProducer::new_config(
+    KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid plain producer config"),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -204,7 +204,7 @@ async fn send_all<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, part
             .set_key(Some(format!("k-{value}").into_bytes()))
             .build()
             .unwrap();
-        let record = ProducerRecord::new_options(options).expect("ProducerRecord::new should not fail");
+        let record = ProducerRecord::with_options(options).expect("ProducerRecord::new should not fail");
         let future = producer.send(record).await.expect("send should be accepted");
         future
             .get_with_timeout(Duration::from_secs(30))
@@ -339,7 +339,7 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
         .set_key(Some(b"k-fenced".to_vec()))
         .build()
         .unwrap();
-    let record = ProducerRecord::new_options(options).expect("ProducerRecord::new should not fail");
+    let record = ProducerRecord::with_options(options).expect("ProducerRecord::new should not fail");
     let sent = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&first, record).await;
     let fenced = match sent {
         // The fencing may be reported synchronously (the manager already knows it

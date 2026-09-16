@@ -69,7 +69,7 @@ fn test_all_round_trips(message: &mut SimpleRecordsMessageData) {
 fn records_of(values: &[&str]) -> Bytes {
     let records: Vec<SimpleRecord> = values
         .iter()
-        .map(|value| SimpleRecord::new_with_value(Some(value.as_bytes().to_vec())))
+        .map(|value| SimpleRecord::with_value(Some(value.as_bytes().to_vec())))
         .collect();
     MemoryRecords::with_records(Compression::none(), &records)
         .buffer_bytes()

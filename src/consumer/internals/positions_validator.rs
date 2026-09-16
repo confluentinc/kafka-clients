@@ -224,7 +224,7 @@ mod tests {
         ]))
         .expect("config");
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
-        let metadata = Arc::new(ConsumerMetadata::new_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             Arc::clone(&subscriptions),
             ClusterResourceListeners::new(),

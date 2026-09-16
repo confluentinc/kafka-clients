@@ -251,6 +251,11 @@ impl FutureRecordMetadata {
     /// A chained metadata will allow the future that has already been returned to the
     /// users to wait on the newly created split batches even after the old big batch
     /// has been deemed as done.
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn chain(&self, future_record_metadata: FutureRecordMetadata) {
         self.chain_arc(Arc::new(future_record_metadata));
     }

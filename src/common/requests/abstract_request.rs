@@ -1132,7 +1132,7 @@ mod tests {
     #[test]
     fn test_serialize_with_header_api_key_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::PRODUCE)
                 .set_request_version(12)
@@ -1160,7 +1160,7 @@ mod tests {
     #[test]
     fn test_serialize_with_header_version_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(9)

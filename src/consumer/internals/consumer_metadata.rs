@@ -180,7 +180,7 @@ impl ConsumerMetadata {
     /// `allow_auto_create_topics` via the `pub(crate)` fields on
     /// `ConsumerConfig` (no public getters currently exist for these — the
     /// fields are accessed directly within the crate).
-    pub(crate) fn new_config(
+    pub(crate) fn with_config(
         config: &ConsumerConfig,
         subscription: Arc<Mutex<SubscriptionState>>,
         cluster_resource_listeners: ClusterResourceListeners,
@@ -340,7 +340,7 @@ mod tests {
             .collect();
         data.set_topics(response_topics);
 
-        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `ConsumerMetadataTest.testPatternSubscriptionNoInternalTopics` and

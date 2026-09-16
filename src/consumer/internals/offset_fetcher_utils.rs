@@ -185,7 +185,7 @@ impl OffsetFetcherUtils {
     ///
     /// Mirrors COMMENTS.DONE.1.md Issue 6: a previous translation used the
     /// public-class constructor here and silently produced `None` for every
-    /// `endOffsets(tp)` because `OffsetAndTimestamp::new_leader_epoch`
+    /// `endOffsets(tp)` because `OffsetAndTimestamp::with_leader_epoch`
     /// rejected `timestamp == -1`.
     pub(crate) fn build_offsets_for_times_result(
         timestamps_to_search: &HashMap<TopicPartition, i64>,
@@ -221,13 +221,13 @@ impl OffsetFetcherUtils {
             std::sync::Arc::clone(&subscriptions),
             std::sync::Arc::clone(&metadata),
         ));
-        Self::new_positions_validator(metadata, subscriptions, api_versions, retry_backoff_ms, positions_validator)
+        Self::with_positions_validator(metadata, subscriptions, api_versions, retry_backoff_ms, positions_validator)
     }
 
     /// Java: the seven-argument overload taking the shared
     /// `PositionsValidator` (`OffsetFetcherUtils.java:83`). Per CLAUDE.md §2
     /// the overload carrying the extra parameter is named after it.
-    pub(crate) fn new_positions_validator(
+    pub(crate) fn with_positions_validator(
         metadata: std::sync::Arc<ConsumerMetadata>,
         subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
         api_versions: std::sync::Arc<ApiVersions>,
@@ -741,7 +741,7 @@ mod tests {
         ]))
         .expect("config");
         let subscriptions = std::sync::Arc::new(Mutex::new(SubscriptionState::new(reset_strategy)));
-        let metadata = std::sync::Arc::new(ConsumerMetadata::new_config(
+        let metadata = std::sync::Arc::new(ConsumerMetadata::with_config(
             &config,
             subscriptions.clone(),
             ClusterResourceListeners::new(),

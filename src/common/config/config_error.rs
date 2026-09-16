@@ -52,7 +52,7 @@ impl ConfigError {
     // generated as `new` by `kafka_error_class!` above, whose single body
     // declares 141 classes. Renaming it here would mean threading a per-class
     // constructor name through the macro so that exactly one of the 141 spells
-    // it `new_message` — leaving `SomeError::new("msg")` valid or not depending
+    // it `with_message` — leaving `SomeError::new("msg")` valid or not depending
     // on a class the call site cannot see. The macro's uniformity is worth more
     // than this one suffix; see the note on `message_only_error!` for the same
     // trade-off.
@@ -60,14 +60,14 @@ impl ConfigError {
     /// Create a config error naming the offending value and configuration key,
     /// mirroring Java's `ConfigException(String name, Object value)` (`:32`):
     /// `"Invalid value {value} for configuration {name}"`.
-    pub fn new_name_value(name: impl Display, value: impl Display) -> Self {
+    pub fn with_name_value(name: impl Display, value: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}"))
     }
 
     /// Create a config error naming the value, key, and a detail message,
     /// mirroring Java's `ConfigException(String name, Object value, String message)`
     /// (`:36`): `"Invalid value {value} for configuration {name}: {message}"`.
-    pub fn new_name_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
+    pub fn with_name_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}: {message}"))
     }
 }
@@ -83,11 +83,11 @@ mod tests {
     #[test]
     fn message_matches_java_config_error_format() {
         assert_eq!(
-            ConfigError::new_name_value("group.protocol", "bad").message(),
+            ConfigError::with_name_value("group.protocol", "bad").message(),
             "Invalid value bad for configuration group.protocol"
         );
         assert_eq!(
-            ConfigError::new_name_value_message("max.poll.records", 0, "Value must be at least 1").message(),
+            ConfigError::with_name_value_message("max.poll.records", 0, "Value must be at least 1").message(),
             "Invalid value 0 for configuration max.poll.records: Value must be at least 1"
         );
     }

@@ -723,7 +723,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             // `Call(...)` rendering, and append the cause as text — which left
             // `Error::source()` empty where Java's `getCause()` is populated.
             let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
-            Error::Timeout(TimeoutError::new_source(message, cause))
+            Error::Timeout(TimeoutError::with_source(message, cause))
         };
         call.handle_failure(&error);
     }
@@ -770,7 +770,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             Box::new(|_timeout_ms| {
                 // Empty topic list: request brokers + controller only, matching Java.
                 Ok(
-                    Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true))
+                    Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true))
                         as Box<dyn RequestBuilder>,
                 )
             }),

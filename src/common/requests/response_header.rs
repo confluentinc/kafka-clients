@@ -41,14 +41,14 @@ pub struct ResponseHeader {
 
 impl ResponseHeader {
     /// Creates a new `ResponseHeader` with the given correlation id and header version.
-    pub fn new_correlation_id(correlation_id: i32, header_version: i16) -> Self {
+    pub fn with_correlation_id(correlation_id: i32, header_version: i16) -> Self {
         let mut data = ResponseHeaderData::new();
         data.set_correlation_id(correlation_id);
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
 
     /// Creates a new `ResponseHeader` from existing data and a header version.
-    pub fn new_data(data: ResponseHeaderData, header_version: i16) -> Self {
+    pub fn with_data(data: ResponseHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
 
@@ -162,7 +162,7 @@ mod tests {
     /// Basic roundtrip test for ResponseHeader: create, serialize, parse, compare.
     #[test]
     fn test_response_header_roundtrip_v0() {
-        let mut header = ResponseHeader::new_correlation_id(42, 0);
+        let mut header = ResponseHeader::with_correlation_id(42, 0);
         let mut cache = ObjectSerializationCache::new();
         let size = header.size_with_cache(&mut cache).unwrap();
         assert_eq!(size, 4); // correlation_id is 4 bytes, v0 has no tagged fields
@@ -179,7 +179,7 @@ mod tests {
     /// Roundtrip test for flexible header version (v1, which includes tagged fields).
     #[test]
     fn test_response_header_roundtrip_v1() {
-        let mut header = ResponseHeader::new_correlation_id(123, 1);
+        let mut header = ResponseHeader::with_correlation_id(123, 1);
         let mut cache = ObjectSerializationCache::new();
         let size = header.size_with_cache(&mut cache).unwrap();
         // correlation_id (4 bytes) + tagged fields count varint (1 byte for 0)
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_response_header_display() {
-        let header = ResponseHeader::new_correlation_id(99, 1);
+        let header = ResponseHeader::with_correlation_id(99, 1);
         let display = format!("{}", header);
         assert!(display.contains("correlationId=99"));
         assert!(display.contains("headerVersion=1"));
@@ -206,7 +206,7 @@ mod tests {
     /// Tests that the cached size method returns the same value as the computed size.
     #[test]
     fn test_response_header_size_caching() {
-        let mut header = ResponseHeader::new_correlation_id(42, 1);
+        let mut header = ResponseHeader::with_correlation_id(42, 1);
         let size1 = header.size().unwrap();
         let size2 = header.size().unwrap();
         assert_eq!(size1, size2);

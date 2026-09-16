@@ -46,7 +46,7 @@ impl AccessControlEntryFilter {
     }
 
     /// This is a non-public constructor used in `AccessControlEntry::to_filter`.
-    pub(crate) fn new_data(data: AccessControlEntryData) -> AccessControlEntryFilter {
+    pub(crate) fn with_data(data: AccessControlEntryData) -> AccessControlEntryFilter {
         AccessControlEntryFilter { data }
     }
 

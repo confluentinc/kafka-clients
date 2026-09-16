@@ -85,7 +85,7 @@ impl FetchConfig {
     ///
     /// Returns an error if `isolation.level` is not one of `read_uncommitted`
     /// or `read_committed`.
-    pub(crate) fn new_consumer_config(config: &ConsumerConfig) -> Result<Self, Error> {
+    pub(crate) fn with_consumer_config(config: &ConsumerConfig) -> Result<Self, Error> {
         let isolation_level = match config.isolation_level.as_str() {
             "read_uncommitted" => IsolationLevel::ReadUncommitted,
             "read_committed" => IsolationLevel::ReadCommitted,
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_basic_from_consumer_config() {
         let consumer_config = ConsumerConfig::default();
-        let fetch_config = FetchConfig::new_consumer_config(&consumer_config).unwrap();
+        let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         // Same as the explicit-values test — defaults agree.
         assert_eq!(1, fetch_config.min_bytes);
         assert_eq!(50 * 1024 * 1024, fetch_config.max_bytes);
@@ -180,7 +180,7 @@ mod tests {
     fn test_new_consumer_config_read_committed() {
         let consumer_config =
             ConsumerConfig { isolation_level: "read_committed".to_string(), ..ConsumerConfig::default() };
-        let fetch_config = FetchConfig::new_consumer_config(&consumer_config).unwrap();
+        let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         assert_eq!(IsolationLevel::ReadCommitted, fetch_config.isolation_level);
     }
 
@@ -189,7 +189,7 @@ mod tests {
     fn test_new_consumer_config_rejects_unknown_isolation_level() {
         let consumer_config =
             ConsumerConfig { isolation_level: "not_a_level".to_string(), ..ConsumerConfig::default() };
-        let err = FetchConfig::new_consumer_config(&consumer_config).unwrap_err();
+        let err = FetchConfig::with_consumer_config(&consumer_config).unwrap_err();
         let msg = err.message();
         assert!(msg.contains("isolation.level"), "{msg}");
         assert!(msg.contains("not_a_level"), "{msg}");

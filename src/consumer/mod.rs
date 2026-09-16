@@ -541,7 +541,7 @@ where
     // (`SubscriptionState`, `ConsumerMetadata`, `NetworkClient` +
     // PLAINTEXT `ChannelBuilder`, every `RequestManager`,
     // `ApplicationEventHandler`, `ConsumerNetworkThread` bg task) and
-    // hands off to `AsyncKafkaConsumer::new_with_components` so the
+    // hands off to `AsyncKafkaConsumer::with_components` so the
     // Phase-11 test seam is preserved. `Box<dyn Consumer<K, V>>` is
     // returned so the dispatch surface stays object-safe (Consumer
     // trait surface check at `tests/consumer/trait_surface_check.rs`).

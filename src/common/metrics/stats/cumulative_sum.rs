@@ -37,11 +37,11 @@ pub struct CumulativeSum {
 impl CumulativeSum {
     /// Create a `CumulativeSum` initialized to `0.0`.
     pub fn new() -> Self {
-        Self::new_value(0.0)
+        Self::with_value(0.0)
     }
 
     /// Create a `CumulativeSum` initialized to `value`.
-    pub fn new_value(value: f64) -> Self {
+    pub fn with_value(value: f64) -> Self {
         Self { total: AtomicU64::new(value.to_bits()) }
     }
 }
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn test_with_value_seed() {
         let config = MetricConfig::new();
-        let s = CumulativeSum::new_value(10.0);
+        let s = CumulativeSum::with_value(10.0);
         assert_eq!(s.measure(&config, 0), 10.0);
         s.record(&config, 5.0, 0);
         assert_eq!(s.measure(&config, 0), 15.0);

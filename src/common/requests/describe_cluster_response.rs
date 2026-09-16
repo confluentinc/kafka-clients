@@ -74,7 +74,7 @@ impl DescribeClusterResponse {
             .map(|b| {
                 (
                     b.broker_id,
-                    Node::new_rack_is_fenced(b.broker_id, b.host.clone(), b.port, b.rack.clone(), b.is_fenced),
+                    Node::with_rack_is_fenced(b.broker_id, b.host.clone(), b.port, b.rack.clone(), b.is_fenced),
                 )
             })
             .collect()

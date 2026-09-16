@@ -1174,7 +1174,7 @@ impl SubscriptionState {
                 // above — so this `ok()` collapses an impossible Err to
                 // `None`, which is treated identically to "no divergent
                 // offset known".
-                let divergent_offset = crate::consumer::OffsetAndMetadata::new_leader_epoch_metadata(
+                let divergent_offset = crate::consumer::OffsetAndMetadata::with_leader_epoch_metadata(
                     epoch_end_offset.end_offset,
                     Some(epoch_end_offset.leader_epoch),
                     "",
@@ -1627,14 +1627,14 @@ impl SubscriptionState {
             if state.has_valid_position()
                 && let Some(pos) = &state.position
             {
-                // `OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, "")` —
+                // `OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, "")` —
                 // empty metadata mirrors Java's `new OffsetAndMetadata(offset, epoch, "")`.
-                match OffsetAndMetadata::new_leader_epoch_metadata(pos.offset, pos.offset_epoch, String::new()) {
+                match OffsetAndMetadata::with_leader_epoch_metadata(pos.offset, pos.offset_epoch, String::new()) {
                     Ok(om) => {
                         result.insert(tp.clone(), om);
                     },
                     Err(_e) => {
-                        // OffsetAndMetadata::new_leader_epoch_metadata only fails on
+                        // OffsetAndMetadata::with_leader_epoch_metadata only fails on
                         // negative offsets — `position.offset` is always
                         // non-negative on the happy path. Skip the entry on
                         // the unexpected case rather than propagating: the
@@ -3181,7 +3181,7 @@ mod tests {
             &epoch_end_offset(divergent_offset_epoch, divergent_offset),
         );
         let truncation = truncation_opt.expect("truncation must be reported");
-        let expected_divergent = crate::consumer::OffsetAndMetadata::new_leader_epoch_metadata(
+        let expected_divergent = crate::consumer::OffsetAndMetadata::with_leader_epoch_metadata(
             divergent_offset,
             Some(divergent_offset_epoch),
             "",

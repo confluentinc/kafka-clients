@@ -276,7 +276,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
-    pub fn new_metadata_rebootstrap_trigger_ms(
+    pub fn with_metadata_rebootstrap_trigger_ms(
         selector: S,
         metadata: Arc<Metadata>,
         client_id: &str,
@@ -353,7 +353,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
-    pub fn new_metadata_updater(
+    pub fn with_metadata_updater(
         selector: S,
         metadata_updater: Box<dyn MetadataUpdater>,
         client_id: &str,
@@ -691,7 +691,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let placeholder_send =
             NetworkSend::new(&destination, Box::new(crate::common::network::ByteBufferSend::new(Vec::new())));
 
-        let in_flight_request = InFlightRequest::new_client_request(
+        let in_flight_request = InFlightRequest::with_client_request(
             client_request,
             header,
             is_internal_request,
@@ -844,12 +844,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     max_api_version = api_version.max_version;
                 }
                 self.nodes_needing_api_versions_fetch
-                    .insert(node, ApiVersionsRequestBuilder::new_version(max_api_version));
+                    .insert(node, ApiVersionsRequestBuilder::with_version(max_api_version));
             }
             return;
         }
 
-        let node_version_info = NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
+        let node_version_info = NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
             &api_versions_response.data().api_keys.to_vec(),
             &api_versions_response.data().supported_features.to_vec(),
             &api_versions_response.data().finalized_features.to_vec(),
@@ -1848,7 +1848,7 @@ mod tests {
     fn create_network_client(reconnect_backoff_max_ms: i64) -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1874,7 +1874,7 @@ mod tests {
     fn create_network_client_with_static_nodes() -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock-static",
@@ -1900,7 +1900,7 @@ mod tests {
     fn create_network_client_with_no_version_discovery() -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1929,7 +1929,7 @@ mod tests {
     ) -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1961,7 +1961,7 @@ mod tests {
             .map(|i| Node::new(i as i32, "localhost".to_string(), 9092 + i as i32))
             .collect();
         let updater = TestMetadataUpdater::new(nodes);
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -2005,7 +2005,7 @@ mod tests {
         correlation_id: i32,
     ) -> Vec<u8> {
         let header_version = api_key.response_header_version(api_version);
-        let mut header = ResponseHeader::new_correlation_id(correlation_id, header_version);
+        let mut header = ResponseHeader::with_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(header.data(), &mut cache, header_version).expect("header size");
@@ -2032,7 +2032,7 @@ mod tests {
     ) {
         let bytes =
             serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data_mut(), correlation_id);
-        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         selector.delayed_receive(DelayedReceive::new(node.id_string(), receive));
     }
 
@@ -2084,7 +2084,7 @@ mod tests {
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
@@ -2104,7 +2104,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -2230,7 +2230,7 @@ mod tests {
     async fn test_send_to_unready_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let now = 0_i64;
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request("5", Box::new(builder), now, false);
         client.send(request, now);
     }
@@ -2250,7 +2250,7 @@ mod tests {
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
 
         // Send a request
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
 
@@ -2406,7 +2406,7 @@ mod tests {
         // Must call before creating any request, as it may send ApiVersionsRequest
         await_ready(client, node).await;
 
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test_topic"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test_topic"]), true);
         let callback_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_flag = callback_executed.clone();
         let callback: super::super::RequestCompletionHandler =
@@ -2433,7 +2433,7 @@ mod tests {
         let response_version = ApiKeys::METADATA.latest_version();
         let bytes =
             serialize_response_with_header(&ApiKeys::METADATA, response_version, &mut response_data, correlation_id);
-        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
 
         let responses = client.poll(1, now).await;
@@ -2461,7 +2461,7 @@ mod tests {
         // Build a MetadataRequestBuilder that targets version 3 only, with
         // allow_auto_topic_creation=false, which should fail.
         let builder =
-            MetadataRequestBuilder::new_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
+            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         client.send_internal_metadata_request(builder, node.id_string(), now);
 
         // The MetadataUpdater should have recorded a failure.
@@ -2488,7 +2488,7 @@ mod tests {
         assert!(least_loaded.has_node_available_or_connection_ready());
 
         // Send a metadata request to saturate the connection
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
@@ -2511,7 +2511,7 @@ mod tests {
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
@@ -2526,7 +2526,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -2550,7 +2550,7 @@ mod tests {
 
         await_ready(&mut client, &node).await;
 
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
@@ -2583,7 +2583,7 @@ mod tests {
         let callback_responses: Arc<std::sync::Mutex<Vec<i32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // Send first request
-        let builder1 = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder1 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let cb_responses1 = callback_responses.clone();
         let callback1: super::super::RequestCompletionHandler =
             Box::new(move |resp: &mut super::super::ClientResponse| {
@@ -2602,7 +2602,7 @@ mod tests {
         client.poll(0, now).await;
 
         // Send second request
-        let builder2 = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder2 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let cb_responses2 = callback_responses.clone();
         let callback2: super::super::RequestCompletionHandler =
             Box::new(move |resp: &mut super::super::ClientResponse| {
@@ -2883,7 +2883,7 @@ mod tests {
     fn create_network_client_with_real_metadata(
         metadata: Arc<Metadata>,
     ) -> NetworkClient<MockSelector, TestHostResolver> {
-        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata,
             "mock",
@@ -2910,7 +2910,7 @@ mod tests {
     fn create_network_client_with_failing_dns() -> NetworkClient<MockSelector, FailingHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -2948,7 +2948,7 @@ mod tests {
     ) -> ClientResponse {
         await_ready(client, node).await;
 
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -2972,7 +2972,7 @@ mod tests {
                 &mut response_data,
                 correlation_id,
             );
-            let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+            let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
             client.selector_mut().complete_receive(receive);
         }
 
@@ -3049,7 +3049,7 @@ mod tests {
             Node::new(1, "localhost".to_string(), 9093),
         ];
         let updater = TestMetadataUpdater::new(nodes);
-        let _client = NetworkClient::new_metadata_updater(
+        let _client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3084,7 +3084,7 @@ mod tests {
 
         // Send first request
         let timeout_ms = 1000;
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3106,13 +3106,13 @@ mod tests {
             &mut response_data,
             r1_correlation_id,
         );
-        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node.id_string(), receive));
 
         // Send second request
-        let builder2 = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder2 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request2 = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder2),
@@ -3146,7 +3146,7 @@ mod tests {
         await_ready(&mut client, &node).await;
 
         // Send a request
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3169,7 +3169,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -3217,7 +3217,7 @@ mod tests {
             std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
         )]);
 
-        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata.clone(),
             "mock",
@@ -3313,7 +3313,7 @@ mod tests {
         let nodes = metadata.fetch().nodes().to_vec();
         assert!(nodes.len() >= 2, "Expected at least 2 nodes from metadata");
 
-        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata.clone(),
             "mock",
@@ -3341,7 +3341,7 @@ mod tests {
         }
 
         // Queue a user request to nodes[0]
-        let builder = MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             nodes[0].id_string(),
             Box::new(builder),
@@ -3563,7 +3563,7 @@ mod tests {
             .expect("METADATA must be advertised");
 
         let unreachable = supported.max_version + 1;
-        let builder = MetadataRequestBuilder::new_options(
+        let builder = MetadataRequestBuilder::with_options(
             MetadataRequestBuilderOptionsBuilder::new()
                 .set_topics(Some(&["topic_1"]))
                 .set_allow_auto_topic_creation(true)
@@ -3616,7 +3616,7 @@ mod tests {
         // v3 is a usable version, but disabling auto topic creation below v4 is
         // not representable, so `build_version` fails.
         let builder =
-            MetadataRequestBuilder::new_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
+            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         let responses = client.poll(0, now).await;
@@ -3711,7 +3711,7 @@ mod tests {
         // has a specific correlation_id, we'll try a range.
         // The safer approach: use delayed_receive which matches on completed sends.
         let bytes = serialize_response_with_header(&ApiKeys::METADATA, response_version, response.data_mut(), 0);
-        let receive = NetworkReceive::new_source_buffer(node1.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node1.id_string(), bytes);
         client
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node1.id_string(), receive));
@@ -3746,7 +3746,7 @@ mod tests {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node.clone()]);
 
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3811,7 +3811,7 @@ mod tests {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node.clone()]);
 
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3872,7 +3872,7 @@ mod tests {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node.clone()]);
 
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3941,7 +3941,7 @@ mod tests {
             Node::new(1, "localhost".to_string(), 9093),
         ];
         let updater = TestMetadataUpdater::new(nodes.clone());
-        let mut client = NetworkClient::new_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -4237,7 +4237,7 @@ mod tests {
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
-        crate::common::requests::RequestHeader::new_options(
+        crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(12)
@@ -4362,7 +4362,7 @@ mod tests {
 
         // `assertThrows(SchemaException.class, ...)` — the request is SASL, the
         // response is not.
-        let header0 = crate::common::requests::RequestHeader::new_options(
+        let header0 = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::LIST_OFFSETS)
                 .set_request_version(version)
@@ -4380,7 +4380,7 @@ mod tests {
         // so the mismatch is rethrown. `CorrelationIdMismatchException` *is* the
         // `IllegalStateException` Java's assertion accepts, which is why every
         // hierarchy predicate must answer `false` for it.
-        let header1 = crate::common::requests::RequestHeader::new_options(
+        let header1 = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::LIST_OFFSETS)
                 .set_request_version(version)
@@ -4452,7 +4452,7 @@ mod tests {
         // a wall-clock metrics clock), the recorded samples fall outside the
         // measured window and the stats read NaN.
         let mock_time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::new_default_config_reporters_time(
+        let metrics = Arc::new(Metrics::with_default_config_reporters_time(
             Arc::new(MetricConfig::new()),
             Vec::new(),
             Arc::clone(&mock_time) as Arc<dyn Time>,
@@ -4513,7 +4513,7 @@ mod tests {
                 &mut response_data,
                 correlation_id,
             );
-            let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
+            let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
             client.selector_mut().complete_receive(receive);
             client.poll(1, mock_time.milliseconds()).await;
             // If a throttled response is received, advance the time to ensure progress.

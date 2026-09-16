@@ -403,7 +403,7 @@ macro_rules! kafka_error_class {
             ///
             /// Suffixed with the one parameter beyond the `{message}`
             /// intersection (CLAUDE.md §2) — see [`new`](Self::new).
-            pub fn new_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
+            pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
                 Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
@@ -646,7 +646,7 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 /// `java.util.concurrent.TimeoutException`), each of which really declares all
 /// four of `()`, `(String)`, `(Throwable)`, `(String, Throwable)`. Under
 /// CLAUDE.md §2 the no-arg form would own the plain `new` and the message form
-/// would become `new_message`.
+/// would become `with_message`.
 ///
 /// They are not modelled, and `new` keeps the message form, for two reasons:
 ///
@@ -687,7 +687,7 @@ macro_rules! message_only_error {
             ///
             /// Suffixed with the one parameter beyond the `{message}`
             /// intersection (CLAUDE.md §2) — see [`new`](Self::new).
-            pub fn new_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
+            pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
                 Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
@@ -1232,7 +1232,7 @@ impl Error {
         let message = message.into();
         error
             .error_with_message(&message)
-            .unwrap_or_else(|| Self::KafkaError(KafkaError::new_message(error, message)))
+            .unwrap_or_else(|| Self::KafkaError(KafkaError::with_message(error, message)))
     }
 
     /// Create a bare Kafka error with no message, translating Java's no-arg
@@ -1270,7 +1270,7 @@ impl Error {
     /// See [`kafka`](Self::kafka) for why this does not go through
     /// [`with_message`](Self::with_message).
     pub fn kafka_message(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::new_message(Errors::UnknownServerError, message))
+        Self::KafkaError(KafkaError::with_message(Errors::UnknownServerError, message))
     }
 
     /// Create a bare Kafka error carrying only the error that caused it,
@@ -1280,7 +1280,7 @@ impl Error {
     /// See [`kafka`](Self::kafka) for why this does not go through
     /// [`with_message`](Self::with_message).
     pub fn kafka_source(source: Error) -> Self {
-        Self::KafkaError(KafkaError::new_source(Errors::UnknownServerError, source))
+        Self::KafkaError(KafkaError::with_source(Errors::UnknownServerError, source))
     }
 
     /// Create a bare Kafka error carrying the error that caused it, translating
@@ -1290,7 +1290,7 @@ impl Error {
     /// See [`kafka`](Self::kafka) for why this does not go through
     /// [`with_message`](Self::with_message).
     pub fn kafka_message_source(message: impl Into<String>, source: Error) -> Self {
-        Self::KafkaError(KafkaError::new_message_source(Errors::UnknownServerError, message, source))
+        Self::KafkaError(KafkaError::with_message_source(Errors::UnknownServerError, message, source))
     }
 
     /// Create a topic authorization error
@@ -1305,7 +1305,7 @@ impl Error {
     /// Create a topic authorization error carrying a custom message
     /// (Java: `new TopicAuthorizationException(message, unauthorizedTopics)`).
     pub fn topic_authorization_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
-        Self::TopicAuthorization(TopicAuthorizationError::new_message(topics, message))
+        Self::TopicAuthorization(TopicAuthorizationError::with_message(topics, message))
     }
 
     /// Create an invalid topic error
@@ -1321,7 +1321,7 @@ impl Error {
     /// (Java: `new InvalidTopicException(message, invalidTopics)`, and the
     /// `new InvalidTopicException(String message)` form when `topics` is empty).
     pub fn invalid_topics_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
-        Self::InvalidTopic(InvalidTopicError::new_message(topics, message))
+        Self::InvalidTopic(InvalidTopicError::with_message(topics, message))
     }
 
     // The two `group_authorization*` factories below are NOT an overload group:
@@ -1348,7 +1348,7 @@ impl Error {
     /// by group-management / offset-commit APIs when the consumer was
     /// constructed without a valid `group.id`.
     pub fn invalid_group_id(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::new_message(Errors::InvalidGroupId, message))
+        Self::KafkaError(KafkaError::with_message(Errors::InvalidGroupId, message))
     }
 
     /// Create a throttling quota exceeded error.
@@ -1402,7 +1402,7 @@ impl Error {
     /// Create a configuration error naming the offending value and key, in
     /// Java's `ConfigException(name, value)` format.
     pub fn config_name_value(name: impl std::fmt::Display, value: impl std::fmt::Display) -> Self {
-        Self::Config(ConfigError::new_name_value(name, value))
+        Self::Config(ConfigError::with_name_value(name, value))
     }
 
     /// Create a configuration error naming the value, key, and a detail message,
@@ -1412,7 +1412,7 @@ impl Error {
         value: impl std::fmt::Display,
         message: impl std::fmt::Display,
     ) -> Self {
-        Self::Config(ConfigError::new_name_value_message(name, value, message))
+        Self::Config(ConfigError::with_name_value_message(name, value, message))
     }
 
     /// Create an illegal state error.
@@ -1469,7 +1469,7 @@ impl Error {
     /// [`schema`](Self::schema), so that one keeps the plain name and this is
     /// suffixed with the parameter beyond it (CLAUDE.md §2).
     pub fn schema_source(message: impl Into<String>, source: Error) -> Self {
-        Self::Schema(SchemaError::new_source(message, source))
+        Self::Schema(SchemaError::with_source(message, source))
     }
 
     /// Create a serialization error.
@@ -1481,7 +1481,7 @@ impl Error {
 
     /// Create an unsupported version error.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::new_message(Errors::UnsupportedVersion, message))
+        Self::KafkaError(KafkaError::with_message(Errors::UnsupportedVersion, message))
     }
 
     /// Create a wakeup error.
@@ -1535,7 +1535,7 @@ impl Error {
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
     pub fn record_batch_too_large(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::new_message(Errors::MessageTooLarge, message))
+        Self::KafkaError(KafkaError::with_message(Errors::MessageTooLarge, message))
     }
 
     // -- Base access -------------------------------------------------------
@@ -1975,7 +1975,7 @@ mod tests {
 
         // Set through `KafkaError`'s Java-shaped `(String, Throwable)` constructor.
         let root = Error::new(Errors::ClusterAuthorizationFailed);
-        let wrapped = Error::KafkaError(KafkaError::new_message_source(
+        let wrapped = Error::KafkaError(KafkaError::with_message_source(
             Errors::UnknownServerError,
             "Cannot execute transactional method because we are in an error state",
             root,
@@ -1988,14 +1988,14 @@ mod tests {
         assert_eq!(wrapped.error(), Errors::UnknownServerError);
 
         // A macro-declared class carries one too (every class has the slot).
-        let serialization = Error::Serialization(SerializationError::new_source(
+        let serialization = Error::Serialization(SerializationError::with_source(
             "bad bytes",
             Error::local_illegal_argument("not utf-8"),
         ));
         assert_eq!(serialization.source().expect("retained").message(), "not utf-8");
 
         // The chain is walkable to arbitrary depth.
-        let outer = Error::KafkaError(KafkaError::new_source(Errors::UnknownServerError, serialization));
+        let outer = Error::KafkaError(KafkaError::with_source(Errors::UnknownServerError, serialization));
         let mid = outer.source().expect("first link");
         assert_eq!(mid.message(), "bad bytes");
         assert_eq!(mid.source().expect("second link").message(), "not utf-8");

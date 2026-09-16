@@ -165,7 +165,7 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if the API key is not recognized.
-    pub fn new_options(options: RequestHeaderOptions<'_>) -> io::Result<Self> {
+    pub fn with_options(options: RequestHeaderOptions<'_>) -> io::Result<Self> {
         let RequestHeaderOptions { request_api_key, request_version, client_id, correlation_id } = options;
         let mut data = RequestHeaderData::new();
         data.set_request_api_key(request_api_key.id());
@@ -180,7 +180,7 @@ impl RequestHeader {
     ///
     /// Corresponds to Java's `RequestHeader(RequestHeaderData, short)`
     /// (`RequestHeader.java:47`).
-    pub fn new_data_header_version(data: RequestHeaderData, header_version: i16) -> Self {
+    pub fn with_data_header_version(data: RequestHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
 
@@ -234,7 +234,7 @@ impl RequestHeader {
     /// Creates a corresponding response header with the same correlation id
     /// and the appropriate response header version.
     pub fn to_response_header(&self) -> ResponseHeader {
-        ResponseHeader::new_correlation_id(
+        ResponseHeader::with_correlation_id(
             self.data.correlation_id,
             self.api_key().response_header_version(self.api_version()),
         )
@@ -380,7 +380,7 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV1`.
     #[test]
     fn test_request_header_v1() {
-        let mut header = RequestHeader::new_options(
+        let mut header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
                 .set_request_version(1)
@@ -401,7 +401,7 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV2`.
     #[test]
     fn test_request_header_v2() {
-        let mut header = RequestHeader::new_options(
+        let mut header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::CREATE_DELEGATION_TOKEN)
                 .set_request_version(2)
@@ -429,7 +429,7 @@ mod tests {
             full_buf.write_byte(0).unwrap();
         }
 
-        let mut header = RequestHeader::new_options(
+        let mut header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
                 .set_request_version(1)
@@ -511,7 +511,7 @@ mod tests {
     /// header's rendering is the text every `NetworkClient` send log embeds.
     #[test]
     fn test_request_header_display() {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(1)
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_request_header_to_response_header() {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(12)
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_request_header_is_api_version_supported() {
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
                 .set_request_version(ApiKeys::METADATA.oldest_version())

@@ -293,7 +293,7 @@ impl CompletedFetch {
     ///   TopicPartition, PartitionData, FetchMetricsAggregator, Long)` —
     /// minus the logger (we use the `log` crate). Phase M3 plumbs the
     /// `FetchMetricsAggregator` (dropped by Phase 7a).
-    pub(crate) fn new_full(
+    pub(crate) fn with_full(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
         partition: TopicPartition,
@@ -532,7 +532,7 @@ impl CompletedFetch {
             Err(err) if err.is_kafka_error() => {
                 self.cached_record_error = Some(err.clone());
                 if out.is_empty() {
-                    Err(Error::KafkaError(KafkaError::new_message_source(
+                    Err(Error::KafkaError(KafkaError::with_message_source(
                         Errors::UnknownServerError,
                         format!(
                             "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
@@ -667,7 +667,7 @@ impl CompletedFetch {
                         e
                     )))
                 })?;
-                headers_owned = RecordHeaders::new_header_iter(headers_vec);
+                headers_owned = RecordHeaders::with_header_iter(headers_vec);
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
@@ -748,7 +748,7 @@ impl CompletedFetch {
 
             // §27: cheap Arc clone — atomic pointer bump, no UTF-8 copy.
             let topic_arc = Arc::clone(&self.topic_arc);
-            let consumer_record = ConsumerRecord::new_options(
+            let consumer_record = ConsumerRecord::with_options(
                 ConsumerRecordOptionsBuilder::new()
                     .set_topic(topic_arc)
                     .set_partition(self.partition.partition())
@@ -1353,7 +1353,7 @@ fn build_aborted_transactions(partition_data: &PartitionData) -> BinaryHeap<Abor
 mod tests {
     use super::*;
     use crate::common::compress::Compression;
-    use crate::common::record::internal::{MemoryRecords, SimpleRecord};
+    use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, SimpleRecord};
     use crate::common::serialization::Deserializer;
     use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::internals::FetchMetricsManager;
@@ -1444,10 +1444,10 @@ mod tests {
         let simple_records: Vec<SimpleRecord> = (0..count)
             .map(|i| {
                 let value = format!("value-{}", first_message_id + i as i64);
-                SimpleRecord::new(0, Some("key".as_bytes().to_vec()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some("key".as_bytes().to_vec()), Some(value.into_bytes()))
             })
             .collect();
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
             Compression::none(),
@@ -1468,10 +1468,10 @@ mod tests {
                 let n = first_message_id + i as i64;
                 let key = format!("key-{n}");
                 let value = format!("value-{n}");
-                SimpleRecord::new(0, Some(key.into_bytes()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some(key.into_bytes()), Some(value.into_bytes()))
             })
             .collect();
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
             Compression::none(),
@@ -1487,10 +1487,10 @@ mod tests {
         let simple_records: Vec<SimpleRecord> = (0..count)
             .map(|i| {
                 let value = format!("value-{}", first_message_id + i as i64);
-                SimpleRecord::new(0, Some("key".as_bytes().to_vec()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some("key".as_bytes().to_vec()), Some(value.into_bytes()))
             })
             .collect();
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
             Compression::gzip(),
@@ -1517,15 +1517,14 @@ mod tests {
             let simple_records: Vec<SimpleRecord> = (0..records_per_batch)
                 .map(|i| {
                     let n = offset + i as i64;
-                    SimpleRecord::new(
+                    SimpleRecord::with_timestamp_key_value(
                         0,
                         Some(format!("key-{n}").into_bytes()),
                         Some(format!("value-{n}").into_bytes()),
-                        vec![],
                     )
                 })
                 .collect();
-            let records = MemoryRecords::with_records_at_offset(
+            let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
                 2,
                 offset,
                 compression.clone(),
@@ -1541,7 +1540,7 @@ mod tests {
     fn new_completed_fetch(fetch_offset: i64, records_bytes: Vec<u8>) -> CompletedFetch {
         let mut partition_data = PartitionData::new();
         partition_data.set_records(Some(bytes::Bytes::from(records_bytes)));
-        CompletedFetch::new_full(
+        CompletedFetch::with_full(
             make_subscriptions(),
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
@@ -1774,7 +1773,7 @@ mod tests {
     /// Java's `DefaultRecordBatch.RecordIterator` count validation (which is
     /// CRC-independent) still has to fire.
     fn batch_with_overridden_record_count(base_offset: i64, count: i32, declared_count: i32) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             512,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1805,20 +1804,35 @@ mod tests {
         is_transactional: bool,
         is_control_batch: bool,
     ) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1, // log_append_time
-            producer_id,
-            0, // producer_epoch
-            0, // base_sequence
-            is_transactional,
-            is_control_batch,
-            -1, // partition_leader_epoch
-            512,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(
+                    // log_append_time
+                    producer_id,
+                )
+                .set_producer_epoch(0)
+                .set_base_sequence(
+                    // producer_epoch
+                    0,
+                )
+                .set_is_transactional(
+                    // base_sequence
+                    is_transactional,
+                )
+                .set_is_control_batch(is_control_batch)
+                .set_partition_leader_epoch(-1)
+                .set_write_limit(
+                    // partition_leader_epoch
+                    512,
+                )
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for i in 0..count {
             let offset = base_offset + i as i64;
@@ -2037,7 +2051,7 @@ mod tests {
         buf.extend_from_slice(&batch_full(4, 2, RecordBatch::NO_PRODUCER_ID, false, false));
 
         let partition_data = partition_data_with_aborted_txn(buf, aborted_pid, 2);
-        let mut cf = CompletedFetch::new_full(
+        let mut cf = CompletedFetch::with_full(
             make_subscriptions(),
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
@@ -2096,7 +2110,7 @@ mod tests {
         // records is None (Java sets it to null) — but the auto-generated
         // setter also accepts None.
         partition_data.set_records(None);
-        let mut cf = CompletedFetch::new_full(
+        let mut cf = CompletedFetch::with_full(
             make_subscriptions(),
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
@@ -2282,7 +2296,7 @@ mod tests {
         {
             let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
             let partition_data = partition_data_with_aborted_txn(buf, PRODUCER_ID, 0);
-            let mut cf = CompletedFetch::new_full(
+            let mut cf = CompletedFetch::with_full(
                 make_subscriptions(),
                 Arc::new(BufferSupplier::create()),
                 tp("test", 0),
@@ -2303,7 +2317,7 @@ mod tests {
         {
             let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
             let partition_data = partition_data_with_aborted_txn(buf, PRODUCER_ID, 0);
-            let mut cf = CompletedFetch::new_full(
+            let mut cf = CompletedFetch::with_full(
                 make_subscriptions(),
                 Arc::new(BufferSupplier::create()),
                 tp("test", 0),
@@ -2345,7 +2359,7 @@ mod tests {
         let buf = batch_full(0, num_records, PRODUCER_ID, true, false);
         let mut partition_data = PartitionData::new();
         partition_data.set_records(Some(bytes::Bytes::from(buf)));
-        let mut cf = CompletedFetch::new_full(
+        let mut cf = CompletedFetch::with_full(
             make_subscriptions(),
             Arc::new(BufferSupplier::create()),
             tp("test", 0),

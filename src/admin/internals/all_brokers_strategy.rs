@@ -116,7 +116,7 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
         Self::validate_lookup_keys(keys);
         // Send an empty `Metadata` request; we are only interested in the
         // brokers from the response.
-        Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), false))
+        Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), false))
     }
 
     fn handle_response(&self, keys: &HashSet<BrokerKey>, response: &ConcreteResponse) -> LookupResult<BrokerKey> {
@@ -287,7 +287,7 @@ mod tests {
             })
             .collect();
         data.set_brokers(brokers);
-        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     // Mirrors `AllBrokersStrategyTest.testBuildRequest`.
@@ -402,7 +402,7 @@ mod integration_tests {
 
         fn build_request(&self, _broker_id: i32, keys: &HashSet<BrokerKey>) -> Vec<RequestAndKeys<BrokerKey>> {
             vec![RequestAndKeys {
-                request: Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), false)),
+                request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), false)),
                 keys: keys.clone(),
             }]
         }
@@ -446,11 +446,11 @@ mod integration_tests {
             })
             .collect();
         data.set_brokers(brokers);
-        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn placeholder_response() -> ConcreteResponse {
-        ConcreteResponse::Metadata(MetadataResponse::new_version(
+        ConcreteResponse::Metadata(MetadataResponse::with_version(
             MetadataResponseData::new(),
             ApiKeys::METADATA.latest_version(),
         ))

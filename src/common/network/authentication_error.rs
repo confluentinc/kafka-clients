@@ -110,7 +110,7 @@ pub fn is_authentication_error(e: &io::Error) -> bool {
 /// NOT appear in the message text — unlike `Throwable(Throwable)`, which sets
 /// `detailMessage = cause.toString()`.
 pub fn auth_io_error_with_source(message: impl Into<String>, source: Error) -> io::Error {
-    io::Error::other(AuthenticationError::new_source(message, source))
+    io::Error::other(AuthenticationError::with_source(message, source))
 }
 
 pub fn authentication_error_message(e: &io::Error) -> Option<&str> {

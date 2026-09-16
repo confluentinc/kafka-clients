@@ -148,7 +148,7 @@ impl SensorBuilder {
         if !self.preexisting {
             let rate_metric = self.metrics.metric_instance_tags(rate_name, self.tags.clone())?;
             let total_metric = self.metrics.metric_instance_tags(total_name, self.tags.clone())?;
-            self.sensor.add(Box::new(Meter::new_rate_stat(
+            self.sensor.add(Box::new(Meter::with_rate_stat(
                 Arc::new(sampled_stat),
                 rate_metric,
                 total_metric,
@@ -171,7 +171,7 @@ mod tests {
 
     fn metrics() -> Arc<Metrics> {
         let config = Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info));
-        Arc::new(Metrics::new_default_config_reporters_time(
+        Arc::new(Metrics::with_default_config_reporters_time(
             config,
             Vec::new(),
             Arc::new(SystemTime),

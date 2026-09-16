@@ -45,7 +45,7 @@ impl ConsumerGroupListing {
     /// across Java's five overloads is `{groupId, isSimpleConsumerGroup}`, and
     /// the overload matching it (`ConsumerGroupListing.java:45`) is not
     /// translated (CLAUDE.md §2).
-    pub fn new_group_state_group_type(
+    pub fn with_group_state_group_type(
         group_id: impl Into<String>,
         group_state: Option<GroupState>,
         group_type: Option<GroupType>,
@@ -60,12 +60,12 @@ impl ConsumerGroupListing {
     /// Mirrors the deprecated
     /// `ConsumerGroupListing(String, boolean, Optional<ConsumerGroupState>)`
     /// constructor, which maps the state via `GroupState.parse(state.toString())`.
-    pub fn new_state(
+    pub fn with_state(
         group_id: impl Into<String>,
         is_simple_consumer_group: bool,
         state: Option<ConsumerGroupState>,
     ) -> Self {
-        Self::new_group_state_group_type(
+        Self::with_group_state_group_type(
             group_id,
             state.map(|s| GroupState::parse(s.name())),
             None,
@@ -127,7 +127,7 @@ mod tests {
             ConsumerGroupState::Assigning,
             ConsumerGroupState::Reconciling,
         ] {
-            let listing = ConsumerGroupListing::new_state("groupId", false, Some(state));
+            let listing = ConsumerGroupListing::with_state("groupId", false, Some(state));
             assert_eq!(listing.state().unwrap(), state);
         }
     }

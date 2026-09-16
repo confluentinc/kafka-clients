@@ -248,33 +248,33 @@ impl Metrics {
     /// Create a metrics repository with the supplied default config and clock,
     /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
     /// (`:101`).
-    pub fn new_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
-        Self::new_default_config_reporters_time(default_config, Vec::new(), time)
+    pub fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
+        Self::with_default_config_reporters_time(default_config, Vec::new(), time)
     }
 
     /// Create a metrics repository with a default config, no reporters, and the
     /// system clock. Mirrors Java's `Metrics()` (`Metrics.java:85`).
     pub fn new() -> Self {
-        Self::new_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), Arc::new(SystemTime))
+        Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied default config.
     /// Mirrors Java's `Metrics(MetricConfig defaultConfig)` (`:111`).
-    pub fn new_default_config(default_config: Arc<MetricConfig>) -> Self {
-        Self::new_default_config_reporters_time(default_config, Vec::new(), Arc::new(SystemTime))
+    pub fn with_default_config(default_config: Arc<MetricConfig>) -> Self {
+        Self::with_default_config_reporters_time(default_config, Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied clock.
     /// Mirrors Java's `Metrics(Time time)` (`:93`).
-    pub fn new_time(time: Arc<dyn Time>) -> Self {
-        Self::new_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
+    pub fn with_time(time: Arc<dyn Time>) -> Self {
+        Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
     }
 
     /// Create a metrics repository with a default config, reporters, and clock.
     /// Mirrors Java's
     /// `Metrics(MetricConfig defaultConfig, List<MetricsReporter> reporters, Time time)`
     /// (`:122`).
-    pub fn new_default_config_reporters_time(
+    pub fn with_default_config_reporters_time(
         default_config: Arc<MetricConfig>,
         reporters: Vec<Arc<dyn MetricsReporter>>,
         time: Arc<dyn Time>,
@@ -768,7 +768,7 @@ mod tests {
 
     fn metrics_with_mock() -> (Metrics, Arc<MockTime>) {
         let time = Arc::new(MockTime::new());
-        let metrics = Metrics::new_default_config_reporters_time(
+        let metrics = Metrics::with_default_config_reporters_time(
             Arc::new(MetricConfig::new()),
             Vec::new(),
             Arc::clone(&time) as Arc<dyn Time>,
@@ -855,7 +855,7 @@ mod tests {
         let mut child_tags = BTreeMap::new();
         child_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
 
-        let inherited = Metrics::new_default_config(Arc::new(MetricConfig::new().set_tags(parent_tags.clone())));
+        let inherited = Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(parent_tags.clone())));
         let mut inherited_tag_names = IndexSet::new();
         inherited_tag_names.insert("parent-tag".to_string());
         inherited_tag_names.insert("child-tag".to_string());
@@ -1274,13 +1274,13 @@ mod tests {
             .unwrap();
         s.add_metric_name(metrics.metric_name("test.min", "grp1"), Box::new(Min::new()))
             .unwrap();
-        s.add(Box::new(Meter::new_unit(
+        s.add(Box::new(Meter::with_unit(
             TimeUnit::Seconds,
             metrics.metric_name("test.rate", "grp1"),
             metrics.metric_name("test.total", "grp1"),
         )))
         .unwrap();
-        s.add(Box::new(Meter::new_rate_stat(
+        s.add(Box::new(Meter::with_rate_stat(
             std::sync::Arc::new(WindowedCount::new().into_sampled_stat()),
             metrics.metric_name("test.occurrences", "grp1"),
             metrics.metric_name("test.occurrences.total", "grp1"),
@@ -1364,7 +1364,7 @@ mod tests {
         let time = Arc::new(MockTime::new());
         // Use the default time window. Set 3 samples.
         let cfg = Arc::new(MetricConfig::new().set_samples(3));
-        let metrics = Metrics::new_default_config_reporters_time(
+        let metrics = Metrics::with_default_config_reporters_time(
             Arc::clone(&cfg),
             Vec::new(),
             Arc::clone(&time) as Arc<dyn Time>,
@@ -1383,13 +1383,13 @@ mod tests {
         let total_metric_name = metrics.metric_name("test.total", "grp1");
         let count_rate_metric_name = metrics.metric_name("test.count.rate", "grp1");
         let count_total_metric_name = metrics.metric_name("test.count.total", "grp1");
-        s.add(Box::new(Meter::new_unit(
+        s.add(Box::new(Meter::with_unit(
             TimeUnit::Seconds,
             rate_metric_name.clone(),
             total_metric_name.clone(),
         )))
         .unwrap();
-        s.add(Box::new(Meter::new_rate_stat(
+        s.add(Box::new(Meter::with_rate_stat(
             Arc::new(WindowedCount::new().into_sampled_stat()),
             count_rate_metric_name.clone(),
             count_total_metric_name.clone(),
@@ -1497,7 +1497,7 @@ mod tests {
     fn test_new_default_config_time_forwards() {
         let config = Arc::new(MetricConfig::new().set_samples(7));
         let time = Arc::new(MockTime::new());
-        let metrics = Metrics::new_default_config_time(Arc::clone(&config), Arc::clone(&time) as Arc<dyn Time>);
+        let metrics = Metrics::with_default_config_time(Arc::clone(&config), Arc::clone(&time) as Arc<dyn Time>);
 
         // The default config is the one we passed, not a fresh one.
         assert!(Arc::ptr_eq(metrics.config(), &config));
@@ -1518,7 +1518,7 @@ mod tests {
     fn test_metric_name_description_forwards() {
         let mut default_tags = BTreeMap::new();
         default_tags.insert("client-id".to_string(), "c1".to_string());
-        let metrics = Metrics::new_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
+        let metrics = Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
 
         let added = metrics.metric_name_description("n", "g", "the description");
         let forwarded = metrics.metric_name_description_tags("n", "g", "the description", BTreeMap::new());
@@ -1536,7 +1536,7 @@ mod tests {
     fn test_metric_name_tags_forwards() {
         let mut default_tags = BTreeMap::new();
         default_tags.insert("client-id".to_string(), "c1".to_string());
-        let metrics = Metrics::new_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
+        let metrics = Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(default_tags)));
 
         let mut tags = BTreeMap::new();
         tags.insert("node-id".to_string(), "n7".to_string());

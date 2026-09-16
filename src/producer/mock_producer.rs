@@ -418,7 +418,7 @@ impl Completion {
     }
 }
 
-/// Parameters for [`MockProducer::new_options`].
+/// Parameters for [`MockProducer::with_options`].
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to
 /// satisfy CLAUDE.md §2's cap on derived overload names: Java's widest
@@ -557,7 +557,7 @@ impl<K, V> MockProducer<K, V> {
     // here is called `new`. `:113` and `:137` take the partitioner and the two
     // serializers as values, so they DO contribute name tokens: five and four
     // respectively, past §2's cap of three, which is why both are served by
-    // [`Self::new_options`] and [`MockProducerOptions`] rather than by a name
+    // [`Self::with_options`] and [`MockProducerOptions`] rather than by a name
     // listing every parameter.
 
     /// Create a mock producer.
@@ -573,9 +573,9 @@ impl<K, V> MockProducer<K, V> {
     /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
     /// Serializer, Serializer)` constructor invoked with a null partitioner and
     /// null serializers (`MockProducer.java:113`). Delegates to
-    /// [`new_options`](Self::new_options).
-    pub fn new_cluster_auto_complete(cluster: Cluster, auto_complete: bool) -> Self {
-        Self::new_options(
+    /// [`with_options`](Self::with_options).
+    pub fn with_cluster_auto_complete(cluster: Cluster, auto_complete: bool) -> Self {
+        Self::with_options(
             MockProducerOptionsBuilder::new()
                 .set_cluster(cluster)
                 .set_auto_complete(auto_complete)
@@ -598,7 +598,7 @@ impl<K, V> MockProducer<K, V> {
     /// Serializer, Serializer)` constructor (`MockProducer.java:113`), and — with
     /// `cluster` left unset — to `MockProducer(boolean, Partitioner, Serializer,
     /// Serializer)` (`:137`), which passes `Cluster.empty()` itself.
-    pub fn new_options(options: MockProducerOptions<K, V>) -> Self {
+    pub fn with_options(options: MockProducerOptions<K, V>) -> Self {
         let MockProducerOptions { cluster, auto_complete, partitioner, key_serializer, value_serializer } = options;
         Self {
             inner: Mutex::new(MockProducerInner {
@@ -638,12 +638,12 @@ impl<K, V> MockProducer<K, V> {
     /// Create a new mock producer with an empty cluster and the given
     /// `auto_complete` setting.
     ///
-    /// Equivalent to `MockProducer::new_cluster_auto_complete(Cluster::empty(), auto_complete)`.
+    /// Equivalent to `MockProducer::with_cluster_auto_complete(Cluster::empty(), auto_complete)`.
     ///
     /// Corresponds to Java's `MockProducer(boolean, Partitioner, Serializer,
     /// Serializer)`.
-    pub fn new_auto_complete(auto_complete: bool) -> Self {
-        Self::new_cluster_auto_complete(Cluster::empty(), auto_complete)
+    pub fn with_auto_complete(auto_complete: bool) -> Self {
+        Self::with_cluster_auto_complete(Cluster::empty(), auto_complete)
     }
 
     /// Get the list of sent records since the last call to [`clear()`](Self::clear).
@@ -969,7 +969,7 @@ impl<K, V> Default for MockProducer<K, V> {
     ///
     /// Corresponds to Java's no-arg `MockProducer()` constructor.
     fn default() -> Self {
-        Self::new_cluster_auto_complete(Cluster::empty(), false)
+        Self::with_cluster_auto_complete(Cluster::empty(), false)
     }
 }
 
@@ -1333,7 +1333,7 @@ mod tests {
     const GROUP_ID: &str = "group";
 
     fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, String> {
-        ProducerRecord::new_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
+        ProducerRecord::with_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
     }
 
     /// Java's `MockProducerTest.record1` (`MockProducerTest.java:58`). A function
@@ -1350,9 +1350,9 @@ mod tests {
     /// Java's `MockProducerTest.buildMockProducer(boolean)`
     /// (`MockProducerTest.java:62`), which passes `Cluster.empty()` and the two
     /// `MockSerializer`s the Rust mock has no counterpart for (it takes
-    /// pre-serialized bytes — see [`MockProducer::new_options`]).
+    /// pre-serialized bytes — see [`MockProducer::with_options`]).
     fn build_mock_producer(auto_complete: bool) -> MockProducer<String, String> {
-        MockProducer::new_auto_complete(auto_complete)
+        MockProducer::with_auto_complete(auto_complete)
     }
 
     /// Java's `new ConsumerGroupMetadata(groupId)`. The Rust constructor carries
@@ -1433,13 +1433,13 @@ mod tests {
     /// Two-partition cluster whose partitions have **no** leader, matching Java's
     /// `testPartitioner` fixture (`MockProducerTest.java:87-90`, `new
     /// PartitionInfo(topic, n, null, null, null)`). The Rust
-    /// `Cluster::new_invalid_topics_controller_topic_ids` takes eight arguments
+    /// `Cluster::with_invalid_topics_controller_topic_ids` takes eight arguments
     /// where Java's constructor takes five; the extra three (controller,
     /// topic-ids, unauthorized/invalid topics) default to empty.
     fn two_partition_cluster() -> Cluster {
         let pi0 = PartitionInfo::new(TOPIC.to_string(), 0, None, vec![], vec![]);
         let pi1 = PartitionInfo::new(TOPIC.to_string(), 1, None, vec![], vec![]);
-        Cluster::new_invalid_topics_controller_topic_ids(
+        Cluster::with_invalid_topics_controller_topic_ids(
             None,
             vec![],
             vec![pi0, pi1],
@@ -1459,7 +1459,7 @@ mod tests {
     /// on partition 0 — the value Java asserts.
     #[tokio::test]
     async fn test_partitioner() {
-        let producer: MockProducer<String, String> = MockProducer::new_options(
+        let producer: MockProducer<String, String> = MockProducer::with_options(
             MockProducerOptionsBuilder::new()
                 .set_cluster(two_partition_cluster())
                 .set_auto_complete(true)
@@ -1470,7 +1470,7 @@ mod tests {
                 .expect("every mandatory parameter is set above"),
         );
 
-        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let future = producer.send(record).await.unwrap();
         let md = future.get().await.unwrap();
         assert_eq!(0, md.partition(), "Partition should be correct");
@@ -1487,8 +1487,8 @@ mod tests {
     #[tokio::test]
     async fn test_partition_out_of_range_is_rejected() {
         let producer: MockProducer<String, String> =
-            MockProducer::new_cluster_auto_complete(two_partition_cluster(), true);
-        let record = ProducerRecord::new_partition_key(
+            MockProducer::with_cluster_auto_complete(two_partition_cluster(), true);
+        let record = ProducerRecord::with_partition_key(
             TOPIC.to_string(),
             Some(2),
             Some("key".to_string()),
@@ -1514,7 +1514,7 @@ mod tests {
     /// (`MockProducer.java:610`), taking priority over the partitioner.
     #[tokio::test]
     async fn test_explicit_partition_is_honoured() {
-        let producer: MockProducer<String, String> = MockProducer::new_options(
+        let producer: MockProducer<String, String> = MockProducer::with_options(
             MockProducerOptionsBuilder::new()
                 .set_cluster(two_partition_cluster())
                 .set_auto_complete(true)
@@ -1524,7 +1524,7 @@ mod tests {
                 .build()
                 .expect("every mandatory parameter is set above"),
         );
-        let record = ProducerRecord::new_partition_key(
+        let record = ProducerRecord::with_partition_key(
             TOPIC.to_string(),
             Some(1),
             Some("key".to_string()),
@@ -1542,8 +1542,8 @@ mod tests {
     #[tokio::test]
     async fn test_no_partitioner_uses_first_partition() {
         let producer: MockProducer<String, String> =
-            MockProducer::new_cluster_auto_complete(two_partition_cluster(), true);
-        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+            MockProducer::with_cluster_auto_complete(two_partition_cluster(), true);
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
 
         let md = producer.send(record).await.unwrap().get().await.unwrap();
         assert_eq!(0, md.partition(), "no-partitioner path uses the first partition");
@@ -1556,13 +1556,13 @@ mod tests {
     /// path the C FFI empty-cluster mock relies on.
     #[tokio::test]
     async fn test_empty_cluster_honours_explicit_partition() {
-        let producer: MockProducer<String, String> = MockProducer::new_cluster_auto_complete(Cluster::empty(), true);
+        let producer: MockProducer<String, String> = MockProducer::with_cluster_auto_complete(Cluster::empty(), true);
 
-        let keyless = ProducerRecord::new_key(TOPIC.to_string(), None, Some("value".to_string()));
+        let keyless = ProducerRecord::with_key(TOPIC.to_string(), None, Some("value".to_string()));
         let md = producer.send(keyless).await.unwrap().get().await.unwrap();
         assert_eq!(0, md.partition(), "empty cluster with no explicit partition defaults to 0");
 
-        let pinned = ProducerRecord::new_partition_key(
+        let pinned = ProducerRecord::with_partition_key(
             TOPIC.to_string(),
             Some(7),
             Some("key".to_string()),
@@ -2582,7 +2582,7 @@ mod tests {
         let pi0 = PartitionInfo::new("topic".to_string(), 0, Some(node.clone()), vec![], vec![]);
         let pi1 = PartitionInfo::new("topic".to_string(), 1, Some(node), vec![], vec![]);
 
-        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             None,
             vec![],
             vec![pi0, pi1],
@@ -2592,7 +2592,7 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let producer: MockProducer<String, String> = MockProducer::new_cluster_auto_complete(cluster, true);
+        let producer: MockProducer<String, String> = MockProducer::with_cluster_auto_complete(cluster, true);
 
         let partitions = producer.partitions_for("topic").await.unwrap();
         assert_eq!(2, partitions.len());
@@ -2972,7 +2972,7 @@ mod tests {
     //   - No test remains weakened. `test_partitioner` (Java 86) was the last
     //     such case: Java drives a `RoundRobinPartitioner` and asserts it picks
     //     partition 0, and the translation now does the same through
-    //     `MockProducer::new_options`, replacing the earlier stopgap that had
+    //     `MockProducer::with_options`, replacing the earlier stopgap that had
     //     no partitioner and asserted an explicit `record.partition()` instead.
     //
     //     **Five** tests were weakened at some point and are no longer. Naming all
@@ -2982,7 +2982,7 @@ mod tests {
     //     count-level check finds nothing wrong with two lists that agree on `3`;
     //     only membership does. So the set is re-derived from the diff rather than
     //     from either list — normalise away the two mechanical swaps
-    //     (`MockProducer::new_auto_complete(x)` → `build_mock_producer(x)`, and
+    //     (`MockProducer::with_auto_complete(x)` → `build_mock_producer(x)`, and
     //     `make_record("topic", "keyN", "valueN")` → `recordN()`), then compare
     //     every pre-Phase-7 test body at `82aa2da` against its current form. Seven
     //     bodies differ before that normalisation and exactly these five after

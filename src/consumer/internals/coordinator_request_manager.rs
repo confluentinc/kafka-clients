@@ -427,7 +427,7 @@ impl CoordinatorRequestManager {
             .lock()
             .expect("request_state poisoned")
             .remaining_backoff_ms(current_time_ms);
-        PollResult::new_time_until_next_poll_ms(remaining)
+        PollResult::with_time_until_next_poll_ms(remaining)
     }
 }
 
@@ -509,7 +509,7 @@ mod tests {
             .expect("builder still present")
             .build_version(api_version)
             .expect("build ok");
-        let header = RequestHeader::new_options(
+        let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
                 .set_request_version(api_version)
@@ -520,7 +520,7 @@ mod tests {
         )
         .expect("header ok");
         let response_body = FindCoordinatorResponse::prepare_response(error, GROUP_ID, &node());
-        ClientResponse::new_timed_out(
+        ClientResponse::with_timed_out(
             header,
             None,
             "1",

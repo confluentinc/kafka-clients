@@ -127,7 +127,7 @@ impl AutoOffsetResetStrategy {
             // cause the two are indistinguishable to a caller, since the outer
             // message is identical for both.
             let duration = parse_iso8601_duration(iso).map_err(|cause| {
-                Error::LocalIllegalArgument(LocalIllegalArgumentError::new_source(
+                Error::LocalIllegalArgument(LocalIllegalArgumentError::with_source(
                     "Unable to parse duration string in by_duration offset reset strategy.",
                     cause,
                 ))
