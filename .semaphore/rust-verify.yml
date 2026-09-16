@@ -3,7 +3,7 @@ name: Build, test and package Rust client
 
 agent:
   machine:
-    type: s1-prod-ubuntu24-04-amd64-3
+    type: s1-prod-ubuntu24-04-amd64-2
 
 execution_time_limit:
   hours: 3
@@ -20,7 +20,7 @@ blocks:
     task:
       agent:
         machine:
-          type: s1-prod-ubuntu24-04-amd64-3
+          type: s1-prod-ubuntu24-04-amd64-2
       env_vars:
         - name: ARTIFACT_KEY
           value: confluent-kafka-rust__plat-linux__arch-x64
@@ -41,7 +41,7 @@ blocks:
     task:
       agent:
         machine:
-          type: s1-prod-ubuntu24-04-arm64-1
+          type: s1-prod-ubuntu24-04-arm64-2
       env_vars:
         - name: ARTIFACT_KEY
           value: confluent-kafka-rust__plat-linux__arch-arm64
@@ -94,3 +94,7 @@ blocks:
             - ls -R artifacts
             - tar czf rust-verify-results.tgz -C artifacts .
             - artifact push workflow rust-verify-results.tgz --force
+
+promotions:
+  - name: Test publish
+    pipeline_file: crate-publish-test.yml
