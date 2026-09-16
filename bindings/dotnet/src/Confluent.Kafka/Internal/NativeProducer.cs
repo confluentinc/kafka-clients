@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -110,6 +111,33 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // teardown starts (PLAN §6.3).
     private readonly object _pumpLock = new object();
     private SendCompletionPump? _pump;
+
+    // The binding-side send accumulator + its batch thread (M11/P3.1), started lazily with the pump
+    // on the first ASYNC send. A sync-only producer starts neither. Guarded by the same _pumpLock
+    // and the same ordering against the _closed latch, so teardown never races one into existence.
+    private SendAccumulator? _accumulator;
+
+    // One permanently-pinned NUL-terminated UTF-8 buffer per DISTINCT topic name, for the deferred
+    // async send path (M11/P3.1 §4.1). Interning rather than a per-record topic pin keeps the cost
+    // at O(distinct topics) permanent pins instead of O(records) transient ones; a topic beyond the
+    // cache's cap falls back to a per-record pin the send releases itself. Not used by the sync
+    // send, which still pins the topic call-scoped (§3.1).
+    private readonly PinnedTopicCache _topics = new PinnedTopicCache();
+
+    // How long teardown waits for the send-batch thread's final drain (§3.8 step 4, §6.3). Long
+    // enough that a healthy drain finishes even when send_batch is briefly parked on the core's
+    // buffer.memory, short enough that Dispose returns rather than inheriting max.block.ms (60 s by
+    // default) for a whole chunk of records. On expiry the outcome is DEFINED, not a hang — see
+    // StopAccumulator and SendAccumulator.Stop.
+    private static readonly TimeSpan s_accumulatorDrainTimeout = TimeSpan.FromSeconds(30);
+
+    // How long teardown waits for the completion pump to take the LAST queued groups off its queue,
+    // after the gate is closed and the teardown flush has resolved them (M11/P3.2 S4, decision D3).
+    // The same 30 s as the accumulator's drain bound above and for the same reason: long enough that
+    // a healthy pump always wins (it needs only to be scheduled — the flush already resolved what it
+    // will read), short enough that Dispose returns. On expiry the outcome is DEFINED, not a hang —
+    // SendCompletionPump.Stop faults the remainder exactly as it did before S4.
+    private static readonly TimeSpan s_pumpDrainTimeout = TimeSpan.FromSeconds(30);
 
     private NativeProducer(SafeProducerHandle handle)
     {
@@ -210,6 +238,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                 "kafka_producer_KafkaProducer_new returned a null handle without an error.");
         }
 
+        // The config map is NOT retained: every entry was consumed above, verbatim, into the
+        // producer properties the core now owns.
         return new NativeProducer(handle);
     }
 
@@ -227,6 +257,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // Non-fallible: MockProducer_new always returns a valid owned handle,
         // already wrapped by the marshaller (M2/P2). No out_error, no IsInvalid guard.
         SafeProducerHandle handle = NativeMethods.MockProducerNew(autoComplete);
+
         return new NativeProducer(handle);
     }
 
@@ -264,6 +295,42 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     internal Task FlushWithCallback(CancellationToken cancellationToken = default)
+    {
+        SendAccumulator? accumulator = AccumulatorToStop();
+        if (accumulator is null)
+        {
+            // No async send ever started an accumulator — nothing is buffered on this side, so this
+            // is the unchanged core flush.
+            return FlushCore(cancellationToken);
+        }
+
+        // Preconditions must still be SYNCHRONOUS (ffi §A5), so they run here rather than inside the
+        // async continuation below.
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+        return FlushAfterDrain(accumulator, cancellationToken);
+    }
+
+    /// <summary>
+    /// Drains the accumulator, then flushes the core (M11/P3.1 §3.5) — the deliberate divergence
+    /// <b>toward Java</b> that the Python anchor lacks.
+    /// </summary>
+    /// <remarks>
+    /// Python's <c>flush()</c> never signals its send thread, so it can return while records are
+    /// still buffered inside the binding — arguably violating Java's contract that <c>flush()</c>
+    /// blocks until every <em>previously sent</em> record completes, since from the caller's view
+    /// those records <b>were</b> sent (<c>send()</c> returned). Draining first is what makes
+    /// "flushed" mean the same thing on both sides of the accumulator. The teardown flush needs no
+    /// equivalent change: <see cref="StopAccumulator"/> already drains at step 4, before it.
+    /// </remarks>
+    private async Task FlushAfterDrain(SendAccumulator accumulator, CancellationToken cancellationToken)
+    {
+        await accumulator.DrainPendingAsync(cancellationToken).ConfigureAwait(false);
+        await FlushCore(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The core half of the flush: <c>Producer_flush_async</c> over the completion bridge.</summary>
+    private Task FlushCore(CancellationToken cancellationToken)
     {
         return SubmitVoidOperation(cancellationToken, (producer, callback, userData) =>
             NativeMethods.ProducerFlushAsync(producer, callback, userData));
@@ -325,166 +392,222 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Sends a single record on the async surface, returning a <see cref="Task{TResult}"/> (the async
     /// send worker; Java <c>Producer.send(record)</c>). Named <c>SendViaPump</c>, <b>not</b>
-    /// <c>SendWithCallback</c> like the peripherals: the inline pull-pump (ffi §A7 Option C) has no
-    /// native <c>Producer_send_async</c> callback — completion arrives via the pump's batched
-    /// <c>get_all</c>, so a <c>WithCallback</c> suffix would misdescribe the mechanism (PLAN §6.2).
-    /// The <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
-    /// <see cref="Send"/> (which has no pump). Runs inline on the caller thread: preconditions →
-    /// <c>Producer_send</c> (call-scoped pinning, the core copies key/value synchronously, ffi §A4) →
-    /// enqueue <c>(future, TCS, delivery)</c> on the pump → return the <see cref="Task{TResult}"/>.
+    /// <c>SendWithCallback</c> like the peripherals: there is no native <c>Producer_send_async</c>
+    /// callback — completion arrives via the pump's batched <c>get_all</c> (ffi §A7's pull surface),
+    /// so a <c>WithCallback</c> suffix would misdescribe the mechanism (M11/P3 PLAN §6.2). The
+    /// <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
+    /// <see cref="Send"/> (which has no pump).
+    /// <para>
+    /// <b>M11/P3.1 — the send SUBMISSION side is now the Python binding's shape (slice S3).</b> This
+    /// method no longer touches the core at all: it pins the record's buffers, appends them to the
+    /// binding-side <see cref="SendAccumulator"/>, and returns the <see cref="Task{TResult}"/>
+    /// immediately. A dedicated batch thread drains the accumulated chain — on a threshold or a
+    /// free-running window — into a blittable <see cref="Interop.ProducerRecordNative"/> array,
+    /// issues <c>kafka_producer_Producer_send_batch</c> per chunk, unpins, and hands the resulting
+    /// futures to the <b>unchanged</b> <see cref="SendCompletionPump"/>. The anchor is
+    /// <c>bindings/python/_confluentkafka.c</c>'s <c>Producer_send_thread</c>.
+    /// </para>
+    /// <para>
+    /// <b>The SYNC <see cref="Send"/> is deliberately NOT moved</b> (M11/P3.1 §3.1): it returns a
+    /// fully-materialized <see cref="RecordMetadata"/>, so routing it through a 0–10 ms accumulator
+    /// window would add that window to every sync send. It still calls the singular
+    /// <c>Producer_send</c> inline with call-scoped <c>fixed</c> pins.
+    /// </para>
+    /// <para>
+    /// <b>M11/P3.2 / M11/P3.4 — records reach <c>send_batch</c> in the order a caller called this
+    /// method</b> (§F1). Deferring the append opened a window in which a send that found capacity
+    /// could overtake one still waiting for it. <see cref="SendAccumulator.SubmitAdmitted"/> now
+    /// closes it the anchor's own way — it <b>appends first</b>, under the accumulator's lock, and
+    /// only then waits on the bound — so a record's place in the chain is fixed by the call that
+    /// placed it and a waiting send cannot be overtaken. Java documents ordering as preserved in the
+    /// default configuration (<c>ProducerConfig.java:274</c>), and the reorder happened
+    /// <em>before</em> the core saw the records, so no core-side setting could have restored it.
+    /// </para>
+    /// <para>
+    /// <b>M11/P3.3 — admission is bounded, and this method BLOCKS the calling thread when the bound
+    /// is saturated.</b> Once the producer holds
+    /// <see cref="SendAccumulatorSettings.MaxAdmittedRecords"/> records that have been accepted but
+    /// not yet handed to the batch thread, this call parks the caller until the batch thread's next
+    /// take frees capacity. Blocking is Java's shape — <c>KafkaProducer.send()</c> blocks once the
+    /// accumulator is full — and it is the only thing that throttles: the caller is handed the
+    /// record's delivery <see cref="Task{TResult}"/> rather than an admission handle (M11/P3.2
+    /// deviation DV-1), so an asynchronous admission wait bounds a container while the accepted
+    /// population grows without limit (measured: 2.05 M records in flight, p50 3,524 ms,
+    /// RSS 2.04 GiB). ⚠ Since M11/P3.4 that wait has <b>no timeout</b> and is not interrupted by
+    /// <paramref name="cancellationToken"/>: the record is already appended by then, so nothing may
+    /// make the call throw and strand an awaiter the caller has not been handed. The <b>sync</b>
+    /// <see cref="Send"/> has no such window — it hands the record to the core inside the call and
+    /// blocks on the core's own <c>buffer.memory</c>.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// <b>Preconditions (ffi §A5).</b> An already-canceled <paramref name="cancellationToken"/> →
     /// <see cref="OperationCanceledException"/>; a closed producer → <see cref="ObjectDisposedException"/>
-    /// — both before any pin / P-Invoke. The null-record and serializer-throw preconditions run in
+    /// — both before any pin. The null-record and serializer-throw preconditions run in
     /// the generic client's <c>Send</c> skin above this carrier (M11/P5, PLAN §5.3), and the
     /// null-topic / negative-partition preconditions live in the
     /// <see cref="ProducerRecord{TKey, TValue}"/> constructor (Java-faithful), so
     /// <paramref name="record"/> is an already-valid, already-serialized value here.
     /// <para>
+    /// <b>⚠ The caller must not mutate the key / value buffers after this returns</b> (decision D6,
+    /// §4.7). The binding borrows them until the batch thread hands the record to the core, so a
+    /// mutation in that window IS visible on the wire. This is inherent to deferring a zero-copy
+    /// send — the alternative is the per-record copy CLAUDE.md §12 forbids — and it matches the
+    /// anchor, where Python likewise borrows the buffer until its drain. It applies to the
+    /// <b>async surface only</b>; the sync <see cref="Send"/> has no such window.
+    /// </para>
+    /// <para>
     /// <b>Cancellation is best-effort — the .NET wait only.</b> The producer has no <c>wakeup()</c>,
-    /// so a token that fires after the send is enqueued cancels the returned <see cref="Task"/>
+    /// so a token that fires after the record is appended cancels the returned <see cref="Task"/>
     /// (<see cref="TaskCompletionSource{TResult}.TrySetCanceled(CancellationToken)"/> — cancelled
     /// WITH the token, so <c>OperationCanceledException.CancellationToken</c> matches it, exactly as
-    /// the async peripherals do); the native send runs to
-    /// completion and the pump's later <c>TrySetResult</c> / <c>TrySetException</c> on the
-    /// already-canceled TCS is a safe no-op (ffi §A7). The registration is disposed when the task
-    /// completes. No registration is created for a non-cancelable token — the common send path
-    /// allocates nothing beyond the TCS + the small topic pin (DoD §10).
+    /// the async peripherals do); the record is still sent and the later
+    /// <c>TrySetResult</c> / <c>TrySetException</c> on the already-canceled TCS is a safe no-op
+    /// (ffi §A7). The registration is disposed when the task completes. No registration is created
+    /// for a non-cancelable token — the common send path allocates nothing beyond the TCS (DoD §10).
     /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to send.</param>
     /// <param name="delivery">
     /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
-    /// <c>Send(record)</c> path. The pump invokes it immediately before completing the returned
-    /// <see cref="Task{TResult}"/> (decision D3); a synchronous throw out of this method fires
-    /// <b>nothing</b> (decision D5). The throw sites that precede the core's acceptance — the
-    /// disposed guard (directly, and again inside <see cref="EnsurePump"/> under its lock), the
-    /// already-canceled token, a pump that could not be started, and
-    /// <c>ProducerSendMarshal.Send</c>'s synchronous <c>out_error</c> — are cases where nothing was
-    /// sent. The orphaned-future <c>catch</c> below runs <em>after</em> <c>Producer_send</c> accepted
-    /// the record: an allocation failure there is a recorded <em>drop</em> (residual 4 on
-    /// <see cref="IDeliveryCallback"/>) noted at that <c>catch</c>.
+    /// <c>Send(record)</c> path. It is invoked immediately before the returned
+    /// <see cref="Task{TResult}"/> completes (decision D3) — on the pump thread for a record the core
+    /// accepted, and on the batch thread for one the core rejected per-record. A synchronous throw out
+    /// of this method fires <b>nothing</b> (decision D5), and under the accumulator every such throw
+    /// is a case where the record never reached the core at all: the disposed guard (directly, and
+    /// again inside <see cref="EnsureAccumulator"/> under its lock), the already-canceled token, a
+    /// pump or accumulator that could not be started, and the accumulator refusing an append because
+    /// teardown closed it.
     /// </param>
-    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
+    /// <param name="cancellationToken">
+    /// Best-effort cancellation of the .NET wait (no native abort). ⚠ It does <b>not</b> interrupt
+    /// the admission wait (M11/P3.4): by then the record is appended and may already have been sent,
+    /// so the token only marks the returned <see cref="Task{TResult}"/> canceled, through the
+    /// registration below.
+    /// </param>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was already canceled when this method was called.
+    /// </exception>
     internal Task<RecordMetadata> SendViaPump(
         SerializedProducerRecord record,
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken = default)
     {
-        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the ABI does not validate them and
-        // panics on violation (UB across FFI). The null-record + serializer-throw preconditions run
-        // in the generic client's Send skin (above this carrier — M11/P5, PLAN §5.3), so `record`
-        // here is an already-serialized value type; this layer applies only the disposed +
-        // already-canceled guards.
+        // Preconditions BEFORE any pin (ffi §A5): the ABI does not validate them and panics on
+        // violation (UB across FFI). The null-record + serializer-throw preconditions run in the
+        // generic client's Send skin (above this carrier — M11/P5, PLAN §5.3), so `record` here is
+        // an already-serialized value type; this layer applies only the disposed + already-canceled
+        // guards.
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
-        // Start (or reuse) the pump before sending, so the future always has a live drain. Refuses
-        // once the producer is closing (ThrowIfClosed under _pumpLock).
-        SendCompletionPump pump = EnsurePump();
+        // Start (or reuse) the accumulator + its completion pump before appending, so an accepted
+        // record always has a live drain. Refuses once the producer is closing (ThrowIfClosed under
+        // _pumpLock).
+        SendAccumulator accumulator = EnsureAccumulator();
 
-        // Inline call-scoped-pinned send (throws a KafkaException synchronously on out_error). The
-        // ABI maps null partition/timestamp to its own -1 sentinels.
-        int partition = record.Partition ?? -1;
-        long timestamp = record.Timestamp ?? -1L;
+        // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
+        // continuation runs on the pump thread and stalls every other completion.
+        TaskCompletionSource<RecordMetadata> completion =
+            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // Pass the SafeProducerHandle straight through (no manual DangerousAddRef): NativeMethods.
-        // ProducerSend takes it as a SafeHandle param, so the P/Invoke marshaler auto-DangerousAddRef/
-        // Releases it AROUND the synchronous Producer_send — the call-scoped guard against a
-        // concurrent Producer_destroy (Producer_send can block up to max.block.ms and the producer is
-        // multi-writer). Send is the FIRST adopter of the sync-native-call → SafeHandle-param
-        // convention (ffi §A2): a synchronous op passes the SafeHandle (auto ref, call-scoped); an
-        // async *_async op cannot (the auto ref releases before its completion callback fires) and
-        // keeps the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
-        // (ThrowIfClosed above already covers the common post-Dispose case).
-        IntPtr future = ProducerSendMarshal.Send(
-            _handle, record.Topic, partition, timestamp, record.Key, record.Value);
+        // Best-effort cancellation: cancel the WAIT, never abort the enqueued send. Only wire it
+        // for a cancelable token so the common Send(record) path stays allocation-free (DoD §10).
+        //
+        // Hoisted out of the `if` so the fast path below can dispose it when Submit throws: the
+        // disposing continuation is chained to `completion`, which that throw leaves unsettled, so
+        // the registration would otherwise stay alive on the caller's token for the token's whole
+        // lifetime. `default` is the not-cancelable case, whose Dispose is a no-op.
+        CancellationTokenRegistration cancellationRegistration = default;
+        if (cancellationToken.CanBeCanceled)
+        {
+            // Cancel WITH the token (M11/P8, Minor 9), so the resulting OperationCanceledException
+            // carries it and the idiomatic .NET catch —
+            // `catch (OperationCanceledException e) when (e.CancellationToken == ct)` — matches.
+            //
+            // The token rides in the state object because the clean overload
+            // (Register(Action<object?, CancellationToken>, object?)) is .NET 5+ and the library
+            // floor is netstandard2.0. TrySetCanceled(CancellationToken) itself IS available there.
+            // The extra allocation is one boxed value tuple on the CANCELABLE path only — the
+            // CanBeCanceled guard keeps plain Send(record) allocation-free, so the DoD §10 send-path
+            // budget is unaffected.
+            cancellationRegistration = cancellationToken.Register(
+                static state =>
+                {
+                    (TaskCompletionSource<RecordMetadata> tcs, CancellationToken token) =
+                        ((TaskCompletionSource<RecordMetadata>, CancellationToken))state!;
+                    tcs.TrySetCanceled(token);
+                },
+                (completion, cancellationToken));
 
-        // The future is live but not yet owned by the pump. If anything between here and
-        // pump.Enqueue throws (OOM allocating the TCS / the cancellation registration / the
-        // continuation), the future would be orphaned — nothing would ever destroy it. Free it and
-        // rethrow ("free every handle on every path", ffi §A2). pump.Enqueue is the ownership
-        // transfer: once it returns, the pump owns the future (it will destroy_all it) and nothing
-        // after it throws (the only post-Enqueue statement is `return`), so this catch never runs
-        // once ownership transferred → no double-free. (pump.Enqueue's own _stopped branch destroys
-        // the future itself and returns normally, so the catch does not run there either.)
+            // Dispose the registration once the task settles (by the pump or by cancellation) so a
+            // long-lived token does not retain it.
+            completion.Task.ContinueWith(
+                static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                cancellationRegistration,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        // APPEND FIRST, THROTTLE AFTER (M11/P3.4 — the anchor's own mechanism). SubmitAdmitted pins
+        // and appends under the accumulator's lock, then blocks this caller while the bound is
+        // saturated. That ordering is what makes submission order call order without a FIFO
+        // submission queue: a record's place is fixed before anyone can wait behind it. It also
+        // means a parked caller holds NO pins — they transferred to the node with the append —
+        // which is how the §4.4 invariant ("a blocked sender must not hold pins") is satisfied here.
+        // The decision lives on SendAccumulator so the test fixture routes through it (DoD §12).
+        //
+        // ⚠ THIS METHOD MUST NOT BECOME `async`. It has to stay synchronous so a serializer throw
+        // (raised above this carrier, before the call) and the precondition throws above still
+        // surface synchronously rather than as a faulted Task — the reason
+        // AsyncKafkaProducer.SendValidated is deliberately not `async` either.
+        //
+        // ⚠ AND THE ADMISSION BOUND IS WHY THAT MATTERS RATHER THAN MERELY BEING TRUE (M11/P3.3).
+        // SubmitAdmitted BLOCKS this caller's thread when the producer already holds
+        // MaxAdmittedRecords records accepted but not yet handed to the batch thread (the permit
+        // comes back at TakeChainLocked, before send_batch runs, so the accepted-but-unsent
+        // POPULATION is larger than the bound by the in-flight chain — the arithmetic is at
+        // _admission). That is the fix: the caller does not await admission (it is handed the
+        // record's delivery Task), so an ASYNCHRONOUS admission wait throttles nobody and just parks
+        // continuations — measured at 3.0 GB / p50 10 s on a sibling branch, and the unbounded shape
+        // this replaces measured 2.04 GiB / p50 3.5 s. A blocking SemaphoreSlim.Wait(token) is a
+        // genuine synchronous primitive, NOT an async operation being blocked on, so it is not the
+        // sync-over-async footgun ffi §B7 / CLAUDE.md §4 forbid — the same distinction CLAUDE.md §4
+        // draws for the consumer's sync Seek. Making this method `async` to "await admission" would
+        // break the synchronous-throw contract above AND reintroduce the defect.
         try
         {
-            // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
-            // continuation runs on the pump thread and stalls every other completion.
-            TaskCompletionSource<RecordMetadata> completion =
-                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            // Best-effort cancellation: cancel the WAIT, never abort the enqueued send. Only wire it
-            // for a cancelable token so the common Send(record) path stays allocation-free (DoD §10).
-            if (cancellationToken.CanBeCanceled)
-            {
-                // Cancel WITH the token (M11/P8, Minor 9), so the resulting
-                // OperationCanceledException carries it and the idiomatic .NET catch —
-                // `catch (OperationCanceledException e) when (e.CancellationToken == ct)` — matches.
-                // The parameterless TrySetCanceled() dropped the identity, leaving Send the one
-                // method users cancel most whose cancellation was least diagnosable, while every
-                // async peripheral (via OperationCompletionSource.CancelAwaiter) carried it.
-                //
-                // The token rides in the state object because the clean overload
-                // (Register(Action<object?, CancellationToken>, object?)) is .NET 5+ and the library
-                // floor is netstandard2.0. TrySetCanceled(CancellationToken) itself IS available
-                // there. The extra allocation is one boxed value tuple on the CANCELABLE path only —
-                // the CanBeCanceled guard above keeps plain Send(record) allocation-free, so the
-                // DoD §10 send-path budget is unaffected.
-                CancellationTokenRegistration registration = cancellationToken.Register(
-                    static state =>
-                    {
-                        (TaskCompletionSource<RecordMetadata> tcs, CancellationToken token) =
-                            ((TaskCompletionSource<RecordMetadata>, CancellationToken))state!;
-                        tcs.TrySetCanceled(token);
-                    },
-                    (completion, cancellationToken));
-
-                // Dispose the registration once the task settles (by the pump or by cancellation) so
-                // a long-lived token does not retain it.
-                completion.Task.ContinueWith(
-                    static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
-                    registration,
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
-            }
-
-            pump.Enqueue(future, completion, delivery);
-            return completion.Task;
+            accumulator.SubmitAdmitted(record, completion, delivery, cancellationToken);
         }
-        catch
+        catch (Exception)
         {
-            // Orphaned future (alloc failure before ownership transferred) → free it, then rethrow.
-            // The SINGULAR FutureRecordMetadata_destroy, not destroy_all with a 1-element array:
-            // this catch is reachable only under out-of-memory (see below), so the recovery path
-            // must not itself allocate — a `new[] { future }` here can throw the same OOM again and
-            // leak the very handle it exists to free. Same reasoning as the pump's own allocation
-            // catch (SendCompletionPump.ProcessBatch). Both symbols are existing header
-            // declarations, so this is Mode A either way.
+            // What reaches here is "nothing reached the core", and so fires no delivery callback
+            // (D5). The `catch` is deliberately broad — an unexpected managed failure (an
+            // OutOfMemoryException inside the pinning, say) reaches it too, and the conclusion holds
+            // for those as well, which is why this note describes the paths rather than counting
+            // them (Critic 72 finding 72.8; it used to open "Three synchronous failures"):
             //
-            // This branch does NOT invoke `delivery` — recorded residual 4 on IDeliveryCallback.
-            // Here Producer_send returned a live future AND a null out_error — the ABI's statement
-            // that the core accepted the record — so the core may still deliver it. What is lost is
-            // the completion: the future is destroyed unread, so there is nothing to report. Firing
-            // a fabricated failure here would invent a delivery failure for a record the core may
-            // deliver successfully. Reachable only under out-of-memory: the TCS, the cancellation
-            // registration and its continuation are this method's own allocations in the try, and
-            // pump.Enqueue can grow the pump's queue.
+            //   * teardown closed the accumulator between the guards above and the append ->
+            //     ObjectDisposedException out of SendAccumulator.Append.
             //
-            // How this residual compares with the others (teardown or not, completion arrived or
-            // not, throw vs faulted Task) is stated ONCE, under "the distinguishing axes" in the
-            // remarks on IDeliveryCallback. Do not paraphrase those axes here, and do not re-scope
-            // one either — a paraphrase that lived at this very spot went stale when residual 3 was
-            // widened, and each later re-wording produced the next round's stale clause.
-            NativeMethods.FutureRecordMetadataDestroy(future);
+            // ⚠ NOTHING THROWS OUT OF THE ADMISSION WAIT ANY MORE (M11/P3.4). The wait runs AFTER
+            // the append, takes no timeout and ignores `cancellationToken`, and swallows the
+            // teardown cancellation — precisely so a record that IS in the chain cannot leave its
+            // caller holding an unreturned `completion`. So every path that reaches this `catch`
+            // appended nothing.
+            //
+            // Each such path leaves `completion` unsettled — or settled only by the registration
+            // below — so the disposing continuation chained to it may never run. Release the
+            // registration here instead.
+            cancellationRegistration.Dispose();
             throw;
         }
+
+        // The SAME awaitable on both routes — the record's delivery future, never a submission
+        // handle. (It only held before because the slow path re-awaited `completion.Task` itself.)
+        return completion.Task;
     }
 
     /// <summary>
@@ -661,10 +784,60 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// flush error via <see cref="KafkaException.FromHandle(IntPtr)"/> — unlike teardown's swallow.
     /// </summary>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a flush failure.</exception>
-    internal void Flush()
+    /// <exception cref="KafkaException">
+    /// The core reported a flush failure, or the binding-side send accumulator did not drain within
+    /// its bound so records buffered in the binding are not covered by this flush.
+    /// </exception>
+    internal void Flush() => FlushWithAccumulatorDrainBound(s_accumulatorDrainTimeout);
+
+    /// <summary>
+    /// <see cref="Flush()"/> with the accumulator-drain bound supplied rather than defaulted — the
+    /// <c>internal</c> seam that makes the expiry branch below reachable without a broker.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why a seam at all.</b> The expiry fires whenever
+    /// <see cref="SendAccumulator.DrainPending"/> returns <see langword="false"/>, which needs no
+    /// broker — only an accumulator that is not empty-and-idle at the deadline. What made it
+    /// untestable was purely that <see cref="s_accumulatorDrainTimeout"/> is a private static, so a
+    /// test could not shorten it. This follows the precedent
+    /// <see cref="SendAccumulatorSettings"/> already set with its <c>internal</c> constructor: a
+    /// test reaches an explicit value through an <c>internal</c> entry point instead of mutating
+    /// process-wide state that a parallel test class could observe.
+    /// <para>
+    /// Production behaviour is unchanged: <see cref="Flush()"/> is the only production caller and it
+    /// passes the same <see cref="s_accumulatorDrainTimeout"/> the body used to read directly.
+    /// </para>
+    /// </remarks>
+    /// <param name="accumulatorDrainTimeout">
+    /// How long to wait for the binding-side accumulator to reach empty-and-idle. <b>Not</b> a flush
+    /// timeout — the core flush below is unbounded, as Java's <c>flush()</c> is.
+    /// </param>
+    internal void FlushWithAccumulatorDrainBound(TimeSpan accumulatorDrainTimeout)
     {
         ThrowIfClosed();
+
+        // Drain the accumulator first (§3.5), for the same reason the async flush does. Reachable
+        // only when the same NativeProducer was driven through BOTH surfaces — the sync producer
+        // never starts an accumulator — but a flush that silently skipped buffered records would be
+        // wrong there too, and the blocking form is the right one on an already-blocking method.
+        //
+        // The expiry is SURFACED, not discarded. Returning success here with records still buffered
+        // in the binding is precisely §3.5's Observation-1 failure — flush() returning while records
+        // the caller believes were sent have not reached the core — which this drain exists to fix,
+        // so reintroducing it on a bounded timer would be the same defect with a 30 s fuse.
+        //
+        // The asymmetry with FlushAfterDrain (which awaits DrainPendingAsync with NO timeout) is
+        // deliberate and one-directional: the async caller has a CancellationToken to bound its own
+        // wait with, so an unbounded drain there is Java-faithful (flush() blocks until every
+        // previously-sent record completes) and still escapable. This surface has neither a token
+        // nor any other escape, so it takes a bound — and a bound that expires has to say so.
+        if (AccumulatorToStop()?.DrainPending(accumulatorDrainTimeout) == false)
+        {
+            throw new KafkaException(
+                "The producer's send accumulator did not drain within " +
+                $"{accumulatorDrainTimeout.TotalSeconds:0} seconds, so records buffered in the " +
+                "binding have not reached the core and this flush did not include them.");
+        }
 
         NativeMethods.ProducerFlush(_handle, out IntPtr error);
         KafkaException? failure = KafkaException.FromHandle(error);
@@ -797,28 +970,138 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Returns the send-completion pump, starting it on first use (lazy — a send-less producer
-    /// never spins a thread). Refuses to start once the producer is closing: the
-    /// <see cref="ThrowIfClosed"/> under <see cref="_pumpLock"/> is ordered against the
-    /// <see cref="TryBeginClose"/> latch so teardown never races a fresh pump into existence
-    /// (PLAN §6.3).
+    /// Returns the send accumulator, starting it — and the completion pump it feeds — on first use
+    /// (lazy: a producer driven only through the sync surface spins neither thread). Refuses to
+    /// start once the producer is closing: the <see cref="ThrowIfClosed"/> under
+    /// <see cref="_pumpLock"/> is ordered against the <see cref="TryBeginClose"/> latch so teardown
+    /// never races a fresh thread into existence (M11/P3 PLAN §6.3).
     /// </summary>
-    private SendCompletionPump EnsurePump()
+    /// <remarks>
+    /// The pump is created <b>first</b> and handed to the accumulator, so the accumulator can never
+    /// observe a null drain: by the time its batch thread can produce a future, the pump that owns
+    /// that future exists. The settings are read once, here, per producer (§3.2).
+    /// </remarks>
+    private SendAccumulator EnsureAccumulator()
     {
-        SendCompletionPump? pump = Volatile.Read(ref _pump);
-        if (pump is not null)
+        SendAccumulator? accumulator = Volatile.Read(ref _accumulator);
+        if (accumulator is not null)
         {
-            return pump;
+            return accumulator;
         }
 
         lock (_pumpLock)
         {
-            // Re-check the latch under the lock: if teardown won it, refuse (no pump for a closing
-            // producer — teardown would never join it).
+            // Re-check the latch under the lock: if teardown won it, refuse (no accumulator for a
+            // closing producer — teardown would never join its thread).
             ThrowIfClosed();
-            return _pump ??= new SendCompletionPump();
+            SendCompletionPump pump = _pump ??= new SendCompletionPump();
+
+            // Every accumulator setting comes from the environment, read here. Nothing is taken
+            // from the producer's config map (SendAccumulatorSettings.FromEnvironment documents
+            // why `max.block.ms` no longer is).
+            return _accumulator ??= new SendAccumulator(
+                _handle, _topics, pump, SendAccumulatorSettings.FromEnvironment());
         }
     }
+
+    /// <summary>
+    /// <b>Teardown step 1 of the §3.8 handshake: close the accumulator and drain it, BEFORE the
+    /// pump's gate closes.</b> Closes it to new appends, wakes the batch thread and joins it; the
+    /// thread performs one final drain first, so every record accepted before teardown reaches the
+    /// core and its future reaches the <b>still-open</b> pump.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The ordering is load-bearing, not incidental.</b> Doing this after
+    /// <see cref="SendCompletionPump.CloseGate"/> would deliver the final drain's futures to a closed
+    /// gate, where <see cref="SendCompletionPump.Enqueue"/> faults them in place and fires <b>no</b>
+    /// delivery callback — recorded residual 1. Routing normal teardown through a recorded residual
+    /// is silent data loss dressed up as an accepted limitation.
+    /// </para>
+    /// <para>
+    /// <b>The §6.3 re-enumeration, with the accumulator in place.</b> The recorded pump-orphan
+    /// finding rests on the premise "flush resolves every pending send"; the handshake adds two more
+    /// premises, and <b>neither is assumed</b> — each is a bounded wait with a stated outcome:
+    /// <list type="bullet">
+    /// <item><i>"the accumulator always reaches empty"</i> — it does not have to. The batch thread
+    /// can be parked inside <c>send_batch</c> on a full <c>buffer.memory</c> for up to
+    /// <c>max.block.ms</c>, and it can in principle fail outright. <c>Stop</c>'s wait is bounded by
+    /// <see cref="s_accumulatorDrainTimeout"/> and its expiry outcome is defined (abandon the thread,
+    /// which stays memory-safe and still settles every record it holds); an unhandled failure of the
+    /// thread itself settles its own chain and closes the accumulator.</item>
+    /// <item><i>"every drained node's futures reach the pump before <c>CloseGate</c>"</i> — true
+    /// exactly when the drain completed, which is what the return value reports. When it did not,
+    /// the late futures take <see cref="SendCompletionPump.Enqueue"/>'s fault-in-place branch:
+    /// faulted and freed, never stranded or leaked, at the cost of residual 1's notification.</item>
+    /// </list>
+    /// The drain result also decides one memory-safety question the caller cannot defer: whether the
+    /// interned topic buffers may be freed eagerly. They may only if nothing can still be pointing at
+    /// them, i.e. only if the drain completed — otherwise the cache falls back to its finalizer.
+    /// </para>
+    /// </remarks>
+    /// <returns><see langword="true"/> if the accumulator drained and its thread exited.</returns>
+    private bool StopAccumulator() => AccumulatorToStop()?.Stop(s_accumulatorDrainTimeout) ?? true;
+
+    /// <summary>
+    /// <b>Teardown's last step:</b> frees the interned topic buffers — but <b>only when the
+    /// accumulator's drain completed</b>.
+    /// </summary>
+    /// <remarks>
+    /// These pointers are raw and un-ref-counted, and they are what a record's
+    /// <c>ProducerRecord_t.topic</c> points at. If the drain completed, every record that ever held
+    /// one has been handed to the core and the core has copied the topic
+    /// (<c>to_string_lossy().into_owned()</c>), so freeing is safe by construction. If it did not,
+    /// the abandoned batch thread may still pass one to <c>send_batch</c>, and freeing here would be
+    /// a use-after-free — so the cache is left to its finalizer, which cannot run while the producer
+    /// (and therefore the cache) is still reachable from that thread. Deliberately unconditional in
+    /// the other direction: a producer that never sent asynchronously has an empty cache, so this is
+    /// a no-op rather than a branch to skip.
+    /// </remarks>
+    private void ReleaseTopicCache(bool accumulatorDrained)
+    {
+        if (accumulatorDrained)
+        {
+            _topics.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Reads the started accumulator (under <see cref="_pumpLock"/>), or <see langword="null"/> if
+    /// no async send ever started one. The same latch ordering as <see cref="PumpToStop"/>.
+    /// </summary>
+    private SendAccumulator? AccumulatorToStop()
+    {
+        lock (_pumpLock)
+        {
+            return _accumulator;
+        }
+    }
+
+    /// <summary>
+    /// Blocks until every async send made so far has been handed to the core and its future enqueued
+    /// to the completion pump — the accumulator's "drain now and wait" primitive (§3.5/§9). Returns
+    /// immediately when no async send ever started an accumulator.
+    /// </summary>
+    /// <returns><see langword="true"/> if the accumulator reached empty-and-idle within the timeout.</returns>
+    internal bool DrainPendingSends(TimeSpan timeout) =>
+        AccumulatorToStop()?.DrainPending(timeout) ?? true;
+
+    /// <summary>
+    /// <b>Test observation point (M11/P3.1 §3.8), not public API:</b> how many sends the completion
+    /// pump has taken off its queue — i.e. how many reached <see cref="SendCompletionPump.Enqueue"/>
+    /// while the gate was still <b>open</b>.
+    /// </summary>
+    /// <remarks>
+    /// The teardown ordering (drain the accumulator, THEN close the pump's gate) has no other
+    /// observable: get it the wrong way round and every drained future takes <c>Enqueue</c>'s
+    /// fault-in-place branch, whose exception type and message are the same ones a send legitimately
+    /// gets when the pump's loop lost the race to <c>Stop</c>'s terminal drain — so the accepted
+    /// outcome and the defect share an observable and no assertion on the send's <see cref="Task"/>
+    /// can separate them. This counter can: it is the number that were <em>queued</em>, which the
+    /// inverted ordering drives to zero. Deliberately readable <b>after</b> teardown (no closed
+    /// guard), because after teardown is the only useful time to read it.
+    /// </remarks>
+    internal long DrainedSendCount => PumpToStop()?.DrainedSendCount ?? 0;
 
     /// <summary>
     /// Completes the next pending mock send successfully (Java <c>MockProducer.completeNext()</c> /
@@ -877,7 +1160,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Reads the started pump (under <see cref="_pumpLock"/>), or <see langword="null"/> if no send
     /// ever started it. The lock is ordered against the close latch: teardown wins the latch before
-    /// calling this, so <see cref="EnsurePump"/> cannot create a new pump afterward (its
+    /// calling this, so <see cref="EnsureAccumulator"/> cannot create a new pump afterward (its
     /// <see cref="ThrowIfClosed"/> under the same lock throws). Shared by the sync
     /// <see cref="StopPump"/> and the async <see cref="StopPumpAsync"/>.
     /// </summary>
@@ -930,6 +1213,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </remarks>
     private void StopPump()
     {
+        bool accumulatorDrained = StopAccumulator();
+
         SendCompletionPump? pump = PumpToStop();
 
         // Major 5: close the enqueue gate BEFORE the flush, so a send racing teardown either
@@ -961,15 +1246,21 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // runs on strictly more paths.
         }
 
-        if (pump is null)
-        {
-            // No pump thread to join — but the flush above already ran (Blocker 2).
-            return;
-        }
+        // S4 (D3): the flush has now resolved everything the pump will read, so give the pump a
+        // BOUNDED chance to take the last queued groups off its queue BEFORE Stop sets _stopping —
+        // otherwise a group enqueued by StopAccumulator above is faulted merely because the pump
+        // thread was not scheduled in time. Monotone (the gate is closed, so nothing can be added)
+        // and bounded, so it cannot hang; on expiry Stop faults the remainder as before. The two
+        // rejected shapes — draining from THIS thread, and moving RunLoop's _stopping check below
+        // the drain — are argued at WaitForQueueDrain.
+        pump?.WaitForQueueDrain(s_pumpDrainTimeout);
 
-        // Shared join+destroy tail: join outside the lock (the pump's terminal drain does not touch
-        // _pumpLock, and holding it across a thread join is needless).
-        pump.Stop();
+        // No pump thread to join when no async send ever started one — but the flush above already
+        // ran (Blocker 2). Join outside the lock (the pump's terminal drain does not touch _pumpLock,
+        // and holding it across a thread join is needless).
+        pump?.Stop();
+
+        ReleaseTopicCache(accumulatorDrained);
     }
 
     /// <summary>
@@ -994,6 +1285,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </remarks>
     private async Task StopPumpAsync()
     {
+        bool accumulatorDrained = StopAccumulator();
+
         SendCompletionPump? pump = PumpToStop();
 
         // Major 5: close the enqueue gate BEFORE the flush (see StopPump for the full argument).
@@ -1019,14 +1312,19 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // is preserved.
         }
 
-        if (pump is null)
-        {
-            // No pump thread to join — the flush above already ran.
-            return;
-        }
+        // S4 (D3), identical to the sync twin: a BOUNDED, non-draining wait for the pump to take the
+        // last queued groups before Stop sets _stopping, so teardown completes what the core
+        // accepted instead of faulting it. Monotone behind the closed gate; on expiry it degrades to
+        // the pre-S4 fault-the-remainder behaviour. It stays SYNCHRONOUS here for the same reason
+        // the join does (see this method's remarks): it is a short wait on an already-resolved
+        // backlog, not an I/O await, and making it awaitable would buy nothing.
+        pump?.WaitForQueueDrain(s_pumpDrainTimeout);
 
-        // Shared join+destroy tail (same as StopPump) — the join stays blocking by design.
-        pump.Stop();
+        // No pump thread to join when no async send ever started one — the flush above already ran.
+        // The join stays blocking by design.
+        pump?.Stop();
+
+        ReleaseTopicCache(accumulatorDrained);
     }
 
     /// <summary>

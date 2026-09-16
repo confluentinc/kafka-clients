@@ -58,6 +58,17 @@ namespace Confluent.Kafka.UnitTests;
 /// to it (a send after close) and surfaces <see cref="ObjectDisposedException"/> instead, which
 /// case 1 of <c>NoCallback_OnSynchronousThrow</c> does cover.
 /// </para>
+/// <para>
+/// <b>One firing site is NOT covered here, and cannot be</b> (M11/P3.1 §6.1): the accumulator's
+/// per-record immediate-error compaction on the batch thread. Reaching it needs the core to reject
+/// an individual record, and the public surface cannot produce that — the mock accepts every record
+/// it is given, and the one broker-free way to make it reject (closing it) also latches the managed
+/// closed flag, so the next <c>Send</c> throws <see cref="ObjectDisposedException"/> before
+/// anything is appended. It is covered instead at the accumulator level, where the core can be
+/// closed underneath a live accumulator, by
+/// <c>Interop.SendAccumulatorTests.ImmediateError_FiresTheDeliveryCallbackExactlyOnce_AndFaultsThatSend</c>
+/// and its compaction twin.
+/// </para>
 /// </remarks>
 public sealed class PublicProducerDeliveryCallbackTests
 {

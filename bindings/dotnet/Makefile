@@ -13,7 +13,7 @@ DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
 SOLUTION := $(RUST_PROJECT_ROOT)/bindings/dotnet/Confluent.Kafka.sln
 
-.PHONY: grpc-image grpc-image-async build-dotnet test-dotnet
+.PHONY: grpc-image grpc-image-async build-dotnet test-dotnet test-soak-dotnet
 
 # Build the .NET gRPC consumer-backend image used by the multilanguage
 # integration test harness. The build context is the repo root so the
@@ -71,6 +71,39 @@ test-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION)
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION)
+	$(MAKE) test-soak-dotnet
+
+# ---------------------------------------------------------------------------
+# Soak client (M16/P1). Kept OUT of the solution (like grpc-server and the perf
+# suite): it carries the OpenTelemetry dependency tree, which must not be
+# restored on the functional gate's critical path. Invoked by path — and by
+# `test-dotnet` above, mirroring PR #172's `test: … $(MAKE) test-soak` wiring on
+# the Python side.
+#
+# ⚠ The format pass is NOT optional here and is the direct consequence of the
+# projects being outside the solution: `dotnet format $(SOLUTION)` above does not
+# reach them, so without these two lines the soak would ship unformatted while
+# the gate read green.
+#
+# Depends on build-dotnet for the two-stage build (CLAUDE.md §7.1): the soak
+# P/Invokes the same native, and Confluent.Kafka.csproj's EnsureNativeLibraryExists
+# fails loudly if cargo has not run. Both steps are incremental, so the re-entry
+# from test-dotnet costs almost nothing.
+#
+# Tests RUN on net8.0 AND net10.0 (the soak exe targets exactly those two; net462
+# is deliberately absent — the client is run by `dotnet <dll>` on a Linux box,
+# never on .NET Framework).
+# ---------------------------------------------------------------------------
+SOAK_DIR := $(RUST_PROJECT_ROOT)/bindings/dotnet/soak
+SOAK_CLIENT := $(SOAK_DIR)/SoakClient/SoakClient.csproj
+SOAK_TESTS := $(SOAK_DIR)/SoakClient.Tests/SoakClient.Tests.csproj
+
+test-soak-dotnet: build-dotnet
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(SOAK_TESTS)
+	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
+	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS)
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS)
 
 # ---------------------------------------------------------------------------
 # Performance suite (M13/P1). Kept OUT of the solution (like grpc-server), so

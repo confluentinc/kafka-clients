@@ -91,6 +91,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 1),
             callback);
+        // The async Send is DEFERRED since M11/P3.1: drain the accumulator so the record has reached
+        // the core before driving the mock by hand (a deterministic hook, never a sleep — §9).
+        producer.WaitForSendsToReachCore(s_deadline);
         Assert.True(producer.ErrorNext(2, "tfm-delivery-error"));
 
         await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
