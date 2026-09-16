@@ -36,7 +36,7 @@ pub(crate) mod txn_partition_entry;
 pub(crate) mod txn_partition_map;
 
 pub(crate) use buffer_pool::BufferPool;
-pub(crate) use built_in_partitioner::BuiltInPartitioner;
+pub(crate) use built_in_partitioner::{BuiltInPartitioner, KeyHasher};
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use kafka_producer_metrics::KafkaProducerMetrics;
@@ -44,7 +44,7 @@ pub(crate) use produce_request_result::ProduceRequestResult;
 pub(crate) use producer_batch::ProducerBatch;
 pub(crate) use producer_metadata::ProducerMetadata;
 pub(crate) use producer_metrics::ProducerMetrics;
-pub(crate) use record_accumulator::{AppendError, PartitionerConfig, RecordAccumulator};
+pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
 pub(crate) use sender::Sender;
 pub(crate) use sender_metrics_registry::SenderMetricsRegistry;
 // Re-exported per CLAUDE.md §2 so the send path (Phase 4) and the public

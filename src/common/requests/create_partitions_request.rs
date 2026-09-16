@@ -157,12 +157,12 @@ mod tests {
         let mut data = CreatePartitionsRequestData::new();
         data.set_topics(vec![topic("a", 3), topic("b", 4)]);
         let request = CreatePartitionsRequest::new(data, 3);
-        let response = request.get_error_response(100, &Errors::InvalidTopicException);
+        let response = request.get_error_response(100, &Errors::InvalidTopicError);
         if let ConcreteResponse::CreatePartitions(r) = response {
             assert_eq!(r.data().results.len(), 2);
             assert_eq!(r.data().throttle_time_ms, 100);
             for result in &r.data().results {
-                assert_eq!(result.error_code, Errors::InvalidTopicException.code());
+                assert_eq!(result.error_code, Errors::InvalidTopicError.code());
             }
         } else {
             panic!("expected CreatePartitions response");

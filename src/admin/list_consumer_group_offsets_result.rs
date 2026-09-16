@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::{KafkaError, KafkaFuture, TopicPartition};
+use crate::common::{Error, KafkaFuture, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 
 /// A map of topic partitions to their committed offset and metadata. A `None`
@@ -57,9 +57,9 @@ impl ListConsumerGroupOffsetsResult {
     /// multiple groups were requested — use
     /// [`partitions_to_offset_and_metadata_for_group`](Self::partitions_to_offset_and_metadata_for_group)
     /// instead.
-    pub fn partitions_to_offset_and_metadata(&self) -> Result<KafkaFuture<GroupOffsets>, KafkaError> {
+    pub fn partitions_to_offset_and_metadata(&self) -> Result<KafkaFuture<GroupOffsets>, Error> {
         if self.futures.len() != 1 {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Offsets from multiple consumer groups were requested. Use \
                  partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.",
             ));
@@ -80,9 +80,9 @@ impl ListConsumerGroupOffsetsResult {
     pub fn partitions_to_offset_and_metadata_for_group(
         &self,
         group_id: &str,
-    ) -> Result<KafkaFuture<GroupOffsets>, KafkaError> {
+    ) -> Result<KafkaFuture<GroupOffsets>, Error> {
         self.futures.get(group_id).cloned().ok_or_else(|| {
-            KafkaError::illegal_argument(format!("Offsets for consumer group '{group_id}' were not requested."))
+            Error::local_illegal_argument(format!("Offsets for consumer group '{group_id}' were not requested."))
         })
     }
 
@@ -123,7 +123,7 @@ mod tests {
         ]));
         assert!(matches!(
             result.partitions_to_offset_and_metadata(),
-            Err(KafkaError::IllegalState(_))
+            Err(Error::LocalIllegalState(_))
         ));
     }
 
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(future.get().await.unwrap(), offsets(5));
         assert!(matches!(
             result.partitions_to_offset_and_metadata_for_group("absent"),
-            Err(KafkaError::IllegalArgument(_))
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 

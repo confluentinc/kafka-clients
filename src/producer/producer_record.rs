@@ -19,6 +19,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use crate::common::LocalIllegalArgumentError;
 use crate::common::header::internals::RecordHeaders;
 
 /// A key/value pair to be sent to Kafka. This consists of a topic name to which the record
@@ -77,18 +78,18 @@ impl<K, V> ProducerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
         headers: Option<RecordHeaders>,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         if let Some(ts) = timestamp
             && ts < 0
         {
-            return Err(IllegalArgumentError::new(format!(
+            return Err(LocalIllegalArgumentError::new(format!(
                 "Invalid timestamp: {ts}. Timestamp should always be non-negative or null."
             )));
         }
         if let Some(p) = partition
             && p < 0
         {
-            return Err(IllegalArgumentError::new(format!(
+            return Err(LocalIllegalArgumentError::new(format!(
                 "Invalid partition: {p}. Partition number should always be non-negative or null."
             )));
         }
@@ -107,7 +108,7 @@ impl<K, V> ProducerRecord<K, V> {
         timestamp: Option<i64>,
         key: Option<K>,
         value: Option<V>,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new(topic, partition, timestamp, key, value, None)
     }
 
@@ -123,7 +124,7 @@ impl<K, V> ProducerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
         headers: RecordHeaders,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new(topic, partition, None, key, value, Some(headers))
     }
 
@@ -137,7 +138,7 @@ impl<K, V> ProducerRecord<K, V> {
         partition: Option<i32>,
         key: Option<K>,
         value: Option<V>,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new(topic, partition, None, key, value, None)
     }
 
@@ -242,34 +243,6 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Display for ProducerRecord<K, V> {
         )
     }
 }
-
-/// Error returned when an argument is invalid (e.g. negative timestamp or partition).
-///
-/// Corresponds to Java's `IllegalArgumentException`.
-#[derive(Clone, Debug)]
-pub struct IllegalArgumentError {
-    message: String,
-}
-
-impl IllegalArgumentError {
-    /// Creates a new `IllegalArgumentError` with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for IllegalArgumentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for IllegalArgumentError {}
 
 #[cfg(test)]
 mod tests {

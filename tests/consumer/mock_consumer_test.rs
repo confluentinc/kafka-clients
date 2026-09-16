@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::common::{KafkaError, TopicPartition};
+use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{
     AutoOffsetResetStrategy, Consumer, ConsumerRebalanceListener, ConsumerRecord, MockConsumer, OffsetAndMetadata,
     SubscriptionPattern,
@@ -234,14 +234,14 @@ struct RecorderListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for RecorderListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         let mut g = self.revoked.lock().unwrap();
         g.clear();
         g.extend_from_slice(partitions);
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         // Java line 156-158: skip if empty (preserves the previous list).
         if partitions.is_empty() {
             return Ok(());
@@ -335,7 +335,7 @@ async fn test_re2j_pattern_subscription() {
 
     // Empty pattern → IllegalArgumentException (Java line 194).
     let err = consumer.subscribe_pattern(SubscriptionPattern::new("")).await.unwrap_err();
-    assert!(matches!(err, KafkaError::IllegalArgument(_)));
+    assert!(matches!(err, Error::LocalIllegalArgument(_)));
 
     let pattern = SubscriptionPattern::new("t.*");
     consumer.subscribe_pattern(pattern).await.unwrap();
@@ -343,7 +343,7 @@ async fn test_re2j_pattern_subscription() {
 
     // Mixed subscription → IllegalStateException (Java line 203).
     let err = consumer.subscribe(vec!["topic1".to_string()]).await.unwrap_err();
-    assert!(matches!(err, KafkaError::IllegalState(_)));
+    assert!(matches!(err, Error::LocalIllegalState(_)));
 }
 
 /// Translated from `MockConsumerTest.shouldReturnMaxPollRecords`.
