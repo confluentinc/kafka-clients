@@ -890,11 +890,24 @@ fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
     value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
 }
 
+/// Parses a string value as `bool`.
+///
+/// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:701-735`) trims the
+/// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
+/// throws `ConfigException(name, value, "Expected value to be either true or
+/// false")`, where `value` is the **original, untrimmed** string.
 fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-    match value.trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(Error::config_value(key, value)),
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(Error::config_value_message(
+            key,
+            value,
+            "Expected value to be either true or false",
+        ))
     }
 }
 
@@ -939,6 +952,43 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let c = ConsumerConfig::from_properties(&props).unwrap();
         assert_eq!(c.bootstrap_servers(), &["localhost:9092".to_string()]);
+    }
+
+    /// Boolean config values are parsed case-insensitively after trimming, and an
+    /// unparseable value is rejected with Java's message and the original,
+    /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
+    /// (`ConfigDef.java:701-735`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// `ConfigException(name, value, "Expected value to be either true or false")`.
+    #[test]
+    fn test_parse_bool_matches_java_boolean() {
+        let props_with = |raw: &str| {
+            HashMap::from([
+                ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("enable.auto.commit".to_string(), raw.to_string()),
+            ])
+        };
+
+        // Accepted regardless of case, and after trimming surrounding whitespace.
+        for raw in ["true", "True", "TRUE"] {
+            let c = ConsumerConfig::from_properties(&props_with(raw))
+                .unwrap_or_else(|e| panic!("enable.auto.commit={raw} should be valid: {e:?}"));
+            assert!(c.enable_auto_commit(), "for enable.auto.commit={raw}");
+        }
+        for raw in ["false", "False", " false "] {
+            let c = ConsumerConfig::from_properties(&props_with(raw))
+                .unwrap_or_else(|e| panic!("enable.auto.commit={raw} should be valid: {e:?}"));
+            assert!(!c.enable_auto_commit(), "for enable.auto.commit={raw}");
+        }
+
+        // Rejected: a non-boolean string. Java prints the original (untrimmed) value.
+        let error = ConsumerConfig::from_properties(&props_with("yes"))
+            .expect_err("a non-boolean enable.auto.commit must be rejected");
+        assert_eq!(
+            error.message(),
+            "Invalid value yes for configuration enable.auto.commit: Expected value to be either true or false",
+        );
+        assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+        assert!(error.is_kafka_error());
     }
 
     /// `metrics.num.samples` is `atLeast(1)` (Java ConsumerConfig). A value
