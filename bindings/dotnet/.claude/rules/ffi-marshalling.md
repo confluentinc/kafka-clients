@@ -239,18 +239,29 @@ disposer, §B1/§B7). ⚠ For the consumer's teardown routes see **§B2's author
 
 **Decision:** Per real `KafkaProducer`, the core owns a multi-thread tokio
 runtime + one Sender task over a single async Selector; the .NET side adds at most
-**one** completion pump (§A7), never a per-send thread or a poll loop.
+**two** background threads — one completion pump (§A7) and, on the **async path
+only**, one send-batch thread (§A7's send-batching tweak, taken in M11/P3.1) — never
+a per-send thread and never a poll loop.
 
 ```
    .NET (managed)                    │ C ABI │       Rust core (native, per producer)
    ─────────────                     │       │       ─────────────────────────────────
    caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     Send → Producer_send ──────│──────►│     RecordAccumulator (enqueue, returns fast)
-   completion pump (1 bg thread):    │       │   Sender task (spawned once in _new):
-     get_all(futures) ─block_on─────►│──────►│     NetworkClient + ONE async Selector
-     ◄── per-message metadata/err ───│◄──────│       ↕ multiplexes ALL brokers (event-driven)
-   Dispose: join pump → flush/close  │       │   (created in KafkaProducer_new, dropped on _destroy)
+     SYNC  Send → Producer_send ───│──────►│     RecordAccumulator (enqueue, returns fast)
+     ASYNC Send → pin + append to  │       │   Sender task (spawned once in _new):
+             the send accumulator   │       │     NetworkClient + ONE async Selector
+   send-batch thread (1 bg, async): │       │       ↕ multiplexes ALL brokers (event-driven)
+     _send_batch(records[]) ───────│──────►│   (created in KafkaProducer_new, dropped on _destroy)
+     unpin, hand futures to the pump │     │
+   completion pump (1 bg thread):    │       │
+     get_all(futures) ─block_on─────►│──────►│
+     ◄── per-message metadata/err ───│◄──────│
+   Dispose: drain accumulator → join pump → flush/close
 ```
+
+⚠ **The "at most two" is a cap on *kinds*, not a licence for more.** The batch thread
+is one thread for **all** sends on a producer, it polls nothing, and the sync path
+starts neither thread. A per-send thread and a poll loop remain forbidden, verbatim.
 
 **Rule:**
 
@@ -258,9 +269,82 @@ runtime + one Sender task over a single async Selector; the .NET side adds at mo
     spawned Sender task doing all I/O over a **single async Selector** (all
     brokers multiplexed — NOT thread-per-broker), created in `KafkaProducer_new`,
     torn down by `Producer_destroy`.
-  - .NET side: caller thread(s) + **exactly one** completion pump (§A7); no
-    per-send threads. **No poll loop** — the core self-drives, so a stalled pump
+  - .NET side: caller thread(s) + **at most two** background threads — one completion
+    pump (§A7) and, on the **async path only**, one send-batch thread; **no per-send
+    threads**. **No poll loop** — the core self-drives, so a stalled pump
     delays result delivery but not sending.
+    ⚠ **Amended in M11/P3.1** — this read "exactly one completion pump". The
+    prohibitions it was really about are unchanged and still hold: the batch thread is
+    one thread for all of a producer's sends (not per-send), and it does not poll. The
+    **sync** path starts neither thread, so a sync-only producer still spins nothing.
+  - **Submission order is call order.** The submission path must hand records to the
+    core in the order a caller called `Send`. Java documents ordering as preserved in
+    the default configuration
+    (`kafka/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java:274`
+    — *"if retries are disabled or if `enable.idempotence` is set to true, ordering
+    will be preserved"*), and a binding-side reorder happens **before** the core sees
+    the records, so **no core-side or broker-side setting can restore it** —
+    idempotence protects against retry-induced reordering, not against being handed
+    the records in the wrong order. A deferred / accumulating submission path must
+    therefore not let a send that finds capacity overtake one still waiting for it.
+    Do **not** rest this on `SemaphoreSlim` fairness: the .NET documentation
+    guarantees **no ordering** in which blocked waiters enter the semaphore, so an
+    ordering claim built on it is unfounded. The property is claimed **per caller**
+    (a caller's own successive sends), which is all Java's guarantee is about;
+    concurrent callers are not ordered against each other, and the anchor does not
+    order them either.
+    ⚠ **Added in M11/P3.2** — no rule stated this, which is a large part of why the
+    defect shipped: the accumulator introduced in M11/P3.1 took the backpressure
+    permit *before* appending and deferred the append when it could not get one, so a
+    later send that found a permit appended ahead of a parked one. The fix that
+    satisfies this rule is a routing count (the inline path is refused while anything
+    is queued ahead) plus a documented-FIFO submission queue drained by a **single**
+    appender.
+    ⚠ **That single submitter is NOT a third background thread**, so the "at most
+    two" cap above is unaffected: it is a task-based loop, started by whichever caller
+    queued the first submission, with **at most one** in flight per producer, and it
+    does not poll — it awaits a permit and appends. A *dedicated thread* for it would
+    breach the cap and is not the sanctioned shape.
+  - **A deferred submission path must be BOUNDED, and the bound must THROTTLE THE
+    CALLER.** A bound enforced by handing the record to a container — a queue, a
+    channel, a continuation parked on a semaphore — bounds the *container*, not the
+    number of records the client has accepted. Where `Send` returns the record's
+    delivery `Task` and the caller does not await admission (the shape this binding
+    ships — M11/P3.2 DV-1), an **asynchronous** admission wait **throttles nobody**:
+    the caller already has its receipt and has moved on. Measured twice, in the same
+    harness: M11/P6's `await _inflight.WaitAsync` gave 63.5k msg/s / 3.0 GB /
+    p50 10,001 ms; M11/P3.2's unbounded FIFO submission queue gave 583k msg/s /
+    2.04 GiB / p50 3,524 ms against 537k / 239 MB / 41 ms immediately before it. The
+    **synchronous, `max.block.ms`-bounded** wait is what throttles (M11/P7: 591.6k
+    msg/s / 127 MiB / p50 7 ms; M11/P3.3 on this branch: 578.6k msg/s / 219 MB /
+    p50 84 ms), and it is Java's own shape — `KafkaProducer.send()` blocks up to
+    `max.block.ms` once the accumulator is full.
+    ⚠ **Capping one container is NOT sufficient, and this was falsified rather than
+    argued:** with M11/P3.2's submission queue bypassed entirely, the identical bloat
+    reappeared in the node chain (p50 3,436 ms / 2.04 GiB — M11/P3.3 §2.3). The bound
+    belongs on **admission**, covering every route into the accumulator.
+    ⚠ **On expiry, fault the `Task` — do NOT throw.** The timeout is Java's
+    buffer-exhaustion case, and Java does not throw from `send()` there:
+    `BufferExhaustedException` extends `TimeoutException` → `RetriableException` →
+    `ApiException`, and `KafkaProducer.doSend`'s `catch (ApiException)` fires the
+    callback with the `-1` placeholder and returns a **failed future**. So fire the
+    delivery callback and fault the returned `Task` with a **retriable** error; only
+    the *precondition* throws (disposed producer, already-cancelled token) stay
+    synchronous. Reuse the existing failure-placeholder machinery — `TopicPartition`'s
+    ctor rejects a negative partition and the placeholder's is `-1`, so a hand-rolled
+    construction throws *inside* §A6 form C's no-throw swallow boundary and makes the
+    callback **silently absent** (the M14/P1 trap).
+    ⚠ **A blocking admission needs no fair primitive for ORDERING, and is NOT fair
+    against STARVATION.** `SemaphoreSlim`'s documented lack of waiter ordering cannot
+    invert one caller's own sends under a blocking admission (that caller has at most
+    one in flight), so no fairness mechanism is needed to make **ordering** hold, and
+    adding one to justify the gate is wrong. But Java's `BufferPool` keeps a genuinely
+    **FIFO-fair** waiter queue where `SemaphoreSlim` can **barge**, so a parked caller
+    can be starved into a spurious `max.block.ms` expiry under contention. That is an
+    accepted **documented deviation** (M11/P3.3 finding 72.3), not parity — after the
+    expiry rule above its worst outcome is a retriable failed future plus a delivery
+    callback, which is what Java produces on genuine exhaustion. Record it at the
+    admission site; never let a comment claim fairness parity.
   - FFI is callable from any .NET thread; the core serializes via the producer's
     internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
@@ -288,12 +372,74 @@ pump deadlock-free (the Sender runs on other worker threads).
     serializes concurrent `Send` (don't double-lock).
   - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
     (shared, §0.3).
+  - A submission path that appends inline whenever capacity happens to be free, with
+    an earlier send still waiting for it — the ordering defect above. Equally: an
+    ordering argument that rests on `SemaphoreSlim` waiter order, or on many
+    independent per-send continuations being released "in order" by one
+    multi-permit `Release`.
+  - A **dedicated thread** for the submission queue's appender (the cap is two);
+    conversely, more than one appender draining that queue, which reintroduces the
+    race the queue exists to remove.
+  - ⚠ **The dual of that, and the one this rule shipped a defect on:** *zero*
+    appenders. "At most one appender" is a start/stop handshake between the enqueuing
+    caller and the exiting appender, i.e. Dekker's pattern, so **both** sides need a
+    store→load fence — an `Interlocked` operation, not a `Volatile.Write`, which is a
+    release store and orders no *later* load. A one-sided fence lets "the appender saw
+    the queue empty" and "the caller saw the token already taken" both hold, stranding
+    a submission with nothing to append it (and, where a drain predicate counts queued
+    submissions, hanging that drain out to its bound). This is the same standard as the
+    `SemaphoreSlim`-fairness warning above: an ordering claim must rest on a documented
+    guarantee, not on how a primitive happens to behave on one target.
+  - A deferred submission path with **no depth bound** — the container is not the
+    bound, and a correctness-only suite cannot see this: every record is still
+    delivered, in order, exactly once, so the tests pass while the client bloats.
+  - Treating an **async** admission wait as a throttle where the caller does not await
+    admission (it is not one — measured twice), or capping **one** container and
+    calling the population bounded (it relocates, measured).
+  - Throwing synchronously on the admission timeout instead of faulting the `Task` and
+    firing the delivery callback; or hand-rolling the `-1` placeholder.
+  - A comment claiming the admission gate is **fair** — it is not; state the
+    starvation deviation instead.
 
 **Tests required:**
 
   - Concurrent `Send` from many threads is correct (the `Mutex` holds).
   - `Dispose` drains before destroying the handle — joins the pump (Option A, §A7).
   - *(Option A only)* a long-blocked pump doesn't stop new sends being enqueued.
+  - **The order records reach `send_batch` equals call order, across a saturated
+    bound.** Two parts, because the raw interleaving is a race: a *deterministic*
+    half (with a submission queued, the inline path is refused and the next send
+    lands behind it — nothing appended, nothing pinned) and a *stress* half (a
+    same-thread burst that saturates the bound, with the observed order equal to the
+    call order every iteration). The stress half must be shown to **fail** without
+    the routing rule; the deterministic half is the one that cannot flake.
+  - **A drain / `Flush` includes a send still queued for capacity.** Once a
+    submission queue sits upstream of the accumulator's chain, "empty and idle" has
+    **two** stages, and a predicate that tests only the chain lets `Flush` return
+    with records the caller's `Send` already returned for — re-opening the
+    Java-faithfulness gap the accumulator drain exists to close.
+  - **Teardown settles every queued submission exactly once**, with nothing left
+    holding an unsettled `TaskCompletionSource`, and **nothing pinned while queued**
+    (the pin belongs after the permit, §A4).
+  - **A queued submission whose token fires before it is appended cancels with the
+    caller's token and is not sent** — asserted on the core's record count, not only
+    on the awaiter's state.
+  - **Bounded acceptance under over-offer** (the M11/P3.3 DoD item). Flood the
+    submission path faster than it drains — with the batch thread held back — and
+    assert the population of **accepted-but-not-yet-forwarded** records stays within
+    its documented bound. Assert on the accumulator's own witnesses, not on a
+    behavioural proxy: the queue's depth alone is **not** the quantity of interest
+    (§A1's capping-one-container note), and a refusal-path counter can be zeroed by
+    teardown independently of the thing under test — which is why M11/P3.3's first
+    version of this test measured **0/8** and needed a second witness (the gate's own
+    `CurrentCount`). Drive it through **production's own entry points** (DoD §12), and
+    prove the mutation **in-suite** with **K=8 bursts and a fresh harness per rep**:
+    M11/P3.2 saw a guard fail **5/5 isolated** while the full suite passed **5/5**, so
+    a ratio without its regime is not evidence. Mutate fixture and production
+    **separately**.
+  - **The admission timeout fires the delivery callback and faults the `Task`** —
+    non-null placeholder metadata, a **retriable** error, and the callback asserted on
+    the expiry path specifically (not merely that the `Task` faulted).
 
 ---
 
@@ -499,11 +645,34 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
 
 **Rule:**
 
-  - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; use
-    `GCHandle.Alloc(Pinned)` + `finally Free()` where `fixed` doesn't fit (the N
-    buffers of `_send_batch`, all pinned for the whole call). Unpin right after
-    the call — never hold a pin across the returned `Task` (per-message pinned
-    objects fragment the GC heap).
+  - Prefer a `fixed` block (stack-scoped, no allocation) for a single send; where
+    `fixed` doesn't fit — the N buffers of `_send_batch`, all borrowed for the whole
+    call — pin them explicitly and release in a `finally`. Unpin right after the call —
+    **never hold a pin across the returned `Task`** (per-message pinned objects
+    fragment the GC heap).
+  - **The pinning primitive for key/value is `ReadOnlyMemory<byte>.Pin()` →
+    `MemoryHandle`, NOT `GCHandle.Alloc(Pinned)`** (amended M11/P3.1). `GCHandle` pins
+    *objects*, and a record's key/value is a `ReadOnlyMemory<byte>`, whose backing store
+    may be an array, a string, native memory or a custom `MemoryManager`; `Pin()`
+    handles all of them and exists on all three TFMs (`netstandard2.0` gets it from the
+    already-referenced `System.Memory`). `GCHandle.Alloc(Pinned)` remains correct for
+    buffers the binding *owns* and pins itself — the interned topic buffers and the
+    empty-sentinel byte below.
+  - **Deferred send: the pin spans `Send` → …accumulator… → `send_batch` returns.**
+    This call-scoped rule was written against §A7's inline send. The producer's **async**
+    path is now deferred (a send-batch thread, as in the Python binding), so a pin taken
+    in `Send` is held until the batch thread's `send_batch` **returns** — and released
+    there, in a `finally`, **before** the future reaches the completion pump. The
+    underlying fact is unchanged and is what keeps this inside the rule rather than
+    outside it: `send_batch_inner` runs `producer_send` — i.e.
+    `rt.block_on(producer.send(record, None))` — per record and copies the topic with
+    `to_string_lossy().into_owned()`, so the core's borrow still ends when the native
+    call returns. "Unpin right after the call" and "never across the `Task`" both still
+    hold; only *which* call moved. The **sync** path is unchanged and stays `fixed`.
+    ⚠ **Consequence on the public surface:** a deferred send **borrows** the caller's
+    buffers past `Send`'s return, so a mutation before the drain IS visible on the wire.
+    Document that on the **async** surface only — the sync send has no such window, and
+    telling sync users to defend against it states a constraint that does not exist.
   - Sentinels: absent → `IntPtr.Zero` + `len -1`; empty → valid pointer + `len 0`.
     A `fixed` over `null` yields a null pointer, so gate length on `null`:
     ```csharp
@@ -518,9 +687,23 @@ the core holds no reference to the user buffer afterward (CLAUDE.md §12).
     (`GCHandle.AddrOfPinnedObject` returns non-null for empty arrays on current
     runtimes too, but that's **undocumented** — prefer the sentinel. Python is
     unaffected — an empty `bytes` is non-null.)
-  - This call-scoped rule depends on §A7's inline-send decision; a deferred-send
-    design (a background send thread, as in the Python binding) would have to hold
-    the buffer until the deferred send runs.
+    ⚠ **A STACK sentinel is correct only for a call-scoped send.** Once the send is
+    deferred, that address is dead by the time the batch thread reads it — a
+    use-after-free that "works" almost always and corrupts rarely, which is the worst
+    failure mode. The deferred path must use **one process-wide, permanently pinned
+    1-byte static** instead (M11/P3.1 §4.2). Test it as a *stability* property — the same
+    address for a record's key and value, and across separate calls at different stack
+    depths — because that is exactly what a stack sentinel cannot satisfy and an
+    "it sent successfully" assertion cannot detect.
+  - **The topic is the third buffer, and it is the one that gets missed.** While the send
+    is call-scoped it is just a scoped `Utf8Marshal.Pin`; deferred, a call-scoped topic
+    pointer is a use-after-free like the sentinel. Do not solve it with a per-record copy
+    (that is the allocation this section exists to prevent): intern **one permanently
+    pinned NUL-terminated buffer per distinct topic**, which is O(distinct topics)
+    permanent pins instead of O(records) transient ones. Bound the cache and **never
+    evict** — freeing a pinned buffer an in-flight record still points at is a
+    use-after-free — and free the whole cache only at a point where nothing can still
+    hold a pointer into it.
 
 **Why:** the borrow ends when the send call returns, so a call-scoped pin is
 exactly sufficient; Task-scoped pinning is unnecessary and fragments the heap.
@@ -536,11 +719,23 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 
 **Tests required:**
 
-  - **Mutation-after-send**: mutate the caller's `byte[]` right after `send`; the
-    produced record is unchanged (proves the copy happened during the call).
+  - **Mutation-after-send**, per surface: on a **call-scoped** send, mutate the caller's
+    `byte[]` right after `send` and the produced record is unchanged (proves the copy
+    happened during the call). On a **deferred** send that guarantee does not exist, so
+    the test asserts what must still hold — the mutation is *memory-safe* (the pin is
+    what makes it so) and the send still resolves — and the visibility window is
+    documented on the async surface instead.
   - **Allocation budget** (DoD §10): a large value adds no value-sized managed
-    allocation.
-  - Absent vs empty key/value each produce the correct record.
+    allocation. ⚠ Under a deferred send, whichever caller allocates or grows the
+    accumulator's node pays for it, which is noise on a per-send measurement; take the
+    **best of N matched attempts** rather than widening the budget, so a real per-send
+    regression (which raises every attempt) still fails.
+  - Absent vs empty key/value each produce the correct record — and, on a deferred send,
+    that the empty sentinel's address is **stable across calls and stack depths**.
+  - **Pin/unpin balance on every path**, including the failure paths (the append refused,
+    the native call throwing, a node abandoned at teardown). A pinned `GCHandle` is a
+    strong root, so a leak is observable without any pin-counting API: hand each send a
+    buffer nothing else references and assert it becomes collectable.
 
 ---
 
@@ -728,10 +923,13 @@ Form A fires **synchronously on the caller's (pump) thread** and returns before
         reported: `get_all` has already reported for the **whole** batch, so
         the core *did* report completions, yet the indices not yet reached are faulted
         with no callback — and the duplicate-risk argument applies to that half. The
-        *before* half (the batch **setup** — the marshalling arrays the
-        `get_all` needs, allocated outside the method's own `try` — or a throw out of
-        the `get_all` P/Invoke itself) does **not** need an allocation failure to be
-        reachable: a stale or
+        *before* half (a throw out of the `get_all` P/Invoke itself — the per-batch
+        allocation of the marshalling arrays used to be a second trigger here and is
+        **gone**, the arrays being reused fields since M11/P3.1 §12.3; the defensive
+        bound check preceding the read used to be a third and is **gone** too, every
+        pass being bounded by the arrays' capacity since M11/P3.2 §3B.3's
+        oversized-group split made that check unreachable by construction) does **not**
+        need an allocation failure to be reachable: a stale or
         mismatched native surfaces an `EntryPointNotFoundException` from the pump's
         *first* batched read, so the "OOM-only, therefore theoretical" defence is
         unavailable for it. Neither half is a teardown path, so a residual clause that
@@ -910,6 +1108,16 @@ Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pend
     `out_error`, enqueues `(future, tcs)`, returns `tcs.Task`. Inline send is fine
     because .NET has no GIL (a send-batching thread is an optional throughput
     tweak, not required).
+    ⚠ **That tweak has since been taken, on the ASYNC path only (M11/P3.1).** `Send`
+    now pins and appends to a binding-side accumulator, and a send-batch thread issues
+    `_send_batch`, mirroring the Python binding; the **sync** path keeps the inline
+    `Producer_send` verbatim. It changes only the send *submission* side — the
+    completion model below is untouched and Option A (this pull pump) remains the
+    engine. It was adopted on user direction and **not** for throughput: it converts the
+    caller's block from a native one inside the core's coarse mutex (which a concurrent
+    close cannot wake) into a managed, cancellable wait, closer to Java's `send`. ⚠
+    Lettering collision: "Option A" *here* is the pull pump, while M11/P3.1's PLAN calls
+    the send-batching design "Option A" — different letterings of different questions.
   - **Exactly one** pump thread does all waits via batched `get_all` — O(1)
     threads for unbounded in-flight sends. Per result: read fields + free handles
     on the pump (§A2), `SetResult`/`SetException`, `destroy_all` the futures.
@@ -989,11 +1197,15 @@ defers the consumer's copy-out-vs-keep-alive).
         is what makes this residual span the completion's arrival. If the throw
         came *after* `get_all` reported, completions had arrived for **every** index,
         so the indices the batch loop never reached lose their delivery notification
-        even though the core did report them. If it came *before* — from the batch
-        **setup** (the marshalling arrays, allocated outside the processing `try`) or
-        from the `get_all` P/Invoke itself against a stale native — nothing was
-        reported and the whole batch loses it. So, unlike the pre-enqueue window
-        above, this residual is **not** OOM-only.
+        even though the core did report them. If it came *before* — from the `get_all`
+        P/Invoke itself against a stale native — nothing was reported and the whole
+        batch loses it. (The batch **setup** used to belong on this side too, when the
+        three marshalling arrays were allocated per batch outside the processing `try`;
+        M11/P3.1 §12.3 made them reused fields, so that trigger is gone. The
+        **defensive bound check** preceding the read used to belong here as well;
+        M11/P3.2 §3B.3 splits an oversized group into sub-passes each bounded by the
+        arrays' capacity, so that check cannot fail and its trigger is gone too.) So,
+        unlike the pre-enqueue window above, this residual is **not** OOM-only.
     These are *non-teardown* members of §A6 form C's at-most-once boundary, and must
     be enumerated on the public surface alongside the teardown paths — the enumeration
     itself, with the counts and the comparisons between residuals, lives in one place
