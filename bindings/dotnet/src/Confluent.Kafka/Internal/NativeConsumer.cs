@@ -3160,10 +3160,15 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // this disposer, so the core guard is free for the close op.
             await CloseWithCallbackInternal().ConfigureAwait(false);
         }
-        catch (KafkaException)
+        catch (Exception)
         {
             // Best-effort teardown — Dispose/DisposeAsync must not surface a close
-            // error; that is the public Close()'s job.
+            // error; that is the public Close()'s job. Deliberately catches every
+            // exception type, not just KafkaException: the awaited Task is completed
+            // by ConsumerCallbacks.OnOperation's no-throw boundary, whose own
+            // catch-all can fault it with an unexpected managed exception (e.g. from
+            // GCHandle recovery) as well as a well-formed KafkaException, and both
+            // must be swallowed here the same way.
         }
         finally
         {
