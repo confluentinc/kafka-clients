@@ -181,6 +181,8 @@ promotions:
     pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
+  - name: Build, test and package Rust client
+    pipeline_file: rust-verify.yml
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
