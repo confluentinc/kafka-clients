@@ -66,6 +66,26 @@ fn now_millis() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
 }
 
+/// Minimum interval between emitting `startup_complete` and `shutdown_complete`
+/// (enforced in [`VerifiableConsumer::run`]).
+///
+/// This is a test-harness accommodation with no Java counterpart; it does not
+/// alter client behavior. The ducktape `VerifiableConsumer` service treats a
+/// node as started only between its `startup_complete` and `shutdown_complete`
+/// events, and polls for that state. A consumer fenced on its first heartbeat —
+/// for example a conflicting static member whose `group.instance.id` is already
+/// in use (`UNRELEASED_INSTANCE_ID`, as in
+/// `OffsetValidationTest.test_fencing_static_consumer`) — closes within a few
+/// milliseconds of startup, too briefly for the poller to observe, and the
+/// service's start gate then times out. The Java client leaves an observable
+/// window (~250 ms) only incidentally, through its slower shutdown pipeline;
+/// the native client completes the same work in ~3 ms. Deferring the final
+/// `shutdown_complete` makes the window explicit and deterministic. The consumer
+/// is already fenced and closed before this delay, so it introduces no group
+/// activity. Three seconds comfortably exceeds the service's poll backoff and
+/// stdout-streaming latency.
+const MIN_STARTUP_VISIBLE: Duration = Duration::from_secs(3);
+
 /// Java's `printJson`: serialize `data` and print one line, or print a
 /// diagnostic if it cannot be serialized. A free function (Java makes it an
 /// instance method only to reach the shared `ObjectMapper`, which is stateless
@@ -554,6 +574,10 @@ impl VerifiableConsumer {
     /// needed in Rust: `#[tokio::main]` awaits `run` to completion, so the
     /// process cannot exit before the close finishes.
     pub async fn run(&mut self) {
+        // Marks (approximately) the instant `run_loop` emits `startup_complete`,
+        // its first statement. Used to enforce `MIN_STARTUP_VISIBLE` below.
+        let started_at = std::time::Instant::now();
+
         if let Err(e) = self.run_loop().await {
             if matches!(e, Error::Wakeup(_)) {
                 // ignore, we are closing (Java catch WakeupException).
@@ -568,6 +592,19 @@ impl VerifiableConsumer {
         if let Err(e) = self.consumer.close().await {
             eprintln!("Error closing consumer: {e}");
         }
+
+        // Defer the final `shutdown_complete` so the interval since
+        // `startup_complete` is at least `MIN_STARTUP_VISIBLE`, ensuring the
+        // ducktape service can observe the started state. Only runs that
+        // terminate within that interval — such as a consumer fenced on its
+        // first heartbeat — are affected; a normal consumer runs for seconds and
+        // is unaffected. The consumer is already closed at this point, so the
+        // delay introduces no group activity.
+        let elapsed = started_at.elapsed();
+        if elapsed < MIN_STARTUP_VISIBLE {
+            tokio::time::sleep(MIN_STARTUP_VISIBLE - elapsed).await;
+        }
+
         print_json(&ShutdownComplete::new());
     }
 

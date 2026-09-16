@@ -3053,6 +3053,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "confluent-kafka-rust",
+ "env_logger",
  "indexmap 2.14.0",
  "serde",
  "serde_json",

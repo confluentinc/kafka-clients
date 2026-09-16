@@ -106,6 +106,8 @@ async fn run(args: &[String]) -> Result<(), Error> {
 
 #[tokio::main]
 async fn main() {
+    let _ = env_logger::Builder::from_default_env().format_timestamp_millis().try_init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         print_help();
