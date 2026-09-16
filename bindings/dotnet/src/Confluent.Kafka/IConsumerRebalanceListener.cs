@@ -27,7 +27,7 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>The methods are synchronous, not <see cref="System.Threading.Tasks.Task"/>-returning
 /// (declared divergence D1).</b> The ABI callback is a synchronous C function pointer
-/// returning <c>kafka_common_KafkaError_t*</c>, and the rebalance blocks until it returns
+/// returning <c>kafka_common_Error_t*</c>, and the rebalance blocks until it returns
 /// (<c>confluent_kafka.h:209-213</c>). <c>bindings/dotnet/CLAUDE.md</c> §3's "(async)" row
 /// describes the <em>Rust core's</em> trait, which the C ABI flattens
 /// (<c>bindings/CLAUDE.md</c> §1.2); restoring "blocks until it returns" faithfully in C#
