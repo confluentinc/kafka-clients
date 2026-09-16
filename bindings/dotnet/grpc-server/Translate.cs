@@ -42,11 +42,18 @@ internal static class Translate
     /// <c>CallbackLogEntry.kind</c> for <c>IConsumerRebalanceListener.OnPartitionsAssigned</c>.
     /// </summary>
     /// <remarks>
-    /// The five <c>kind</c> values are a cross-backend wire contract
-    /// (<c>producer_service.proto</c>): every server must emit the identical lowercase string or
-    /// the one shared Rust test body fails on this backend alone. Only four are reachable on
-    /// <c>ConsumerService</c> — <c>"delivery"</c> is producer-side and there is no .NET producer
-    /// backend, so it is deliberately not defined here.
+    /// The <c>kind</c> values are a cross-backend wire contract — <c>producer_service.proto</c>'s
+    /// <c>CallbackLogEntry</c> table (<c>:214-222</c>): every server must emit the identical
+    /// lowercase string or the one shared Rust test body fails on this backend alone. This
+    /// assembly hosts <em>both</em> gRPC services (Program.cs), so every value in that table is
+    /// defined here: the rebalance kinds and <see cref="KindCommit"/> are emitted by the consumer
+    /// servicers, and <see cref="KindDelivery"/> by the producer servicers (M14/P2).
+    /// <para>
+    /// This remark used to say <c>"delivery"</c> was "deliberately not defined here" because
+    /// "there is no .NET producer backend". That stopped being true when M12/P1 added the two
+    /// producer servicers, and it stayed stale until M14/P2 gave them a real
+    /// <see cref="IDeliveryCallback"/> to log.
+    /// </para>
     /// </remarks>
     internal const string KindAssigned = "assigned";
 
@@ -64,6 +71,13 @@ internal static class Translate
     /// <c>CallbackLogEntry.kind</c> for <c>IOffsetCommitCallback.OnComplete</c>.
     /// </summary>
     internal const string KindCommit = "commit";
+
+    /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <see cref="IDeliveryCallback.OnCompletion"/> — the
+    /// producer's delivery callback, emitted by both producer servicers when
+    /// <c>SendRequest.with_callback</c> is set (M14/P2).
+    /// </summary>
+    internal const string KindDelivery = "delivery";
 
     /// <summary>
     /// The <c>CallbackLogEntry.offsets</c> key for a partition:
@@ -158,6 +172,18 @@ internal static class Translate
     {
         Code = LocalIllegalStateCode,
         Message = $"unknown consumer_id {consumerId}",
+    };
+
+    /// <summary>
+    /// The producer sibling of <see cref="UnknownConsumer"/>: the hand-crafted
+    /// <c>LOCAL_ILLEGAL_STATE</c> error returned when a producer RPC names an unknown
+    /// <c>producer_id</c> (Python parity — <c>grpc_server.py</c>'s <c>ProducerService</c>
+    /// returns the same <c>{code=LOCAL_ILLEGAL_STATE, "unknown producer_id N"}</c>).
+    /// </summary>
+    internal static Proto.KafkaError UnknownProducer(ulong producerId) => new Proto.KafkaError
+    {
+        Code = LocalIllegalStateCode,
+        Message = $"unknown producer_id {producerId}",
     };
 
     /// <summary>Proto <c>TopicPartition</c> -&gt; binding <see cref="TopicPartition"/>.</summary>
@@ -313,7 +339,47 @@ internal static class Translate
     }
 
     /// <summary>
-    /// One entry of the binding's <see cref="IConsumerCommon.Metrics"/> snapshot
+    /// Proto <c>ProducerRecord</c> -&gt; binding <see cref="ProducerRecord{TKey, TValue}"/>
+    /// (bytes/bytes) — the C# port of <c>grpc_translate.py</c>'s
+    /// <c>_proto_to_producer_record</c>. <c>partition</c> / <c>timestamp</c> / <c>key</c> /
+    /// <c>value</c> are three-state via proto3 optional-presence: absent maps to
+    /// <see langword="null"/> (producer chooses / no key / tombstone), a present payload maps
+    /// to its value (a present-empty <see cref="ByteString"/> becomes an empty
+    /// <c>byte[]</c>). This is more faithful than Python for <c>value</c> (Python's wrapper
+    /// rejects a null value and substitutes an empty payload); the .NET generic
+    /// <see cref="ProducerRecord{TKey, TValue}"/> models a null-value tombstone directly.
+    /// Incoming proto headers are DROPPED — the .NET <see cref="ProducerRecord{TKey, TValue}"/>
+    /// has no headers today (Python parity — its wrapper drops them too), and no
+    /// <c>multilanguage_test!</c> scenario sends headers.
+    /// </summary>
+    internal static ProducerRecord<byte[], byte[]> ProducerRecordFromProto(Proto.ProducerRecord proto)
+    {
+        byte[]? key = proto.HasKey ? proto.Key.ToByteArray() : null;
+        byte[]? value = proto.HasValue ? proto.Value.ToByteArray() : null;
+        int? partition = proto.HasPartition ? proto.Partition : (int?)null;
+        long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
+        return new ProducerRecord<byte[], byte[]>(proto.Topic, value, key, partition, timestamp);
+    }
+
+    /// <summary>
+    /// Binding <see cref="RecordMetadata"/> -&gt; proto <c>RecordMetadata</c> — the C# port of
+    /// <c>grpc_translate.py</c>'s <c>_record_metadata_to_proto</c>. The serialized key/value
+    /// sizes are emitted as <c>-1</c> (Python parity — the .NET <see cref="RecordMetadata"/>
+    /// exposes no serialized-size accessors today, and <c>-1</c> lets the Rust client's
+    /// <c>RecordMetadata::new</c> construct validly).
+    /// </summary>
+    internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata
+    {
+        Offset = metadata.Offset,
+        Timestamp = metadata.Timestamp,
+        SerializedKeySize = -1,
+        SerializedValueSize = -1,
+        Topic = metadata.Topic,
+        Partition = metadata.Partition,
+    };
+
+    /// <summary>
+    /// One entry of a <c>metrics()</c> snapshot
     /// (<c>(MetricName, IMetric)</c>) -&gt; proto <c>Metric</c> — the C# port of
     /// <c>grpc_translate.py</c>'s <c>_metric_to_proto</c> and the C++ server's <c>Metrics</c>
     /// value switch (<c>bindings/c/grpc_server/server.cc</c>).

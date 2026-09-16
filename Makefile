@@ -266,6 +266,26 @@ test-integration-c:
 # that SIGSEGVs during C# codegen, so the images cannot be built on an arm64
 # host at all. Skipping is the only option here; the container arm runs in CI's
 # amd64 Linux verify-dotnet job (see .semaphore/semaphore.yml).
+#
+# THREE TESTS ARE SKIPPED FOR .NET ONLY -- the producer transaction arms.
+# `multilanguage_test!` emits one arm per backend for every test it wraps, so the
+# three transaction tests in tests/integration/producer_transactions_test.rs
+# generate __grpc_dotnet / __grpc_dotnet_async arms like every other backend. The
+# .NET gRPC server cannot serve them: ProducerServiceImpl /
+# AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
+# transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
+# AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
+# so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
+# at all yet -- IAsyncProducer's own docs record it as deferred.
+#
+# The skip is scoped to THIS target, which only ever runs __grpc_dotnet*, so no
+# other backend loses coverage: python / c / rust still run all three.
+#
+# REMOVE THESE THREE LINES when the .NET producer reaches transaction parity with
+# Python (the 10 transaction P/Invokes, the public surface on
+# IProducer/IAsyncProducer and the four producer types, the three MockProducer
+# transaction controls, and the five RPCs in both producer servicers). Deleting
+# them is the last step of that phase, not a follow-up to it.
 test-integration-dotnet:
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 		printf '\n========================================================================\n'; \
@@ -282,7 +302,10 @@ test-integration-dotnet:
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-dotnet && \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet; \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+			--skip test_transactional_records_are_visible_only_after_commit \
+			--skip test_aborted_transaction_records_are_discarded \
+			--skip test_consume_transform_produce_with_offsets; \
 	fi
 
 # ── Performance integration tests ────────────────────────────────────────
