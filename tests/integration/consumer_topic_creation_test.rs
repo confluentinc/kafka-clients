@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
@@ -59,7 +59,7 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }

@@ -389,7 +389,7 @@ def get_topic_end_offsets(bootstrap_servers, topic):
 def verify_consumed_messages(bootstrap_servers, topic, baseline, expected_count, has_keys):
     """Consume `topic` starting at `baseline` per-partition offsets, count
     messages, and (if has_keys) check every message landed in the partition
-    murmur2 would have chosen.
+    the default CRC-32 partitioner would have chosen (see partition_for_key).
 
     `baseline` is {partition_id: starting_offset} captured before this test ran;
     starting from those offsets means the consumer only sees messages produced
@@ -509,11 +509,15 @@ def v3_producer(common_default_configuration):
 
 def v2_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
-    # Match Apache Kafka's default partitioner so end-of-run partition
-    # verification is apples-to-apples vs the v3 (Java/Rust) client.
-    # librdkafka defaults to consistent_random (CRC32-based), not murmur2.
+    # Match the v3 Rust client's default partitioner so end-of-run partition
+    # verification is apples-to-apples. The Rust client now defaults to CRC-32
+    # (KeyHasher::Crc32), matching librdkafka's consistent_random rather than
+    # the Java client's murmur2 — see design/current/partitioner.md. Since
+    # consistent_random is already librdkafka's own default, this is explicit
+    # but redundant (and it is skipped under USE_DEFAULTS, where librdkafka's
+    # default already applies).
     if not use_defaults:
-        conf['partitioner'] = 'murmur2_random'
+        conf['partitioner'] = 'consistent_random'
     print_configuration(conf)
     return CompatibleProducer(conf)
 

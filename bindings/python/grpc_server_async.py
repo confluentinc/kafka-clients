@@ -53,12 +53,15 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
+# Error codes generated from kafka_common_ErrorCode_t
+# (cargo xtask generate-error-codes). Private plumbing: the servicers stamp the
+# real code on errors of their own making, so the Rust client can tell those
+# apart from an error the client actually reported.
+import _error_code as ec  # noqa: E402
 
-# Proto<->Python translation helpers + variant constants shared with the sync
-# server (see grpc_translate.py); client-agnostic, so reused verbatim.
+# Proto<->Python translation helpers shared with the sync server (see
+# grpc_translate.py); client-agnostic, so reused verbatim.
 from grpc_translate import (  # noqa: E402
-    ILLEGAL_STATE,
-    TIMEOUT,
     CallbackLog,
     LoggingRebalanceListener,
     _admin_abort_transaction_spec,
@@ -186,9 +189,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.SendResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             record = _proto_to_producer_record(request.record)
         except Exception as e:  # noqa: BLE001
@@ -218,9 +220,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except asyncio.TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
-                variant=TIMEOUT, code=7,
-                message="python async server: producer future timed out after 120s",
-                is_retriable=True, is_fatal=False))
+                code=ec.REQUEST_TIMED_OUT,
+                message="python async server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
             LOG.exception("awaiting future raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
@@ -236,9 +237,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.init_transactions()
         except kp.KafkaError as e:
@@ -249,9 +249,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.begin_transaction()
         except kp.KafkaError as e:
@@ -262,9 +261,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.commit_transaction()
         except kp.KafkaError as e:
@@ -275,9 +273,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.abort_transaction()
         except kp.KafkaError as e:
@@ -288,9 +285,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         # Rebuild the consumer's group-metadata handle from the wire fields and
         # translate the flat OffsetEntry list; the producer stages the offsets in
         # the ongoing transaction (they commit only if the transaction commits).
@@ -306,9 +302,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.flush()
         except kp.KafkaError as e:
@@ -319,9 +314,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.PartitionsForResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             infos = await producer.partitions_for(request.topic)
         except kp.KafkaError as e:
@@ -332,9 +326,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.MetricsResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             # metrics() is sync on AsyncProducer (Java metrics() does not block).
             snapshot = producer.metrics()
@@ -391,8 +384,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     def _unknown_consumer(self, consumer_id):
         return pb.KafkaError(
-            variant=ILLEGAL_STATE, code=-1,
-            message=f"unknown consumer_id {consumer_id}", is_retriable=False, is_fatal=True)
+            code=ec.LOCAL_ILLEGAL_STATE,
+            message=f"unknown consumer_id {consumer_id}")
 
     async def CreateConsumer(self, request, context):
         config = dict(request.config)
@@ -717,9 +710,8 @@ class AdminService(apb_grpc.AdminServiceServicer):
 
     def _unknown_admin(self, admin_id):
         return pb.KafkaError(
-            variant=ILLEGAL_STATE, code=-1,
-            message=f"unknown admin_id {admin_id}",
-            is_retriable=False, is_fatal=True)
+            code=ec.LOCAL_ILLEGAL_STATE,
+            message=f"unknown admin_id {admin_id}")
 
     async def CreateTopics(self, request, context):
         client = self._get(request.admin_id)

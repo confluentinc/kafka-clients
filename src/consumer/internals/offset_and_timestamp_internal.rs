@@ -32,7 +32,7 @@
 //! timestamp is necessarily non-negative).
 //!
 //! In Rust, the same separation is needed for the same reason: a
-//! `Result<OffsetAndTimestamp, KafkaError>` that fails on `timestamp ==
+//! `Result<OffsetAndTimestamp, Error>` that fails on `timestamp ==
 //! -1` makes the receive path silently produce `None` for every
 //! `endOffsets(tp)` and the caller gets a value-omitted-from-map
 //! result. See COMMENTS.DONE.1.md Issue 6.
@@ -86,12 +86,12 @@ impl OffsetAndTimestampInternal {
     /// # Errors
     ///
     /// Returns the underlying `OffsetAndTimestamp::with_leader_epoch`
-    /// error (`KafkaError::IllegalArgument`) if either `offset` or
+    /// error (`Error::LocalIllegalArgument`) if either `offset` or
     /// `timestamp` is negative. Callers that route values from a
     /// `LATEST` / `EARLIEST` ListOffsets must NOT call this — those
     /// values carry `timestamp == -1`. Use [`Self::offset`] directly
     /// for those flows.
-    pub(crate) fn build_offset_and_timestamp(&self) -> Result<OffsetAndTimestamp, crate::common::KafkaError> {
+    pub(crate) fn build_offset_and_timestamp(&self) -> Result<OffsetAndTimestamp, crate::common::Error> {
         OffsetAndTimestamp::with_leader_epoch(self.offset, self.timestamp, self.leader_epoch)
     }
 }

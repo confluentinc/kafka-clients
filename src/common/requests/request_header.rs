@@ -234,7 +234,7 @@ impl fmt::Display for RequestHeader {
         write!(
             f,
             "RequestHeader(apiKey={}, apiVersion={}, clientId={}, correlationId={}, headerVersion={})",
-            self.api_key().name(),
+            self.api_key(),
             self.api_version(),
             self.client_id(),
             self.correlation_id(),
@@ -359,14 +359,20 @@ mod tests {
         assert_eq!(size_calculated, size_from_cache);
     }
 
+    /// Java's `RequestHeader.toString()` interpolates `apiKey()` — an `ApiKeys`
+    /// enum value that overrides no `toString()` — so `apiKey=` carries the enum
+    /// **constant**, not the specification spelling held by the public `name`
+    /// field (`RequestHeader.java:163-170`). Pin the whole string, since the
+    /// header's rendering is the text every `NetworkClient` send log embeds.
     #[test]
     fn test_request_header_display() {
         let header = RequestHeader::new(&ApiKeys::METADATA, 1, "test-client", 42).unwrap();
-        let display = format!("{}", header);
-        assert!(display.contains("Metadata"));
-        assert!(display.contains("apiVersion=1"));
-        assert!(display.contains("clientId=test-client"));
-        assert!(display.contains("correlationId=42"));
+        assert_eq!(
+            format!("{header}"),
+            "RequestHeader(apiKey=METADATA, apiVersion=1, clientId=test-client, correlationId=42, headerVersion=1)"
+        );
+        // Not the `name` field's spelling, which the previous rendering used.
+        assert!(!format!("{header}").contains("apiKey=Metadata"));
     }
 
     #[test]

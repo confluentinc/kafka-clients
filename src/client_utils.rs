@@ -22,7 +22,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use log::warn;
 
 use super::HostResolver;
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Resolves a hostname using the given resolver and filters preferred addresses.
 ///
@@ -61,7 +61,7 @@ fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if:
+/// Returns [`Error::LocalIllegalArgument`] if:
 /// - Any URL contains embedded whitespace (newlines, spaces, tabs) after trimming
 ///   leading/trailing whitespace — these indicate user error (e.g., space-separated
 ///   or newline-separated addresses in a single string).
@@ -69,7 +69,7 @@ fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
 /// - No valid addresses can be resolved after validation.
 ///
 /// These correspond to Java's `ConfigException`.
-pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, KafkaError> {
+pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, Error> {
     let mut addresses = Vec::new();
     for url in urls {
         let trimmed = url.trim();
@@ -81,7 +81,7 @@ pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, Sock
         // Java's HOST_PORT_PATTERN regex rejects these because it anchors the entire
         // string and only allows alphanumeric, -%._: and bracket characters.
         if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Invalid url in {}: {}",
                 super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
                 url
@@ -91,7 +91,7 @@ pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, Sock
         // Parse host and port. Java uses Utils.getHost/getPort with a regex;
         // we parse manually to support IPv4 (host:port) and IPv6 ([host]:port).
         let (host, port) = parse_host_port(trimmed).ok_or_else(|| {
-            KafkaError::illegal_argument(format!(
+            Error::local_illegal_argument(format!(
                 "Invalid url in {}: {}",
                 super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
                 url
@@ -101,7 +101,7 @@ pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, Sock
         // Validate port range (Java's InetSocketAddress constructor throws
         // IllegalArgumentException for ports outside 0-65535).
         if port > 65535 {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Invalid port in {}: {}",
                 super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
                 url
@@ -145,7 +145,7 @@ pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, Sock
         }
     }
     if addresses.is_empty() {
-        return Err(KafkaError::illegal_argument(format!(
+        return Err(Error::local_illegal_argument(format!(
             "No resolvable bootstrap urls given in {}",
             super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG
         )));
@@ -335,9 +335,9 @@ mod tests {
         let result = parse_and_validate_addresses(&urls);
         assert!(result.is_err(), "Address without port should be rejected");
         match result.unwrap_err() {
-            KafkaError::IllegalArgument(msg) => {
+            Error::LocalIllegalArgument(msg) => {
                 assert!(
-                    msg.contains("Invalid url") || msg.contains("No resolvable"),
+                    msg.message().contains("Invalid url") || msg.message().contains("No resolvable"),
                     "Error should indicate invalid URL: {}",
                     msg
                 );
@@ -355,8 +355,12 @@ mod tests {
         let result = parse_and_validate_addresses(&urls);
         assert!(result.is_err(), "Port 70000 should be rejected");
         match result.unwrap_err() {
-            KafkaError::IllegalArgument(msg) => {
-                assert!(msg.contains("Invalid port"), "Error should indicate invalid port: {}", msg);
+            Error::LocalIllegalArgument(msg) => {
+                assert!(
+                    msg.message().contains("Invalid port"),
+                    "Error should indicate invalid port: {}",
+                    msg
+                );
             },
             other => panic!("Expected IllegalArgument error, got: {:?}", other),
         }

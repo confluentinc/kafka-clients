@@ -16,8 +16,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
 
-use crate::common::KafkaError;
-use crate::common::protocol::Errors;
+use crate::common::Error;
 
 /// The timestamp type of the records.
 ///
@@ -51,17 +50,24 @@ impl TimestampType {
     ///
     /// # Errors
     ///
-    /// Returns a `KafkaError` if the name is not recognized, matching Java's
+    /// Returns a `Error` if the name is not recognized, matching Java's
     /// `NoSuchElementException` thrown by `TimestampType.forName()`.
-    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
+    pub fn for_name(name: &str) -> Result<Self, Error> {
         match name {
             "NoTimestampType" => Ok(Self::NoTimestampType),
             "CreateTime" => Ok(Self::CreateTime),
             "LogAppendTime" => Ok(Self::LogAppendTime),
-            _ => Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("No timestamp type with name: {name}"),
-            )),
+            // Java: `throw new NoSuchElementException("Invalid timestamp type " + name)`
+            // (`TimestampType.java:39`). `NoSuchElementException` is a plain
+            // `java.util` `RuntimeException`, so — exactly like
+            // `IllegalArgumentException` — it sits OUTSIDE the `KafkaException`
+            // hierarchy: `is_kafka_error()` and `is_api_error()` both answer
+            // `false`. The crate has no `NoSuchElement` variant, and the two Java
+            // classes are indistinguishable through every §10.4 predicate, so
+            // `LocalIllegalArgument` is the faithful carrier here;
+            // `Error::with_message(Errors::UnknownServerError, ..)` was not,
+            // because it resolves the code to `UnknownServerException`.
+            _ => Err(Error::local_illegal_argument(format!("Invalid timestamp type {name}"))),
         }
     }
 }
@@ -103,7 +109,13 @@ mod tests {
     #[test]
     fn test_for_name_unknown() {
         let err = TimestampType::for_name("Unknown").unwrap_err();
-        assert!(err.message().contains("No timestamp type with name: Unknown"));
+        // Java: `new NoSuchElementException("Invalid timestamp type " + name)`
+        // (`TimestampType.java:39`).
+        assert_eq!(err.message(), "Invalid timestamp type Unknown");
+        // `NoSuchElementException` is outside the `KafkaException` hierarchy, so
+        // both predicates must answer `false`.
+        assert!(!err.is_kafka_error(), "Java's NoSuchElementException is not a KafkaException");
+        assert!(!err.is_api_error(), "Java's NoSuchElementException is not an ApiException");
     }
 
     #[test]

@@ -23,14 +23,21 @@ pub mod compress;
 pub mod config;
 pub mod consumer_group_state;
 pub mod election_type;
+/// Kafka's exception classes (`org.apache.kafka.common.errors`).
+pub mod errors;
 pub mod feature;
 pub mod group_state;
 pub mod group_type;
 pub mod header;
 pub(crate) mod internals;
+pub mod invalid_record_error;
 pub mod isolation_level;
 pub mod kafka_error;
 pub mod kafka_future;
+pub mod local_concurrent_modification_error;
+pub mod local_illegal_argument_error;
+pub mod local_illegal_state_error;
+pub mod local_timeout_error;
 pub mod memory;
 pub mod metric;
 pub mod metric_name;
@@ -63,9 +70,20 @@ pub use consumer_group_state::ConsumerGroupState;
 pub use election_type::ElectionType;
 pub use group_state::GroupState;
 pub use group_type::GroupType;
+pub use invalid_record_error::InvalidRecordError;
 pub use isolation_level::IsolationLevel;
-pub use kafka_error::{KafkaError, KafkaGenericError};
+pub use kafka_error::{Error, KafkaError};
+// `ErrorHierarchy` is deliberately NOT re-exported: it is the mechanism behind
+// `Error`'s predicates, used only inside `kafka_error.rs`. Callers — in-crate,
+// external, and the C FFI alike — use the inherent methods on `Error`.
 pub use kafka_future::KafkaFuture;
+// The four JDK classes the client raises itself. Re-exported here rather than
+// from `common::errors`, which is Java's `org.apache.kafka.common.errors`
+// package and holds none of them.
+pub use local_concurrent_modification_error::LocalConcurrentModificationError;
+pub use local_illegal_argument_error::LocalIllegalArgumentError;
+pub use local_illegal_state_error::LocalIllegalStateError;
+pub use local_timeout_error::LocalTimeoutError;
 pub use metric::{Metric, MetricValue};
 pub use metric_name::MetricName;
 pub use metric_name_template::MetricNameTemplate;
