@@ -479,11 +479,20 @@ impl ProducerConfig {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
-                    config.transactional_id = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    };
+                    // Java declares `transactional.id` with a
+                    // `ConfigDef.NonEmptyString` validator
+                    // (`ProducerConfig.java:537-540`), so
+                    // `ConfigDef.NonEmptyString.ensureValid` (`ConfigDef.java:1223-1231`)
+                    // rejects an empty string with a `ConfigException`. The validator
+                    // receives the parsed value, which `ConfigDef.parseType(STRING)`
+                    // has already trimmed, so `""` and `"   "` (trimmed to empty) are
+                    // both rejected and the error prints the trimmed (empty) value;
+                    // ` my-txn ` is stored as `my-txn`.
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        return Err(Error::config_value_message(key, trimmed, "String must be non-empty"));
+                    }
+                    config.transactional_id = Some(trimmed.to_string());
                 },
                 Self::TRANSACTION_TIMEOUT_CONFIG => {
                     config.transaction_timeout_ms = Self::parse_i32(key, value)?;
@@ -889,16 +898,35 @@ mod tests {
 
     #[test]
     fn test_from_properties_transactional_id() {
-        let mut props = HashMap::new();
-        props.insert("transactional.id".to_string(), "my-txn".to_string());
-        let config = ProducerConfig::from_properties(&props).unwrap();
+        let config = ProducerConfig::from_properties(&props_with(&[("transactional.id", "my-txn")])).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Empty string -> None
-        let mut props = HashMap::new();
-        props.insert("transactional.id".to_string(), String::new());
-        let config = ProducerConfig::from_properties(&props).unwrap();
-        assert_eq!(config.transactional_id, None);
+        // Java trims before validating (`ConfigDef.parseType(STRING)`), so a padded
+        // id is stored trimmed.
+        let config = ProducerConfig::from_properties(&props_with(&[("transactional.id", " my-txn ")])).unwrap();
+        assert_eq!(config.transactional_id, Some("my-txn".to_string()));
+
+        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:537-540`
+        // → `ConfigDef.java:1223-1231`) rejects an empty string; a whitespace-only
+        // id trims to empty and is rejected the same way. The error prints the
+        // trimmed (empty) value, so "Invalid value " is followed by two spaces.
+        for raw in ["", "   "] {
+            let error = ProducerConfig::from_properties(&props_with(&[("transactional.id", raw)]))
+                .expect_err("an empty transactional.id must be rejected");
+            assert_eq!(
+                error.message(),
+                "Invalid value  for configuration transactional.id: String must be non-empty",
+                "for transactional.id={raw:?}"
+            );
+            assert!(
+                matches!(error, Error::Config(_)),
+                "for transactional.id={raw:?}: expected Error::Config, got {error:?}"
+            );
+            assert!(
+                error.is_kafka_error(),
+                "for transactional.id={raw:?}: a config error is a Kafka error"
+            );
+        }
     }
 
     #[test]
