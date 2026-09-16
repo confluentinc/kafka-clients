@@ -1,0 +1,266 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests;
+
+/// <summary>
+/// M5/P8a — preconditions (validated <b>before any native call</b>, ffi §B5) and their exact
+/// message content (DoD §3) for the <b>synchronous</b> <see cref="IConsumer"/> surface, plus
+/// the unassigned-partition synchronous <see cref="KafkaException"/>. Each argument check
+/// fires before the P/Invoke — asserted even when the consumer is closed (the argument check
+/// precedes the disposed check).
+/// </summary>
+/// <remarks>
+/// <b>Concurrent-use is a documented mock limit (not a flaky test).</b> A concurrent op from
+/// another thread while one is in flight is rejected by the core's access guard (a
+/// ConcurrentModification <see cref="KafkaException"/>, thrown synchronously — ffi §B5). But
+/// the mock poll runs to completion synchronously (source-verified,
+/// <c>src/consumer/mock_consumer.rs</c>) and holds the guard only for that instant, so a second
+/// op cannot deterministically observe the guard held — the same ceiling the async M5 phases
+/// recorded. The mapping (concurrent sync op → synchronous ConcurrentModification
+/// <see cref="KafkaException"/>; concurrent sync state read → <see cref="InvalidOperationException"/>)
+/// is verified by inspection of the core's <c>acquire</c> path; no flaky overlap test is shipped.
+/// </remarks>
+public sealed class PublicSyncConsumerPreconditionTests
+{
+    private const string Topic = "sync-precondition-topic";
+    private const int Partition = 0;
+
+    // ---- Null collections / maps → ArgumentNullException ----
+
+    [Fact]
+    public void Subscribe_NullTopics_ThrowsArgumentNull()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
+        Assert.Equal("topics", ex.ParamName);
+    }
+
+    [Fact]
+    public void Subscribe_NullElementTopic_ThrowsArgumentException()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Subscribe(new string[] { null! }));
+        Assert.Equal("topics", ex.ParamName);
+        Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("assign")]
+    [InlineData("pause")]
+    [InlineData("resume")]
+    [InlineData("seekToBeginning")]
+    [InlineData("seekToEnd")]
+    public void PartitionOps_NullCollection_ThrowArgumentNull(string op)
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => InvokePartitionOp(consumer, op, null!));
+        Assert.Equal("partitions", ex.ParamName);
+    }
+
+    [Theory]
+    [InlineData("assign")]
+    [InlineData("pause")]
+    [InlineData("resume")]
+    [InlineData("seekToBeginning")]
+    [InlineData("seekToEnd")]
+    public void PartitionOps_NullElementTopic_ThrowArgumentException(string op)
+    {
+        // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
+        // present a null element topic without the TopicPartition ctor validation firing.
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentException ex = Assert.Throws<ArgumentException>(
+            () => InvokePartitionOp(consumer, op, new[] { default(TopicPartition) }));
+        Assert.Equal("partitions", ex.ParamName);
+        Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Commit_NullOffsets_ThrowsArgumentNull()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Commit(null!));
+        Assert.Equal("offsets", ex.ParamName);
+    }
+
+    [Fact]
+    public void Commit_NullOffsetValue_ThrowsArgumentException()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
+        {
+            [new TopicPartition(Topic, Partition)] = null!,
+        };
+
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Commit(offsets));
+        Assert.Equal("offsets", ex.ParamName);
+        Assert.Contains("Offset value must not be null.", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Position_NullTopic_ThrowsArgumentNull()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Position(default));
+        Assert.Equal("partition", ex.ParamName);
+    }
+
+    // ---- Negative timeout → ArgumentOutOfRangeException, before any native call (even closed) ----
+
+    [Fact]
+    public void Poll_NegativeTimeout_ThrowsArgumentOutOfRange()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Poll(TimeSpan.FromMilliseconds(-1)));
+        Assert.Equal("timeout", ex.ParamName);
+        Assert.Contains("Timeout must not be negative.", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Poll_NegativeTimeout_ThrownBeforeNativeCall_EvenWhenClosed()
+    {
+        // The timeout precondition precedes the disposed check — a closed consumer still throws
+        // ArgumentOutOfRangeException, not ObjectDisposedException.
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        consumer.Dispose();
+
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Poll(TimeSpan.FromSeconds(-2)));
+        Assert.Equal("timeout", ex.ParamName);
+    }
+
+    [Fact]
+    public void Close_NegativeTimeout_ThrowsArgumentOutOfRange()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Close(TimeSpan.FromMilliseconds(-1)));
+        Assert.Equal("timeout", ex.ParamName);
+        Assert.Contains("Timeout must not be negative.", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Close_NegativeTimeout_ThrownBeforeNativeCall_EvenWhenClosed()
+    {
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        consumer.Dispose();
+
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Close(TimeSpan.FromSeconds(-3)));
+        Assert.Equal("timeout", ex.ParamName);
+    }
+
+    [Fact]
+    public void Close_ZeroTimeout_IsValid()
+    {
+        // TimeSpan.Zero is a valid close timeout (an immediate best-effort close), not rejected.
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        consumer.Close(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void Close_NegativeTimeout_LeavesTheConsumerIntactAndStillClosable()
+    {
+        // The binding-side half of M9/P4 H2, and the fact that makes the servicer's ordering
+        // load-bearing rather than cosmetic: the timeout precondition throws BEFORE any native
+        // call, so NOTHING has been torn down. The consumer is still fully open, still usable,
+        // and still needs a real close — so a caller that removes its own bookkeeping entry
+        // BEFORE invoking Close(TimeSpan) orphans a live native consumer, with no remaining
+        // reference through which to close or destroy it. The gRPC harness servicer did exactly
+        // that (TryRemove first, then close), which is why its ordering is now
+        // resolve -> validate -> close -> evict, with a non-orphaning failure path.
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Close(TimeSpan.FromMilliseconds(-1)));
+        Assert.Equal("timeout", ex.ParamName);
+
+        // Still open after the rejected close: an ordinary op works...
+        consumer.Subscribe(new[] { "h2-proof-topic" });
+
+        // ...and the graceful close still runs (it was never taken).
+        consumer.Close();
+
+        // Teardown stays idempotent afterwards.
+        consumer.Dispose();
+    }
+
+    [Fact]
+    public void Subscribe_NullTopics_ThrownBeforeNativeCall_EvenWhenClosed()
+    {
+        // The null-argument check precedes the disposed check.
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        consumer.Dispose();
+
+        Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
+    }
+
+    // ---- Unassigned partition → synchronous KafkaException ----
+
+    [Fact]
+    public void Position_UnassignedPartition_ThrowsKafkaException()
+    {
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        Assert.Throws<KafkaException>(() => consumer.Position(new TopicPartition("unassigned", 0)));
+    }
+
+    [Fact]
+    public void Seek_UnassignedPartition_ThrowsKafkaException()
+    {
+        // Seek is sync (M5/P7): an unassigned partition surfaces as a SYNCHRONOUS KafkaException.
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        Assert.Throws<KafkaException>(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
+    }
+
+    [Fact]
+    public void Pause_UnassignedPartition_ThrowsKafkaException()
+    {
+        // Pause of an unassigned partition is the one partition op with a deterministic
+        // broker-free failure ("No current assignment for partition …").
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        KafkaException ex = Assert.Throws<KafkaException>(
+            () => consumer.Pause(new[] { new TopicPartition("unassigned", 0) }));
+        Assert.Contains("No current assignment for partition", ex.Message, StringComparison.Ordinal);
+    }
+
+    private static void InvokePartitionOp(IConsumer<byte[], byte[]> consumer, string op, IReadOnlyCollection<TopicPartition> partitions)
+    {
+        switch (op)
+        {
+            case "assign":
+                consumer.Assign(partitions);
+                break;
+            case "pause":
+                consumer.Pause(partitions);
+                break;
+            case "resume":
+                consumer.Resume(partitions);
+                break;
+            case "seekToBeginning":
+                consumer.SeekToBeginning(partitions);
+                break;
+            case "seekToEnd":
+                consumer.SeekToEnd(partitions);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(op), op, "Unknown partition op.");
+        }
+    }
+}
