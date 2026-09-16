@@ -82,8 +82,13 @@ namespace Confluent.Kafka.Internal.Interop;
 /// lifecycle (<c>KafkaConsumer_new</c> / <c>MockConsumer_new</c> / <c>close</c> /
 /// <c>close_with_timeout</c> / <c>destroy</c>, ffi §B2) plus the group-metadata
 /// getter trio used to round-trip a UTF-8 config value (ffi §B3).
+///
+/// <b><c>partial</c> (M15/P1).</b> CA1060 requires the P/Invoke declarations to live
+/// in <em>one</em> class, but this file already holds 218 of them; the admin family
+/// therefore lands in <c>NativeMethods.Admin.cs</c> as another part of this same
+/// class, keeping both files navigable without splitting the boundary type.
 /// </summary>
-internal static class NativeMethods
+internal static partial class NativeMethods
 {
     /// <summary>
     /// The bare DLL name. The runtime maps it per-OS to
