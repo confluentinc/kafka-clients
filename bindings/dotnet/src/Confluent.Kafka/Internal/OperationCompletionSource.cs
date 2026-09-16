@@ -230,6 +230,33 @@ internal class OperationCompletionSource<TResult>
     internal void TrySetException(Exception exception) => _tcs.TrySetException(exception);
 
     /// <summary>
+    /// Cancels the awaiter directly — the realization of best-effort cancellation for a client
+    /// that has <b>no native abort path</b> (the producer, which has no <c>wakeup()</c>, unlike
+    /// the consumer; ffi-marshalling.md §A7). Wired as the <c>wakeup</c> action of
+    /// <see cref="RegisterCancellation"/> by that client, so a canceled token cancels the
+    /// .NET-side wait immediately; the native op continues to completion and its callback's
+    /// <see cref="Complete(IntPtr)"/> / <see cref="CompleteWithResult(TResult)"/> is then a safe
+    /// no-op on the already-canceled <c>TaskCompletionSource</c>. Disposes the cancellation
+    /// registration first (idempotent; safe to call re-entrantly from inside the registration's
+    /// own callback — <see cref="CancellationTokenRegistration.Dispose"/> does not block there).
+    /// </summary>
+    /// <remarks>
+    /// <b>Additive, consumer path untouched.</b> The consumer wires
+    /// <see cref="RegisterCancellation"/>'s <c>wakeup</c> to the native <c>wakeup()</c> (which
+    /// faults the op with a Wakeup error, routed to a canceled task by
+    /// <see cref="Complete(IntPtr)"/>'s cancellation branch); it never calls this method. This
+    /// method exists solely for the no-abort producer path, so it changes no existing behavior.
+    /// It does <b>not</b> free the rooting <see cref="GCHandle"/> / span-the-op ref — those stay
+    /// owned by the eventual completion callback (<see cref="FreeGcHandle"/>), so the native op's
+    /// straggler callback still runs and cleans up exactly once (§A7 "frees its own rooting").
+    /// </remarks>
+    internal void CancelAwaiter()
+    {
+        _registration.Dispose();
+        _tcs.TrySetCanceled(_cancellationToken);
+    }
+
+    /// <summary>
     /// Cleanup for the case where the submitting P/Invoke throws before native could
     /// have fired the callback (so ownership never transferred): disposes the
     /// cancellation registration and frees the <see cref="GCHandle"/>. The awaiter is
