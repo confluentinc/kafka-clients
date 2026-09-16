@@ -36,27 +36,6 @@ blocks:
           commands:
             - set -o pipefail; make verify-rust 2>&1 | tee artifacts/verify.log
 
-  - name: "Verify: Linux arm64"
-    dependencies: []
-    task:
-      agent:
-        machine:
-          type: s1-prod-ubuntu24-04-arm64-2
-      env_vars:
-        - name: ARTIFACT_KEY
-          value: confluent-kafka-rust__plat-linux__arch-arm64
-      prologue:
-        commands:
-          - ./.semaphore/dependencies.sh
-      epilogue:
-        always:
-          commands:
-            - artifact push workflow artifacts/ --destination artifacts/${ARTIFACT_KEY}/ --force
-      jobs:
-        - name: verify
-          commands:
-            - set -o pipefail; make verify-rust 2>&1 | tee artifacts/verify.log
-
   - name: "Verify: macOS arm64"
     dependencies: []
     task:
@@ -81,7 +60,6 @@ blocks:
   - name: "Packaging"
     dependencies:
       - "Verify: Linux x64"
-      - "Verify: Linux arm64"
       - "Verify: macOS arm64"
     task:
       agent:
