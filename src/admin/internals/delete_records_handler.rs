@@ -20,20 +20,21 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::deleted_records::DeletedRecords;
-use crate::admin::records_to_delete::RecordsToDelete;
+use crate::DeleteRecordsRequestData;
+use crate::admin::DeletedRecords;
+use crate::admin::RecordsToDelete;
+use crate::common::Errors;
 use crate::common::errors::ApiError;
-use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, DeleteRecordsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
-use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsRequestData, DeleteRecordsTopic};
+use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsTopic};
 use crate::kafka_debug;
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::partition_leader_cache::PartitionLeaderCache;
-use super::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
+use super::AdminApiLookupStrategy;
+use super::PartitionLeaderCache;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 
 /// Handler for `deleteRecords`.
 ///
@@ -79,7 +80,7 @@ impl DeleteRecordsHandler {
         let mut deletions_for_topic: HashMap<String, DeleteRecordsTopic> = HashMap::new();
         for topic_partition in keys {
             let to_delete = self.records_to_delete.get(topic_partition);
-            let offset = to_delete.map(RecordsToDelete::before_offset_value).unwrap_or(-1);
+            let offset = to_delete.map(RecordsToDelete::before_offset).unwrap_or(-1);
             let topic = deletions_for_topic
                 .entry(topic_partition.topic().to_string())
                 .or_insert_with(|| {
@@ -146,7 +147,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
     fn build_request(&self, broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(broker_id, keys);
         vec![RequestAndKeys {
-            request: Box::new(DeleteRecordsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(DeleteRecordsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }
@@ -213,14 +214,14 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::super::admin_api_future::AdminApiFuture;
+    use super::super::AdminApiFuture;
     use super::*;
-    use crate::common::protocol::ApiKeys;
+    use crate::DeleteRecordsResponseData;
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::requests::{DeleteRecordsResponse, MetadataResponse};
-    use crate::delete_records_response_data::{
-        DeleteRecordsPartitionResult, DeleteRecordsResponseData, DeleteRecordsTopicResult,
-    };
-    use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+    use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
+    use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
     const TIMEOUT: i32 = 2000;
 
@@ -235,7 +236,7 @@ mod tests {
     fn records_to_delete() -> HashMap<TopicPartition, RecordsToDelete> {
         [tp(0), tp(1), tp(2), tp(3)]
             .into_iter()
-            .map(|k| (k, RecordsToDelete::before_offset(10)))
+            .map(|k| (k, RecordsToDelete::with_before_offset(10)))
             .collect()
     }
 
@@ -418,8 +419,8 @@ mod tests {
         let keys: HashSet<TopicPartition> = records_to_delete().into_keys().collect();
         // Any other variant: `Metadata` is what the lookup stage of this same driver
         // uses, so it is the realistic mis-route.
-        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new(
-            crate::metadata_response_data::MetadataResponseData::new(),
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::with_version(
+            crate::MetadataResponseData::new(),
             0,
         ));
         let result = handler().handle_response(&node(1), &keys, &wrong);
@@ -473,7 +474,7 @@ mod tests {
         let mut metadata = MetadataResponseData::new();
         metadata.set_topics(vec![topic_metadata]);
         let metadata_response =
-            ConcreteResponse::Metadata(MetadataResponse::new(metadata, ApiKeys::METADATA.latest_version()));
+            ConcreteResponse::Metadata(MetadataResponse::with_version(metadata, ApiKeys::METADATA.latest_version()));
 
         let handler = handler();
         let strategy = handler.lookup_strategy();

@@ -22,6 +22,7 @@
 //!
 //! This class is not thread-safe!
 
+use crate::common::security::SaslClientAuthenticator;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
@@ -41,11 +42,10 @@ use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::requests::ApiVersionsRequestBuilder;
 use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::ConcreteResponse;
+use crate::common::requests::CorrelationIdMismatchError;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
-use crate::common::requests::correlation_id_mismatch_error::correlation_id_mismatch;
 use crate::common::requests::{ConcreteRequest, RequestBuilder, RequestHeader};
-use crate::common::security::authenticator::sasl_client_authenticator;
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -61,84 +61,6 @@ use super::{InFlightRequest, InFlightRequests};
 use crate::common::Error;
 use crate::common::errors::AuthenticationError;
 use crate::common::utils::LogContext;
-
-/// Parses a response, translating the two failures `AbstractResponse` raises
-/// into the classes the rest of the client dispatches on.
-///
-/// Translated from the public static `NetworkClient.parseResponse(ByteBuffer,
-/// RequestHeader)` (`NetworkClient.java:824-840`), whose whole body is two
-/// `catch` clauses around `AbstractResponse.parseResponse`:
-///
-///  - `BufferUnderflowException` -> `SchemaException("Buffer underflow while
-///    parsing response for request with header " + requestHeader, e)`.
-///  - `CorrelationIdMismatchException` -> a `SchemaException` **only when** the
-///    request used a SASL-reserved correlation id and the response did not;
-///    otherwise the mismatch is rethrown unchanged.
-///
-/// The second clause is why `SaslClientAuthenticator` reserves a correlation-id
-/// range at all: during re-authentication a response to an *earlier*, unrelated
-/// Kafka request can arrive on the channel, and a `SchemaException` is what tells
-/// `SaslClientAuthenticator.receiveKafkaResponse` to set it aside rather than
-/// fail authentication (`SaslClientAuthenticator.java:118-126,581-597`).
-/// A genuine mismatch between two *reserved* ids is a client bug and keeps
-/// escaping as the `IllegalStateException` subclass Java rethrows.
-///
-/// # Divergence from Java
-///
-/// Java's readers signal a short buffer with `BufferUnderflowException`, which
-/// the first clause catches by type. This crate's readers report every read
-/// failure through [`std::io::Error`], using
-/// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) for a short
-/// buffer (`ByteBufferAccessor::check_remaining`), so the kind is what stands in
-/// for the type there. The cause slot is left empty:
-/// `java.nio.BufferUnderflowException` is a `java.lang` runtime exception with
-/// no class in the Kafka client and therefore no translation in this crate, and
-/// inventing one to fill the slot would misreport the hierarchy. The reader's own
-/// byte-count diagnostic is logged by the caller instead.
-///
-/// Any *other* read failure is not a clause Java has, so it keeps the reader's
-/// diagnostic. It is reported as [`Error::schema`] because that is the class every
-/// consumer of the distinction already treats it as: Java's own
-/// `SaslClientAuthenticator` catch clause lists `BufferUnderflowException |
-/// SchemaException | IllegalArgumentException` together
-/// (`SaslClientAuthenticator.java:581`), and `Schema`/`ArrayOf`/`Struct` raise
-/// `SchemaException` for exactly these malformed-buffer cases
-/// (`protocol/types/ArrayOf.java:73,76`).
-pub fn parse_response(
-    buffer: &mut dyn crate::common::protocol::Readable,
-    request_header: &RequestHeader,
-) -> Result<ConcreteResponse, Error> {
-    let error = match ConcreteResponse::parse_response(buffer, request_header) {
-        Ok(response) => return Ok(response),
-        Err(error) => error,
-    };
-
-    // Java 829-838: `catch (CorrelationIdMismatchException e)`.
-    if let Some(mismatch) = correlation_id_mismatch(&error) {
-        if sasl_client_authenticator::is_reserved(request_header.correlation_id())
-            && !sasl_client_authenticator::is_reserved(mismatch.response_correlation_id())
-        {
-            return Err(Error::schema(format!(
-                "The response is unrelated to Sasl request since its correlation id is {} and the reserved range for Sasl request is [ {},{}]",
-                mismatch.response_correlation_id(),
-                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
-            )));
-        }
-        // Java 836-837: `else { throw e; }` — the mismatch propagates as the
-        // `IllegalStateException` subclass it is, NOT as a `SchemaException`.
-        return Err(Error::CorrelationIdMismatch(mismatch.clone()));
-    }
-
-    // Java 826-828: `catch (BufferUnderflowException e)`.
-    if error.kind() == std::io::ErrorKind::UnexpectedEof {
-        return Err(Error::schema(format!(
-            "Buffer underflow while parsing response for request with header {request_header}"
-        )));
-    }
-
-    Err(Error::schema(error.to_string()))
-}
 
 /// Returns current wall-clock time in milliseconds since the Unix epoch.
 /// This is the default time provider, equivalent to Java's `SystemTime`.
@@ -242,7 +164,96 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
 }
 
+/// Names one concrete instantiation of [`NetworkClient`] so its
+/// client-independent associated functions can be called without a
+/// meaningless turbofish.
+///
+/// `S` and `H` are Rust-side injection parameters with no counterpart in
+/// Java — `NetworkClient.java` is not generic — and
+/// [`NetworkClient::parse_response`] (Java's `public static
+/// NetworkClient.parseResponse`, `NetworkClient.java:824`) reads neither, but
+/// Rust still cannot infer them at a call site (E0283).
+pub(crate) type NetworkClientStatics = NetworkClient<crate::common::network::Selector, crate::DefaultHostResolver>;
+
 impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
+    /// Parses a response, translating the two failures `AbstractResponse` raises
+    /// into the classes the rest of the client dispatches on.
+    ///
+    /// Translated from the public static `NetworkClient.parseResponse(ByteBuffer,
+    /// RequestHeader)` (`NetworkClient.java:824-840`), whose whole body is two
+    /// `catch` clauses around `AbstractResponse.parseResponse`:
+    ///
+    ///  - `BufferUnderflowException` -> `SchemaException("Buffer underflow while
+    ///    parsing response for request with header " + requestHeader, e)`.
+    ///  - `CorrelationIdMismatchException` -> a `SchemaException` **only when** the
+    ///    request used a SASL-reserved correlation id and the response did not;
+    ///    otherwise the mismatch is rethrown unchanged.
+    ///
+    /// The second clause is why `SaslClientAuthenticator` reserves a correlation-id
+    /// range at all: during re-authentication a response to an *earlier*, unrelated
+    /// Kafka request can arrive on the channel, and a `SchemaException` is what tells
+    /// `SaslClientAuthenticator.receiveKafkaResponse` to set it aside rather than
+    /// fail authentication (`SaslClientAuthenticator.java:118-126,581-597`).
+    /// A genuine mismatch between two *reserved* ids is a client bug and keeps
+    /// escaping as the `IllegalStateException` subclass Java rethrows.
+    ///
+    /// # Divergence from Java
+    ///
+    /// Java's readers signal a short buffer with `BufferUnderflowException`, which
+    /// the first clause catches by type. This crate's readers report every read
+    /// failure through [`std::io::Error`], using
+    /// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) for a short
+    /// buffer (`ByteBufferAccessor::check_remaining`), so the kind is what stands in
+    /// for the type there. The cause slot is left empty:
+    /// `java.nio.BufferUnderflowException` is a `java.lang` runtime exception with
+    /// no class in the Kafka client and therefore no translation in this crate, and
+    /// inventing one to fill the slot would misreport the hierarchy. The reader's own
+    /// byte-count diagnostic is logged by the caller instead.
+    ///
+    /// Any *other* read failure is not a clause Java has, so it keeps the reader's
+    /// diagnostic. It is reported as [`Error::schema`] because that is the class every
+    /// consumer of the distinction already treats it as: Java's own
+    /// `SaslClientAuthenticator` catch clause lists `BufferUnderflowException |
+    /// SchemaException | IllegalArgumentException` together
+    /// (`SaslClientAuthenticator.java:581`), and `Schema`/`ArrayOf`/`Struct` raise
+    /// `SchemaException` for exactly these malformed-buffer cases
+    /// (`protocol/types/ArrayOf.java:73,76`).
+    pub fn parse_response(
+        buffer: &mut dyn crate::common::Readable,
+        request_header: &RequestHeader,
+    ) -> Result<ConcreteResponse, Error> {
+        let error = match ConcreteResponse::parse_response(buffer, request_header) {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+
+        // Java 829-838: `catch (CorrelationIdMismatchException e)`.
+        if let Some(mismatch) = CorrelationIdMismatchError::correlation_id_mismatch(&error) {
+            if SaslClientAuthenticator::is_reserved(request_header.correlation_id())
+                && !SaslClientAuthenticator::is_reserved(mismatch.response_correlation_id())
+            {
+                return Err(Error::schema(format!(
+                    "The response is unrelated to Sasl request since its correlation id is {} and the reserved range for Sasl request is [ {},{}]",
+                    mismatch.response_correlation_id(),
+                    SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+                    SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
+                )));
+            }
+            // Java 836-837: `else { throw e; }` — the mismatch propagates as the
+            // `IllegalStateException` subclass it is, NOT as a `SchemaException`.
+            return Err(Error::CorrelationIdMismatch(mismatch.clone()));
+        }
+
+        // Java 826-828: `catch (BufferUnderflowException e)`.
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Err(Error::schema(format!(
+                "Buffer underflow while parsing response for request with header {request_header}"
+            )));
+        }
+
+        Err(Error::schema(error.to_string()))
+    }
+
     /// Creates a new `NetworkClient` with a `Metadata` instance (uses DefaultMetadataUpdater internally).
     ///
     /// # Arguments
@@ -265,7 +276,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
-    pub fn with_metadata(
+    pub fn with_metadata_rebootstrap_trigger_ms(
         selector: S,
         metadata: Arc<Metadata>,
         client_id: &str,
@@ -686,7 +697,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let placeholder_send =
             NetworkSend::new(&destination, Box::new(crate::common::network::ByteBufferSend::new(Vec::new())));
 
-        let in_flight_request = InFlightRequest::from_client_request(
+        let in_flight_request = InFlightRequest::with_client_request(
             client_request,
             header,
             is_internal_request,
@@ -744,14 +755,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 // Java calls the static `parseResponse` here, not
                 // `AbstractResponse.parseResponse` directly
                 // (`NetworkClient.java:999`), so the two `catch` clauses apply.
-                match parse_response(&mut buf, &req.header) {
+                match Self::parse_response(&mut buf, &req.header) {
                     Ok(response) => {
                         // Record the throttle time of EVERY response (Java
                         // `NetworkClient.handleCompletedReceives` →
                         // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
                         // before deciding whether to actually throttle.
                         if let Some(sensor) = &self.throttle_time_sensor {
-                            sensor.record_at(response.throttle_time_ms() as f64, now);
+                            sensor.record_value_time_ms(response.throttle_time_ms() as f64, now);
                         }
 
                         // Handle throttle
@@ -839,12 +850,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     max_api_version = api_version.max_version;
                 }
                 self.nodes_needing_api_versions_fetch
-                    .insert(node, ApiVersionsRequestBuilder::for_version(max_api_version));
+                    .insert(node, ApiVersionsRequestBuilder::with_version(max_api_version));
             }
             return;
         }
 
-        let node_version_info = NodeApiVersions::new(
+        let node_version_info = NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
             &api_versions_response.data().api_keys.to_vec(),
             &api_versions_response.data().supported_features.to_vec(),
             &api_versions_response.data().finalized_features.to_vec(),
@@ -871,7 +882,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             .collect();
 
         for (node, channel_state) in disconnected {
-            if channel_state == channel_state::EXPIRED {
+            if channel_state == ChannelState::EXPIRED {
                 kafka_debug!(self.log_context, "Idle connection to node {} disconnected.", node);
             } else {
                 kafka_info!(self.log_context, "Node {} disconnected.", node);
@@ -1074,7 +1085,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             // `metadata.fatalError(e)` and `maybeThrowAnyException()` rethrows.
             // `ChannelState` carries that typed error, so it is forwarded
             // unchanged: rebuilding it as `UnknownServerError` here made
-            // `is_authentication_error()` and `request_utils::is_fatal_error`
+            // `is_authentication_error()` and `request_utils::RequestUtils::is_fatal_error`
             // answer `false` on a broker that had definitively rejected our
             // credentials (finding 230).
             disconnect_state.error().cloned(),
@@ -1685,9 +1696,14 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
+    use crate::ApiVersionsResponseData;
+    use crate::HostResolver;
+    use crate::KafkaClient;
+    use crate::MetadataResponseData;
+    use crate::MetadataUpdater;
     use crate::api_message_type::ListenerType;
-    use crate::api_versions_response_data::ApiVersionsResponseData;
     use crate::common::Error;
     use crate::common::Node;
     use crate::common::network::NetworkReceive;
@@ -1696,13 +1712,9 @@ mod tests {
     use crate::common::protocol::ObjectSerializationCache;
     use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
     use crate::common::requests::ApiVersionsResponse;
-    use crate::common::requests::MetadataRequestBuilder;
     use crate::common::requests::ProduceRequestBuilder;
     use crate::common::requests::ResponseHeader;
-    use crate::host_resolver::HostResolver;
-    use crate::kafka_client::KafkaClient;
-    use crate::metadata_response_data::MetadataResponseData;
-    use crate::metadata_updater::MetadataUpdater;
+    use crate::common::requests::{MetadataRequestBuilder, MetadataRequestBuilderOptionsBuilder};
 
     // ---------------------------------------------------------------------------
     // TestHostResolver — a host resolver that returns 127.0.0.1 without DNS.
@@ -1999,14 +2011,14 @@ mod tests {
         correlation_id: i32,
     ) -> Vec<u8> {
         let header_version = api_key.response_header_version(api_version);
-        let mut header = ResponseHeader::new(correlation_id, header_version);
+        let mut header = ResponseHeader::with_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(header.data(), &mut cache, header_version).expect("header size");
         let body_size = Message::size(response_data, &mut cache, api_version).expect("body size");
         let total = (header_size + body_size) as usize;
 
-        let mut buf = ByteBufferAccessor::new(total);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(total));
         Message::write(header.data_mut(), &mut buf, &cache, header_version).expect("write header");
         Message::write(response_data, &mut buf, &cache, api_version).expect("write body");
         buf.flip();
@@ -2026,7 +2038,7 @@ mod tests {
     ) {
         let bytes =
             serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data_mut(), correlation_id);
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         selector.delayed_receive(DelayedReceive::new(node.id_string(), receive));
     }
 
@@ -2078,7 +2090,7 @@ mod tests {
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
@@ -2098,7 +2110,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -2224,7 +2236,7 @@ mod tests {
     async fn test_send_to_unready_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let now = 0_i64;
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request("5", Box::new(builder), now, false);
         client.send(request, now);
     }
@@ -2244,7 +2256,7 @@ mod tests {
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
 
         // Send a request
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
 
@@ -2400,11 +2412,11 @@ mod tests {
         // Must call before creating any request, as it may send ApiVersionsRequest
         await_ready(client, node).await;
 
-        let builder = MetadataRequestBuilder::new(Some(&["test_topic"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test_topic"]), true);
         let callback_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_flag = callback_executed.clone();
         let callback: super::super::RequestCompletionHandler =
-            Box::new(move |_response: &mut super::super::client_response::ClientResponse| {
+            Box::new(move |_response: &mut super::super::ClientResponse| {
                 callback_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             });
 
@@ -2427,7 +2439,7 @@ mod tests {
         let response_version = ApiKeys::METADATA.latest_version();
         let bytes =
             serialize_response_with_header(&ApiKeys::METADATA, response_version, &mut response_data, correlation_id);
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
 
         let responses = client.poll(1, now).await;
@@ -2454,7 +2466,8 @@ mod tests {
         // Disabling auto topic creation for versions less than 4 is not supported.
         // Build a MetadataRequestBuilder that targets version 3 only, with
         // allow_auto_topic_creation=false, which should fail.
-        let builder = MetadataRequestBuilder::new_with_version(Some(&["topic_1"]), false, 3);
+        let builder =
+            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         client.send_internal_metadata_request(builder, node.id_string(), now);
 
         // The MetadataUpdater should have recorded a failure.
@@ -2481,7 +2494,7 @@ mod tests {
         assert!(least_loaded.has_node_available_or_connection_ready());
 
         // Send a metadata request to saturate the connection
-        let builder = MetadataRequestBuilder::new(Some(&[]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
@@ -2504,7 +2517,7 @@ mod tests {
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
@@ -2519,7 +2532,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -2543,7 +2556,7 @@ mod tests {
 
         await_ready(&mut client, &node).await;
 
-        let builder = MetadataRequestBuilder::new(Some(&[]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
@@ -2576,10 +2589,10 @@ mod tests {
         let callback_responses: Arc<std::sync::Mutex<Vec<i32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // Send first request
-        let builder1 = MetadataRequestBuilder::new(Some(&[]), true);
+        let builder1 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let cb_responses1 = callback_responses.clone();
         let callback1: super::super::RequestCompletionHandler =
-            Box::new(move |resp: &mut super::super::client_response::ClientResponse| {
+            Box::new(move |resp: &mut super::super::ClientResponse| {
                 cb_responses1.lock().unwrap().push(resp.request_header().correlation_id());
             });
         let request1 = client.new_client_request_with_timeout(
@@ -2595,10 +2608,10 @@ mod tests {
         client.poll(0, now).await;
 
         // Send second request
-        let builder2 = MetadataRequestBuilder::new(Some(&[]), true);
+        let builder2 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let cb_responses2 = callback_responses.clone();
         let callback2: super::super::RequestCompletionHandler =
-            Box::new(move |resp: &mut super::super::client_response::ClientResponse| {
+            Box::new(move |resp: &mut super::super::ClientResponse| {
                 cb_responses2.lock().unwrap().push(resp.request_header().correlation_id());
             });
         let request2 = client.new_client_request_with_timeout(
@@ -2876,7 +2889,7 @@ mod tests {
     fn create_network_client_with_real_metadata(
         metadata: Arc<Metadata>,
     ) -> NetworkClient<MockSelector, TestHostResolver> {
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata,
             "mock",
@@ -2941,7 +2954,7 @@ mod tests {
     ) -> ClientResponse {
         await_ready(client, node).await;
 
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -2965,7 +2978,7 @@ mod tests {
                 &mut response_data,
                 correlation_id,
             );
-            let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+            let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
             client.selector_mut().complete_receive(receive);
         }
 
@@ -3001,7 +3014,7 @@ mod tests {
             crate::common::internals::ClusterResourceListeners::new(),
         ));
         let metadata_response =
-            crate::common::requests::request_test_utils::metadata_update_with(2, &std::collections::HashMap::new());
+            crate::common::requests::RequestTestUtils::metadata_update_with(2, &std::collections::HashMap::new());
         metadata.update_with_current_request_version(&metadata_response, false, 0);
 
         let mut client = create_network_client_with_real_metadata(metadata.clone());
@@ -3077,7 +3090,7 @@ mod tests {
 
         // Send first request
         let timeout_ms = 1000;
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3099,13 +3112,13 @@ mod tests {
             &mut response_data,
             r1_correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node.id_string(), receive));
 
         // Send second request
-        let builder2 = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder2 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request2 = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder2),
@@ -3139,7 +3152,7 @@ mod tests {
         await_ready(&mut client, &node).await;
 
         // Send a request
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3162,7 +3175,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -3210,7 +3223,7 @@ mod tests {
             std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
         )]);
 
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata.clone(),
             "mock",
@@ -3300,13 +3313,13 @@ mod tests {
             std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
         )]);
         let metadata_response =
-            crate::common::requests::request_test_utils::metadata_update_with(2, &std::collections::HashMap::new());
+            crate::common::requests::RequestTestUtils::metadata_update_with(2, &std::collections::HashMap::new());
         metadata.update_with_current_request_version(&metadata_response, false, 0);
 
         let nodes = metadata.fetch().nodes().to_vec();
         assert!(nodes.len() >= 2, "Expected at least 2 nodes from metadata");
 
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata.clone(),
             "mock",
@@ -3334,7 +3347,7 @@ mod tests {
         }
 
         // Queue a user request to nodes[0]
-        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             nodes[0].id_string(),
             Box::new(builder),
@@ -3407,7 +3420,7 @@ mod tests {
     /// `AuthenticationException`.
     ///
     /// Rebuilding it as an `UnknownServerException` made
-    /// `is_authentication_error()` and `request_utils::is_fatal_error` both answer
+    /// `is_authentication_error()` and `request_utils::RequestUtils::is_fatal_error` both answer
     /// `false`, so a client whose credentials the broker had definitively rejected
     /// kept reconnecting.
     #[tokio::test]
@@ -3419,7 +3432,7 @@ mod tests {
             crate::common::internals::ClusterResourceListeners::new(),
         ));
         let metadata_response =
-            crate::common::requests::request_test_utils::metadata_update_with(1, &std::collections::HashMap::new());
+            crate::common::requests::RequestTestUtils::metadata_update_with(1, &std::collections::HashMap::new());
         metadata.update_with_current_request_version(&metadata_response, false, 0);
         let node = metadata.fetch().nodes()[0].clone();
 
@@ -3438,7 +3451,7 @@ mod tests {
             "Java rethrows an AuthenticationException, so this must classify as one: {err:?}"
         );
         assert!(
-            crate::common::requests::request_utils::is_fatal_error(&err),
+            crate::common::requests::RequestUtils::is_fatal_error(&err),
             "RequestUtils.isFatalException answers true for an AuthenticationException: {err:?}"
         );
         // The reason text is the authenticator's own, with no class prefix: the
@@ -3528,7 +3541,7 @@ mod tests {
         // Java's callers branch on — while remaining distinguishable by class.
         for error in [&sasl, &ssl] {
             assert!(error.is_authentication_error(), "{error:?}");
-            assert!(crate::common::requests::request_utils::is_fatal_error(error), "{error:?}");
+            assert!(crate::common::requests::RequestUtils::is_fatal_error(error), "{error:?}");
         }
     }
 
@@ -3556,8 +3569,15 @@ mod tests {
             .expect("METADATA must be advertised");
 
         let unreachable = supported.max_version + 1;
-        let builder =
-            MetadataRequestBuilder::new_with_version_range(Some(&["topic_1"]), true, unreachable, unreachable);
+        let builder = MetadataRequestBuilder::with_options(
+            MetadataRequestBuilderOptionsBuilder::new()
+                .set_topics(Some(&["topic_1"]))
+                .set_allow_auto_topic_creation(true)
+                .set_min_version(unreachable)
+                .set_max_version(unreachable)
+                .build()
+                .unwrap(),
+        );
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         let responses = client.poll(0, now).await;
@@ -3601,7 +3621,8 @@ mod tests {
 
         // v3 is a usable version, but disabling auto topic creation below v4 is
         // not representable, so `build_version` fails.
-        let builder = MetadataRequestBuilder::new_with_version(Some(&["topic_1"]), false, 3);
+        let builder =
+            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         let responses = client.poll(0, now).await;
@@ -3632,7 +3653,7 @@ mod tests {
             crate::common::internals::ClusterResourceListeners::new(),
         ));
         let metadata_response =
-            crate::common::requests::request_test_utils::metadata_update_with(2, &std::collections::HashMap::new());
+            crate::common::requests::RequestTestUtils::metadata_update_with(2, &std::collections::HashMap::new());
         metadata.update_with_current_request_version(&metadata_response, false, 0);
 
         let cluster = metadata.fetch();
@@ -3689,14 +3710,14 @@ mod tests {
 
         // Construct a metadata response with brokers so it's not ignored as empty
         let mut response =
-            crate::common::requests::request_test_utils::metadata_update_with(2, &std::collections::HashMap::new());
+            crate::common::requests::RequestTestUtils::metadata_update_with(2, &std::collections::HashMap::new());
         let response_version = ApiKeys::METADATA.latest_version();
 
         // We need to match the correlation_id. Since the internal metadata request
         // has a specific correlation_id, we'll try a range.
         // The safer approach: use delayed_receive which matches on completed sends.
         let bytes = serialize_response_with_header(&ApiKeys::METADATA, response_version, response.data_mut(), 0);
-        let receive = NetworkReceive::with_buffer(node1.id_string(), bytes);
+        let receive = NetworkReceive::with_source_buffer(node1.id_string(), bytes);
         client
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node1.id_string(), receive));
@@ -4222,8 +4243,16 @@ mod tests {
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
-        crate::common::requests::RequestHeader::new(&ApiKeys::METADATA, 12, "client-id", correlation_id)
-            .expect("request header")
+        crate::common::requests::RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(12)
+                .set_client_id("client-id")
+                .set_correlation_id(correlation_id)
+                .build()
+                .unwrap(),
+        )
+        .expect("request header")
     }
 
     /// A serialized METADATA v12 response carrying the given correlation id.
@@ -4237,8 +4266,8 @@ mod tests {
     #[test]
     fn parse_response_returns_the_body_when_the_correlation_ids_match() {
         let header = metadata_request_header(11);
-        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(11));
-        let response = parse_response(&mut buffer, &header).expect("must parse");
+        let mut buffer = ByteBufferAccessor::new(metadata_response_bytes(11));
+        let response = NetworkClientStatics::parse_response(&mut buffer, &header).expect("must parse");
         assert!(matches!(response, ConcreteResponse::Metadata(_)));
     }
 
@@ -4249,8 +4278,8 @@ mod tests {
     #[test]
     fn parse_response_rethrows_a_mismatch_on_a_non_sasl_request() {
         let header = metadata_request_header(11);
-        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(12));
-        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+        let mut buffer = ByteBufferAccessor::new(metadata_response_bytes(12));
+        let error = NetworkClientStatics::parse_response(&mut buffer, &header).expect_err("must not parse");
 
         let mismatch = match &error {
             Error::CorrelationIdMismatch(mismatch) => mismatch,
@@ -4272,18 +4301,18 @@ mod tests {
     /// receive aside instead of failing authentication.
     #[test]
     fn parse_response_converts_a_mismatch_unrelated_to_a_sasl_request_to_a_schema_error() {
-        let reserved = sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
+        let reserved = SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
         let header = metadata_request_header(reserved);
-        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(5));
-        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+        let mut buffer = ByteBufferAccessor::new(metadata_response_bytes(5));
+        let error = NetworkClientStatics::parse_response(&mut buffer, &header).expect_err("must not parse");
 
         assert!(matches!(error, Error::Schema(_)), "must be a SchemaException, got {error:?}");
         assert_eq!(
             error.message(),
             format!(
                 "The response is unrelated to Sasl request since its correlation id is 5 and the reserved range for Sasl request is [ {},{}]",
-                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
+                SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+                SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
             )
         );
         assert!(error.is_kafka_error(), "SchemaException extends KafkaException");
@@ -4296,10 +4325,10 @@ mod tests {
     /// row would be a `SchemaException` too.
     #[test]
     fn parse_response_rethrows_a_mismatch_between_two_reserved_correlation_ids() {
-        let reserved = sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
+        let reserved = SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
         let header = metadata_request_header(reserved);
-        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(reserved + 1));
-        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+        let mut buffer = ByteBufferAccessor::new(metadata_response_bytes(reserved + 1));
+        let error = NetworkClientStatics::parse_response(&mut buffer, &header).expect_err("must not parse");
 
         let mismatch = match &error {
             Error::CorrelationIdMismatch(mismatch) => mismatch,
@@ -4317,14 +4346,13 @@ mod tests {
     /// when it did not.
     #[test]
     fn test_convert_list_offset_response_to_sasl_handshake_response() {
+        use crate::ListOffsetsResponseData;
         use crate::common::requests::ListOffsetsResponse;
-        use crate::list_offsets_response_data::{
-            ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
-        };
+        use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 
         let mut partition = ListOffsetsPartitionResponse::new();
         partition.set_error_code(Errors::None.code());
-        partition.set_leader_epoch(crate::common::requests::list_offsets_response::UNKNOWN_EPOCH);
+        partition.set_leader_epoch(ListOffsetsResponse::UNKNOWN_EPOCH);
         partition.set_partition_index(0);
         partition.set_offset(0);
         partition.set_timestamp(0);
@@ -4340,25 +4368,36 @@ mod tests {
 
         // `assertThrows(SchemaException.class, ...)` — the request is SASL, the
         // response is not.
-        let header0 = crate::common::requests::RequestHeader::new(
-            &ApiKeys::LIST_OFFSETS,
-            version,
-            "id",
-            sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+        let header0 = crate::common::requests::RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(version)
+                .set_client_id("id")
+                .set_correlation_id(SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID)
+                .build()
+                .unwrap(),
         )
         .expect("request header");
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes.clone());
-        let error = parse_response(&mut buffer, &header0).expect_err("must not parse");
+        let mut buffer = ByteBufferAccessor::new(bytes.clone());
+        let error = NetworkClientStatics::parse_response(&mut buffer, &header0).expect_err("must not parse");
         assert!(matches!(error, Error::Schema(_)), "must be a SchemaException, got {error:?}");
 
         // `assertThrows(IllegalStateException.class, ...)` — a plain Kafka request,
         // so the mismatch is rethrown. `CorrelationIdMismatchException` *is* the
         // `IllegalStateException` Java's assertion accepts, which is why every
         // hierarchy predicate must answer `false` for it.
-        let header1 = crate::common::requests::RequestHeader::new(&ApiKeys::LIST_OFFSETS, version, "id", 1)
-            .expect("request header");
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes);
-        let error = parse_response(&mut buffer, &header1).expect_err("must not parse");
+        let header1 = crate::common::requests::RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::LIST_OFFSETS)
+                .set_request_version(version)
+                .set_client_id("id")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("request header");
+        let mut buffer = ByteBufferAccessor::new(bytes);
+        let error = NetworkClientStatics::parse_response(&mut buffer, &header1).expect_err("must not parse");
         assert!(
             matches!(error, Error::CorrelationIdMismatch(_)),
             "must be the IllegalStateException subclass, got {error:?}"
@@ -4378,8 +4417,8 @@ mod tests {
         let header_len = ApiKeys::METADATA.response_header_version(12);
         assert_eq!(header_len, 1, "METADATA v12 uses the flexible response header");
         bytes.truncate(5);
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes);
-        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+        let mut buffer = ByteBufferAccessor::new(bytes);
+        let error = NetworkClientStatics::parse_response(&mut buffer, &header).expect_err("must not parse");
 
         assert!(matches!(error, Error::Schema(_)), "must be a SchemaException, got {error:?}");
         assert_eq!(
@@ -4401,14 +4440,14 @@ mod tests {
     /// avg = (400 + 100 + 200 + 300) / 4 = 250 and max = 400.
     #[tokio::test]
     async fn test_quota_metrics() {
-        use crate::common::metric::Metric;
-        use crate::common::metrics::time::Time;
-        use crate::common::metrics::time::mock::MockTime;
+        use crate::ProduceRequestData;
+        use crate::ProduceResponseData;
+        use crate::common::Metric;
+        use crate::common::metrics::MockTime;
+        use crate::common::metrics::Time;
         use crate::common::metrics::{MetricConfig, Metrics};
-        use crate::produce_request_data::ProduceRequestData;
-        use crate::produce_response_data::ProduceResponseData;
         use crate::producer::internals::SenderMetricsRegistry;
-        use crate::producer::internals::sender::throttle_time_sensor;
+        use crate::producer::internals::SenderStatics;
 
         const EPS: f64 = 0.0001;
 
@@ -4419,13 +4458,13 @@ mod tests {
         // a wall-clock metrics clock), the recorded samples fall outside the
         // measured window and the stats read NaN.
         let mock_time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_config_reporters_time(
+        let metrics = Arc::new(Metrics::with_default_config_reporters_time(
             Arc::new(MetricConfig::new()),
             Vec::new(),
             Arc::clone(&mock_time) as Arc<dyn Time>,
         ));
         let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
-        let throttle_sensor = throttle_time_sensor(&sender_metrics_registry).expect("throttle sensor");
+        let throttle_sensor = SenderStatics::throttle_time_sensor(&sender_metrics_registry).expect("throttle sensor");
 
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         client.set_throttle_time_sensor(throttle_sensor);
@@ -4464,7 +4503,7 @@ mod tests {
             data.set_acks(1);
             data.set_timeout_ms(1000);
             data.set_topic_data(Vec::new());
-            let builder = ProduceRequestBuilder::new(data);
+            let builder = ProduceRequestBuilder::builder(data);
 
             let request =
                 client.new_client_request(node.id_string(), Box::new(builder), mock_time.milliseconds(), true);
@@ -4480,7 +4519,7 @@ mod tests {
                 &mut response_data,
                 correlation_id,
             );
-            let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+            let receive = NetworkReceive::with_source_buffer(node.id_string(), bytes);
             client.selector_mut().complete_receive(receive);
             client.poll(1, mock_time.milliseconds()).await;
             // If a throttled response is received, advance the time to ensure progress.

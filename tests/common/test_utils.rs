@@ -147,12 +147,12 @@ pub const TOPIC_METADATA_PROPAGATION_WAIT_MS: u64 = 60_000;
 /// queried does not (yet) know the topic.
 ///
 /// A freshly created topic is not immediately visible on every broker, so
-/// `describe_topics` can legitimately answer `UnknownTopicOrPartition` for a
+/// `describe_topics_with_topics` can legitimately answer `UnknownTopicOrPartition` for a
 /// short window after `create_topics` returns. That is "not propagated yet",
 /// not a failure — hence `Option` rather than an error.
 pub async fn try_partition_count(admin: &dyn Admin, topic: &str) -> Option<usize> {
     admin
-        .describe_topics(
+        .describe_topics_with_topics_options(
             TopicCollection::of_topic_names(vec![topic.to_string()]),
             DescribeTopicsOptions::new(),
         )
@@ -170,7 +170,7 @@ pub async fn try_partition_count(admin: &dyn Admin, topic: &str) -> Option<usize
 /// Mirrors `TestUtils.waitForAllPartitionsMetadata(brokers, topic,
 /// expectedNumPartitions)`, including its 60s bound and failure message. Java
 /// inspects each broker's `metadataCache` directly; the client-observable
-/// equivalent over the wire is `describe_topics` reporting the count.
+/// equivalent over the wire is `describe_topics_with_topics` reporting the count.
 pub async fn wait_for_all_partitions_metadata(admin: &dyn Admin, topic: &str, expected_num_partitions: usize) {
     wait_until_true_with_timeout(
         || async { try_partition_count(admin, topic).await == Some(expected_num_partitions) },
@@ -203,10 +203,10 @@ pub async fn wait_for_all_partitions_metadata_with_context(
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
-    let config = AdminClientConfig::from_properties(&props).expect("valid admin config");
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
     let admin = new_admin_client(config).expect("admin client");
     wait_for_all_partitions_metadata(admin.as_ref(), topic, expected_num_partitions).await;
-    admin.close(ADMIN_CLOSE_TIMEOUT).await;
+    admin.close_with_timeout(ADMIN_CLOSE_TIMEOUT).await;
 }
 
 /// Creates `topic` and does not return until its metadata has propagated.
@@ -219,8 +219,12 @@ pub async fn wait_for_all_partitions_metadata_with_context(
 /// create a topic and then immediately assert on it MUST go through here.
 pub async fn create_topic(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
     admin
-        .create_topics(
-            &[NewTopic::new(topic.to_string(), num_partitions, replication_factor)],
+        .create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor(
+                topic.to_string(),
+                Some(num_partitions),
+                Some(replication_factor),
+            )],
             CreateTopicsOptions::new(),
         )
         .all()

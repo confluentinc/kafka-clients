@@ -17,8 +17,8 @@
 use std::fmt;
 
 use crate::common::TopicPartition;
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::header::RecordHeaders;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::record::TimestampType;
 
 /// Which side of the record failed to deserialize.

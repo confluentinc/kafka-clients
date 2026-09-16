@@ -70,8 +70,8 @@ impl InFlightRequest {
     /// Creates a new `InFlightRequest` from a `ClientRequest` and additional send-time metadata.
     ///
     /// This corresponds to the Java constructor that takes a `ClientRequest`.
-    pub fn from_client_request(
-        client_request: &mut super::client_request::ClientRequest,
+    pub fn with_client_request(
+        client_request: &mut super::ClientRequest,
         header: RequestHeader,
         is_internal_request: bool,
         request: Option<ConcreteRequest>,
@@ -164,7 +164,7 @@ impl InFlightRequest {
     ///
     /// A timed-out request is also considered disconnected.
     pub fn timed_out(&mut self, time_ms: i64) -> ClientResponse {
-        ClientResponse::with_timeout(
+        ClientResponse::with_timed_out(
             self.header.clone(),
             self.callback.take(),
             &self.destination,
@@ -445,8 +445,9 @@ impl InFlightRequests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::ApiKeys;
     use crate::common::network::{ByteBufferSend, NetworkSend};
-    use crate::common::protocol::ApiKeys;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
     fn add_request(
         in_flight_requests: &mut InFlightRequests,
@@ -458,8 +459,16 @@ mod tests {
         let id = *correlation_id;
         *correlation_id += 1;
 
-        let header =
-            RequestHeader::new(&ApiKeys::METADATA, 0, "clientId", id).expect("header creation should not fail");
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(0)
+                .set_client_id("clientId")
+                .set_correlation_id(id)
+                .build()
+                .unwrap(),
+        )
+        .expect("header creation should not fail");
 
         // Create a minimal completed NetworkSend for testing.
         // An empty ByteBufferSend is immediately "completed" (remaining == 0).

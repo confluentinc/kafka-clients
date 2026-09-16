@@ -20,19 +20,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::admin::options::FenceProducersOptions;
-use crate::common::protocol::Errors;
+use crate::InitProducerIdRequestData;
+use crate::admin::FenceProducersOptions;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, InitProducerIdRequestBuilder, RequestBuilder};
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, Node};
-use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::kafka_debug;
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// Handler for `fenceProducers`.
 ///
@@ -58,7 +58,7 @@ impl FenceProducersHandler {
     /// Creates a handler. The transaction timeout is the option's timeout when
     /// set, otherwise the client's request timeout.
     pub(crate) fn new(options: &FenceProducersOptions, log_context: LogContext, request_timeout_ms: i32) -> Self {
-        let txn_timeout_ms = options.timeout().unwrap_or(request_timeout_ms);
+        let txn_timeout_ms = options.timeout_ms().unwrap_or(request_timeout_ms);
         Self {
             lookup_strategy: CoordinatorStrategy::new(CoordinatorType::Transaction, log_context.clone()),
             log_context,
@@ -245,8 +245,8 @@ impl AdminApiHandler<CoordinatorKey, ProducerIdAndEpoch> for FenceProducersHandl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InitProducerIdResponseData;
     use crate::common::requests::InitProducerIdResponse;
-    use crate::init_producer_id_response_data::InitProducerIdResponseData;
 
     fn log_context() -> LogContext {
         LogContext::new("[test] ")
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn build_request_options_timeout() {
         let options_timeout_ms = 50000;
-        let h = handler(FenceProducersOptions::new().timeout_ms(Some(options_timeout_ms)));
+        let h = handler(FenceProducersOptions::new().set_timeout_ms(Some(options_timeout_ms)));
         for id in ["foo", "bar", "baz"] {
             let data = h.build_single_request(&key(id));
             assert_eq!(data.transactional_id.as_deref(), Some(id));

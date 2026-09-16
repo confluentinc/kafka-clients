@@ -154,7 +154,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: Option<&str>) -> Consum
     if let Some(gid) = group_id {
         props.insert("group.id".to_string(), gid.to_string());
     }
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -170,7 +170,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid producer test config")
+    ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Translates Java's `ClientsTestUtils.sendRecords(cluster, tp, num,
@@ -185,7 +185,7 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 /// All records are fired to the producer up front, then `flush()` waits
 /// for the broker acks. The producer is then closed.
 async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::from_config(
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -198,14 +198,14 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
                 .await
@@ -219,7 +219,9 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
     if let Some(f) = last_future {
         // Belt-and-braces — `flush` already awaited; this is a no-op for
         // a completed future but surfaces any error.
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
+        f.get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("last send should succeed");
     }
     producer.close().await.expect("producer close should succeed");
 }
@@ -623,7 +625,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
 
     consumer.commit_sync().await.expect("commit_sync should succeed");
@@ -707,7 +709,10 @@ async fn test_async_assign_and_consume_skipping_position() {
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     let offset: i64 = 1;
-    consumer.seek(tp.clone(), offset).await.expect("seek should succeed");
+    consumer
+        .seek_with_offset(tp.clone(), offset)
+        .await
+        .expect("seek should succeed");
     consume_and_verify_records_bytes(
         consumer.as_mut(),
         &tp,
@@ -757,7 +762,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         create_topic(consumer.as_mut(), &topic, 1).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-        consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+        consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
         consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
         consumer.commit_sync().await.expect("commit_sync should succeed");
 
@@ -795,7 +800,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
 
 /// Translates Java's `testAsyncAssignAndConsumeFromCommittedOffsets`
 /// (line 247). Consumer #1 commits a manual offset (10) via
-/// `commit_sync_offsets(...)`; consumer #2 reads from that offset and
+/// `commit_sync_with_offsets(...)`; consumer #2 reads from that offset and
 /// verifies the remaining records.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_assign_and_consume_from_committed_offsets() {
@@ -830,9 +835,9 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
             OffsetAndMetadata::new(offset).expect("OffsetAndMetadata::new should not fail for offset=10"),
         );
         consumer
-            .commit_sync_offsets(offsets)
+            .commit_sync_with_offsets(offsets)
             .await
-            .expect("commit_sync_offsets should succeed");
+            .expect("commit_sync_with_offsets should succeed");
 
         let committed = consumer
             .committed(std::slice::from_ref(&tp))
@@ -906,7 +911,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
     consumer.commit_sync().await.expect("commit_sync should succeed");
 

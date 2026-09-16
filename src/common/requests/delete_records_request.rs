@@ -18,13 +18,11 @@
 
 use std::io;
 
+use crate::DeleteRecordsRequestData;
+use crate::DeleteRecordsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::delete_records_request_data::DeleteRecordsRequestData;
-use crate::delete_records_response_data::{
-    DeleteRecordsPartitionResult, DeleteRecordsResponseData, DeleteRecordsTopicResult,
-};
+use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
 
-use super::delete_records_response::INVALID_LOW_WATERMARK;
 use super::{ConcreteRequest, ConcreteResponse, DeleteRecordsResponse, RequestBuilder};
 
 /// A DeleteRecords request.
@@ -80,7 +78,7 @@ impl DeleteRecordsRequest {
                 let mut partition_result = DeleteRecordsPartitionResult::new();
                 partition_result.set_partition_index(partition.partition_index);
                 partition_result.set_error_code(error.code());
-                partition_result.set_low_watermark(INVALID_LOW_WATERMARK);
+                partition_result.set_low_watermark(DeleteRecordsResponse::INVALID_LOW_WATERMARK);
                 partitions.push(partition_result);
             }
             topic_result.set_partitions(partitions);
@@ -120,7 +118,7 @@ pub struct DeleteRecordsRequestBuilder {
 
 impl DeleteRecordsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DeleteRecordsRequestData) -> Self {
+    pub fn new(data: DeleteRecordsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DELETE_RECORDS.oldest_version(),
@@ -184,7 +182,7 @@ mod tests {
             assert_eq!(r.data().topics[0].partitions.len(), 2);
             for partition in &r.data().topics[0].partitions {
                 assert_eq!(partition.error_code, Errors::NotLeaderOrFollower.code());
-                assert_eq!(partition.low_watermark, INVALID_LOW_WATERMARK);
+                assert_eq!(partition.low_watermark, DeleteRecordsResponse::INVALID_LOW_WATERMARK);
             }
         } else {
             panic!("expected DeleteRecords response");
@@ -200,7 +198,7 @@ mod tests {
         data.set_timeout_ms(30000);
         let mut request = ConcreteRequest::DeleteRecords(DeleteRecordsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteRecordsRequest::parse(&mut readable, 2).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");

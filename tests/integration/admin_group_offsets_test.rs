@@ -49,7 +49,7 @@ use confluent_kafka::admin::{
     AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
 };
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
 use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
@@ -84,7 +84,7 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid consumer test config")
+    ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
 fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
@@ -100,7 +100,7 @@ fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
 /// assigned).
 async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_with_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     for _ in 0..60 {
@@ -119,15 +119,15 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
         ("acks".to_string(), "all".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::from_config(
-        ProducerConfig::from_properties(&props).expect("producer config"),
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
+        ProducerConfig::new(&props).expect("producer config"),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
     .expect("build producer");
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(1_700_000_000_000 + i as i64),
@@ -143,7 +143,7 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
     }
     producer.flush().await.expect("flush");
     if let Some(f) = last {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send");
+        f.get_with_timeout(Duration::from_secs(30)).await.expect("last send");
     }
     producer.close().await.expect("producer close");
 }
@@ -158,7 +158,7 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
 async fn list_offsets<B: AdminBackend>(admin: &B, group_id: &str) -> GroupOffsets {
     let spec = HashMap::from([(group_id.to_string(), ListConsumerGroupOffsetsSpec::new())]);
     let outcomes = admin
-        .list_consumer_group_offsets(&spec, ListConsumerGroupOffsetsOptions::new())
+        .list_consumer_group_offsets_with_group_specs(&spec, ListConsumerGroupOffsetsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{} backend: list consumer group offsets: {e}", admin.name()));
     all_of_exactly(
@@ -187,7 +187,7 @@ fn committed(offsets: &GroupOffsets, tp: &TopicPartition) -> Option<i64> {
 // listConsumerGroupOffsets
 // ---------------------------------------------------------------------------
 
-/// A live consumer commits explicit offsets; `list_consumer_group_offsets`
+/// A live consumer commits explicit offsets; `list_consumer_group_offsets_with_group_specs`
 /// reports them.
 async fn list_consumer_group_offsets_matches_committed<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
@@ -206,7 +206,7 @@ async fn list_consumer_group_offsets_matches_committed<F: AdminBackendFactory>(c
         (tp0.clone(), OffsetAndMetadata::new(5).unwrap()),
         (tp1.clone(), OffsetAndMetadata::new(3).unwrap()),
     ]);
-    consumer.commit_sync_offsets(to_commit).await.expect("commit_sync");
+    consumer.commit_sync_with_offsets(to_commit).await.expect("commit_sync");
 
     let listed = list_offsets(&admin, &group_id).await;
     assert_eq!(
@@ -282,7 +282,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let tp0 = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
     consumer
-        .commit_sync_offsets(HashMap::from([
+        .commit_sync_with_offsets(HashMap::from([
             (tp0.clone(), OffsetAndMetadata::new(4).unwrap()),
             (tp1.clone(), OffsetAndMetadata::new(6).unwrap()),
         ]))
@@ -298,7 +298,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
         what: &str,
     ) -> GroupOffsets {
         let outcomes = admin
-            .list_consumer_group_offsets(&HashMap::from([(group_id.to_string(), spec)]), options)
+            .list_consumer_group_offsets_with_group_specs(&HashMap::from([(group_id.to_string(), spec)]), options)
             .await
             .unwrap_or_else(|e| panic!("{} backend: list offsets ({what}): {e}", admin.name()));
         all_of_exactly(admin, &outcomes, &[group_id.to_string()], what);
@@ -332,7 +332,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let only_zero = with_spec(
         &admin,
         &group_id,
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![tp0.clone()])),
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![tp0.clone()])),
         ListConsumerGroupOffsetsOptions::new(),
         "explicit selection of partition 0",
     )
@@ -358,7 +358,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
     let none_selected = with_spec(
         &admin,
         &group_id,
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(Vec::new())),
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(Vec::new())),
         ListConsumerGroupOffsetsOptions::new(),
         "explicitly empty partition selection",
     )
@@ -375,7 +375,7 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
         &admin,
         &group_id,
         ListConsumerGroupOffsetsSpec::new(),
-        ListConsumerGroupOffsetsOptions::new().require_stable(true),
+        ListConsumerGroupOffsetsOptions::new().set_require_stable(true),
         "require_stable=true",
     )
     .await;
@@ -412,7 +412,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     let mut consumer_a = new_bytes_consumer(&bootstrap, &group_id);
     subscribe_and_join(&mut consumer_a, &topic).await;
     consumer_a
-        .commit_sync_offsets(HashMap::from([(tp0.clone(), OffsetAndMetadata::new(10).unwrap())]))
+        .commit_sync_with_offsets(HashMap::from([(tp0.clone(), OffsetAndMetadata::new(10).unwrap())]))
         .await
         .expect("commit");
     consumer_a.close().await.expect("close A");
@@ -455,7 +455,10 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     // Subscribe and poll in one loop so the very first partition-0 record is
     // captured (the join itself drives fetching).
     let mut consumer_b = new_bytes_consumer(&bootstrap, &group_id);
-    consumer_b.subscribe(vec![topic.clone()]).await.expect("subscribe B");
+    consumer_b
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe B");
     let mut first_offset = None;
     for _ in 0..60 {
         let records = consumer_b.poll(Duration::from_millis(500)).await.expect("poll B");
@@ -500,7 +503,7 @@ async fn delete_consumer_group_offsets_on_inactive_group<F: AdminBackendFactory>
     // Both partitions are committed, so the deletion can be shown to be scoped to
     // the one that was asked for.
     consumer
-        .commit_sync_offsets(HashMap::from([
+        .commit_sync_with_offsets(HashMap::from([
             (tp0.clone(), OffsetAndMetadata::new(7).unwrap()),
             (tp1.clone(), OffsetAndMetadata::new(9).unwrap()),
         ]))

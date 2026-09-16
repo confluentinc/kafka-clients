@@ -63,7 +63,7 @@ fn make_smoke_config() -> ConsumerConfig {
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("smoke-test config should validate")
+    ConsumerConfig::new(&props).expect("smoke-test config should validate")
 }
 
 /// Smoke: the production ctor succeeds against a refuses-connection
@@ -102,7 +102,7 @@ async fn new_consumer_rejects_classic_group_protocol() {
         ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
         ("group.protocol".to_string(), "classic".to_string()),
     ]);
-    let config = ConsumerConfig::from_properties(&props).expect("config should validate");
+    let config = ConsumerConfig::new(&props).expect("config should validate");
 
     let result = new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
 

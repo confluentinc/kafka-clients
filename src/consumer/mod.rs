@@ -17,42 +17,42 @@
 //! Translated from `org.apache.kafka.clients.consumer`. The `clients` Java
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
-pub mod async_kafka_consumer;
+mod async_kafka_consumer;
 pub mod close_options;
-pub mod consumer_commit_failed_error;
-pub mod consumer_config;
-pub mod consumer_group_metadata;
-pub mod consumer_log_truncation_error;
-pub mod consumer_no_offset_for_partition_error;
-pub mod consumer_offset_out_of_range_error;
+mod consumer_commit_failed_error;
+mod consumer_config;
+mod consumer_group_metadata;
+mod consumer_log_truncation_error;
+mod consumer_no_offset_for_partition_error;
+mod consumer_offset_out_of_range_error;
 pub mod consumer_partition_assignor;
-pub mod consumer_rebalance_listener;
-pub mod consumer_rebalance_listener_method_name;
-pub mod consumer_record;
-pub mod consumer_records;
-pub mod consumer_retriable_commit_failed_error;
-pub mod group_protocol;
-pub mod interceptor;
-pub mod mock_consumer;
-pub mod offset_and_metadata;
-pub mod offset_and_timestamp;
-pub mod offset_commit_callback;
-pub mod offset_reset_strategy;
-pub mod subscription_pattern;
+mod consumer_rebalance_listener;
+mod consumer_rebalance_listener_method_name;
+mod consumer_record;
+mod consumer_records;
+mod consumer_retriable_commit_failed_error;
+mod group_protocol;
+mod interceptor;
+mod mock_consumer;
+mod offset_and_metadata;
+mod offset_and_timestamp;
+mod offset_commit_callback;
+mod offset_reset_strategy;
+mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub use async_kafka_consumer::ConsumerHandle;
+pub use async_kafka_consumer::{AsyncKafkaConsumer, ConsumerHandle};
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
 pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-pub use consumer_record::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
+pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordOptionsBuilder};
 pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
-pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
+pub use internals::{AutoOffsetResetStrategy, StrategyType};
 pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
@@ -200,26 +200,51 @@ where
 
     // ── Subscription / assignment (async per §1 — may interact with bg task) ──
 
+    // Java declares six `subscribe` overloads (`Consumer.java:54-84`). The
+    // intersection of their parameters is empty, so under CLAUDE.md §2 no
+    // overload keeps the plain name `subscribe`; each is suffixed with the
+    // parameter names that distinguish it.
+    //
+    // Java has two pattern forms and they are NOT sugar for one another:
+    // `subscribe(Pattern)` matches a `java.util.regex.Pattern` **client-side**
+    // against the consumer's own metadata
+    // (`TopicPatternSubscriptionChangeEvent`), while
+    // `subscribe(SubscriptionPattern)` sends the pattern to the broker for
+    // **server-side** RE2/J evaluation
+    // (`TopicRe2JPatternSubscriptionChangeEvent`) —
+    // `AsyncKafkaConsumer.java:2107,2131`.
+    //
+    // **Only the `SubscriptionPattern` form is translated.** The two
+    // `subscribe(Pattern ...)` overloads are deliberately NOT implemented in
+    // Rust, so there is no `subscribe_pattern` / `subscribe_pattern_listener`
+    // on this trait. Callers wanting a regex subscription use
+    // [`Self::subscribe_with_pattern`], whose pattern the group
+    // coordinator evaluates.
+
     /// Translates Java's `void subscribe(Collection<String> topics)`.
     ///
     /// Takes `Vec<String>` because the impl moves the elements into
     /// `SubscriptionState`.
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error>;
+    async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(Collection<String> topics, ConsumerRebalanceListener)`.
-    async fn subscribe_with_listener(
+    async fn subscribe_with_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error>;
 
     /// Translates Java's `void subscribe(SubscriptionPattern pattern)`.
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
+    ///
+    /// Server-side regex subscription (KIP-848 RE2/J): the pattern is sent to
+    /// the group coordinator, which evaluates it. Java's javadoc notes that no
+    /// validation of the pattern is performed by the client.
+    async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener)`.
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_with_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
@@ -247,16 +272,19 @@ where
     async fn commit_sync(&mut self) -> Result<(), Error>;
 
     /// Translates Java's `void commitSync(Duration timeout)`.
-    async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
+    async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets)`.
-    async fn commit_sync_offsets(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error>;
+    async fn commit_sync_with_offsets(
+        &mut self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets,
     ///                  Duration timeout)`.
-    async fn commit_sync_offsets_timeout(
+    async fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
@@ -271,7 +299,7 @@ where
     /// Translates Java's
     /// `void commitAsync(Map<TopicPartition, OffsetAndMetadata>,
     ///                   OffsetCommitCallback)`.
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_with_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
@@ -285,11 +313,11 @@ where
     /// `IllegalStateException` on invalid input. Async because Java's seek
     /// calls `applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1068`).
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
+    async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void seek(TopicPartition partition, OffsetAndMetadata)`.
-    async fn seek_with_metadata(
+    async fn seek_with_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -307,7 +335,7 @@ where
     async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
 
     /// Translates Java's `long position(TopicPartition, Duration)`.
-    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
+    async fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
@@ -319,7 +347,7 @@ where
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>,
     ///                                                    Duration)`.
-    async fn committed_timeout(
+    async fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
@@ -332,7 +360,11 @@ where
 
     /// Translates Java's
     /// `List<PartitionInfo> partitionsFor(String topic, Duration)`.
-    async fn partitions_for_timeout(&mut self, topic: &str, timeout: Duration) -> Result<Vec<PartitionInfo>, Error>;
+    async fn partitions_for_with_timeout(
+        &mut self,
+        topic: &str,
+        timeout: Duration,
+    ) -> Result<Vec<PartitionInfo>, Error>;
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics()`.
@@ -340,7 +372,10 @@ where
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics(Duration)`.
-    async fn list_topics_timeout(&mut self, timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
+    async fn list_topics_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
@@ -367,7 +402,7 @@ where
     /// See [`Self::offsets_for_times`] for the unresolved-partition
     /// contract note (unresolved partitions are omitted, not
     /// present-with-null, unlike Java).
-    async fn offsets_for_times_timeout(
+    async fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
@@ -381,7 +416,7 @@ where
     /// Translates Java's
     /// `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>,
     ///                                              Duration)`.
-    async fn beginning_offsets_timeout(
+    async fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
@@ -394,7 +429,7 @@ where
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>,
     ///                                        Duration)`.
-    async fn end_offsets_timeout(
+    async fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
@@ -418,18 +453,31 @@ where
 
     // ── Lifecycle ──
 
-    /// Translates Java's `void enforceRebalance()` /
-    /// `void enforceRebalance(String reason)` combined; `reason` defaults
-    /// to `None`.
+    /// Translates Java's `void enforceRebalance()` (`Consumer.java:267`).
     ///
     /// Java's javadoc says this method is classic-protocol-only; under
     /// the KIP-848 protocol it returns an unsupported-version error.
     /// Match Java behavior.
-    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), Error>;
+    async fn enforce_rebalance(&mut self) -> Result<(), Error>;
+
+    /// Translates Java's `void enforceRebalance(String reason)`
+    /// (`Consumer.java:272`).
+    ///
+    /// The parameter intersection across Java's two overloads is empty, so
+    /// under CLAUDE.md §2 the no-arg form keeps the plain name and this one
+    /// carries the `reason` parameter-name suffix.
+    async fn enforce_rebalance_with_reason(&mut self, reason: &str) -> Result<(), Error>;
 
     /// Translates Java's `void close()`. Closes the consumer with default
     /// timeout.
     async fn close(&mut self) -> Result<(), Error>;
+
+    /// Translates Java's `@Deprecated void close(Duration timeout)`
+    /// (`Consumer.java:283`).
+    #[deprecated(
+        note = "mirroring Java's @Deprecated close(Duration); use close_with_options with CloseOptions::timeout"
+    )]
+    async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
 
     /// Translates Java's `void close(CloseOptions option)`.
     async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
@@ -493,7 +541,7 @@ where
     // (`SubscriptionState`, `ConsumerMetadata`, `NetworkClient` +
     // PLAINTEXT `ChannelBuilder`, every `RequestManager`,
     // `ApplicationEventHandler`, `ConsumerNetworkThread` bg task) and
-    // hands off to `AsyncKafkaConsumer::new_with_components` so the
+    // hands off to `AsyncKafkaConsumer::with_components` so the
     // Phase-11 test seam is preserved. `Box<dyn Consumer<K, V>>` is
     // returned so the dispatch surface stays object-safe (Consumer
     // trait surface check at `tests/consumer/trait_surface_check.rs`).
@@ -514,10 +562,8 @@ where
         )),
     }
 }
-pub use consumer_commit_failed_error::{CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE, ConsumerCommitFailedError};
+pub use consumer_commit_failed_error::ConsumerCommitFailedError;
 pub use consumer_log_truncation_error::ConsumerLogTruncationError;
 pub use consumer_no_offset_for_partition_error::ConsumerNoOffsetForPartitionError;
 pub use consumer_offset_out_of_range_error::ConsumerOffsetOutOfRangeError;
-pub use consumer_retriable_commit_failed_error::{
-    CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE, ConsumerRetriableCommitFailedError,
-};
+pub use consumer_retriable_commit_failed_error::ConsumerRetriableCommitFailedError;

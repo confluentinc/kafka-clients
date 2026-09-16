@@ -117,7 +117,7 @@ pub trait ConsumerBackendFactory {
 /// Implementors construct a producer of their associated `Producer` type
 /// from a flat `HashMap<String, String>` of config properties (the same
 /// shape Python's `KafkaProducer(config: dict)` accepts and
-/// `ProducerConfig::from_properties` parses). Each impl corresponds to
+/// `ProducerConfig::new` parses). Each impl corresponds to
 /// one backend in the multilanguage test matrix.
 ///
 /// The map is taken by value because the gRPC factories forward it into
@@ -166,8 +166,8 @@ impl ProducerBackendFactory for RustNativeFactory {
     type Producer = KafkaProducer<Vec<u8>, Vec<u8>>;
 
     async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
-        let producer_config = ProducerConfig::from_properties(&config)?;
-        KafkaProducer::from_config(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        let producer_config = ProducerConfig::new(&config)?;
+        KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
     }
 
     async fn create_with_callback_log(
@@ -205,7 +205,7 @@ impl AdminBackendFactory for RustNativeFactory {
 
 impl ConsumerBackendFactory for RustNativeFactory {
     async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
-        let consumer_config = ConsumerConfig::from_properties(&config)?;
+        let consumer_config = ConsumerConfig::new(&config)?;
         new_consumer::<Vec<u8>, Vec<u8>>(
             consumer_config,
             Box::new(ByteArrayDeserializer),

@@ -18,6 +18,7 @@
 //!
 //! This class is not thread safe and external synchronization must be used when modifying it.
 
+use crate::producer::RecordMetadata;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,19 +28,18 @@ use log::{debug, error, trace};
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::header::Header;
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionRatioEstimator;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::Record;
 use crate::common::record::internal::RecordBatch;
-use crate::common::record::internal::abstract_records;
 use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
-use crate::producer::record_metadata;
 
 /// The final state of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,11 +122,11 @@ pub struct ProducerBatch {
 impl ProducerBatch {
     /// Create a new `ProducerBatch`.
     pub fn new(tp: TopicPartition, records_builder: MemoryRecordsBuilder, created_ms: i64) -> Self {
-        Self::new_with_split(tp, records_builder, created_ms, false)
+        Self::with_split(tp, records_builder, created_ms, false)
     }
 
     /// Create a new `ProducerBatch`, optionally marking it as a split batch.
-    pub fn new_with_split(
+    pub fn with_split(
         tp: TopicPartition,
         mut records_builder: MemoryRecordsBuilder,
         created_ms: i64,
@@ -227,7 +227,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -273,7 +273,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -320,7 +320,7 @@ impl ProducerBatch {
             Arc::new(move |_idx| Some((*err).clone()))
         };
         self.complete_future_and_fire_callbacks(
-            record_metadata::INVALID_OFFSET,
+            RecordMetadata::INVALID_OFFSET,
             RecordBatch::NO_TIMESTAMP,
             Some(error_fn),
         );
@@ -346,7 +346,7 @@ impl ProducerBatch {
         _top_level_error: Error,
         record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
     ) -> bool {
-        self.done(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
+        self.done(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
     }
 
     /// Finalize the state of a batch.
@@ -550,7 +550,7 @@ impl ProducerBatch {
         let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
             Arc::new(|_idx| Some(Error::record_batch_too_large("Record batch too large".to_string())));
         self.produce_future
-            .set(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
+            .set(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         self.produce_future.done();
 
         self.assign_producer_state_to_batches(batches);
@@ -594,7 +594,7 @@ impl ProducerBatch {
         headers: &[RecordHeader],
         batch_size: i32,
     ) -> ProducerBatch {
-        let initial_size = (abstract_records::estimate_size_in_bytes_upper_bound(
+        let initial_size = (AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -603,14 +603,14 @@ impl ProducerBatch {
         ))
         .max(batch_size) as usize;
 
-        let builder = MemoryRecords::builder_with_magic(
+        let builder = MemoryRecords::builder_with_initial_capacity_magic(
             initial_size,
             self.magic(),
             self.records_builder.compression().clone(),
             TimestampType::CreateTime,
             0,
         );
-        ProducerBatch::new_with_split(self.topic_partition.clone(), builder, self.created_ms, true)
+        ProducerBatch::with_split(self.topic_partition.clone(), builder, self.created_ms, true)
     }
 
     /// Returns whether the batch uses compression.
@@ -746,6 +746,11 @@ impl ProducerBatch {
     }
 
     /// Returns a reference to the underlying buffer.
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn buffer(&self) -> &Vec<u8> {
         self.records_builder.buffer()
     }
@@ -764,6 +769,7 @@ impl ProducerBatch {
     }
 
     /// Whether the batch is still writable (not closed).
+    #[allow(dead_code)]
     pub fn is_writable(&self) -> bool {
         !self.records_builder.is_closed()
     }
@@ -829,11 +835,13 @@ impl ProducerBatch {
     }
 
     /// The current leader epoch (visible for testing).
+    #[allow(dead_code)]
     pub fn current_leader_epoch(&self) -> Option<i32> {
         self.current_leader_epoch
     }
 
     /// The attempt number when the leader was last changed (visible for testing).
+    #[allow(dead_code)]
     pub fn attempts_when_leader_last_changed(&self) -> i32 {
         self.attempts_when_leader_last_changed
     }
@@ -862,8 +870,8 @@ impl std::fmt::Debug for ProducerBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
     use crate::common::compress::Compression;
-    use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;
 
@@ -872,7 +880,7 @@ mod tests {
     }
 
     fn make_builder() -> MemoryRecordsBuilder {
-        MemoryRecords::builder(512, Compression::none(), TimestampType::CreateTime, 128)
+        MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128)
     }
 
     /// Translated from `ProducerBatchTest.testBatchAbort`.
@@ -1055,7 +1063,7 @@ mod tests {
     /// in record-level iteration.
     #[test]
     fn test_split_preserves_headers() {
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
@@ -1245,7 +1253,7 @@ mod tests {
         assert!(!batch.is_split_batch());
 
         let builder2 = make_builder();
-        let batch2 = ProducerBatch::new_with_split(make_tp(), builder2, NOW, true);
+        let batch2 = ProducerBatch::with_split(make_tp(), builder2, NOW, true);
         assert!(batch2.is_split_batch());
     }
 
@@ -1265,7 +1273,7 @@ mod tests {
     fn test_split_preserves_magic_and_compression_type() {
         // We only support magic V2 and NONE compression for record-level iteration.
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
             Compression::none(),

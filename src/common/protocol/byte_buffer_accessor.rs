@@ -16,9 +16,9 @@
 //!
 //! Corresponds to org.apache.kafka.common.protocol.ByteBufferAccessor
 
+use super::ByteUtils;
 use super::Readable;
 use super::Writable;
-use super::varint;
 use std::io;
 
 /// A struct that implements both Readable and Writable traits for a byte buffer.
@@ -30,13 +30,12 @@ pub struct ByteBufferAccessor {
 }
 
 impl ByteBufferAccessor {
-    /// Create a new ByteBufferAccessor with the given capacity.
-    pub fn new(capacity: usize) -> Self {
-        ByteBufferAccessor { buffer: Vec::with_capacity(capacity), position: 0 }
-    }
-
-    /// Create a ByteBufferAccessor from existing bytes.
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+    /// Create a `ByteBufferAccessor` over an existing buffer.
+    ///
+    /// Translates Java's sole constructor `ByteBufferAccessor(ByteBuffer buf)`
+    /// (`ByteBufferAccessor.java:27`). A caller that wants Java's
+    /// `ByteBuffer.allocate(n)` passes `Vec::with_capacity(n)`.
+    pub fn new(bytes: Vec<u8>) -> Self {
         ByteBufferAccessor { buffer: bytes, position: 0 }
     }
 
@@ -91,7 +90,7 @@ impl ByteBufferAccessor {
     /// The new accessor's position is set to 0. The original accessor is unchanged.
     pub fn snapshot_remaining(&self) -> Self {
         let remaining = self.buffer[self.position..].to_vec();
-        ByteBufferAccessor::from_bytes(remaining)
+        ByteBufferAccessor::new(remaining)
     }
 
     /// Ensure we have at least `size` bytes available to read.
@@ -194,21 +193,21 @@ impl Readable for ByteBufferAccessor {
     }
 
     fn read_unsigned_varint(&mut self) -> io::Result<u32> {
-        let (value, size) = varint::read_unsigned_varint(&self.buffer[self.position..])
+        let (value, size) = ByteUtils::read_unsigned_varint(&self.buffer[self.position..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.position += size;
         Ok(value)
     }
 
     fn read_varint(&mut self) -> io::Result<i32> {
-        let (value, size) = varint::read_varint(&self.buffer[self.position..])
+        let (value, size) = ByteUtils::read_varint(&self.buffer[self.position..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.position += size;
         Ok(value)
     }
 
     fn read_varlong(&mut self) -> io::Result<i64> {
-        let (value, size) = varint::read_varlong(&self.buffer[self.position..])
+        let (value, size) = ByteUtils::read_varlong(&self.buffer[self.position..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.position += size;
         Ok(value)
@@ -251,15 +250,15 @@ impl Writable for ByteBufferAccessor {
     }
 
     fn write_unsigned_varint(&mut self, val: u32) -> io::Result<()> {
-        varint::write_unsigned_varint(val, &mut self.buffer)
+        ByteUtils::write_unsigned_varint(val, &mut self.buffer)
     }
 
     fn write_varint(&mut self, val: i32) -> io::Result<()> {
-        varint::write_varint(val, &mut self.buffer)
+        ByteUtils::write_varint(val, &mut self.buffer)
     }
 
     fn write_varlong(&mut self, val: i64) -> io::Result<()> {
-        varint::write_varlong(val, &mut self.buffer)
+        ByteUtils::write_varlong(val, &mut self.buffer)
     }
 }
 
@@ -270,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_read_write_byte() {
-        let mut buf = ByteBufferAccessor::new(10);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(10));
         buf.write_byte(42).unwrap();
         buf.write_byte(-128).unwrap();
 
@@ -281,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_read_write_short() {
-        let mut buf = ByteBufferAccessor::new(10);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(10));
         buf.write_short(1000).unwrap();
         buf.write_short(-1000).unwrap();
 
@@ -292,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_read_write_int() {
-        let mut buf = ByteBufferAccessor::new(10);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(10));
         buf.write_int(1000000).unwrap();
         buf.write_int(-1000000).unwrap();
 
@@ -303,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_read_write_long() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         buf.write_long(1000000000000).unwrap();
         buf.write_long(-1000000000000).unwrap();
 
@@ -314,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_read_write_double() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         buf.write_double(std::f64::consts::PI).unwrap();
         buf.write_double(-std::f64::consts::E).unwrap();
 
@@ -325,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_read_write_array() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         let data = vec![1u8, 2, 3, 4, 5];
         buf.write_byte_array(&data).unwrap();
 
@@ -336,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_read_write_varint() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         buf.write_varint(0).unwrap();
         buf.write_varint(1).unwrap();
         buf.write_varint(-1).unwrap();
@@ -353,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_read_write_unsigned_varint() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         buf.write_unsigned_varint(0).unwrap();
         buf.write_unsigned_varint(127).unwrap();
         buf.write_unsigned_varint(128).unwrap();
@@ -370,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_read_write_varlong() {
-        let mut buf = ByteBufferAccessor::new(30);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(30));
         buf.write_varlong(0).unwrap();
         buf.write_varlong(1).unwrap();
         buf.write_varlong(-1).unwrap();
@@ -387,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_read_write_uuid() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
         buf.write_uuid(&uuid).unwrap();
 
@@ -405,7 +404,7 @@ mod tests {
     fn test_uuid_wire_protocol_byte_representation() {
         // Test a known UUID with distinct bytes in each position
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
-        let mut buf = ByteBufferAccessor::new(16);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(16));
         buf.write_uuid(&uuid).unwrap();
 
         let expected_bytes: [u8; 16] = [
@@ -420,7 +419,7 @@ mod tests {
 
         // Verify zero UUID serializes to 16 zero bytes
         let zero_uuid = Uuid::ZERO_UUID;
-        let mut buf2 = ByteBufferAccessor::new(16);
+        let mut buf2 = ByteBufferAccessor::new(Vec::with_capacity(16));
         buf2.write_uuid(&zero_uuid).unwrap();
         assert_eq!(buf2.buffer(), &[0u8; 16], "Zero UUID should serialize to 16 zero bytes");
 
@@ -436,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_read_write_string() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         let text = "Hello, Kafka!";
         buf.write_byte_array(text.as_bytes()).unwrap();
 
@@ -447,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_remaining() {
-        let mut buf = ByteBufferAccessor::new(10);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(10));
         buf.write_int(42).unwrap();
         buf.write_int(43).unwrap();
 
@@ -461,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_position() {
-        let mut buf = ByteBufferAccessor::new(10);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(10));
         buf.write_int(42).unwrap();
         assert_eq!(buf.len(), 4);
 
@@ -476,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_remaining() {
-        let mut buf = ByteBufferAccessor::new(20);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
         buf.write_int(1).unwrap();
         buf.write_int(2).unwrap();
         buf.write_int(3).unwrap();
@@ -500,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_remaining_empty() {
-        let mut buf = ByteBufferAccessor::from_bytes(vec![1, 2]);
+        let mut buf = ByteBufferAccessor::new(vec![1, 2]);
         buf.read_byte().unwrap();
         buf.read_byte().unwrap();
 
@@ -511,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_insufficient_data() {
-        let mut buf = ByteBufferAccessor::from_bytes(vec![1, 2, 3]);
+        let mut buf = ByteBufferAccessor::new(vec![1, 2, 3]);
         assert!(buf.read_int().is_err());
     }
 
@@ -520,7 +519,7 @@ mod tests {
     /// message when reading beyond available bytes.
     #[test]
     fn test_read_array_error_message() {
-        let mut accessor = ByteBufferAccessor::new(1024);
+        let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(1024));
         let test_array: Vec<u8> = vec![0x4b, 0x61, 0x46];
         accessor.write_byte_array(&test_array).unwrap();
         accessor.write_int(12345).unwrap();
@@ -542,7 +541,7 @@ mod tests {
     /// message when reading beyond available bytes.
     #[test]
     fn test_read_string_error_message() {
-        let mut accessor = ByteBufferAccessor::new(1024);
+        let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(1024));
         let test_string = "ABC";
         let test_array = test_string.as_bytes();
         accessor.write_byte_array(test_array).unwrap();

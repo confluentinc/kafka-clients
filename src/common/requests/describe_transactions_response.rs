@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_transactions_response_data::DescribeTransactionsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DescribeTransactions response.
 ///
@@ -77,7 +77,7 @@ impl DescribeTransactionsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for state in &self.data.transaction_states {
-            update_error_counts(&mut counts, Errors::for_code(state.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(state.error_code));
         }
         counts
     }
@@ -128,7 +128,7 @@ mod tests {
         let mut concrete =
             super::super::ConcreteResponse::DescribeTransactions(DescribeTransactionsResponse::new(data));
         let bytes = concrete.serialize(0).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeTransactionsResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 9);
     }

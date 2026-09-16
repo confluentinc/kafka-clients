@@ -19,11 +19,11 @@
 //! # Why this is not on the `Consumer` / `Producer` trait
 //!
 //! For the native Rust backend a test could simply pass an
-//! `Arc<dyn ConsumerRebalanceListener>` to `subscribe_with_listener`. For the
+//! `Arc<dyn ConsumerRebalanceListener>` to `subscribe_with_topics_listener`. For the
 //! gRPC backends it cannot: the callback must be registered *by the server's own
 //! binding* (that is the thing under test), so it fires in another process and
 //! nothing can be handed across the wire. `MultilanguageConsumer`'s
-//! `subscribe_with_listener` / `commit_async_*_with_callback` therefore stay
+//! `subscribe_with_topics_listener` / `commit_async_*_with_callback` therefore stay
 //! `unsupported` — synthesizing local listener invocations out of a remote log
 //! would re-test the Rust core rather than the binding, and would be timing
 //! fragile.
@@ -221,7 +221,7 @@ impl ConsumerCallbackLog {
     /// so the native arm can reach the real trait method.
     ///
     /// Registration is per-subscribe: calling this again re-registers a listener
-    /// writing to the same log, while a plain `consumer.subscribe(topics)`
+    /// writing to the same log, while a plain `consumer.subscribe_with_topics(topics)`
     /// releases it.
     pub async fn subscribe_with_logging_listener(
         &self,
@@ -231,7 +231,7 @@ impl ConsumerCallbackLog {
         match self {
             ConsumerCallbackLog::Native(log) => {
                 let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log) });
-                consumer.subscribe_with_listener(topics, listener).await
+                consumer.subscribe_with_topics_listener(topics, listener).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ConsumerCallbackLog::Grpc(remote) => remote.subscribe_with_listener(topics).await,

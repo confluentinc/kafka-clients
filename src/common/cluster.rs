@@ -49,8 +49,112 @@ pub struct Cluster {
 
 impl Cluster {
     /// Create a new cluster with the given id, nodes and partitions.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Corresponds to Java's
+    /// `Cluster(String, Collection<Node>, Collection<PartitionInfo>, Set<String>, Set<String>)`
+    /// (`Cluster.java:57`), whose parameters
+    /// `{clusterId, nodes, partitions, unauthorizedTopics, internalTopics}` are
+    /// the intersection across the four public constructors — so it owns the
+    /// plain name (CLAUDE.md §2).
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - The nodes in the cluster
+    /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
     pub fn new(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<String>,
+        internal_topics: HashSet<String>,
+    ) -> Self {
+        Self::new_internal(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            unauthorized_topics,
+            HashSet::new(),
+            internal_topics,
+            None,
+            HashMap::new(),
+        )
+    }
+
+    /// Create a new cluster with the given id, nodes, partitions and controller.
+    ///
+    /// Corresponds to Java's
+    /// `Cluster(String, Collection<Node>, Collection<PartitionInfo>, Set<String>, Set<String>, Node)`
+    /// (`Cluster.java:70`).
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - The nodes in the cluster
+    /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
+    pub fn with_controller(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<String>,
+        internal_topics: HashSet<String>,
+        controller: Option<Node>,
+    ) -> Self {
+        Self::new_internal(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            unauthorized_topics,
+            HashSet::new(),
+            internal_topics,
+            controller,
+            HashMap::new(),
+        )
+    }
+
+    /// Create a new cluster with the given id, nodes, partitions, invalid topics and controller.
+    ///
+    /// Corresponds to Java's
+    /// `Cluster(String, Collection<Node>, Collection<PartitionInfo>, Set<String>, Set<String>, Set<String>, Node)`
+    /// (`Cluster.java:84`).
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - The nodes in the cluster
+    /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_invalid_topics_controller(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<String>,
+        invalid_topics: HashSet<String>,
+        internal_topics: HashSet<String>,
+        controller: Option<Node>,
+    ) -> Self {
+        Self::new_internal(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            unauthorized_topics,
+            invalid_topics,
+            internal_topics,
+            controller,
+            HashMap::new(),
+        )
+    }
+
+    /// Create a new cluster with the given id, nodes, partitions and topic ids.
+    ///
+    /// Corresponds to Java's widest public constructor (`Cluster.java:99`).
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - The nodes in the cluster
+    /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_invalid_topics_controller_topic_ids(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
         partitions: Vec<PartitionInfo>,
@@ -154,7 +258,7 @@ impl Cluster {
 
     /// Create an empty cluster instance with no nodes and no topic-partitions.
     pub fn empty() -> Self {
-        Self::new(
+        Self::with_invalid_topics_controller_topic_ids(
             None,
             Vec::new(),
             Vec::new(),
@@ -192,7 +296,7 @@ impl Cluster {
         let mut combined = self.partitions_by_topic_partition.clone();
         combined.extend(partitions);
         let all_partitions: Vec<PartitionInfo> = combined.into_values().collect();
-        Self::new(
+        Self::with_invalid_topics_controller_topic_ids(
             self.cluster_resource.cluster_id().map(|s| s.to_string()),
             self.nodes.clone(),
             all_partitions,
@@ -415,7 +519,7 @@ mod tests {
     fn test_cluster_with_partitions() {
         let nodes = vec![make_node(0), make_node(1)];
         let partitions = vec![make_partition("test", 0, 0), make_partition("test", 1, 1)];
-        let cluster = Cluster::new(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             Some("cluster1".to_string()),
             nodes,
             partitions,
@@ -435,7 +539,7 @@ mod tests {
     #[test]
     fn test_node_by_id() {
         let nodes = vec![make_node(0), make_node(1)];
-        let cluster = Cluster::new(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             None,
             nodes,
             Vec::new(),
@@ -455,7 +559,7 @@ mod tests {
     fn test_leader_for() {
         let nodes = vec![make_node(0)];
         let partitions = vec![make_partition("test", 0, 0)];
-        let cluster = Cluster::new(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             None,
             nodes,
             partitions,
@@ -479,7 +583,7 @@ mod tests {
         let mut topic_ids = HashMap::new();
         topic_ids.insert("test".to_string(), Uuid::random_uuid());
 
-        let cluster = Cluster::new(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             None,
             Vec::new(),
             Vec::new(),
@@ -499,7 +603,7 @@ mod tests {
     #[test]
     fn test_controller() {
         let controller = make_node(0);
-        let cluster = Cluster::new(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             None,
             vec![make_node(0)],
             Vec::new(),
@@ -521,7 +625,7 @@ mod tests {
             make_partition("test", 1, 0),
             make_partition("test", 2, 1),
         ];
-        let cluster = Cluster::new(
+        let cluster = Cluster::with_invalid_topics_controller_topic_ids(
             None,
             nodes,
             partitions,
@@ -570,7 +674,7 @@ mod tests {
         let topic_ids1: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
         let topic_ids2: HashMap<String, Uuid> = [("topic2".to_string(), topic_id2)].into_iter().collect();
 
-        let cluster1 = Cluster::new(
+        let cluster1 = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions1.clone(),
@@ -580,7 +684,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids1.clone(),
         );
-        let different_topic_ids = Cluster::new(
+        let different_topic_ids = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions1.clone(),
@@ -590,7 +694,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids2,
         );
-        let different_controller = Cluster::new(
+        let different_controller = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions1.clone(),
@@ -600,7 +704,7 @@ mod tests {
             Some(controller2),
             topic_ids1.clone(),
         );
-        let different_internal_topics = Cluster::new(
+        let different_internal_topics = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions1.clone(),
@@ -610,7 +714,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids1.clone(),
         );
-        let different_invalid_topics = Cluster::new(
+        let different_invalid_topics = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions1.clone(),
@@ -620,7 +724,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids1.clone(),
         );
-        let different_unauthorized_topics = Cluster::new(
+        let different_unauthorized_topics = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions1.clone(),
@@ -630,7 +734,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids1.clone(),
         );
-        let different_partitions = Cluster::new(
+        let different_partitions = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone()],
             partitions2,
@@ -640,7 +744,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids1.clone(),
         );
-        let different_nodes = Cluster::new(
+        let different_nodes = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node0.clone(), node1],
             partitions1.clone(),
@@ -650,7 +754,7 @@ mod tests {
             Some(controller1.clone()),
             topic_ids1.clone(),
         );
-        let different_cluster_id = Cluster::new(
+        let different_cluster_id = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id2.to_string()),
             vec![node0],
             partitions1,
@@ -699,7 +803,7 @@ mod tests {
         let topic_ids1: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
         let topic_ids1_duplicate: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
 
-        let cluster1 = Cluster::new(
+        let cluster1 = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node1],
             partitions1,
@@ -709,7 +813,7 @@ mod tests {
             Some(controller1),
             topic_ids1,
         );
-        let cluster1_duplicate = Cluster::new(
+        let cluster1_duplicate = Cluster::with_invalid_topics_controller_topic_ids(
             Some(cluster_id1.to_string()),
             vec![node1_duplicate],
             partitions1_duplicate,
@@ -720,5 +824,76 @@ mod tests {
             topic_ids1_duplicate,
         );
         assert_eq!(cluster1, cluster1_duplicate);
+    }
+
+    /// The 5-argument constructor (Java `Cluster.java:57`) must agree with the
+    /// widest one given empty invalid topics, no controller and no topic ids.
+    #[test]
+    fn test_new_matches_widest_with_defaults() {
+        let nodes = vec![make_node(0), make_node(1)];
+        let partitions = vec![make_partition("test", 0, 0), make_partition("test", 1, 1)];
+        let unauthorized: HashSet<String> = ["forbidden".to_string()].into_iter().collect();
+        let internal: HashSet<String> = ["__consumer_offsets".to_string()].into_iter().collect();
+
+        let cluster = Cluster::new(
+            Some("cluster1".to_string()),
+            nodes.clone(),
+            partitions.clone(),
+            unauthorized.clone(),
+            internal.clone(),
+        );
+
+        assert_eq!(cluster.cluster_resource().cluster_id(), Some("cluster1"));
+        assert_eq!(cluster.nodes().len(), 2);
+        assert_eq!(cluster.partitions_for_topic("test").len(), 2);
+        assert_eq!(cluster.unauthorized_topics(), &unauthorized);
+        assert_eq!(cluster.internal_topics(), &internal);
+        assert!(cluster.invalid_topics().is_empty());
+        assert_eq!(cluster.controller(), None);
+        assert_eq!(cluster.topic_ids().count(), 0);
+    }
+
+    /// The 6-argument constructor (Java `Cluster.java:70`) adds only the
+    /// controller.
+    #[test]
+    fn test_new_controller_carries_controller() {
+        let nodes = vec![make_node(0), make_node(1)];
+        let controller = make_node(1);
+
+        let cluster = Cluster::with_controller(
+            Some("cluster1".to_string()),
+            nodes,
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Some(controller.clone()),
+        );
+
+        assert_eq!(cluster.controller(), Some(&controller));
+        assert!(cluster.invalid_topics().is_empty());
+        assert_eq!(cluster.topic_ids().count(), 0);
+    }
+
+    /// The 7-argument constructor (Java `Cluster.java:84`) adds invalid topics
+    /// and the controller, but still no topic ids.
+    #[test]
+    fn test_new_invalid_topics_controller_carries_both() {
+        let nodes = vec![make_node(0)];
+        let controller = make_node(0);
+        let invalid: HashSet<String> = ["bad topic".to_string()].into_iter().collect();
+
+        let cluster = Cluster::with_invalid_topics_controller(
+            Some("cluster1".to_string()),
+            nodes,
+            Vec::new(),
+            HashSet::new(),
+            invalid.clone(),
+            HashSet::new(),
+            Some(controller.clone()),
+        );
+
+        assert_eq!(cluster.invalid_topics(), &invalid);
+        assert_eq!(cluster.controller(), Some(&controller));
+        assert_eq!(cluster.topic_ids().count(), 0);
     }
 }

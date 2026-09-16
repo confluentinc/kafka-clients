@@ -118,7 +118,7 @@ fn make_sasl_ssl_consumer_config(
         // `ssl_sasl_test`'s SASL_SSL selector helper.
         ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid SASL_SSL consumer config")
+    ConsumerConfig::new(&props).expect("invalid SASL_SSL consumer config")
 }
 
 /// Build a SASL_SSL `ProducerConfig` (PLAIN, acks=all) against `:9097`.
@@ -135,12 +135,12 @@ fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> Producer
         ("ssl.truststore.certificates".to_string(), ca_cert_pem.to_string()),
         ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid SASL_SSL producer config")
+    ProducerConfig::new(&props).expect("invalid SASL_SSL producer config")
 }
 
 /// Produce `num_records` byte records to `tp` over SASL_SSL, then flush.
 async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &TopicPartition, num_records: usize) {
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::from_config(
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_sasl_ssl_producer_config(bootstrap, ca_cert_pem),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -149,13 +149,13 @@ async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &Topic
 
     let mut last_future = None;
     for i in 0..num_records {
-        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition(
+        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(format!("key {i}").into_bytes()),
             Some(format!("value {i}").into_bytes()),
         )
-        .expect("ProducerRecord::with_partition should not fail for a non-negative partition");
+        .expect("ProducerRecord::with_partition_key should not fail for a non-negative partition");
         // Call the `Producer` trait `send` (1-arg) via fully-qualified syntax
         // so the inherent zero-copy
         // `KafkaProducer::<Vec<u8>,Vec<u8>>::send(record, callback)` does not
@@ -168,7 +168,9 @@ async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &Topic
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
+        f.get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("last send should succeed");
     }
     producer.close().await.expect("producer close should succeed");
 }
@@ -209,7 +211,10 @@ async fn test_sasl_ssl_consume_records() {
     )
     .expect("new_consumer should succeed for SASL_SSL");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     let records = consume_records(&mut *consumer, NUM_RECORDS).await;
     assert_eq!(
@@ -247,7 +252,10 @@ async fn test_sasl_ssl_wrong_credentials() {
     )
     .expect("new_consumer should succeed (config is structurally valid)");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Drive poll for a bounded period; authentication must fail and surface as
     // an error rather than hanging. We bound the whole sequence with an outer

@@ -17,7 +17,7 @@
 //! at pinned commit `a18251bae0b825c69794a50dffd4c3100cf5ca5b`.
 //!
 //! These tests exercise the **subscription-based** consumer API
-//! (`subscribe`, `subscribe_pattern`, `unsubscribe`) — the KIP-848
+//! (`subscribe_with_topics`, `subscribe_with_pattern`, `unsubscribe`) — the KIP-848
 //! group-protocol rebalance flow against a real 3-broker Kafka 4.2.0
 //! cluster.
 //!
@@ -71,15 +71,17 @@
 //! ## SKIPped (CONSUMER-arm relies on client-side `Pattern.compile`)
 //!
 //! Three CONSUMER-arm tests subscribe with a Java `Pattern.compile(...)`
-//! — the client-side regex overload. Per `PLAN.md:99-101` and the
-//! Phase-13 prompt, the KIP-848 in-scope path is `SubscriptionPattern`
-//! (server-side / Re2J). The client-side `Pattern` overload is
-//! classic-protocol style; even when wired through the async consumer
-//! it exercises the `UpdatePatternSubscription` event path, which is
-//! outside the §20 KIP-848 surface this milestone targets.
+//! — the client-side regex overload, which is **not implemented in
+//! Rust**: `Consumer` has no `subscribe` counterpart for Java's
+//! `subscribe(Pattern)` / `subscribe(Pattern,
+//! ConsumerRebalanceListener)`, so there is no API for these tests to
+//! call. Only the `SubscriptionPattern` form is translated, which hands
+//! the pattern to the group coordinator for server-side RE2/J
+//! evaluation (KIP-848) instead of matching it against the consumer's
+//! own metadata.
 //!
 //! - SKIP: `testAsyncConsumerPatternSubscription` (line 92) — uses
-//!   `Pattern.compile("t.*c")`, client-side regex (PLAN.md §9, line 99)
+//!   `Pattern.compile("t.*c")`, client-side regex
 //! - SKIP: `testAsyncConsumerSubsequentPatternSubscription` (line 165)
 //!   — uses `Pattern.compile(".*o.*")`, client-side regex
 //! - SKIP: `testAsyncConsumerPatternUnsubscription` (line 235) — uses
@@ -176,7 +178,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -192,13 +194,13 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid producer test config")
+    ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Build a [`KafkaProducer`] for byte-array keys/values matching what
 /// Java's `cluster.producer()` returns.
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::from_config(
+    KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -220,14 +222,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -236,7 +238,9 @@ async fn send_records_with_producer(
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
+        f.get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("last send should succeed");
     }
 }
 
@@ -262,17 +266,17 @@ async fn send_records_with_producer(
 /// relies on the topic existing in the cluster metadata).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(b"__provisioner__".to_vec()),
             Some(b"__provisioner__".to_vec()),
         )
-        .expect("ProducerRecord::with_partition should succeed");
+        .expect("ProducerRecord::with_partition_key should succeed");
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
             .await
             .expect("provisioner send should succeed");
-        fut.get_timeout(Duration::from_secs(30))
+        fut.get_with_timeout(Duration::from_secs(30))
             .await
             .expect("provisioner send should ack");
     }
@@ -427,9 +431,9 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     let pattern_str = format!("{}_t.*c", ctx_prefix(&topic, "topic"));
     let pattern = SubscriptionPattern::new(pattern_str.clone());
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_pattern should succeed");
+        .expect("subscribe_with_pattern should succeed");
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic.clone(), 0));
@@ -445,9 +449,9 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     // match before).
     let pattern2 = SubscriptionPattern::new(format!("{topic2}.*"));
     consumer
-        .subscribe_pattern(pattern2)
+        .subscribe_with_pattern(pattern2)
         .await
-        .expect("second subscribe_pattern should succeed");
+        .expect("second subscribe_with_pattern should succeed");
 
     let mut expected2: HashSet<TopicPartition> = HashSet::new();
     expected2.insert(TopicPartition::new(topic2.clone(), 0));
@@ -492,9 +496,9 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
 
     let pattern = SubscriptionPattern::new(format!("{}.*", ctx_prefix(&topic, "topic")));
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_pattern should succeed");
+        .expect("subscribe_with_pattern should succeed");
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic.clone(), 0));
@@ -545,9 +549,9 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     assert_eq!(consumer.assignment().len(), 0);
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_with_pattern(pattern)
         .await
-        .expect("first subscribe_pattern should succeed");
+        .expect("first subscribe_with_pattern should succeed");
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic1.clone(), 0));
@@ -561,9 +565,9 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     // topics the member already had plus new ones.
     let pattern2 = SubscriptionPattern::new(format!("{topic1}|{topic2}"));
     consumer
-        .subscribe_pattern(pattern2)
+        .subscribe_with_pattern(pattern2)
         .await
-        .expect("second subscribe_pattern should succeed");
+        .expect("second subscribe_with_pattern should succeed");
 
     let mut expanded: HashSet<TopicPartition> = expected.clone();
     expanded.insert(TopicPartition::new(topic2.clone(), 0));
@@ -618,9 +622,9 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
 
     let pattern = SubscriptionPattern::new(format!("{}.*", ctx_prefix(&topic, "topic")));
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_pattern should succeed");
+        .expect("subscribe_with_pattern should succeed");
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic.clone(), 0));
@@ -716,9 +720,9 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
     consumer
-        .subscribe_pattern(pattern.clone())
+        .subscribe_with_pattern(pattern.clone())
         .await
-        .expect("subscribe_pattern should succeed");
+        .expect("subscribe_with_pattern should succeed");
 
     let mut pattern_assignment: HashSet<TopicPartition> = HashSet::new();
     pattern_assignment.insert(TopicPartition::new(topic1.clone(), 0));
@@ -732,7 +736,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     // Subscribe to explicit topic names.
     consumer
-        .subscribe(vec![topic2.clone()])
+        .subscribe_with_topics(vec![topic2.clone()])
         .await
         .expect("subscribe (topic list) should succeed");
 
@@ -744,9 +748,9 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     // Subscribe to pattern again.
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_pattern (second time) should succeed");
+        .expect("subscribe_with_pattern (second time) should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &pattern_assignment, Duration::from_secs(90)).await;
 
     consumer.close().await.expect("consumer close should succeed");
@@ -772,9 +776,9 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
 
     let pattern = SubscriptionPattern::new("(t.*c");
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_pattern should succeed (validation is broker-side)");
+        .expect("subscribe_with_pattern should succeed (validation is broker-side)");
 
     // Drive `poll()` until it surfaces an `InvalidRegularExpression`
     // error or the deadline elapses. Java's `waitForPollThrowException`
@@ -834,7 +838,10 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
     initial_assignment.insert(TopicPartition::new(topic.clone(), 1));
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
 
     // Create the other topic now (Java: `cluster.createTopic(otherTopic, 2, BROKER_COUNT)`).
@@ -846,7 +853,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     expanded_assignment.insert(TopicPartition::new(other_topic.clone(), 1));
 
     consumer
-        .subscribe(vec![topic.clone(), other_topic.clone()])
+        .subscribe_with_topics(vec![topic.clone(), other_topic.clone()])
         .await
         .expect("second subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &expanded_assignment, Duration::from_secs(90)).await;
@@ -883,7 +890,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     initial_assignment.insert(TopicPartition::new(other_topic.clone(), 1));
 
     consumer
-        .subscribe(vec![topic.clone(), other_topic.clone()])
+        .subscribe_with_topics(vec![topic.clone(), other_topic.clone()])
         .await
         .expect("subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
@@ -893,7 +900,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     shrunken_assignment.insert(TopicPartition::new(topic.clone(), 1));
 
     consumer
-        .subscribe(vec![topic.clone()])
+        .subscribe_with_topics(vec![topic.clone()])
         .await
         .expect("second subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &shrunken_assignment, Duration::from_secs(90)).await;
@@ -928,7 +935,10 @@ async fn test_async_consumer_unsubscribe_topic() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Java's `awaitRebalance` blocks until the rebalance listener has
     // been invoked. We mirror by waiting until `assignment()` is
@@ -940,7 +950,10 @@ async fn test_async_consumer_unsubscribe_topic() {
     await_assignment_with_deadline(consumer.as_mut(), &initial, Duration::from_secs(90)).await;
 
     // Subscribe to empty list (== unsubscribe).
-    consumer.subscribe(vec![]).await.expect("subscribe(empty) should succeed");
+    consumer
+        .subscribe_with_topics(vec![])
+        .await
+        .expect("subscribe(empty) should succeed");
     // After unsubscribe the assignment should drop to empty. The Java
     // test asserts immediately because Java's `subscribe(emptyList)`
     // path inside the classic protocol completes synchronously; in
@@ -1014,7 +1027,7 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
 async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
     let invalid_topic_name = "topic abc";
     consumer
-        .subscribe(vec![invalid_topic_name.to_string()])
+        .subscribe_with_topics(vec![invalid_topic_name.to_string()])
         .await
         .expect("subscribe should accept the topic at API level (broker-side validation)");
 

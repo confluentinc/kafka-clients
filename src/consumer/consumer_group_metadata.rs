@@ -57,7 +57,7 @@ impl ConsumerGroupMetadata {
     )]
     pub fn new(group_id: impl Into<String>) -> Self {
         #[allow(deprecated)]
-        Self::with_details(group_id, UNKNOWN_GENERATION_ID, UNKNOWN_MEMBER_ID, None)
+        Self::with_generation_id_member_id_group_instance_id(group_id, UNKNOWN_GENERATION_ID, UNKNOWN_MEMBER_ID, None)
     }
 
     /// Create new `ConsumerGroupMetadata` with full details.
@@ -68,7 +68,7 @@ impl ConsumerGroupMetadata {
         since = "4.2.0",
         note = "Use Consumer::group_metadata() instead. This struct will become a trait in a future release."
     )]
-    pub fn with_details(
+    pub fn with_generation_id_member_id_group_instance_id(
         group_id: impl Into<String>,
         generation_id: i32,
         member_id: impl Into<String>,
@@ -133,7 +133,12 @@ mod tests {
 
     #[test]
     fn test_with_details() {
-        let m = ConsumerGroupMetadata::with_details("g", 2, "member", Some("instance".into()));
+        let m = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+            "g",
+            2,
+            "member",
+            Some("instance".into()),
+        );
         assert_eq!(m.group_id(), "g");
         assert_eq!(m.generation_id(), 2);
         assert_eq!(m.member_id(), "member");
@@ -142,7 +147,12 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let m = ConsumerGroupMetadata::with_details("g", 2, "member", Some("instance".into()));
+        let m = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+            "g",
+            2,
+            "member",
+            Some("instance".into()),
+        );
         assert_eq!(
             m.to_string(),
             "GroupMetadata(groupId = g, generationId = 2, memberId = member, groupInstanceId = instance)"

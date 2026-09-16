@@ -22,12 +22,12 @@
 //! `handle_unsupported_version` hooks (Java abstract methods on an anonymous
 //! subclass) are modelled as boxed sync closures owned by the [`Call`].
 
+use crate::KafkaClient;
+use crate::MetadataRecoveryStrategy;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 use crate::common::{Error, Node};
-use crate::kafka_client::KafkaClient;
-use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 
-use super::admin_metadata_manager::AdminMetadataManager;
+use super::AdminMetadataManager;
 
 /// Builds the request body for a [`Call`] given the per-attempt timeout.
 pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBuilder>, Error> + Send>;

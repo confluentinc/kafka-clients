@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use crate::admin::partition_reassignment::PartitionReassignment;
+use crate::admin::PartitionReassignment;
 use crate::common::{KafkaFuture, TopicPartition};
 
 /// The result of `Admin::list_partition_reassignments`.
@@ -49,7 +49,7 @@ impl ListPartitionReassignmentsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn reassignments_exposes_the_map() {

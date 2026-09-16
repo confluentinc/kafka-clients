@@ -33,9 +33,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::ConsumerGroupHeartbeatResponseData;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions};
+use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions};
 
 /// A `ConsumerGroupHeartbeat` response.
 ///

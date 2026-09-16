@@ -19,11 +19,10 @@
 
 use std::io;
 
+use crate::DescribeUserScramCredentialsRequestData;
+use crate::DescribeUserScramCredentialsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_user_scram_credentials_request_data::DescribeUserScramCredentialsRequestData;
-use crate::describe_user_scram_credentials_response_data::{
-    DescribeUserScramCredentialsResponseData, DescribeUserScramCredentialsResult,
-};
+use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResult;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeUserScramCredentialsResponse, RequestBuilder};
 
@@ -123,7 +122,7 @@ pub struct DescribeUserScramCredentialsRequestBuilder {
 
 impl DescribeUserScramCredentialsRequestBuilder {
     /// Creates a builder wrapping the given request data.
-    pub fn from_data(data: DescribeUserScramCredentialsRequestData) -> Self {
+    pub fn new(data: DescribeUserScramCredentialsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS.oldest_version(),
@@ -205,7 +204,7 @@ mod tests {
     #[test]
     fn serialize_parse_round_trip() {
         let version = ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS.latest_version();
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::from_data({
+        let mut builder = DescribeUserScramCredentialsRequestBuilder::new({
             let mut data = DescribeUserScramCredentialsRequestData::new();
             data.set_users(Some(vec![{
                 let mut n = UserName::new();
@@ -216,7 +215,7 @@ mod tests {
         });
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeUserScramCredentialsRequest::parse(&mut readable, version).unwrap();
         let users = parsed.data().users.as_ref().unwrap();
         assert_eq!(users.len(), 1);
@@ -232,7 +231,7 @@ mod tests {
             n.set_name("u0".to_string());
             n
         }]));
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::from_data(data);
+        let mut builder = DescribeUserScramCredentialsRequestBuilder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

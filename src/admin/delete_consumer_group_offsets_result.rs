@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition delete errors carried by the underlying future.
@@ -103,7 +103,7 @@ fn sub_level_error(partition_level_errors: &PartitionErrors, partition: &TopicPa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn tp_zero() -> TopicPartition {
         TopicPartition::new("topic", 0)

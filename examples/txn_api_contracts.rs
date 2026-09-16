@@ -366,10 +366,10 @@ async fn abort_pending_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
     let mut first_other: Option<Error> = None;
     let mut unresolved = 0usize;
     for future in &futures {
-        match future.get_timeout(Duration::from_secs(10)).await {
+        match future.get_with_timeout(Duration::from_secs(10)).await {
             Ok(_) => acked += 1,
             Err(Error::TransactionAborted(_)) => aborted += 1,
-            // get_timeout wraps an unresolved future in its own timeout error;
+            // get_with_timeout wraps an unresolved future in its own timeout error;
             // a resolved-but-failed future keeps its original error above.
             Err(e) if e.to_string().contains("Timeout expired") => unresolved += 1,
             Err(e) => {
@@ -478,10 +478,9 @@ async fn buffer_limit_case(bootstrap: &str) -> Result<bool, String> {
         ("max.request.size".to_string(), "5242880".to_string()),
         ("max.block.ms".to_string(), "10000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("buffer config: {e}"))?;
-    let producer: StringProducer =
-        KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("building the buffer producer: {e}"))?;
+    let config = ProducerConfig::new(&props).map_err(|e| format!("buffer config: {e}"))?;
+    let producer: StringProducer = KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .map_err(|e| format!("building the buffer producer: {e}"))?;
 
     // 100 KB into a 64 KiB budget: unsatisfiable no matter how long we wait, so
     // Java rejects it outright rather than blocking (`BufferPool.allocate`'s
@@ -539,10 +538,9 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
         ("max.block.ms".to_string(), "10000".to_string()),
         ("transaction.two.phase.commit.enable".to_string(), "true".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("2pc config: {e}"))?;
-    let producer: StringProducer =
-        KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("building the 2pc producer: {e}"))?;
+    let config = ProducerConfig::new(&props).map_err(|e| format!("2pc config: {e}"))?;
+    let producer: StringProducer = KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .map_err(|e| format!("building the 2pc producer: {e}"))?;
     match tokio::time::timeout(Duration::from_secs(15), producer.init_transactions()).await {
         Ok(Err(error)) => {
             ok &= report(
@@ -591,7 +589,7 @@ async fn retriable_flag_case() -> bool {
                 error.is_retriable_error(),
                 // Java's `RequestUtils.isFatalException` static — fatality is a
                 // classification over an error, not a flag carried by it.
-                confluent_kafka::common::requests::request_utils::is_fatal_error(&error)
+                confluent_kafka::common::requests::RequestUtils::is_fatal_error(&error)
             ),
         ),
         Ok(Ok(())) => report(

@@ -19,13 +19,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-/// The entity type value for a user.
-pub const USER: &str = "user";
-/// The entity type value for a client id.
-pub const CLIENT_ID: &str = "client-id";
-/// The entity type value for an IP address.
-pub const IP: &str = "ip";
-
 /// Describes a client quota entity, which is a mapping of entity types to their
 /// names.
 ///
@@ -44,11 +37,22 @@ pub struct ClientQuotaEntity {
 }
 
 impl ClientQuotaEntity {
+    /// The entity type value for a user.
+    pub const USER: &str = "user";
+
+    /// The entity type value for a client id.
+    pub const CLIENT_ID: &str = "client-id";
+
+    /// The entity type value for an IP address.
+    pub const IP: &str = "ip";
+
     /// Returns whether the given entity type is one of the built-in types.
     ///
     /// Mirrors `ClientQuotaEntity.isValidEntityType`.
     pub fn is_valid_entity_type(entity_type: &str) -> bool {
-        entity_type == USER || entity_type == CLIENT_ID || entity_type == IP
+        entity_type == ClientQuotaEntity::USER
+            || entity_type == ClientQuotaEntity::CLIENT_ID
+            || entity_type == ClientQuotaEntity::IP
     }
 
     /// Constructs a quota entity for the given types and names. If a name is
@@ -109,19 +113,19 @@ mod tests {
     // dedicated Java test files (upstream gap, see DoD #3 note in PLAN.md).
     #[test]
     fn is_valid_entity_type_matches_builtins() {
-        assert!(ClientQuotaEntity::is_valid_entity_type(USER));
-        assert!(ClientQuotaEntity::is_valid_entity_type(CLIENT_ID));
-        assert!(ClientQuotaEntity::is_valid_entity_type(IP));
+        assert!(ClientQuotaEntity::is_valid_entity_type(ClientQuotaEntity::USER));
+        assert!(ClientQuotaEntity::is_valid_entity_type(ClientQuotaEntity::CLIENT_ID));
+        assert!(ClientQuotaEntity::is_valid_entity_type(ClientQuotaEntity::IP));
         assert!(!ClientQuotaEntity::is_valid_entity_type("group"));
     }
 
     // New test, no Java original.
     #[test]
     fn equality_is_order_independent() {
-        let a = entity(&[(USER, "u1"), (CLIENT_ID, "c1")]);
-        let b = entity(&[(CLIENT_ID, "c1"), (USER, "u1")]);
+        let a = entity(&[(ClientQuotaEntity::USER, "u1"), (ClientQuotaEntity::CLIENT_ID, "c1")]);
+        let b = entity(&[(ClientQuotaEntity::CLIENT_ID, "c1"), (ClientQuotaEntity::USER, "u1")]);
         assert_eq!(a, b);
-        assert_ne!(a, entity(&[(USER, "u2")]));
+        assert_ne!(a, entity(&[(ClientQuotaEntity::USER, "u2")]));
     }
 
     // New test, no Java original: equal entities must hash equal so they can be
@@ -130,15 +134,24 @@ mod tests {
     fn equal_entities_hash_equal() {
         use std::collections::HashMap as Map;
         let mut map: Map<ClientQuotaEntity, i32> = Map::new();
-        map.insert(entity(&[(USER, "u1"), (CLIENT_ID, "c1")]), 7);
-        assert_eq!(map.get(&entity(&[(CLIENT_ID, "c1"), (USER, "u1")])), Some(&7));
+        map.insert(
+            entity(&[(ClientQuotaEntity::USER, "u1"), (ClientQuotaEntity::CLIENT_ID, "c1")]),
+            7,
+        );
+        assert_eq!(
+            map.get(&entity(&[
+                (ClientQuotaEntity::CLIENT_ID, "c1"),
+                (ClientQuotaEntity::USER, "u1")
+            ])),
+            Some(&7)
+        );
     }
 
     // New test, no Java original.
     #[test]
     fn entries_accessor_round_trips() {
-        let e = entity(&[(USER, "u1")]);
-        assert_eq!(e.entries().get(USER), Some(&Some("u1".to_string())));
+        let e = entity(&[(ClientQuotaEntity::USER, "u1")]);
+        assert_eq!(e.entries().get(ClientQuotaEntity::USER), Some(&Some("u1".to_string())));
     }
 
     // New test, no Java original: a `None` name (the built-in default entity,
@@ -146,10 +159,14 @@ mod tests {
     // distinct from an entity literally named "" (`Some("")`).
     #[test]
     fn default_entity_none_distinct_from_empty_name() {
-        let default_user = ClientQuotaEntity::new(HashMap::from([(USER.to_string(), None)]));
-        let empty_named_user = ClientQuotaEntity::new(HashMap::from([(USER.to_string(), Some(String::new()))]));
-        assert_eq!(default_user.entries().get(USER), Some(&None));
-        assert_eq!(empty_named_user.entries().get(USER), Some(&Some(String::new())));
+        let default_user = ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), None)]));
+        let empty_named_user =
+            ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), Some(String::new()))]));
+        assert_eq!(default_user.entries().get(ClientQuotaEntity::USER), Some(&None));
+        assert_eq!(
+            empty_named_user.entries().get(ClientQuotaEntity::USER),
+            Some(&Some(String::new()))
+        );
         assert_ne!(default_user, empty_named_user);
     }
 }

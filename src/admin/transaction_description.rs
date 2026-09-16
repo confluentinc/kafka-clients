@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use crate::admin::transaction_state::TransactionState;
+use crate::admin::TransactionState;
 use crate::common::TopicPartition;
 
 /// The description of a transaction.
