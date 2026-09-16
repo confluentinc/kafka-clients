@@ -43,7 +43,7 @@ pub trait Record {
     ///
     /// Corresponds to Java's `ensureValid()`. In Java this throws
     /// `CorruptRecordException`; in Rust it returns a `Result`.
-    fn ensure_valid(&self) -> Result<(), crate::common::record::InvalidRecordError>;
+    fn ensure_valid(&self) -> Result<(), crate::common::InvalidRecordError>;
 
     /// Get the size in bytes of the key.
     ///

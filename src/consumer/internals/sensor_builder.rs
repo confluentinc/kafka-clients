@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::MetricNameTemplate;
 use crate::common::metrics::stats::{Avg, Max, Meter, Min, SampledStat, Value};
 use crate::common::metrics::{Metrics, RecordingLevel, Sensor};
@@ -49,7 +49,7 @@ impl SensorBuilder {
     /// partition-level sensors were created "at DEBUG (off by default) per the
     /// consumer perf constraint"; they never were, and asserting otherwise hid
     /// the real per-poll cost of that path.
-    pub(crate) fn new(metrics: &Arc<Metrics>, name: &str, recording_level: RecordingLevel) -> Result<Self, KafkaError> {
+    pub(crate) fn new(metrics: &Arc<Metrics>, name: &str, recording_level: RecordingLevel) -> Result<Self, Error> {
         Self::with_tags(metrics, name, recording_level, BTreeMap::new)
     }
 
@@ -72,7 +72,7 @@ impl SensorBuilder {
         name: &str,
         recording_level: RecordingLevel,
         tags: F,
-    ) -> Result<Self, KafkaError>
+    ) -> Result<Self, Error>
     where
         F: FnOnce() -> BTreeMap<String, String>,
     {
@@ -86,7 +86,7 @@ impl SensorBuilder {
     }
 
     /// Add an [`Avg`] stat under the given template (if newly created).
-    pub(crate) fn with_avg(self, name: &MetricNameTemplate) -> Result<Self, KafkaError> {
+    pub(crate) fn with_avg(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
             self.sensor.add(metric_name, Box::new(Avg::new()))?;
@@ -95,7 +95,7 @@ impl SensorBuilder {
     }
 
     /// Add a [`Min`] stat under the given template (if newly created).
-    pub(crate) fn with_min(self, name: &MetricNameTemplate) -> Result<Self, KafkaError> {
+    pub(crate) fn with_min(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
             self.sensor.add(metric_name, Box::new(Min::new()))?;
@@ -104,7 +104,7 @@ impl SensorBuilder {
     }
 
     /// Add a [`Max`] stat under the given template (if newly created).
-    pub(crate) fn with_max(self, name: &MetricNameTemplate) -> Result<Self, KafkaError> {
+    pub(crate) fn with_max(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
             self.sensor.add(metric_name, Box::new(Max::new()))?;
@@ -113,7 +113,7 @@ impl SensorBuilder {
     }
 
     /// Add a [`Value`] stat under the given template (if newly created).
-    pub(crate) fn with_value(self, name: &MetricNameTemplate) -> Result<Self, KafkaError> {
+    pub(crate) fn with_value(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
             let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
             self.sensor.add(metric_name, Box::new(Value::new()))?;
@@ -127,7 +127,7 @@ impl SensorBuilder {
         self,
         rate_name: &MetricNameTemplate,
         total_name: &MetricNameTemplate,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
         if !self.preexisting {
             let rate_metric = self.metrics.metric_instance_with_tags(rate_name, self.tags.clone())?;
             let total_metric = self.metrics.metric_instance_with_tags(total_name, self.tags.clone())?;
@@ -144,7 +144,7 @@ impl SensorBuilder {
         sampled_stat: SampledStat,
         rate_name: &MetricNameTemplate,
         total_name: &MetricNameTemplate,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
         if !self.preexisting {
             let rate_metric = self.metrics.metric_instance_with_tags(rate_name, self.tags.clone())?;
             let total_metric = self.metrics.metric_instance_with_tags(total_name, self.tags.clone())?;

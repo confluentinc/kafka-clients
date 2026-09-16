@@ -24,7 +24,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::request_utils::get_leader_epoch;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetFetchRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::kafka_warn;
 use crate::offset_fetch_request_data::{OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics};
@@ -126,7 +126,7 @@ impl ListConsumerGroupOffsetsHandler {
         &self,
         group_id: CoordinatorKey,
         error: Errors,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut Vec<CoordinatorKey>,
     ) {
         match error {
@@ -137,7 +137,7 @@ impl ListConsumerGroupOffsetsHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id, KafkaError::new(error));
+                failed.insert(group_id, Error::new(error));
             },
             Errors::CoordinatorLoadInProgress => {
                 // If the coordinator is loading, we just need to retry.
@@ -166,7 +166,7 @@ impl ListConsumerGroupOffsetsHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id, KafkaError::new(other));
+                failed.insert(group_id, Error::new(other));
             },
         }
     }
@@ -214,7 +214,12 @@ impl AdminApiHandler<CoordinatorKey, GroupOffsets> for ListConsumerGroupOffsetsH
         self.validate_keys(group_ids);
 
         let ConcreteResponse::OffsetFetch(response) = response else {
-            panic!("ListConsumerGroupOffsetsHandler received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                group_ids,
+                Error::local_illegal_state("ListConsumerGroupOffsetsHandler received an unexpected response type"),
+            );
         };
 
         let mut completed = HashMap::new();

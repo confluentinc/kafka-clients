@@ -305,7 +305,6 @@ public sealed class PublicProducerDeliveryCallbackTests
         Assert.Equal(2, completion.Exception!.Code);
         Assert.Contains("boom-delivery", completion.Exception.Message, StringComparison.Ordinal);
         Assert.True(completion.Exception.IsRetriable);
-        Assert.False(completion.Exception.IsFatal);
         Assert.Equal(thrown.Code, completion.Exception.Code);
         Assert.Equal(thrown.Message, completion.Exception.Message);
     }

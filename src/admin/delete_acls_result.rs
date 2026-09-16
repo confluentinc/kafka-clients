@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use crate::common::acl::{AclBinding, AclBindingFilter};
 use crate::common::kafka_future::KafkaFutureOps;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 
 /// A class containing either the deleted ACL binding or an exception if the
 /// delete failed.
@@ -32,13 +32,13 @@ use crate::common::{KafkaError, KafkaFuture};
 #[derive(Clone, Debug)]
 pub struct FilterResult {
     binding: Option<AclBinding>,
-    exception: Option<KafkaError>,
+    error: Option<Error>,
 }
 
 impl FilterResult {
     /// Creates a filter result carrying the deleted binding and/or an error.
-    pub fn new(binding: Option<AclBinding>, exception: Option<KafkaError>) -> Self {
-        Self { binding, exception }
+    pub fn new(binding: Option<AclBinding>, error: Option<Error>) -> Self {
+        Self { binding, error }
     }
 
     /// Return the deleted ACL binding, or `None` if there was an error.
@@ -48,8 +48,8 @@ impl FilterResult {
 
     /// Return an exception if the ACL delete was not successful, or `None` if it
     /// was.
-    pub fn exception(&self) -> Option<&KafkaError> {
-        self.exception.as_ref()
+    pub fn error(&self) -> Option<&Error> {
+        self.error.as_ref()
     }
 }
 
@@ -117,13 +117,13 @@ struct AclBindingsFuture {
 }
 
 impl AclBindingsFuture {
-    async fn collect(&self) -> Result<Vec<AclBinding>, KafkaError> {
+    async fn collect(&self) -> Result<Vec<AclBinding>, Error> {
         let mut acls = Vec::new();
         for value in &self.futures {
             let results = value.get().await?;
             for result in results.values() {
-                if let Some(exception) = result.exception() {
-                    return Err(exception.clone());
+                if let Some(error) = result.error() {
+                    return Err(error.clone());
                 }
                 if let Some(binding) = result.binding() {
                     acls.push(binding.clone());
@@ -135,14 +135,14 @@ impl AclBindingsFuture {
 }
 
 impl KafkaFutureOps<Vec<AclBinding>> for AclBindingsFuture {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, KafkaError>> + Send + '_>> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, Error>> + Send + '_>> {
         Box::pin(self.collect())
     }
 
     fn get_timeout(
         &self,
         _timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, KafkaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, Error>> + Send + '_>> {
         // The per-filter futures resolve together via the background task; the
         // aggregate simply awaits them (mirroring Java's `allOf` + `get`).
         Box::pin(self.collect())

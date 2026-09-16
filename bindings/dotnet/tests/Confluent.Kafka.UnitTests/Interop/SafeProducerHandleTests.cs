@@ -170,13 +170,18 @@ public sealed class SafeProducerHandleTests
             handle.Dispose();
 
             // The fallible contract's error still round-trips (the parse message /
-            // flags), freed exactly once by FromHandle. IllegalArgument is neither
-            // retriable nor fatal. The exact message is the behavioral contract (DoD §3).
+            // flags), freed exactly once by FromHandle. IllegalArgument is not
+            // retriable. The exact message is the behavioral contract (DoD §3); the
+            // format mirrors Java's `ConfigException(String name, Object value)`:
+            // "Invalid value {value} for configuration {name}". This failure occurs
+            // while parsing properties, before `KafkaProducer::from_config`'s
+            // relabeling try/catch, so it surfaces unwrapped (unlike the
+            // "Failed to construct kafka producer" wrapper on later construction
+            // failures — see ProducerConfigMarshalTests).
             KafkaException? failure = KafkaException.FromHandle(outError);
             Assert.NotNull(failure);
-            Assert.Contains("Invalid value for 'batch.size'", failure!.Message, StringComparison.Ordinal);
+            Assert.Contains("Invalid value not-a-number for configuration batch.size", failure!.Message, StringComparison.Ordinal);
             Assert.False(failure.IsRetriable);
-            Assert.False(failure.IsFatal);
         }
     }
 }

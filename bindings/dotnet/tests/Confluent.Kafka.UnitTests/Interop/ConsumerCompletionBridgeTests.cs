@@ -41,9 +41,11 @@ public sealed class ConsumerCompletionBridgeTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    // Broker-free error codes are all indistinct (UnknownServerError == -1); tests
-    // assert on TYPE + Message + reusability, never on a distinctive Code.
-    private const int UnknownServerErrorCode = -1;
+    // Seek on an unassigned partition builds its failure via
+    // subscription_state::assigned_state_mut's Error::local_illegal_state (a8205c5c), which
+    // is a specific, meaningful code (LOCAL_ILLEGAL_STATE == -4) — not one of the indistinct
+    // broker-free codes this comment originally warned about.
+    private const int LocalIllegalStateErrorCode = -4;
 
     private static string[] ProofTopic() => new[] { "proof-topic" };
 
@@ -78,18 +80,17 @@ public sealed class ConsumerCompletionBridgeTests
         // FromHandle) — no longer a faulted void-bridge Task.
         KafkaException ex = Assert.Throws<KafkaException>(() => consumer.Seek("proof-topic", 0, 0L));
 
-        // Assert TYPE + Code (indistinct -1) + flags + a non-empty Message — never a
-        // distinctive code (PLAN finding #4).
-        Assert.Equal(UnknownServerErrorCode, ex.Code);
+        // Assert TYPE + Code (LOCAL_ILLEGAL_STATE == -4) + the retriable flag + a
+        // non-empty Message.
+        Assert.Equal(LocalIllegalStateErrorCode, ex.Code);
         Assert.False(ex.IsRetriable);
-        Assert.False(ex.IsFatal);
         Assert.False(string.IsNullOrEmpty(ex.Message));
     }
 
     [Fact]
     public void Seek_Churned_ThrowsEachTime_NoCorruption()
     {
-        // The sync error path frees an owned KafkaError handle each time (FromHandle);
+        // The sync error path frees an owned Error handle each time (FromHandle);
         // churn to catch a double-free / leak on the failure branch.
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 

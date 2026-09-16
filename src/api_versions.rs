@@ -119,7 +119,7 @@ impl ApiVersions {
         api_key: &crate::common::protocol::ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
-    ) -> Option<Result<i16, crate::common::KafkaError>> {
+    ) -> Option<Result<i16, crate::common::Error>> {
         let inner = self.inner.read().unwrap();
         inner
             .node_api_versions

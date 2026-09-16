@@ -59,7 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Cancellation primitive shared between the app side
 /// (`AsyncKafkaConsumer::wakeup()`) and the background task.
@@ -125,7 +125,7 @@ impl WakeupTrigger {
 
     /// Replace the current token with a fresh, un-cancelled one. Called
     /// by the app side after a public method returns
-    /// `KafkaError::wakeup(...)` — `consumer-threading.md` §11 explicitly
+    /// `Error::wakeup(...)` — `consumer-threading.md` §11 explicitly
     /// states this is the analog of Java's "throw `WakeupException`,
     /// then clear the volatile flag".
     pub(crate) fn rotate(&self) {
@@ -171,16 +171,16 @@ impl WakeupTrigger {
     }
 
     /// Java's `maybeTriggerWakeup()` — synchronous check. Returns
-    /// `Err(KafkaError::wakeup(...))` if the current token has been
+    /// `Err(Error::wakeup(...))` if the current token has been
     /// cancelled (i.e. a prior `wakeup()` is pending). Does NOT consume
     /// the wakeup state — the caller is expected to [`Self::rotate`]
     /// after raising the error to the user.
-    pub(crate) fn maybe_trigger_wakeup(&self) -> Result<(), KafkaError> {
+    pub(crate) fn maybe_trigger_wakeup(&self) -> Result<(), Error> {
         if self.inner.disabled.load(Ordering::Acquire) {
             return Ok(());
         }
         if self.current_token().is_cancelled() {
-            return Err(KafkaError::wakeup("WakeupTrigger fired"));
+            return Err(Error::wakeup("WakeupTrigger fired"));
         }
         Ok(())
     }
@@ -236,7 +236,7 @@ mod tests {
         let trigger = WakeupTrigger::new();
         trigger.wakeup();
         let err = trigger.maybe_trigger_wakeup().expect_err("must err");
-        assert!(matches!(err, KafkaError::Wakeup(_)));
+        assert!(matches!(err, Error::Wakeup(_)));
     }
 
     /// Java `testManualTriggerWhenWakeupNotCalled`.

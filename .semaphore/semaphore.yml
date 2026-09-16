@@ -28,12 +28,15 @@ name: build-test-release
 #   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
 #   2. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python.
-#   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
-#      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
-#      up Docker via Colima; the C/Python gRPC images build the Rust library
-#      in-container (see Dockerfile.grpc.macos).
-#   5. "Verify .NET binding" -- verify-dotnet. Its OWN block (not a job in
+#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
+#      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
+#   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
+#      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
+#      for the broker the integration/perf tests need.
+#   5. "Build + unit test bindings (macOS)" -- verify-c (ctest) and
+#      verify-python (pytest test/unit). No container is used, so the block sets
+#      MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
+#   6. "Verify .NET binding" -- verify-dotnet. Its OWN block (not a job in
 #      block 3) so its machine type can be PINNED to amd64 independently of the
 #      pipeline default: Semaphore sets machine type per pipeline `agent` or per
 #      `task.agent`, never per job. The pipeline default is amd64 today, so the
@@ -115,7 +118,7 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-rust"
+        - name: "verify-rust (Linux amd64)"
           commands:
             - make verify-rust
 
@@ -134,10 +137,10 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-c"
+        - name: "verify-c (Linux amd64)"
           commands:
             - make verify-c
-        - name: "verify-python"
+        - name: "verify-python (Linux amd64)"
           commands:
             - make verify-python
 
@@ -158,11 +161,14 @@ blocks:
           commands:
             - colima stop || true
       jobs:
-        - name: "verify-rust"
+        - name: "verify-rust (macOS arm64)"
           commands:
             - make verify-rust-macos-docker
 
-  - name: "Verify language bindings (macOS arm64)"
+  - name: "Build + unit test bindings (macOS)"
+    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. No
+    # container is used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh
+    # to skip Colima. The gRPC multilanguage arm runs on Linux only.
     dependencies: []
     task:
       agent:
@@ -171,18 +177,16 @@ blocks:
       env_vars:
         - name: RUST_BACKTRACE
           value: full
+        - name: MACOS_SKIP_COLIMA
+          value: "true"
       prologue:
         commands:
           - source ./.semaphore/dependencies-macos.sh
-      epilogue:
-        always:
-          commands:
-            - colima stop || true
       jobs:
-        - name: "verify-c"
+        - name: "verify-c (macOS arm64)"
           commands:
             - make verify-c-macos-docker
-        - name: "verify-python"
+        - name: "verify-python (macOS arm64)"
           commands:
             - make verify-python-macos-docker
 

@@ -131,11 +131,12 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_OnMock_ThrowsUnsupportedVersion()
     {
-        // The mock's offsets_for_times returns unsupported_version UNCONDITIONALLY (Java's
-        // not-implemented MockConsumer — verified in src/consumer/mock_consumer.rs). The sync
-        // call THROWS a KafkaException (not a faulted Task). Assert the throw + the exact message
-        // + the UnsupportedVersion code (35). Do NOT over-claim a success round-trip — the mock
-        // cannot reach one.
+        // The mock's offsets_for_times returns unsupported_version UNCONDITIONALLY, with the
+        // Java-verbatim message from UnsupportedOperationException("Not implemented yet.")
+        // (Java line 534-537, admin-client.md §9 / DoD #3 — verified in
+        // src/consumer/mock_consumer.rs). The sync call THROWS a KafkaException (not a faulted
+        // Task). Assert the throw + the exact message + the UnsupportedVersion code (35). Do NOT
+        // over-claim a success round-trip — the mock cannot reach one.
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
@@ -144,7 +145,7 @@ public sealed class PublicSyncConsumerQueryTests
 
         KafkaException ex = Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(search));
 
-        Assert.Equal("MockConsumer::offsets_for_times is not implemented", ex.Message);
+        Assert.Equal("Not implemented yet.", ex.Message);
         Assert.Equal(UnsupportedVersionCode, ex.Code);
     }
 
@@ -162,7 +163,7 @@ public sealed class PublicSyncConsumerQueryTests
 
         KafkaException ex = Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(search));
 
-        Assert.Equal("MockConsumer::offsets_for_times is not implemented", ex.Message);
+        Assert.Equal("Not implemented yet.", ex.Message);
     }
 
     [Fact]

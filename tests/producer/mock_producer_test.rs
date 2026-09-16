@@ -92,7 +92,7 @@ async fn test_manual_completion() {
     assert!(result1.is_ok(), "Request should be successful");
     assert!(!md2.is_done(), "Second request still incomplete");
 
-    let e = confluent_kafka::common::KafkaError::illegal_argument("blah");
+    let e = confluent_kafka::common::Error::local_illegal_argument("blah");
     assert!(producer.error_next(e), "Complete the second request with an error");
     let result2 = md2.get().await;
     assert!(result2.is_err(), "Expected error to be thrown");

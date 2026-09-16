@@ -27,6 +27,8 @@ pub(crate) mod internals;
 // package. CLAUDE.md §2 keeps the `internals` Rust module `pub(crate)`, so
 // we re-export the public types at the `common::header` level to make them
 // reachable from external code (matching Java's effective visibility).
+use crate::common::LocalIllegalStateError;
+
 pub use internals::{RecordHeader, RecordHeaders};
 
 /// A header is a key-value pair.
@@ -56,7 +58,7 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add(&mut self, header: RecordHeader) -> Result<(), IllegalStateError>;
+    fn add(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
     ///
@@ -65,7 +67,7 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError>;
+    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError>;
 
     /// Removes all headers for the given key returning if the operation succeeded,
     /// while preserving the insertion order of the remaining headers.
@@ -73,7 +75,7 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn remove(&mut self, key: &str) -> Result<(), IllegalStateError>;
+    fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError>;
 
     /// Returns just one (the very last) header for the given key, if present.
     fn last_header(&self, key: &str) -> Option<&RecordHeader>;
@@ -89,32 +91,3 @@ pub trait Headers {
     /// Returns an iterator over the headers.
     fn iter(&self) -> std::slice::Iter<'_, RecordHeader>;
 }
-
-/// Error returned when a mutating operation is attempted on read-only headers.
-///
-/// Corresponds to Java's `IllegalStateException` thrown by `RecordHeaders`
-/// when the collection has been set to read-only.
-#[derive(Clone, Debug)]
-pub struct IllegalStateError {
-    message: String,
-}
-
-impl IllegalStateError {
-    /// Create a new `IllegalStateError` with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl std::fmt::Display for IllegalStateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for IllegalStateError {}

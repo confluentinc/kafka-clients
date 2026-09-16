@@ -137,7 +137,6 @@ public sealed class PublicProducerSendTests
         Assert.Equal(2, failure.Code);
         Assert.Contains("boom-corrupt-message", failure.Message, StringComparison.Ordinal);
         Assert.True(failure.IsRetriable);
-        Assert.False(failure.IsFatal);
     }
 
     [Fact]
