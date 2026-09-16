@@ -526,10 +526,7 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for DotnetGrpcFactory {
-        async fn create(
-            &self,
-            config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
             ))
@@ -594,10 +591,7 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for DotnetAsyncGrpcFactory {
-        async fn create(
-            &self,
-            config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
             ))
