@@ -164,8 +164,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
         TopicPartition bad = new TopicPartition("p4-all", 1);
         TopicPartition worse = new TopicPartition("p4-all", 2);
 
-        KafkaException first = new KafkaException(11, "first failure", isRetriable: false, isFatal: false);
-        KafkaException second = new KafkaException(12, "second failure", isRetriable: false, isFatal: false);
+        KafkaException first = new KafkaException(11, "first failure", isRetriable: false);
+        KafkaException second = new KafkaException(12, "second failure", isRetriable: false);
 
         Dictionary<TopicPartition, KafkaException?> outcomes = new Dictionary<TopicPartition, KafkaException?>
         {

@@ -155,12 +155,11 @@ public sealed class SafeConsumerHandleTests
             handle.Dispose();
 
             // The fallible contract's error still round-trips (classic-protocol
-            // message / flags), freed exactly once by FromHandle.
+            // message / retriable flag), freed exactly once by FromHandle.
             KafkaException? failure = KafkaException.FromHandle(outError);
             Assert.NotNull(failure);
             Assert.Equal(UnsupportedVersionCode, failure!.Code);
             Assert.False(failure.IsRetriable);
-            Assert.False(failure.IsFatal);
             Assert.Contains("Classic group protocol", failure.Message, StringComparison.Ordinal);
         }
     }

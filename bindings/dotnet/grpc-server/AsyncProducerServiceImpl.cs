@@ -191,16 +191,15 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
         catch (TimeoutException)
         {
-            // Structured TIMEOUT, matching Python's shape byte for byte (variant/code/flags).
+            // Structured TIMEOUT, matching Python's shape (grpc_server.py: code=REQUEST_TIMED_OUT).
+            // `code` is the sole discriminator post-redesign (Translate.cs remarks) — `variant` /
+            // `is_retriable` / `is_fatal` are reserved, not settable.
             return new Proto.SendResponse
             {
                 Error = new Proto.KafkaError
                 {
-                    Variant = Proto.KafkaError.Types.Variant.Timeout,
-                    Code = 7,
+                    Code = 7, // kafka_common_ErrorCode_REQUEST_TIMED_OUT
                     Message = "dotnet server: producer future timed out after 120s",
-                    IsRetriable = true,
-                    IsFatal = false,
                 },
             };
         }
