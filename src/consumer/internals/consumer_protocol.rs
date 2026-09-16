@@ -27,25 +27,16 @@
 //! [`Error::serialization`](crate::common::Error::serialization) — a
 //! non-retriable parse error, matching `SchemaException`'s nature.
 
+use crate::ConsumerProtocolAssignmentData;
+use crate::ConsumerProtocolSubscriptionData;
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::errors::SerializationError;
-use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
+use crate::common::protocol::MessageUtil;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
-use crate::consumer::consumer_partition_assignor::{Assignment, Subscription};
-use crate::consumer_protocol_assignment_data::{
-    ConsumerProtocolAssignmentData, TopicPartition as AssignmentTopicPartition,
-};
-use crate::consumer_protocol_subscription_data::{
-    ConsumerProtocolSubscriptionData, TopicPartition as SubscriptionTopicPartition,
-};
-
-/// The consumer protocol type name.
-///
-/// Corresponds to `ConsumerProtocol.PROTOCOL_TYPE`. Consumed by the admin
-/// group-describe handlers landing later in this phase.
-#[allow(dead_code)]
-pub(crate) const PROTOCOL_TYPE: &str = "consumer";
+use crate::consumer::consumer_partition_assignor::{Assignment, Subscription, SubscriptionOptionsBuilder};
+use crate::consumer_protocol_assignment_data::TopicPartition as AssignmentTopicPartition;
+use crate::consumer_protocol_subscription_data::TopicPartition as SubscriptionTopicPartition;
 
 /// Safety check translating Java's `static { }` initializer
 /// (`ConsumerProtocol.java:47-58`), which refuses to load the class when the
@@ -94,6 +85,13 @@ pub(crate) struct ConsumerProtocol;
 // the classic-assignor/consumer-join paths are translated in a later milestone.
 #[allow(dead_code)]
 impl ConsumerProtocol {
+    /// The consumer protocol type name.
+    ///
+    /// Corresponds to `ConsumerProtocol.PROTOCOL_TYPE`. Consumed by the admin
+    /// group-describe handlers landing later in this phase.
+    #[allow(dead_code)]
+    pub(crate) const PROTOCOL_TYPE: &str = "consumer";
+
     /// Translate a decode failure the way each Java `deserialize*` method's
     /// `catch (BufferUnderflowException e)` does.
     ///
@@ -114,7 +112,7 @@ impl ConsumerProtocol {
     /// through [`Error::source`].
     fn map_decode_error(e: std::io::Error, part: &str) -> Error {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            Error::Serialization(SerializationError::with_source(
+            Error::Serialization(SerializationError::new_source(
                 format!("Buffer underflow while parsing consumer protocol's {part}"),
                 Error::serialization(e.to_string()),
             ))
@@ -177,7 +175,7 @@ impl ConsumerProtocol {
 
         data.set_generation_id(subscription.generation_id().unwrap_or(-1));
 
-        Ok(to_version_prefixed_byte_buffer(version, &mut data)
+        Ok(MessageUtil::to_version_prefixed_byte_buffer(version, &mut data)
             .map_err(|e| Error::serialization(format!("Failed to serialize consumer protocol's subscription: {e}")))?
             .into_buffer())
     }
@@ -207,12 +205,14 @@ impl ConsumerProtocol {
             _ => None,
         };
 
-        Ok(Subscription::new(
-            data.topics.clone(),
-            data.user_data.clone(),
-            owned_partitions,
-            data.generation_id,
-            rack_id,
+        Ok(Subscription::new_options(
+            SubscriptionOptionsBuilder::new()
+                .set_topics(data.topics.clone())
+                .set_user_data(data.user_data.clone())
+                .set_owned_partitions(owned_partitions)
+                .set_generation_id(data.generation_id)
+                .set_rack_id(rack_id)
+                .build()?,
         ))
     }
 
@@ -220,7 +220,7 @@ impl ConsumerProtocol {
     ///
     /// Mirrors `ConsumerProtocol.deserializeSubscription(ByteBuffer)`.
     pub(crate) fn deserialize_subscription(bytes: &[u8]) -> Result<Subscription, Error> {
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
+        let mut buffer = ByteBufferAccessor::new(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_subscription_versioned(&mut buffer, version)
     }
@@ -246,7 +246,7 @@ impl ConsumerProtocol {
     pub(crate) fn deserialize_consumer_protocol_subscription(
         bytes: &[u8],
     ) -> Result<ConsumerProtocolSubscriptionData, Error> {
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
+        let mut buffer = ByteBufferAccessor::new(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_consumer_protocol_subscription_versioned(&mut buffer, version)
     }
@@ -281,7 +281,7 @@ impl ConsumerProtocol {
         }
         data.set_assigned_partitions(assigned);
 
-        Ok(to_version_prefixed_byte_buffer(version, &mut data)
+        Ok(MessageUtil::to_version_prefixed_byte_buffer(version, &mut data)
             .map_err(|e| Error::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
             .into_buffer())
     }
@@ -296,7 +296,7 @@ impl ConsumerProtocol {
         version: i16,
     ) -> Result<Vec<u8>, Error> {
         let version = Self::check_assignment_version(version)?;
-        Ok(to_version_prefixed_byte_buffer(version, &mut data)
+        Ok(MessageUtil::to_version_prefixed_byte_buffer(version, &mut data)
             .map_err(|e| Error::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
             .into_buffer())
     }
@@ -321,7 +321,7 @@ impl ConsumerProtocol {
             }
         }
 
-        Ok(Assignment::new(assigned_partitions, data.user_data.clone()))
+        Ok(Assignment::new_user_data(assigned_partitions, data.user_data.clone()))
     }
 
     /// Deserializes an assignment, reading the version header from the buffer.
@@ -330,7 +330,7 @@ impl ConsumerProtocol {
     /// entry point used by the admin group-describe handlers to decode a
     /// classic member's raw assignment bytes.
     pub(crate) fn deserialize_assignment(bytes: &[u8]) -> Result<Assignment, Error> {
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
+        let mut buffer = ByteBufferAccessor::new(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_assignment_versioned(&mut buffer, version)
     }
@@ -356,7 +356,7 @@ impl ConsumerProtocol {
     pub(crate) fn deserialize_consumer_protocol_assignment(
         bytes: &[u8],
     ) -> Result<ConsumerProtocolAssignmentData, Error> {
-        let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
+        let mut buffer = ByteBufferAccessor::new(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_consumer_protocol_assignment_versioned(&mut buffer, version)
     }
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn genuine_underflow_is_relabelled_with_the_cause_attached() {
         // One byte where a 2-byte version header is required.
-        let mut accessor = ByteBufferAccessor::from_bytes(vec![0u8]);
+        let mut accessor = ByteBufferAccessor::new(vec![0u8]);
         let err = ConsumerProtocol::deserialize_version(&mut accessor)
             .expect_err("a 1-byte buffer cannot yield a 2-byte version");
 
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn assignment_round_trip() {
         let partitions = vec![tp("foo", 0), tp("foo", 1), tp("bar", 2)];
-        let assignment = Assignment::with_partitions(partitions.clone());
+        let assignment = Assignment::new(partitions.clone());
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
 
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
@@ -481,7 +481,7 @@ mod tests {
     /// Round-trips an assignment carrying user data.
     #[test]
     fn assignment_round_trip_with_user_data() {
-        let assignment = Assignment::new(vec![tp("t", 3)], Some(vec![1, 2, 3, 4]));
+        let assignment = Assignment::new_user_data(vec![tp("t", 3)], Some(vec![1, 2, 3, 4]));
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
         assert_eq!(decoded.partitions(), &[tp("t", 3)]);
@@ -491,7 +491,7 @@ mod tests {
     /// An empty assignment decodes to no partitions.
     #[test]
     fn empty_assignment_round_trip() {
-        let assignment = Assignment::with_partitions(Vec::new());
+        let assignment = Assignment::new(Vec::new());
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
         assert!(decoded.partitions().is_empty());
@@ -500,12 +500,14 @@ mod tests {
     /// Round-trips a subscription including owned partitions and generation.
     #[test]
     fn subscription_round_trip() {
-        let subscription = Subscription::new(
-            vec!["b".to_string(), "a".to_string()],
-            None,
-            vec![tp("a", 0), tp("a", 1)],
-            7,
-            Some("rack-1".to_string()),
+        let subscription = Subscription::new_options(
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["b".to_string(), "a".to_string()])
+                .set_owned_partitions(vec![tp("a", 0), tp("a", 1)])
+                .set_generation_id(7)
+                .set_rack_id(Some("rack-1".to_string()))
+                .build()
+                .unwrap(),
         );
         let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
         let decoded = ConsumerProtocol::deserialize_subscription(&bytes).unwrap();
@@ -519,9 +521,8 @@ mod tests {
     /// A version below the lowest supported version is rejected.
     #[test]
     fn deserialize_assignment_rejects_low_version() {
-        let err =
-            ConsumerProtocol::deserialize_assignment_versioned(&mut ByteBufferAccessor::from_bytes(Vec::new()), -1)
-                .expect_err("negative version must be rejected");
+        let err = ConsumerProtocol::deserialize_assignment_versioned(&mut ByteBufferAccessor::new(Vec::new()), -1)
+            .expect_err("negative version must be rejected");
         assert!(
             err.message().contains("Unsupported assignment version: -1"),
             "got: {}",
@@ -533,7 +534,7 @@ mod tests {
     /// the current format (mirrors Java's forward-compat behavior).
     #[test]
     fn serialize_assignment_clamps_high_version() {
-        let assignment = Assignment::with_partitions(vec![tp("t", 0)]);
+        let assignment = Assignment::new(vec![tp("t", 0)]);
         // Version 99 is clamped to HIGHEST_SUPPORTED_VERSION on both ends.
         let bytes = ConsumerProtocol::serialize_assignment_versioned(&assignment, 99).unwrap();
         let decoded = ConsumerProtocol::deserialize_assignment(&bytes).unwrap();
@@ -545,7 +546,7 @@ mod tests {
     #[test]
     fn consumer_protocol_assignment_data_round_trip() {
         // Serialize a normal assignment, then decode it as the raw data struct.
-        let assignment = Assignment::with_partitions(vec![tp("foo", 0), tp("foo", 1)]);
+        let assignment = Assignment::new(vec![tp("foo", 0), tp("foo", 1)]);
         let bytes = ConsumerProtocol::serialize_assignment(&assignment).unwrap();
 
         let data = ConsumerProtocol::deserialize_consumer_protocol_assignment(&bytes).unwrap();
@@ -570,7 +571,14 @@ mod tests {
     /// `serialize_subscription` / `deserialize_consumer_protocol_subscription`.
     #[test]
     fn consumer_protocol_subscription_data_round_trip() {
-        let subscription = Subscription::new(vec!["b".to_string(), "a".to_string()], None, vec![tp("a", 0)], 3, None);
+        let subscription = Subscription::new_options(
+            SubscriptionOptionsBuilder::new()
+                .set_topics(vec!["b".to_string(), "a".to_string()])
+                .set_owned_partitions(vec![tp("a", 0)])
+                .set_generation_id(3)
+                .build()
+                .unwrap(),
+        );
         let bytes = ConsumerProtocol::serialize_subscription(&subscription).unwrap();
 
         let data = ConsumerProtocol::deserialize_consumer_protocol_subscription(&bytes).unwrap();

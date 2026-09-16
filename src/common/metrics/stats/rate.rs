@@ -17,9 +17,9 @@
 
 use std::sync::Arc;
 
-use crate::common::metrics::internals::metrics_utils::{TimeUnit, convert};
+use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
 use crate::common::metrics::stats::SampledStat;
-use crate::common::metrics::stats::windowed_sum::WindowedSum;
+use crate::common::metrics::stats::WindowedSum;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// The rate of the given quantity. By default this is the total observed over a
@@ -36,29 +36,29 @@ pub struct Rate {
 impl Rate {
     /// Create a `Rate` over seconds backed by a [`WindowedSum`].
     pub fn new() -> Self {
-        Self::with_unit(TimeUnit::Seconds)
+        Self::new_unit(TimeUnit::Seconds)
     }
 
     /// Create a `Rate` with the given unit backed by a [`WindowedSum`].
-    pub fn with_unit(unit: TimeUnit) -> Self {
-        Self::with_unit_stat(unit, Arc::new(WindowedSum::new().into_sampled_stat()))
+    pub fn new_unit(unit: TimeUnit) -> Self {
+        Self::new_unit_stat(unit, Arc::new(WindowedSum::new().into_sampled_stat()))
     }
 
     /// Create a `Rate` over seconds backed by the given sampled stat.
-    pub fn with_stat(stat: Arc<SampledStat>) -> Self {
-        Self::with_unit_stat(TimeUnit::Seconds, stat)
+    pub fn new_stat(stat: Arc<SampledStat>) -> Self {
+        Self::new_unit_stat(TimeUnit::Seconds, stat)
     }
 
     /// Create a `Rate` with the given unit and sampled stat.
-    pub fn with_unit_stat(unit: TimeUnit, stat: Arc<SampledStat>) -> Self {
-        Self::with_unit_stat_window(unit, stat, -1)
+    pub fn new_unit_stat(unit: TimeUnit, stat: Arc<SampledStat>) -> Self {
+        Self::new_unit_stat_window(unit, stat, -1)
     }
 
     /// Create a `Rate` with the given unit, sampled stat and explicit window.
     ///
     /// `window` is expressed in `unit`; when positive it configures the stat's
     /// own time window (Java `stat.withTimeWindow(window, unit)`).
-    pub fn with_unit_stat_window(unit: TimeUnit, stat: Arc<SampledStat>, window: i64) -> Self {
+    pub fn new_unit_stat_window(unit: TimeUnit, stat: Arc<SampledStat>, window: i64) -> Self {
         let time_window_ms = if window > 0 {
             let ms = unit.to_millis(window);
             stat.with_time_window_ms(ms);
@@ -135,16 +135,16 @@ impl Stat for Rate {
 impl Measurable for Rate {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         let value = self.stat.measure(config, now);
-        value / convert(self.window_size(config, now), self.unit)
+        value / MetricsUtils::convert(self.window_size(config, now), self.unit)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::Time;
-    use crate::common::metrics::internals::metrics_utils::convert;
-    use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::internals::MetricsUtils;
 
     const EPS: f64 = 0.000001;
 
@@ -154,8 +154,8 @@ mod tests {
         // {numSample, sampleWindowSizeSec}
         for (num_sample, sample_window_size_sec) in [(1, 1), (1, 11), (11, 1), (11, 11)] {
             let config = MetricConfig::new()
-                .with_samples(num_sample)
-                .with_time_window(sample_window_size_sec, TimeUnit::Seconds);
+                .set_samples(num_sample)
+                .set_time_window(sample_window_size_sec, TimeUnit::Seconds);
             let rate = Rate::new();
             let time = MockTime::new();
             let sample_value = 50.0;
@@ -170,7 +170,7 @@ mod tests {
 
             // The rate calculation assumes N-1 prior samples of value 0.
             let dummy_prior_samples_assumed = (num_sample - 1) as f64;
-            let window_size = convert(measurement_time, TimeUnit::Seconds)
+            let window_size = MetricsUtils::convert(measurement_time, TimeUnit::Seconds)
                 + (dummy_prior_samples_assumed * sample_window_size_sec as f64);
             let expected_rate_per_sec = sample_value / window_size;
             assert!(
@@ -183,7 +183,7 @@ mod tests {
     // RateTest.testRateIsConsistentAfterTheFirstWindow
     #[test]
     fn test_rate_is_consistent_after_the_first_window() {
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Seconds).with_samples(2);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let rate = Rate::new();
         let time = MockTime::new();
         let steps = [0, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100];
@@ -213,8 +213,8 @@ mod tests {
     fn unit_name_strips_last_two_chars() {
         // Faithful to Java Rate.unitName(): name().substring(0, length-2).toLowerCase().
         // "SECONDS" (7) -> [0..5] = "SECON" -> "secon".
-        assert_eq!("secon", Rate::with_unit(TimeUnit::Seconds).unit_name());
+        assert_eq!("secon", Rate::new_unit(TimeUnit::Seconds).unit_name());
         // "MILLISECONDS" (12) -> [0..10] = "MILLISECON" -> "millisecon".
-        assert_eq!("millisecon", Rate::with_unit(TimeUnit::Milliseconds).unit_name());
+        assert_eq!("millisecon", Rate::new_unit(TimeUnit::Milliseconds).unit_name());
     }
 }

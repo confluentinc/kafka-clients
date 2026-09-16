@@ -58,30 +58,30 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
-use crate::common::metrics::time::Time;
-use crate::common::protocol::Errors;
+use crate::OffsetCommitRequestData;
+use crate::OffsetFetchRequestData;
+use crate::common::Errors;
+use crate::common::metrics::Time;
 use crate::common::requests::{
     OffsetCommitRequestBuilder, OffsetCommitResponse, OffsetFetchRequestBuilder, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH,
 };
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::offset_commit_callback::OffsetCommitCallback;
+use crate::consumer::OffsetCommitCallback;
 use crate::consumer::{ConsumerCommitFailedError, ConsumerRetriableCommitFailedError};
-use crate::offset_commit_request_data::{
-    OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-};
-use crate::offset_fetch_request_data::{OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics};
+use crate::offset_commit_request_data::{OffsetCommitRequestPartition, OffsetCommitRequestTopic};
+use crate::offset_fetch_request_data::{OffsetFetchRequestGroup, OffsetFetchRequestTopics};
 
-use super::consumer_metadata::ConsumerMetadata;
-use super::coordinator_request_manager::CoordinatorRequestManager;
-use super::member_state_listener::MemberStateListener;
-use super::network_client_delegate::{PollResult, UnsentRequest};
-use super::offset_commit_callback_invoker::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
-use super::offset_commit_metrics_manager::OffsetCommitMetricsManager;
-use super::request_manager::RequestManager;
-use super::subscription_state::SubscriptionState;
-use super::timed_request_state::TimedRequestState;
+use super::ConsumerMetadata;
+use super::CoordinatorRequestManager;
+use super::MemberStateListener;
+use super::OffsetCommitMetricsManager;
+use super::RequestManager;
+use super::SubscriptionState;
+use super::TimedRequestState;
+use super::{AutoCommitInterceptorHook, OffsetCommitCallbackInvoker};
+use super::{PollResult, UnsentRequest};
 
 // =========================================================================
 //                       MemberInfo + AutoCommitState
@@ -1889,7 +1889,8 @@ fn classify_and_complete_commit(
                     unauthorized.insert(tp.topic().to_string());
                 },
                 _ => {
-                    request.complete_err(Error::kafka(format!("Unexpected error in commit: {}", error.message())));
+                    request
+                        .complete_err(Error::kafka_message(format!("Unexpected error in commit: {}", error.message())));
                     return;
                 },
             }
@@ -1988,7 +1989,7 @@ fn handle_offset_fetch_response(
                 } else {
                     None
                 };
-                match OffsetAndMetadata::with_leader_epoch(
+                match OffsetAndMetadata::new_leader_epoch_metadata(
                     partition.committed_offset,
                     leader_epoch,
                     partition.metadata.clone().unwrap_or_default(),
@@ -2037,7 +2038,7 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> Error {
         | Errors::CoordinatorNotAvailable => Error::new(error),
         Errors::GroupAuthorizationFailed => Error::group_authorization(group_id.to_string()),
         _ if error.error().is_some_and(|e| e.is_retriable_error()) => Error::new(error),
-        _ => Error::kafka(format!("Unexpected error in fetch offset response: {}", error.message())),
+        _ => Error::kafka_message(format!("Unexpected error in fetch offset response: {}", error.message())),
     }
 }
 
@@ -2676,7 +2677,7 @@ mod tests {
     //! `deadline_ms` — mirroring Java, which checks `isExpired()` /
     //! `handleRetriablePartitionErrors` against `time.milliseconds()` at
     //! response-handling time. Deadline-expiry tests therefore inject a
-    //! [`MockTime`](crate::common::metrics::time::mock::MockTime) via
+    //! [`MockTime`](crate::common::metrics::MockTime) via
     //! [`make_manager_with_mock_time`] and advance it with `MockTime::sleep`
     //! to trip the deadline (mirroring Java's `MockTime.sleep`), rather than
     //! relying on a model clock advanced by `retry_backoff_ms`. Each retry
@@ -2695,12 +2696,12 @@ mod tests {
 
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::internals::subscription_state::SubscriptionState;
+    use crate::consumer::internals::SubscriptionState;
 
     const GROUP_ID: &str = "group-1";
 
     fn test_config(enable_auto_commit: bool) -> ConsumerConfig {
-        let mut cfg = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let mut cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         cfg.enable_auto_commit = enable_auto_commit;
         cfg.auto_commit_interval_ms = 1_000;
         cfg
@@ -2715,23 +2716,19 @@ mod tests {
         // backoff windows unreachably far ahead of the poll `now`).
         // Deadline-expiry tests use [`make_manager_with_mock_time`] instead so
         // they can advance the clock past the deadline.
-        make_manager_with_time(
-            now_ms,
-            enable_auto_commit,
-            Arc::new(crate::common::metrics::time::mock::MockTime::new()),
-        )
+        make_manager_with_time(now_ms, enable_auto_commit, Arc::new(crate::common::metrics::MockTime::new()))
     }
 
     /// Build a manager over an explicit [`Time`] handle. Deadline-expiry tests
-    /// pass a [`MockTime`](crate::common::metrics::time::mock::MockTime) so
+    /// pass a [`MockTime`](crate::common::metrics::MockTime) so
     /// they can advance the clock past `deadline_ms` deterministically —
     /// mirroring Java's `MockTime.sleep` driving `isExpired()`.
     fn make_manager_with_time(now_ms: i64, enable_auto_commit: bool, time: Arc<dyn Time>) -> CommitRequestManager {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -2744,8 +2741,8 @@ mod tests {
     fn make_manager_with_mock_time(
         now_ms: i64,
         enable_auto_commit: bool,
-    ) -> (CommitRequestManager, Arc<crate::common::metrics::time::mock::MockTime>) {
-        let time = Arc::new(crate::common::metrics::time::mock::MockTime::new());
+    ) -> (CommitRequestManager, Arc<crate::common::metrics::MockTime>) {
+        let time = Arc::new(crate::common::metrics::MockTime::new());
         let mgr = make_manager_with_time(now_ms, enable_auto_commit, Arc::clone(&time) as Arc<dyn Time>);
         (mgr, time)
     }
@@ -2761,14 +2758,14 @@ mod tests {
         let (mgr, subs, _time) = make_manager_with_subs_and_time(
             now_ms,
             enable_auto_commit,
-            Arc::new(crate::common::metrics::time::mock::MockTime::new()),
+            Arc::new(crate::common::metrics::MockTime::new()),
         );
         (mgr, subs)
     }
 
     /// As [`make_manager_with_subs`] but over an explicit [`Time`] handle,
     /// returning the handle too so deadline-expiry tests can advance a
-    /// [`MockTime`](crate::common::metrics::time::mock::MockTime).
+    /// [`MockTime`](crate::common::metrics::MockTime).
     fn make_manager_with_subs_and_time(
         now_ms: i64,
         enable_auto_commit: bool,
@@ -2776,9 +2773,9 @@ mod tests {
     ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>, Arc<dyn Time>) {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
@@ -2794,11 +2791,11 @@ mod tests {
         map
     }
 
-    use crate::client_response::ClientResponse;
+    use crate::ClientResponse;
+    use crate::common::ApiKeys;
     use crate::common::Node;
-    use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader};
-    use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+    use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader, RequestHeaderOptionsBuilder};
+    use crate::consumer::internals::CoordinatorRequestManager;
 
     /// A `CoordinatorRequestManager` with a known coordinator node injected,
     /// mirroring `when(coordinatorRequestManager.coordinator()).thenReturn(...)`.
@@ -2811,7 +2808,16 @@ mod tests {
     /// Wrap a `ConcreteResponse` in a `ClientResponse` with the appropriate
     /// API key header. Mirrors the Java test's `ClientResponse` construction.
     fn client_response_for(api_key: &ApiKeys, version: i16, response: ConcreteResponse) -> ClientResponse {
-        let header = RequestHeader::new(api_key, version, "test-client", 0).expect("request header");
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(api_key)
+                .set_request_version(version)
+                .set_client_id("test-client")
+                .set_correlation_id(0)
+                .build()
+                .unwrap(),
+        )
+        .expect("request header");
         ClientResponse::new(header, None, "localhost:9092", 0, 1, false, None, None, Some(response))
     }
 
@@ -2819,7 +2825,8 @@ mod tests {
     /// map. Mirrors Java's `mockOffsetCommitResponse` /
     /// `buildOffsetCommitClientResponse`.
     fn offset_commit_response(per_partition: HashMap<TopicPartition, Errors>) -> ClientResponse {
-        let response = ConcreteResponse::OffsetCommit(OffsetCommitResponse::from_response_data(0, &per_partition));
+        let response =
+            ConcreteResponse::OffsetCommit(OffsetCommitResponse::new_throttle_time_ms_response_data(0, &per_partition));
         client_response_for(&ApiKeys::OFFSET_COMMIT, 1, response)
     }
 
@@ -2845,8 +2852,9 @@ mod tests {
         topics: Vec<((&str, Uuid), Vec<FetchPartition>)>,
         group_error: Errors,
     ) -> ClientResponse {
+        use crate::OffsetFetchResponseData;
         use crate::offset_fetch_response_data::{
-            OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+            OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
         };
         let mut response_topics = Vec::new();
         for ((name, topic_id), partitions) in topics {
@@ -2939,7 +2947,7 @@ mod tests {
         counts.insert(topic.to_string(), 1);
         let mut ids = HashMap::new();
         ids.insert(topic.to_string(), topic_id);
-        let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
             "cluster",
             1,
             &HashMap::new(),
@@ -3017,8 +3025,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn commit_async_empty_offsets_resolves_immediately() {
         let manager = make_manager(0, false);
-        let interceptors =
-            crate::consumer::internals::consumer_interceptors::ConsumerInterceptors::<String, String>::new(Vec::new());
+        let interceptors = crate::consumer::internals::ConsumerInterceptors::<String, String>::new(Vec::new());
         let invoker = Arc::new(OffsetCommitCallbackInvoker::new(interceptors));
         let rx = manager.commit_async(HashMap::new(), None, invoker, 0);
         let result = rx.await.expect("sender alive").expect("ok");
@@ -3191,7 +3198,7 @@ mod tests {
         // `autoCommitCallback` BiConsumer in `requestAutoCommit`).
         use crate::common::Node;
         use crate::common::requests::ConcreteResponse;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
         let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
         let poll_result = manager.poll_with_coordinator(&coordinator, after_expiry_ms);
@@ -3201,26 +3208,20 @@ mod tests {
         let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
         response_data.insert(tp.clone(), Errors::None);
         let response = ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::from_response_data(0, &response_data),
+            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
-        let header = crate::common::requests::RequestHeader::new(
-            &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
-            0,
-            "test-client",
-            0,
+        let header = crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
+                .set_request_version(0)
+                .set_client_id("test-client")
+                .set_correlation_id(0)
+                .build()
+                .unwrap(),
         )
         .expect("request header");
-        let client_response = crate::client_response::ClientResponse::new(
-            header,
-            None,
-            "localhost:9092",
-            0,
-            1,
-            false,
-            None,
-            None,
-            Some(response),
-        );
+        let client_response =
+            crate::ClientResponse::new(header, None, "localhost:9092", 0, 1, false, None, None, Some(response));
         unsent.handler().on_complete(client_response);
         // Yield until the spawned auto-commit task clears the flag.
         for _ in 0..32 {
@@ -3274,7 +3275,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn inflight_offset_fetches_drained_on_response() {
         use crate::common::Node;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
 
         let manager = make_manager(0, false);
         let mut partitions = HashSet::new();
@@ -3336,7 +3337,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn commit_sync_surfaces_timeout_error_after_deadline_expiry() {
         use crate::common::Node;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
 
         let (manager, mock_time) = make_manager_with_mock_time(0, false);
         // Short deadline. The retry driver checks expiry against the real
@@ -3494,7 +3495,7 @@ mod tests {
     async fn maybe_auto_commit_sync_before_rebalance_flushes_offsets() {
         use crate::common::Node;
         use crate::common::requests::ConcreteResponse;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
 
         let (manager, subs) = make_manager_with_subs(0, true);
         // Seed `subscriptions.allConsumed()`: assign one partition and
@@ -3538,26 +3539,20 @@ mod tests {
         let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
         response_data.insert(tp.clone(), Errors::None);
         let response = ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::from_response_data(0, &response_data),
+            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
-        let header = crate::common::requests::RequestHeader::new(
-            &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
-            0,
-            "test-client",
-            0,
+        let header = crate::common::requests::RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
+                .set_request_version(0)
+                .set_client_id("test-client")
+                .set_correlation_id(0)
+                .build()
+                .unwrap(),
         )
         .expect("request header");
-        let client_response = crate::client_response::ClientResponse::new(
-            header,
-            None,
-            "localhost:9092",
-            0,
-            1,
-            false,
-            None,
-            None,
-            Some(response),
-        );
+        let client_response =
+            crate::ClientResponse::new(header, None, "localhost:9092", 0, 1, false, None, None, Some(response));
         unsent.handler().on_complete(client_response);
 
         // Drive the runtime so the spawned response handler runs and
@@ -3593,7 +3588,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_sync_before_rebalance_surfaces_stale_epoch_when_no_valid_epoch() {
         use crate::common::Node;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
 
         let (manager, subs) = make_manager_with_subs(0, true);
         // Member epoch defaults to None — that's the relevant precondition
@@ -3662,9 +3657,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_sync_before_rebalance_timeout_wins_over_unknown_topic_or_partition() {
         use crate::common::Node;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
 
-        let mock_time = Arc::new(crate::common::metrics::time::mock::MockTime::new());
+        let mock_time = Arc::new(crate::common::metrics::MockTime::new());
         let (manager, subs, _time) = make_manager_with_subs_and_time(0, true, Arc::clone(&mock_time) as Arc<dyn Time>);
         let tp = TopicPartition::new("t".to_string(), 0);
         {
@@ -3862,7 +3857,7 @@ mod tests {
         let mut counts = HashMap::new();
         counts.insert(tp.topic().to_string(), tp.partition() + 1);
         let tp_owned = tp.clone();
-        let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
             "cluster",
             1,
             &HashMap::new(),
@@ -3945,7 +3940,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
         // Seed a lower epoch so the commit path's update is observable (Java
         // verifies the call on a mock; the Rust Metadata only replaces an
@@ -3975,7 +3970,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
         seed_partition_leader_epoch(&manager, &tp, 0);
 
@@ -4189,7 +4184,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
 
         let mut public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
@@ -5131,14 +5126,14 @@ mod tests {
         cfg.retry_backoff_ms = 0;
         cfg.retry_backoff_max_ms = 0;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        let mock_time = Arc::new(crate::common::metrics::time::mock::MockTime::new());
+        let mock_time = Arc::new(crate::common::metrics::MockTime::new());
         let manager =
             CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, Arc::clone(&mock_time) as Arc<dyn Time>, 0);
         let coordinator = coordinator_with_node();
@@ -5848,9 +5843,9 @@ mod tests {
     //                §31 — interceptor invocation on auto-commit
     // ---------------------------------------------------------------------
 
+    use crate::consumer::ConsumerInterceptor;
     use crate::consumer::ConsumerRecords;
-    use crate::consumer::interceptor::ConsumerInterceptor;
-    use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
+    use crate::consumer::internals::ConsumerInterceptors;
 
     /// Records `on_commit` invocations so the §31 tests can assert the
     /// interceptor fired (and with which offsets).
@@ -5974,13 +5969,13 @@ mod tests {
             now_ms,
             enable_auto_commit,
             interval_ms,
-            Arc::new(crate::common::metrics::time::mock::MockTime::new()),
+            Arc::new(crate::common::metrics::MockTime::new()),
         )
     }
 
     /// As [`make_manager_with_subs_interval`] but over an explicit [`Time`]
     /// handle. The rebalance-flush retry test injects a
-    /// [`MockTime`](crate::common::metrics::time::mock::MockTime) held below
+    /// [`MockTime`](crate::common::metrics::MockTime) held below
     /// the deadline so a retriable failure re-queues (rather than being seen
     /// as expired against the wall clock).
     fn make_manager_with_subs_interval_time(
@@ -5992,9 +5987,9 @@ mod tests {
         let mut cfg = test_config(enable_auto_commit);
         cfg.auto_commit_interval_ms = interval_ms.clamp(0, i64::from(i32::MAX)) as i32;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &cfg,
             Arc::clone(&subs),
             ClusterResourceListeners::new(),

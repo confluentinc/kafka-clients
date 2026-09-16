@@ -32,35 +32,20 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::OffsetFetchRequestData;
+use crate::OffsetFetchResponseData;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::offset_fetch_request_data::{
-    OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
-};
+use crate::offset_fetch_request_data::{OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics};
 use crate::offset_fetch_response_data::{
-    OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
+    OffsetFetchResponseGroup, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
 };
 
 use super::ConcreteResponse;
 use super::OffsetFetchResponse;
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use super::abstract_request::{ConcreteRequest, RequestBuilder};
-
-/// Wire version at which the top-level `error_code` and nullable `topics`
-/// fields appear.
-pub const TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION: i16 = 2;
-/// Wire version at which `requireStable` becomes available.
-pub const REQUIRE_STABLE_OFFSET_MIN_VERSION: i16 = 7;
-/// Wire version at which multiple groups can be batched in a single request.
-pub const BATCH_MIN_VERSION: i16 = 8;
-/// Wire version at which topic ids replace topic names.
-pub const TOPIC_ID_MIN_VERSION: i16 = 10;
-
-/// Sentinel offset value indicating "no committed offset".
-pub const INVALID_OFFSET: i64 = -1;
-/// Sentinel metadata string used when no metadata is associated.
-pub const NO_METADATA: &str = "";
 
 /// An `OffsetFetch` request.
 ///
@@ -72,6 +57,25 @@ pub struct OffsetFetchRequest {
 }
 
 impl OffsetFetchRequest {
+    /// Wire version at which the top-level `error_code` and nullable `topics`
+    /// fields appear.
+    pub const TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION: i16 = 2;
+
+    /// Wire version at which `requireStable` becomes available.
+    pub const REQUIRE_STABLE_OFFSET_MIN_VERSION: i16 = 7;
+
+    /// Wire version at which multiple groups can be batched in a single request.
+    pub const BATCH_MIN_VERSION: i16 = 8;
+
+    /// Wire version at which topic ids replace topic names.
+    pub const TOPIC_ID_MIN_VERSION: i16 = 10;
+
+    /// Sentinel offset value indicating "no committed offset".
+    pub const INVALID_OFFSET: i64 = -1;
+
+    /// Sentinel metadata string used when no metadata is associated.
+    pub const NO_METADATA: &str = "";
+
     /// Creates a new `OffsetFetchRequest` from data and version.
     ///
     /// Mirrors Java's private constructor.
@@ -120,7 +124,7 @@ impl OffsetFetchRequest {
     ///
     /// Mirrors Java's `groups()`.
     pub fn groups(&self) -> Vec<OffsetFetchRequestGroup> {
-        if self.version >= BATCH_MIN_VERSION {
+        if self.version >= OffsetFetchRequest::BATCH_MIN_VERSION {
             return self.data.groups.clone();
         }
         let mut group = OffsetFetchRequestGroup::new();
@@ -188,7 +192,7 @@ impl OffsetFetchRequest {
         let mut data = OffsetFetchResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
 
-        if self.version < TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
+        if self.version < OffsetFetchRequest::TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
             // No top-level error; propagate the error to every partition.
             if let Some(topics) = &self.data.topics {
                 let response_topics = topics
@@ -203,8 +207,8 @@ impl OffsetFetchRequest {
                                 let mut p = OffsetFetchResponsePartition::new();
                                 p.set_partition_index(partition_index);
                                 p.set_error_code(error.code());
-                                p.set_committed_offset(INVALID_OFFSET);
-                                p.set_metadata(Some(NO_METADATA.to_string()));
+                                p.set_committed_offset(OffsetFetchRequest::INVALID_OFFSET);
+                                p.set_metadata(Some(OffsetFetchRequest::NO_METADATA.to_string()));
                                 p.set_committed_leader_epoch(RECORD_BATCH_NO_PARTITION_LEADER_EPOCH);
                                 p
                             })
@@ -215,7 +219,7 @@ impl OffsetFetchRequest {
                     .collect();
                 data.set_topics(response_topics);
             }
-        } else if self.version < BATCH_MIN_VERSION {
+        } else if self.version < OffsetFetchRequest::BATCH_MIN_VERSION {
             // Top-level error code; single-group form.
             data.set_error_code(error.code());
         } else {
@@ -239,7 +243,7 @@ impl OffsetFetchRequest {
     /// Returns `true` if the wire protocol uses topic ids at the given
     /// version (v10+).
     pub fn use_topic_ids(version: i16) -> bool {
-        version >= TOPIC_ID_MIN_VERSION
+        version >= OffsetFetchRequest::TOPIC_ID_MIN_VERSION
     }
 
     /// Returns `true` if the group requests offsets for all topics (i.e. its
@@ -306,7 +310,7 @@ impl OffsetFetchRequestBuilder {
             data,
             throw_on_fetch_stable_offsets_unsupported,
             oldest_allowed_version: ApiKeys::OFFSET_FETCH.oldest_version(),
-            latest_allowed_version: TOPIC_ID_MIN_VERSION - 1,
+            latest_allowed_version: OffsetFetchRequest::TOPIC_ID_MIN_VERSION - 1,
         }
     }
 
@@ -318,7 +322,7 @@ impl OffsetFetchRequestBuilder {
     /// Java: `maybeDowngrade(short)`. Converts batched (v8+) data to the
     /// single-group v<8 wire layout. Returns the (possibly rebuilt) data.
     fn maybe_downgrade(&self, version: i16) -> OffsetFetchRequestData {
-        if version >= BATCH_MIN_VERSION || self.data.groups.is_empty() {
+        if version >= OffsetFetchRequest::BATCH_MIN_VERSION || self.data.groups.is_empty() {
             return self.data.clone();
         }
         let group = &self.data.groups[0];
@@ -367,7 +371,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
             ));
         }
         // throwIfBatchingIsUnsupported
-        if self.data.groups.len() > 1 && version < BATCH_MIN_VERSION {
+        if self.data.groups.len() > 1 && version < OffsetFetchRequest::BATCH_MIN_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("Broker does not support batching groups for fetch offset request on version {version}"),
@@ -375,7 +379,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         }
         // throwIfStableOffsetsUnsupported
         if self.data.require_stable
-            && version < REQUIRE_STABLE_OFFSET_MIN_VERSION
+            && version < OffsetFetchRequest::REQUIRE_STABLE_OFFSET_MIN_VERSION
             && self.throw_on_fetch_stable_offsets_unsupported
         {
             return Err(io::Error::new(
@@ -387,7 +391,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         // the clearing happens further below by mutating a downgraded copy
         // of the data so the request as built reflects `requireStable=false`.
         // throwIfMissingRequiredTopicIdentifiers
-        if version < TOPIC_ID_MIN_VERSION {
+        if version < OffsetFetchRequest::TOPIC_ID_MIN_VERSION {
             for group in &self.data.groups {
                 if let Some(topics) = &group.topics {
                     for topic in topics {
@@ -419,7 +423,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
             }
         }
         // throwIfRequestingAllTopicsIsUnsupported
-        if version < TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
+        if version < OffsetFetchRequest::TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
             for group in &self.data.groups {
                 if group.topics.is_none() {
                     return Err(io::Error::new(
@@ -436,7 +440,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         let mut data = self.maybe_downgrade(version);
         if !self.throw_on_fetch_stable_offsets_unsupported
             && self.data.require_stable
-            && version < REQUIRE_STABLE_OFFSET_MIN_VERSION
+            && version < OffsetFetchRequest::REQUIRE_STABLE_OFFSET_MIN_VERSION
         {
             data.set_require_stable(false);
         }
@@ -487,7 +491,7 @@ mod tests {
     #[test]
     fn for_topic_names_caps_at_v9() {
         let builder = OffsetFetchRequestBuilder::for_topic_names(OffsetFetchRequestData::new(), false);
-        assert_eq!(builder.latest_allowed_version(), TOPIC_ID_MIN_VERSION - 1);
+        assert_eq!(builder.latest_allowed_version(), OffsetFetchRequest::TOPIC_ID_MIN_VERSION - 1);
     }
 
     /// `build_version` rejects multi-group requests at v<8.

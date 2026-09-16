@@ -216,8 +216,21 @@ pub struct MockClient {
 }
 
 impl MockClient {
+    /// Creates a new `MockClient` with no static nodes.
+    ///
+    /// Translates `MockClient(Time time)` (`MockClient.java:92-94`), which forwards to
+    /// `this(time, new NoOpMetadataUpdater())`. `NoOpMetadataUpdater.fetchNodes()` returns
+    /// `Collections.emptyList()` (`:769`), and `StaticMetadataUpdater` extends it overriding
+    /// only `fetchNodes()` (`:783-791`) — so Java's no-nodes form is exactly the
+    /// static-nodes form with an empty list, which is what this forwards to.
+    pub fn new(time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        Self::new_nodes(Vec::new(), time_provider)
+    }
+
     /// Creates a new `MockClient` with the given nodes and time provider.
-    pub fn new(nodes: Vec<Node>, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+    ///
+    /// Translates `MockClient(Time time, List<Node> staticNodes)` (`MockClient.java:105-107`).
+    pub fn new_nodes(nodes: Vec<Node>, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
         Self {
             correlation: AtomicI32::new(0),
             time_provider,
@@ -360,7 +373,7 @@ impl MockClient {
     /// Queue up a response that will be delivered when `poll()` is called.
     /// The next queued request will be matched.
     pub fn respond(&mut self, response: ConcreteResponse) {
-        self.respond_with_disconnect(response, false);
+        self.respond_disconnected(response, false);
     }
 
     /// Queue up a response for the next pending request, first asserting `matcher`
@@ -375,7 +388,7 @@ impl MockClient {
     ///
     /// If no request is pending (Java's `:384-385`), or if `matcher` rejects it — Java
     /// throws `IllegalStateException` in the same place (`:388-389`).
-    pub fn respond_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
+    pub fn respond_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
         let built = self
             .requests
             .front_mut()
@@ -384,11 +397,11 @@ impl MockClient {
             .build()
             .expect("the pending request builds");
         assert!(matcher(&built), "Request matcher did not match next-in-line request {built}");
-        self.respond_with_disconnect(response, false);
+        self.respond_disconnected(response, false);
     }
 
     /// Queue up a response with a possible disconnect flag.
-    pub fn respond_with_disconnect(&mut self, response: ConcreteResponse, disconnected: bool) {
+    pub fn respond_disconnected(&mut self, response: ConcreteResponse, disconnected: bool) {
         let mut request = self.requests.pop_front().expect("No requests pending for inbound response");
         let now = (self.time_provider)();
         let version = request.request_builder().latest_allowed_version();
@@ -419,7 +432,7 @@ impl MockClient {
     /// # Panics
     ///
     /// If `index` is out of range.
-    pub fn respond_to_request_at(&mut self, index: usize, response: ConcreteResponse) {
+    pub fn respond_to_request(&mut self, index: usize, response: ConcreteResponse) {
         let now = (self.time_provider)();
         let mut request = self
             .requests
@@ -444,11 +457,11 @@ impl MockClient {
 
     /// Respond to the first pending request to the given node.
     pub fn respond_from(&mut self, response: ConcreteResponse, node: &Node) {
-        self.respond_from_with_disconnect(response, node, false);
+        self.respond_from_disconnected(response, node, false);
     }
 
     /// Respond to the first pending request to the given node, with a disconnect flag.
-    pub fn respond_from_with_disconnect(&mut self, response: ConcreteResponse, node: &Node, disconnected: bool) {
+    pub fn respond_from_disconnected(&mut self, response: ConcreteResponse, node: &Node, disconnected: bool) {
         let now = (self.time_provider)();
         let node_id = node.id_string().to_string();
         let idx = self
@@ -477,7 +490,7 @@ impl MockClient {
 
     /// Prepare a future response that will be delivered when a matching request is sent.
     pub fn prepare_response(&mut self, response: ConcreteResponse) {
-        self.prepare_response_from(None, None, response, false, false);
+        self.push_future_response(None, None, response, false, false);
     }
 
     /// Prepare a future response, asserting `matcher` against the request it answers.
@@ -485,8 +498,8 @@ impl MockClient {
     /// Translated from `MockClient.prepareResponse(RequestMatcher, AbstractResponse)`
     /// (`MockClient.java:445-447`), which delegates to the disconnect overload with
     /// `disconnected = false`.
-    pub fn prepare_response_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
-        self.prepare_response_from(None, Some(matcher), response, false, false);
+    pub fn prepare_response_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
+        self.push_future_response(None, Some(matcher), response, false, false);
     }
 
     /// Prepare a future response with both a matcher and a disconnect flag.
@@ -494,23 +507,57 @@ impl MockClient {
     /// Translated from
     /// `MockClient.prepareResponse(RequestMatcher, AbstractResponse, boolean)`
     /// (`MockClient.java:472-474`).
-    pub fn prepare_response_with_matcher_disconnected(
+    pub fn prepare_response_matcher_disconnected(
         &mut self,
         matcher: RequestMatcher,
         response: ConcreteResponse,
         disconnected: bool,
     ) {
-        self.prepare_response_from(None, Some(matcher), response, disconnected, false);
+        self.push_future_response(None, Some(matcher), response, disconnected, false);
     }
 
     /// Prepare a future response from a specific node.
-    pub fn prepare_response_for_node(&mut self, response: ConcreteResponse, node: &Node) {
-        self.prepare_response_from(Some(node.clone()), None, response, false, false);
+    pub fn prepare_response_from(&mut self, response: ConcreteResponse, node: &Node) {
+        self.push_future_response(Some(node.clone()), None, response, false, false);
     }
 
     /// Prepare a disconnect response for a specific node.
     pub fn prepare_response_disconnected(&mut self, response: ConcreteResponse, disconnected: bool) {
-        self.prepare_response_from(None, None, response, disconnected, false);
+        self.push_future_response(None, None, response, disconnected, false);
+    }
+
+    /// Prepare a future response from a specific node, asserting `matcher` against the
+    /// request it answers.
+    ///
+    /// Translates `MockClient.prepareResponseFrom(RequestMatcher, AbstractResponse, Node)`
+    /// (`MockClient.java:449-451`), which forwards to the five-argument form with
+    /// `disconnected = false`.
+    pub fn prepare_response_from_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse, node: &Node) {
+        self.push_future_response(Some(node.clone()), Some(matcher), response, false, false);
+    }
+
+    /// Prepare a future response from a specific node, with both a matcher and a
+    /// disconnect flag.
+    ///
+    /// Translates
+    /// `MockClient.prepareResponseFrom(RequestMatcher, AbstractResponse, Node, boolean)`
+    /// (`MockClient.java:453-455`).
+    pub fn prepare_response_from_matcher_disconnected(
+        &mut self,
+        matcher: RequestMatcher,
+        response: ConcreteResponse,
+        node: &Node,
+        disconnected: bool,
+    ) {
+        self.push_future_response(Some(node.clone()), Some(matcher), response, disconnected, false);
+    }
+
+    /// Prepare a future response from a specific node, with a disconnect flag.
+    ///
+    /// Translates `MockClient.prepareResponseFrom(AbstractResponse, Node, boolean)`
+    /// (`MockClient.java:461-463`).
+    pub fn prepare_response_from_disconnected(&mut self, response: ConcreteResponse, node: &Node, disconnected: bool) {
+        self.push_future_response(Some(node.clone()), None, response, disconnected, false);
     }
 
     /// Prepare an unsupported version response.
@@ -540,7 +587,15 @@ impl MockClient {
         });
     }
 
-    fn prepare_response_from(
+    /// The shared body of every `prepareResponse` / `prepareResponseFrom` overload.
+    ///
+    /// Translates Java's **private** five-argument
+    /// `prepareResponseFrom(RequestMatcher, AbstractResponse, Node, boolean, boolean)`
+    /// (`MockClient.java:484-490`). Java can give it the same identifier as the public
+    /// overloads because it overloads on arity; Rust cannot, and since the method is
+    /// private in both languages the name is free of CLAUDE.md §2's derivation — so it is
+    /// named for what it does rather than carrying a five-parameter suffix.
+    fn push_future_response(
         &mut self,
         node: Option<Node>,
         request_matcher: Option<RequestMatcher>,
@@ -852,5 +907,87 @@ impl KafkaClient for MockClient {
 
     async fn close(&mut self) {
         self.active.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::Errors;
+    use crate::common::requests::FindCoordinatorResponse;
+    use std::sync::atomic::AtomicI64;
+
+    fn time_provider() -> Arc<dyn Fn() -> i64 + Send + Sync> {
+        let clock = Arc::new(AtomicI64::new(1));
+        Arc::new(move || clock.load(Ordering::SeqCst))
+    }
+
+    fn node() -> Node {
+        Node::new(0, "localhost".to_string(), 9092)
+    }
+
+    fn response() -> ConcreteResponse {
+        ConcreteResponse::FindCoordinator(FindCoordinatorResponse::prepare_response(Errors::None, "group", &node()))
+    }
+
+    /// `MockClient::new(time)` agrees with `new_nodes(vec![], time)`, because Java's
+    /// `MockClient(Time)` installs a `NoOpMetadataUpdater` whose `fetchNodes()` returns an
+    /// empty list — the same thing `StaticMetadataUpdater` returns for an empty list
+    /// (`MockClient.java:92-94`, `:769`, `:783-791`).
+    #[test]
+    fn test_new_matches_new_nodes_with_no_nodes() {
+        let plain = MockClient::new(time_provider());
+        let explicit = MockClient::new_nodes(Vec::new(), time_provider());
+        assert!(plain.nodes.is_empty());
+        assert_eq!(plain.nodes, explicit.nodes);
+    }
+
+    /// `prepare_response_from(response, node)` agrees with the four-argument form it
+    /// forwards to (`MockClient.java:435-437`).
+    #[test]
+    fn test_prepare_response_from_matches_disconnected_form() {
+        let mut base = MockClient::new(time_provider());
+        base.prepare_response_from(response(), &node());
+
+        let mut explicit = MockClient::new(time_provider());
+        explicit.prepare_response_from_disconnected(response(), &node(), false);
+
+        assert_eq!(base.future_responses.len(), 1);
+        assert_eq!(explicit.future_responses.len(), 1);
+        let (a, b) = (&base.future_responses[0], &explicit.future_responses[0]);
+        assert_eq!(a.node, Some(node()));
+        assert_eq!(a.node, b.node);
+        assert!(a.request_matcher.is_none() && b.request_matcher.is_none());
+        assert!(!a.disconnected && !b.disconnected);
+    }
+
+    /// `prepare_response_from_matcher(..)` agrees with the disconnect form it forwards to
+    /// (`MockClient.java:449-451`), and both retain the matcher and the node.
+    #[test]
+    fn test_prepare_response_from_matcher_matches_disconnected_form() {
+        let mut base = MockClient::new(time_provider());
+        base.prepare_response_from_matcher(Box::new(|_| true), response(), &node());
+
+        let mut explicit = MockClient::new(time_provider());
+        explicit.prepare_response_from_matcher_disconnected(Box::new(|_| true), response(), &node(), false);
+
+        let (a, b) = (&base.future_responses[0], &explicit.future_responses[0]);
+        assert_eq!(a.node, Some(node()));
+        assert_eq!(a.node, b.node);
+        assert!(a.request_matcher.is_some() && b.request_matcher.is_some());
+        assert!(!a.disconnected && !b.disconnected);
+    }
+
+    /// The `disconnected` flag actually reaches the queued `FutureResponse` on both
+    /// node-scoped forms (`MockClient.java:453-455`, `:461-463`).
+    #[test]
+    fn test_prepare_response_from_carries_disconnected_flag() {
+        let mut client = MockClient::new(time_provider());
+        client.prepare_response_from_disconnected(response(), &node(), true);
+        client.prepare_response_from_matcher_disconnected(Box::new(|_| true), response(), &node(), true);
+
+        assert_eq!(client.num_awaiting_responses(), 2);
+        assert!(client.future_responses.iter().all(|f| f.disconnected));
+        assert!(client.future_responses.iter().all(|f| f.node == Some(node())));
     }
 }

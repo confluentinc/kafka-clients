@@ -19,11 +19,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeClusterResponseData;
 use crate::common::Node;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_cluster_response_data::DescribeClusterResponseData;
 
-use super::abstract_response::single_error_count;
+use super::AbstractResponse;
 
 /// A DescribeCluster response.
 ///
@@ -74,7 +74,7 @@ impl DescribeClusterResponse {
             .map(|b| {
                 (
                     b.broker_id,
-                    Node::with_rack_and_fenced(b.broker_id, b.host.clone(), b.port, b.rack.clone(), b.is_fenced),
+                    Node::new_rack_is_fenced(b.broker_id, b.host.clone(), b.port, b.rack.clone(), b.is_fenced),
                 )
             })
             .collect()
@@ -82,7 +82,7 @@ impl DescribeClusterResponse {
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        single_error_count(Errors::for_code(self.data.error_code))
+        AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
 
     /// Parses a `DescribeClusterResponse` from a readable buffer at the given

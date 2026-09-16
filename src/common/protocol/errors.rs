@@ -22,8 +22,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::common::Error;
+use crate::common::InvalidRecordError;
 use crate::common::errors::*;
-use crate::common::invalid_record_error::InvalidRecordError;
 
 /// All Kafka protocol error codes.
 ///
@@ -910,7 +910,7 @@ impl Errors {
         // no hot-path caller (Java's is one log statement in `FetchCollector`);
         // the alternative is a second 135-arm match that can drift from the
         // first.
-        self.error().map(|e| crate::common::kafka_error::ErrorName::name(&e))
+        self.error().map(|e| crate::common::error::ErrorName::name(&e))
     }
 
     /// The exception class this code names, carrying `message` instead of the
@@ -975,10 +975,9 @@ impl Errors {
                 Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message)))
             },
             Self::FetchSessionTopicIdError => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
-            Self::GroupAuthorizationFailed => Some(Error::GroupAuthorization(GroupAuthorizationError::with_message(
-                String::new(),
-                message,
-            ))),
+            Self::GroupAuthorizationFailed => {
+                Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
+            },
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
             Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
             Self::GroupSubscribedToTopic => {
@@ -1026,7 +1025,7 @@ impl Errors {
             },
             Self::InvalidTimestamp => Some(Error::InvalidTimestamp(InvalidTimestampError::new(message))),
             Self::InvalidTopicError => {
-                Some(Error::InvalidTopic(InvalidTopicError::with_message(HashSet::new(), message)))
+                Some(Error::InvalidTopic(InvalidTopicError::new_message(HashSet::new(), message)))
             },
             Self::InvalidTransactionTimeout => Some(Error::InvalidTxnTimeout(InvalidTxnTimeoutError::new(message))),
             Self::InvalidTxnState => Some(Error::InvalidTxnState(InvalidTxnStateError::new(message))),
@@ -1104,7 +1103,7 @@ impl Errors {
                 Some(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(0, message)))
             },
             Self::TopicAlreadyExists => Some(Error::TopicExists(TopicExistsError::new(message))),
-            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::with_message(
+            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::new_message(
                 HashSet::new(),
                 message,
             ))),
@@ -1909,7 +1908,7 @@ mod tests {
                 );
                 assert!(
                     e.error()
-                        .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x)),
+                        .is_some_and(|x| crate::common::requests::RequestUtils::is_fatal_error(&x)),
                     "{e:?}: auth/authz errors must be fatal"
                 );
                 assert!(
@@ -2028,7 +2027,7 @@ mod tests {
         }
     }
 
-    /// `RequestUtils.isFatalException` (translated in `request_utils::is_fatal_error`) must be `true` for **exactly** the error codes whose
+    /// `RequestUtils.isFatalException` (translated in `request_utils::RequestUtils::is_fatal_error`) must be `true` for **exactly** the error codes whose
     /// Java exception class satisfies `RequestUtils.isFatalException`
     /// (`common/requests/RequestUtils.java:88`). Java has no per-exception
     /// fatal flag, so that class test IS the definition; if this set drifts,
@@ -2064,25 +2063,33 @@ mod tests {
             SecurityDisabledError, SslAuthenticationError, UnsupportedEndpointTypeError,
             UnsupportedForMessageFormatError, UnsupportedVersionError,
         };
-        use crate::common::requests::request_utils::is_fatal_error;
-        assert!(is_fatal_error(&Error::Authentication(AuthenticationError::new(""))));
-        assert!(is_fatal_error(&Error::Authorization(AuthorizationError::new(""))));
+        use crate::common::requests::RequestUtils;
+        assert!(RequestUtils::is_fatal_error(&Error::Authentication(AuthenticationError::new(
+            ""
+        ))));
+        assert!(RequestUtils::is_fatal_error(&Error::Authorization(AuthorizationError::new(""))));
         // SslAuthenticationException extends AuthenticationException — codeless,
         // so only reachable now that the base class is translated.
-        assert!(is_fatal_error(&Error::SslAuthentication(SslAuthenticationError::new(""))));
-        assert!(is_fatal_error(&Error::MismatchedEndpointType(
+        assert!(RequestUtils::is_fatal_error(&Error::SslAuthentication(
+            SslAuthenticationError::new("")
+        )));
+        assert!(RequestUtils::is_fatal_error(&Error::MismatchedEndpointType(
             MismatchedEndpointTypeError::new("")
         )));
-        assert!(is_fatal_error(&Error::SecurityDisabled(SecurityDisabledError::new(""))));
-        assert!(is_fatal_error(&Error::UnsupportedEndpointType(
+        assert!(RequestUtils::is_fatal_error(&Error::SecurityDisabled(
+            SecurityDisabledError::new("")
+        )));
+        assert!(RequestUtils::is_fatal_error(&Error::UnsupportedEndpointType(
             UnsupportedEndpointTypeError::new("")
         )));
-        assert!(is_fatal_error(&Error::UnsupportedForMessageFormat(
+        assert!(RequestUtils::is_fatal_error(&Error::UnsupportedForMessageFormat(
             UnsupportedForMessageFormatError::new("")
         )));
-        assert!(is_fatal_error(&Error::UnsupportedVersion(UnsupportedVersionError::new(""))));
+        assert!(RequestUtils::is_fatal_error(&Error::UnsupportedVersion(
+            UnsupportedVersionError::new("")
+        )));
         // retriable exceptions
-        assert!(!is_fatal_error(&Error::Disconnect(DisconnectError::new(""))));
+        assert!(!RequestUtils::is_fatal_error(&Error::Disconnect(DisconnectError::new(""))));
 
         run_fatal_errors_match_java_request_utils();
     }
@@ -2119,13 +2126,13 @@ mod tests {
                 expected.contains(&error),
                 error
                     .error()
-                    .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x)),
+                    .is_some_and(|x| crate::common::requests::RequestUtils::is_fatal_error(&x)),
                 "{error:?} (code {}) disagrees with Java's fatal classification: expected fatal={}, got {}",
                 error.code(),
                 expected.contains(&error),
                 error
                     .error()
-                    .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x))
+                    .is_some_and(|x| crate::common::requests::RequestUtils::is_fatal_error(&x))
             );
         }
         for error in &expected {
@@ -2144,7 +2151,7 @@ mod tests {
             assert!(
                 !(error
                     .error()
-                    .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x))
+                    .is_some_and(|x| crate::common::requests::RequestUtils::is_fatal_error(&x))
                     && error.error().is_some_and(|x| x.is_retriable_error())),
                 "{error:?} (code {}) is both fatal and retriable",
                 error.code()
@@ -2413,7 +2420,7 @@ mod tests {
         assert_eq!(Error::wakeup("woken").error(), Errors::UnknownServerError);
         assert_eq!(Error::local_illegal_state("misuse").error(), Errors::UnknownServerError);
         // And the bare `KafkaException`, which is not even an `ApiException`.
-        assert_eq!(Error::kafka("no code of its own").error(), Errors::UnknownServerError);
+        assert_eq!(Error::kafka_message("no code of its own").error(), Errors::UnknownServerError);
     }
 
     /// `ErrorsTest.testExceptionName`: the code reports the name of its class.

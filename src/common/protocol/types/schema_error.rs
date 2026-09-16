@@ -14,7 +14,7 @@
 
 //! Translated from `org.apache.kafka.common.protocol.types.SchemaException`.
 
-use crate::common::kafka_error::kafka_error_class;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// Raised if the protocol schema validation fails while parsing a request or
@@ -46,7 +46,7 @@ kafka_error_class! {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::protocol::Errors;
+    use crate::common::Errors;
 
     /// `SchemaException extends KafkaException` and stops there — it bypasses
     /// `ApiException`, so a `catch (ApiException)` does not see it while a
@@ -58,7 +58,7 @@ mod tests {
         assert!(!error.is_api_error());
         assert!(!error.is_retriable_error());
         assert!(!error.is_serialization_error());
-        assert!(!crate::common::requests::request_utils::is_fatal_error(&error));
+        assert!(!crate::common::requests::RequestUtils::is_fatal_error(&error));
         assert_eq!(error.message(), "Array size -1 cannot be negative");
         assert_eq!(error.to_string(), "SchemaError: Array size -1 cannot be negative");
         // No entry in `Errors.java`, and `KafkaException` has none either, so
@@ -70,7 +70,7 @@ mod tests {
     /// `NetworkClient.parseResponse` uses for the buffer-underflow clause.
     #[test]
     fn carries_its_cause() {
-        let error = SchemaError::with_source("outer", Error::local_illegal_state("inner"));
+        let error = SchemaError::new_source("outer", Error::local_illegal_state("inner"));
         assert_eq!(error.message(), "outer");
         let cause = error.source().expect("the cause must be carried");
         assert_eq!(cause.message(), "inner");

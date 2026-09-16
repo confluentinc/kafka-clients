@@ -306,7 +306,7 @@ impl MetadataSnapshot {
             .map(|metadata| MetadataResponse::to_partition_info(metadata, nodes))
             .collect();
 
-        Cluster::new(
+        Cluster::new_invalid_topics_controller_topic_ids(
             cluster_id.clone(),
             nodes.values().cloned().collect(),
             partition_infos,
@@ -335,7 +335,7 @@ impl fmt::Display for MetadataSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::Errors;
+    use crate::common::Errors;
 
     /// Translated from `MetadataSnapshotTest.testMissingLeaderEndpoint`.
     #[test]

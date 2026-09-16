@@ -16,13 +16,14 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestHeader`.
 
+use crate::common::Error;
 use std::fmt;
 use std::io;
 
+use crate::RequestHeaderData;
 use crate::common::protocol::Message;
 use crate::common::protocol::ObjectSerializationCache;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
-use crate::request_header_data::RequestHeaderData;
 
 use super::ResponseHeader;
 
@@ -40,18 +41,132 @@ pub struct RequestHeader {
     size: i32,
 }
 
+/// The parameters of Java's
+/// `RequestHeader(ApiKeys, short, String, int)` (`RequestHeader.java:38`).
+///
+/// Java's two `RequestHeader` constructors (`:38`, `:47`) share no parameter
+/// name, so all four of `:38`'s reach its derived name. CLAUDE.md §2 caps that
+/// at three and makes this struct the method's *only* parameter, so all four
+/// live here. This struct has no Java counterpart: it exists solely to satisfy
+/// that naming rule (DoD #7).
+///
+/// It deliberately has **no** `Default`. Java's other `RequestHeader` overload
+/// (`:47`) takes an already-built `RequestHeaderData`, so it supplies none of
+/// these four on the caller's behalf — none has a Java-derived default, and a
+/// synthesised `correlationId` of `0` would silently produce a header that
+/// cannot be matched to its response. Construct it with
+/// [`RequestHeaderOptionsBuilder::new`] and set all four: [`RequestHeaderOptionsBuilder::build`] returns an error if any of `request_api_key`, `request_version`, `client_id`, `correlation_id` was not set.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RequestHeaderOptions<'a> {
+    /// Java's `apiKey`.
+    pub request_api_key: &'a ApiKeys,
+    /// Java's `requestVersion`.
+    pub request_version: i16,
+    /// Java's `clientId`.
+    pub client_id: &'a str,
+    /// Java's `correlationId`.
+    pub correlation_id: i32,
+}
+
+/// Fluent builder for [`RequestHeaderOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
+/// [`Error::LocalIllegalArgument`] if they were not set. Like [`RequestHeaderOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct RequestHeaderOptionsBuilder<'a> {
+    request_api_key: Option<&'a ApiKeys>,
+    request_version: Option<i16>,
+    client_id: Option<&'a str>,
+    correlation_id: Option<i32>,
+}
+
+impl<'a> Default for RequestHeaderOptionsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> RequestHeaderOptionsBuilder<'a> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            request_api_key: None,
+            request_version: None,
+            client_id: None,
+            correlation_id: None,
+        }
+    }
+
+    /// Sets [`RequestHeaderOptions::request_api_key`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_request_api_key(mut self, request_api_key: &'a ApiKeys) -> Self {
+        self.request_api_key = Some(request_api_key);
+        self
+    }
+    /// Sets [`RequestHeaderOptions::request_version`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_request_version(mut self, request_version: i16) -> Self {
+        self.request_version = Some(request_version);
+        self
+    }
+    /// Sets [`RequestHeaderOptions::client_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_client_id(mut self, client_id: &'a str) -> Self {
+        self.client_id = Some(client_id);
+        self
+    }
+    /// Sets [`RequestHeaderOptions::correlation_id`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_correlation_id(mut self, correlation_id: i32) -> Self {
+        self.correlation_id = Some(correlation_id);
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `request_api_key`, `request_version`, `client_id`, `correlation_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
+    /// set which was not given a setter call. Only presence is checked here;
+    /// semantic validation belongs to the method the options are passed to
+    /// (CLAUDE.md §2).
+    pub fn build(self) -> Result<RequestHeaderOptions<'a>, Error> {
+        Ok(RequestHeaderOptions {
+            request_api_key: self.request_api_key.ok_or_else(|| Self::missing("request_api_key"))?,
+            request_version: self.request_version.ok_or_else(|| Self::missing("request_version"))?,
+            client_id: self.client_id.ok_or_else(|| Self::missing("client_id"))?,
+            correlation_id: self.correlation_id.ok_or_else(|| Self::missing("correlation_id"))?,
+        })
+    }
+
+    /// Builds the [`Error::LocalIllegalArgument`] naming a mandatory parameter
+    /// [`Self::build`] found unset.
+    fn missing(parameter: &str) -> Error {
+        Error::local_illegal_argument(format!(
+            "RequestHeaderOptionsBuilder::build: mandatory parameter `{parameter}` was not set"
+        ))
+    }
+}
+
 impl RequestHeader {
     /// Creates a new `RequestHeader` with the given API key, version, client id, and correlation id.
+    ///
+    /// Corresponds to Java's `RequestHeader(ApiKeys, short, String, int)`
+    /// (`RequestHeader.java:38`).
     ///
     /// # Errors
     ///
     /// Returns an error if the API key is not recognized.
-    pub fn new(
-        request_api_key: &ApiKeys,
-        request_version: i16,
-        client_id: &str,
-        correlation_id: i32,
-    ) -> io::Result<Self> {
+    pub fn new_options(options: RequestHeaderOptions<'_>) -> io::Result<Self> {
+        let RequestHeaderOptions { request_api_key, request_version, client_id, correlation_id } = options;
         let mut data = RequestHeaderData::new();
         data.set_request_api_key(request_api_key.id());
         data.set_request_api_version(request_version);
@@ -62,7 +177,10 @@ impl RequestHeader {
     }
 
     /// Creates a new `RequestHeader` from existing data and a header version.
-    pub fn from_data(data: RequestHeaderData, header_version: i16) -> Self {
+    ///
+    /// Corresponds to Java's `RequestHeader(RequestHeaderData, short)`
+    /// (`RequestHeader.java:47`).
+    pub fn new_data_header_version(data: RequestHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
 
@@ -116,7 +234,7 @@ impl RequestHeader {
     /// Creates a corresponding response header with the same correlation id
     /// and the appropriate response header version.
     pub fn to_response_header(&self) -> ResponseHeader {
-        ResponseHeader::new(
+        ResponseHeader::new_correlation_id(
             self.data.correlation_id,
             self.api_key().response_header_version(self.api_version()),
         )
@@ -246,14 +364,14 @@ impl fmt::Display for RequestHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::Writable;
+    use crate::common::Writable;
 
     /// Helper: serializes a RequestHeader into a ByteBufferAccessor for parsing tests.
     /// Equivalent to Java's `RequestTestUtils.serializeRequestHeader`.
     fn serialize_request_header(header: &mut RequestHeader) -> io::Result<ByteBufferAccessor> {
         let mut cache = ObjectSerializationCache::new();
         let size = header.size_with_cache(&mut cache)?;
-        let mut buffer = ByteBufferAccessor::new(size as usize);
+        let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         header.write(&mut buffer, &cache)?;
         buffer.flip();
         Ok(buffer)
@@ -262,7 +380,16 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV1`.
     #[test]
     fn test_request_header_v1() {
-        let mut header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, 1, "", 10).unwrap();
+        let mut header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
+                .set_request_version(1)
+                .set_client_id("")
+                .set_correlation_id(10)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(header.header_version(), 1);
 
         let mut buffer = serialize_request_header(&mut header).unwrap();
@@ -274,7 +401,16 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV2`.
     #[test]
     fn test_request_header_v2() {
-        let mut header = RequestHeader::new(&ApiKeys::CREATE_DELEGATION_TOKEN, 2, "", 10).unwrap();
+        let mut header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CREATE_DELEGATION_TOKEN)
+                .set_request_version(2)
+                .set_client_id("")
+                .set_correlation_id(10)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(header.header_version(), 2);
 
         let mut buffer = serialize_request_header(&mut header).unwrap();
@@ -287,13 +423,22 @@ mod tests {
     #[test]
     fn test_parse_header_from_buffer_with_non_zero_position() {
         // Create a buffer with some leading bytes to simulate a non-zero start position
-        let mut full_buf = ByteBufferAccessor::new(64);
+        let mut full_buf = ByteBufferAccessor::new(Vec::with_capacity(64));
         // Write 10 bytes of padding
         for _ in 0..10 {
             full_buf.write_byte(0).unwrap();
         }
 
-        let mut header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, 1, "", 10).unwrap();
+        let mut header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
+                .set_request_version(1)
+                .set_client_id("")
+                .set_correlation_id(10)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let mut cache = ObjectSerializationCache::new();
         header.size_with_cache(&mut cache).unwrap();
         header.write(&mut full_buf, &cache).unwrap();
@@ -303,7 +448,7 @@ mod tests {
         // Create a sub-buffer from position 10 to limit (simulates a Java buffer
         // with position=10 and limit=end after header bytes)
         let sub_bytes = full_buf.buffer()[10..limit].to_vec();
-        let mut parse_buf = ByteBufferAccessor::from_bytes(sub_bytes);
+        let mut parse_buf = ByteBufferAccessor::new(sub_bytes);
 
         let parsed = RequestHeader::parse(&mut parse_buf).unwrap();
         assert_eq!(header, parsed);
@@ -320,7 +465,7 @@ mod tests {
 
         let mut cache = ObjectSerializationCache::new();
         let size = Message::size(&header_data, &mut cache, 2).unwrap();
-        let mut buffer = ByteBufferAccessor::new(size as usize);
+        let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         Message::write(&mut header_data, &mut buffer, &cache, 2).unwrap();
         buffer.flip();
 
@@ -347,7 +492,7 @@ mod tests {
         // Serialize to buffer and parse back
         let mut cache = ObjectSerializationCache::new();
         let size = Message::size(&header_data, &mut cache, 2).unwrap();
-        let mut buffer = ByteBufferAccessor::new(size as usize);
+        let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         Message::write(&mut header_data, &mut buffer, &cache, 2).unwrap();
         buffer.flip();
 
@@ -366,7 +511,16 @@ mod tests {
     /// header's rendering is the text every `NetworkClient` send log embeds.
     #[test]
     fn test_request_header_display() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, 1, "test-client", 42).unwrap();
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(1)
+                .set_client_id("test-client")
+                .set_correlation_id(42)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             format!("{header}"),
             "RequestHeader(apiKey=METADATA, apiVersion=1, clientId=test-client, correlationId=42, headerVersion=1)"
@@ -377,14 +531,47 @@ mod tests {
 
     #[test]
     fn test_request_header_to_response_header() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, 12, "client", 99).unwrap();
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(12)
+                .set_client_id("client")
+                .set_correlation_id(99)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let response_header = header.to_response_header();
         assert_eq!(response_header.correlation_id(), 99);
     }
 
     #[test]
     fn test_request_header_is_api_version_supported() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.oldest_version(), "c", 1).unwrap();
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.oldest_version())
+                .set_client_id("c")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         assert!(header.is_api_version_supported());
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`RequestHeaderOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    fn request_header_options_builder_build_errors_when_no_mandatory_parameter_is_set() {
+        let Err(error) = RequestHeaderOptionsBuilder::new().build() else {
+            panic!("build must reject the unset mandatory parameter");
+        };
+        assert!(matches!(error, Error::LocalIllegalArgument(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "RequestHeaderOptionsBuilder::build: mandatory parameter `request_api_key` was not set"
+        );
     }
 }

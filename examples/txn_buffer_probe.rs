@@ -76,9 +76,9 @@ async fn run() -> Result<(), String> {
         ("linger.ms".to_string(), "60000".to_string()),
         ("max.block.ms".to_string(), "2000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("config: {e}"))?;
+    let config = ProducerConfig::new(&props).map_err(|e| format!("config: {e}"))?;
     let producer: KafkaProducer<String, String> =
-        KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        KafkaProducer::new_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
             .map_err(|e| format!("build: {e}"))?;
 
     // Warm-up: enqueue-only — the outer await caches metadata and opens the
@@ -99,7 +99,7 @@ async fn run() -> Result<(), String> {
         let record = string_record("txn-buffer-probe-sink", &value)?;
         let outcome = match producer.send(record).await {
             Err(error) => Some(error),
-            Ok(future) => match future.get_timeout(Duration::from_secs(5)).await {
+            Ok(future) => match future.get_with_timeout(Duration::from_secs(5)).await {
                 Err(error) if !is_await_timeout(&error) => Some(error),
                 _ => None, // accepted-but-unacked (broker paused) or acked
             },
@@ -129,7 +129,7 @@ fn is_buffer_exhausted(error: &confluent_kafka::common::Error) -> bool {
         || error.to_string().contains("hard limit")
 }
 
-/// My own `get_timeout` firing (record accepted, ack never came) vs a real
+/// My own `get_with_timeout` firing (record accepted, ack never came) vs a real
 /// error carried by the future.
 fn is_await_timeout(error: &confluent_kafka::common::Error) -> bool {
     error.to_string().contains("Timeout after waiting for")

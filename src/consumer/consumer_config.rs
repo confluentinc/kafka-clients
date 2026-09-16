@@ -34,11 +34,9 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::common::Error;
-use crate::common::config::sasl_configs;
-use crate::common::config::ssl_configs;
-use crate::common::config::{SaslConfig, SslConfig};
+use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::security::SecurityProtocol;
-use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+use crate::consumer::AutoOffsetResetStrategy;
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -276,12 +274,6 @@ impl Default for ConsumerConfig {
 }
 
 impl ConsumerConfig {
-    /// Creates a new `ConsumerConfig` with default values and the given
-    /// `bootstrap.servers` list.
-    pub fn new(bootstrap_servers: Vec<String>) -> Self {
-        Self { bootstrap_servers, ..Self::default() }
-    }
-
     // --- Config key constants (matching Java string keys exactly) ---
 
     /// Config key: `group.id`.
@@ -420,9 +412,9 @@ impl ConsumerConfig {
     /// Config key: `security.protocol`.
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = "security.protocol";
     /// Config key: `sasl.mechanism`.
-    pub const SASL_MECHANISM_CONFIG: &'static str = sasl_configs::SASL_MECHANISM;
+    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
     /// Config key: `sasl.jaas.config`.
-    pub const SASL_JAAS_CONFIG: &'static str = sasl_configs::SASL_JAAS_CONFIG;
+    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Config key: `config.providers`.
     pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
@@ -521,54 +513,54 @@ impl ConsumerConfig {
     // -------- Fluent setters --------
 
     /// Set `bootstrap.servers`.
-    pub fn with_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
+    pub fn set_bootstrap_servers(mut self, bootstrap_servers: Vec<String>) -> Self {
         self.bootstrap_servers = bootstrap_servers;
         self
     }
     /// Set `client.id`.
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+    pub fn set_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = client_id.into();
         self
     }
     /// Set `group.id`.
-    pub fn with_group_id(mut self, group_id: impl Into<String>) -> Self {
+    pub fn set_group_id(mut self, group_id: impl Into<String>) -> Self {
         self.group_id = Some(group_id.into());
         self
     }
     /// Set `group.protocol`.
-    pub fn with_group_protocol(mut self, protocol: impl Into<String>) -> Self {
+    pub fn set_group_protocol(mut self, protocol: impl Into<String>) -> Self {
         self.group_protocol = protocol.into();
         self
     }
     /// Set `auto.offset.reset`.
-    pub fn with_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
+    pub fn set_auto_offset_reset(mut self, value: impl Into<String>) -> Self {
         self.auto_offset_reset = value.into();
         self
     }
     /// Set `enable.auto.commit`.
-    pub fn with_enable_auto_commit(mut self, value: bool) -> Self {
+    pub fn set_enable_auto_commit(mut self, value: bool) -> Self {
         self.enable_auto_commit = value;
         self
     }
     /// Set `key.deserializer`.
-    pub fn with_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
+    pub fn set_key_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.key_deserializer_class = Some(class.into());
         self
     }
     /// Set `value.deserializer`.
-    pub fn with_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
+    pub fn set_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.value_deserializer_class = Some(class.into());
         self
     }
 
     /// Set `request.timeout.ms`.
-    pub fn with_request_timeout_ms(mut self, value: i32) -> Self {
+    pub fn set_request_timeout_ms(mut self, value: i32) -> Self {
         self.request_timeout_ms = value;
         self
     }
 
     /// Set `retry.backoff.ms`.
-    pub fn with_retry_backoff_ms(mut self, value: i64) -> Self {
+    pub fn set_retry_backoff_ms(mut self, value: i64) -> Self {
         self.retry_backoff_ms = value;
         self
     }
@@ -588,7 +580,7 @@ impl ConsumerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
+    pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
@@ -649,7 +641,7 @@ impl ConsumerConfig {
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
                     if value.is_empty() {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::GROUP_INSTANCE_ID_CONFIG,
                             value,
                             "must be non-empty",
@@ -661,7 +653,7 @@ impl ConsumerConfig {
                     // Case-insensitive validation against the enum's lower-case names.
                     let lc = value.to_ascii_lowercase();
                     if lc != "classic" && lc != "consumer" {
-                        return Err(Error::config_value(Self::GROUP_PROTOCOL_CONFIG, value));
+                        return Err(Error::config_name_value(Self::GROUP_PROTOCOL_CONFIG, value));
                     }
                     // Java's `getString` returns the original-case value; preserve it.
                     config.group_protocol = value.clone();
@@ -672,7 +664,7 @@ impl ConsumerConfig {
                 Self::MAX_POLL_RECORDS_CONFIG => {
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.max_poll_records = v;
                 },
@@ -758,7 +750,7 @@ impl ConsumerConfig {
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "none" && lc != "rebootstrap" {
-                        return Err(Error::config_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
+                        return Err(Error::config_name_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
                     }
                     config.metadata_recovery_strategy = value.clone();
                 },
@@ -774,7 +766,7 @@ impl ConsumerConfig {
                 Self::ISOLATION_LEVEL_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "read_committed" && lc != "read_uncommitted" {
-                        return Err(Error::config_value(Self::ISOLATION_LEVEL_CONFIG, value));
+                        return Err(Error::config_name_value(Self::ISOLATION_LEVEL_CONFIG, value));
                     }
                     config.isolation_level = value.clone();
                 },
@@ -789,7 +781,7 @@ impl ConsumerConfig {
                     // `metrics.sample.window.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
                     if v < 0 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 0"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metrics_sample_window_ms = v;
                 },
@@ -798,7 +790,7 @@ impl ConsumerConfig {
                     // `metrics.num.samples` is `atLeast(1)`.
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.metrics_num_samples = v;
                 },
@@ -809,7 +801,7 @@ impl ConsumerConfig {
                     // membership check, throwing `ConfigException` for any other value
                     // (including lower/mixed case such as `debug`).
                     if value != "INFO" && value != "DEBUG" && value != "TRACE" {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::METRICS_RECORDING_LEVEL_CONFIG,
                             value,
                             "String must be one of: INFO, DEBUG, TRACE",
@@ -843,7 +835,7 @@ impl ConsumerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             Self::SECURITY_PROTOCOL_CONFIG,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
@@ -857,7 +849,7 @@ impl ConsumerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 key if key.starts_with("ssl.") => {
-                    ssl_configs::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
                     config.config_providers = split_csv(value);
@@ -883,18 +875,18 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(Error::config_value(key, value)),
+        _ => Err(Error::config_name_value(key, value)),
     }
 }
 
@@ -919,13 +911,13 @@ mod tests {
     }
 
     #[test]
-    fn test_from_properties_basic() {
+    fn test_new_basic() {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093".to_string());
         props.insert("group.id".to_string(), "g".to_string());
         props.insert("client.id".to_string(), "my-consumer".to_string());
         props.insert("max.poll.records".to_string(), "100".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.bootstrap_servers(), &["host1:9092".to_string(), "host2:9093".to_string()]);
         assert_eq!(c.group_id(), Some("g"));
         assert_eq!(c.client_id(), "my-consumer");
@@ -933,11 +925,11 @@ mod tests {
     }
 
     #[test]
-    fn test_from_properties_unknown_key_ignored() {
+    fn test_new_unknown_key_ignored() {
         let mut props = HashMap::new();
         props.insert("unknown.key".to_string(), "value".to_string());
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.bootstrap_servers(), &["localhost:9092".to_string()]);
     }
 
@@ -948,13 +940,13 @@ mod tests {
         // Valid: >= 1.
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "3".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_num_samples, 3);
 
         // Invalid: 0 (< 1).
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "0".to_string());
-        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("metrics.num.samples") && msg.contains("at least 1"),
@@ -964,7 +956,7 @@ mod tests {
         // Invalid: negative.
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
-        assert!(ConsumerConfig::from_properties(&props).is_err());
+        assert!(ConsumerConfig::new(&props).is_err());
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A
@@ -974,18 +966,18 @@ mod tests {
         // Valid: >= 0 (0 is allowed).
         let mut props = HashMap::new();
         props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 0);
 
         let mut props = HashMap::new();
         props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.metrics_sample_window_ms, 60_000);
 
         // Invalid: negative.
         let mut props = HashMap::new();
         props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
-        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("metrics.sample.window.ms") && msg.contains("at least 0"),
@@ -1002,14 +994,14 @@ mod tests {
         for level in ["INFO", "DEBUG", "TRACE"] {
             let mut props = HashMap::new();
             props.insert("metrics.recording.level".to_string(), level.to_string());
-            let c = ConsumerConfig::from_properties(&props).unwrap();
+            let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.metrics_recording_level, level);
         }
 
         // Lowercase is rejected (case-sensitive membership check).
         let mut props = HashMap::new();
         props.insert("metrics.recording.level".to_string(), "debug".to_string());
-        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let err = ConsumerConfig::new(&props).unwrap_err();
         assert!(
             err.to_string().ends_with(
                 "Invalid value debug for configuration metrics.recording.level: \
@@ -1021,7 +1013,7 @@ mod tests {
         // A wholly unknown value is rejected too.
         let mut props = HashMap::new();
         props.insert("metrics.recording.level".to_string(), "bogus".to_string());
-        assert!(ConsumerConfig::from_properties(&props).is_err());
+        assert!(ConsumerConfig::new(&props).is_err());
     }
 
     /// Each of the four `security.protocol` values parses to the right enum.
@@ -1035,7 +1027,7 @@ mod tests {
         ] {
             let mut props = HashMap::new();
             props.insert("security.protocol".to_string(), input.to_string());
-            let c = ConsumerConfig::from_properties(&props).unwrap();
+            let c = ConsumerConfig::new(&props).unwrap();
             assert_eq!(c.security_protocol, expected, "for input {input}");
             assert_eq!(c.security_protocol(), expected.name());
         }
@@ -1046,7 +1038,7 @@ mod tests {
     fn test_security_protocol_case_insensitive() {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.security_protocol, SecurityProtocol::SaslSsl);
     }
 
@@ -1056,7 +1048,7 @@ mod tests {
     fn test_invalid_security_protocol() {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "abc".to_string());
-        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let err = ConsumerConfig::new(&props).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("security.protocol"), "should contain config key, got: {msg}");
         assert!(msg.contains("abc"), "should contain the invalid value, got: {msg}");
@@ -1073,7 +1065,7 @@ mod tests {
             "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"secret\";"
                 .to_string(),
         );
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.sasl_config.mechanism, "PLAIN");
         assert_eq!(c.sasl_config.resolve_username(), Some("alice"));
         assert_eq!(c.sasl_config.resolve_password(), Some("secret"));
@@ -1084,7 +1076,7 @@ mod tests {
     fn test_sasl_jaas_config_empty_is_none() {
         let mut props = HashMap::new();
         props.insert("sasl.jaas.config".to_string(), String::new());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.sasl_config.jaas_config, None);
     }
 
@@ -1095,7 +1087,7 @@ mod tests {
         props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
         props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
         props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.ssl_config.truststore_location.as_deref(), Some("/path/to/truststore.pem"));
         assert_eq!(c.ssl_config.keystore_location.as_deref(), Some("/path/to/keystore.pem"));
         assert_eq!(c.ssl_config.endpoint_identification_algorithm, "");
@@ -1112,7 +1104,7 @@ mod tests {
     /// and the missing-ssl error branch without filesystem/cert dependencies.
     #[test]
     fn test_builder_selection() {
-        use crate::common::network::channel_builders;
+        use crate::common::network::ChannelBuilders;
         use crate::common::utils::LogContext;
 
         // SASL_PLAINTEXT with PLAIN credentials → Ok (no cert needed).
@@ -1124,9 +1116,9 @@ mod tests {
             "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"admin\" password=\"admin-secret\";"
                 .to_string(),
         );
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.security_protocol, SecurityProtocol::SaslPlaintext);
-        let builder = channel_builders::client_channel_builder(
+        let builder = ChannelBuilders::client_channel_builder(
             c.security_protocol,
             Some(&c.ssl_config),
             Some(&c.sasl_config),
@@ -1146,8 +1138,8 @@ mod tests {
             "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"admin\" password=\"admin-secret\";"
                 .to_string(),
         );
-        let c = ConsumerConfig::from_properties(&props).unwrap();
-        let builder = channel_builders::client_channel_builder(
+        let c = ConsumerConfig::new(&props).unwrap();
+        let builder = ChannelBuilders::client_channel_builder(
             c.security_protocol,
             None, // missing ssl_config content
             Some(&c.sasl_config),
@@ -1169,20 +1161,20 @@ mod tests {
     /// turn a hard configuration error into a groupless consumer, which then
     /// fails much later and much less legibly.
     #[test]
-    fn test_from_properties_keeps_an_empty_group_id() {
+    fn test_new_keeps_an_empty_group_id() {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
         props.insert("group.id".to_string(), String::new());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.group_id(), Some(""), "the empty string must survive to the constructor");
     }
 
     /// An absent `group.id` is still `None` — the two cases stay distinct.
     #[test]
-    fn test_from_properties_absent_group_id_is_none() {
+    fn test_new_absent_group_id_is_none() {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
-        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.group_id(), None);
     }
 }

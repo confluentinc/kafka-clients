@@ -22,9 +22,10 @@
 
 use std::io;
 
+use crate::LeaveGroupRequestData;
+use crate::LeaveGroupResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::leave_group_request_data::{LeaveGroupRequestData, MemberIdentity};
-use crate::leave_group_response_data::LeaveGroupResponseData;
+use crate::leave_group_request_data::MemberIdentity;
 
 use super::ConcreteResponse;
 use super::LeaveGroupResponse;

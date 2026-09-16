@@ -28,15 +28,15 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
 
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, Node};
 use crate::kafka_debug;
 
-use super::admin_api_future::AdminApiFuture;
-use super::admin_api_handler::AdminApiHandler;
-use super::api_request_scope::ApiRequestScope;
+use super::AdminApiFuture;
+use super::AdminApiHandler;
+use super::ApiRequestScope;
 
 /// A request that needs to be sent, produced by [`AdminApiDriver::poll`].
 ///
@@ -167,7 +167,7 @@ where
         // For cached keys we can skip straight to fulfillment; unknown keys go
         // to the lookup stage.
         for (key, broker_id) in driver.future.cached_key_broker_id_mapping() {
-            if broker_id == super::admin_api_future::UNKNOWN_BROKER_ID {
+            if broker_id == super::UNKNOWN_BROKER_ID {
                 driver.unmap(&key);
             } else {
                 driver.fulfillment_map.put(ApiRequestScope::Fulfillment(broker_id), key);
@@ -554,15 +554,15 @@ pub(crate) mod test_support {
     use std::collections::{BTreeSet, HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
-    use crate::admin::internals::admin_api_future::AdminApiFuture;
-    use crate::admin::internals::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-    use crate::admin::internals::admin_api_lookup_strategy::{AdminApiLookupStrategy, LookupResult};
-    use crate::admin::internals::api_request_scope::ApiRequestScope;
-    use crate::common::protocol::ApiKeys;
+    use crate::MetadataResponseData;
+    use crate::admin::internals::AdminApiFuture;
+    use crate::admin::internals::ApiRequestScope;
+    use crate::admin::internals::{AdminApiHandler, ApiResult, RequestAndKeys};
+    use crate::admin::internals::{AdminApiLookupStrategy, LookupResult};
+    use crate::common::ApiKeys;
     use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
     use crate::common::utils::{ExponentialBackoff, LogContext};
     use crate::common::{Error, Node};
-    use crate::metadata_response_data::MetadataResponseData;
 
     use super::{AdminApiDriver, RequestSpec};
 
@@ -578,7 +578,7 @@ pub(crate) mod test_support {
     /// request's key set, so the response body is never inspected (mirrors the
     /// Java tests, which always pass an empty `MetadataResponse`).
     pub(crate) fn placeholder_response() -> ConcreteResponse {
-        ConcreteResponse::Metadata(MetadataResponse::new(
+        ConcreteResponse::Metadata(MetadataResponse::new_version(
             MetadataResponseData::new(),
             ApiKeys::METADATA.latest_version(),
         ))
@@ -684,7 +684,7 @@ pub(crate) mod test_support {
                 self.expected.lock().unwrap().contains_key(&set),
                 "Unexpected lookup request for keys {set:?}"
             );
-            Box::new(MetadataRequestBuilder::new(None, false))
+            Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false))
         }
 
         fn handle_response(&self, keys: &HashSet<String>, _response: &ConcreteResponse) -> LookupResult<String> {
@@ -722,7 +722,10 @@ pub(crate) mod test_support {
                 self.expected.lock().unwrap().contains_key(&set),
                 "Unexpected fulfillment request for keys {set:?}"
             );
-            vec![RequestAndKeys { request: Box::new(MetadataRequestBuilder::new(None, false)), keys: keys.clone() }]
+            vec![RequestAndKeys {
+                request: Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false)),
+                keys: keys.clone(),
+            }]
         }
 
         fn handle_response(

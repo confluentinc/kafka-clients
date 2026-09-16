@@ -17,8 +17,8 @@
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// A request illegally referred to the same resource twice.
 ///
@@ -40,19 +40,24 @@ pub struct DuplicateResourceError {
 impl DuplicateResourceError {
     /// Create the error with the given message and no resource — Java's
     /// `DuplicateResourceException(String message)`.
+    ///
+    /// The three translated constructors intersect on `{message}`, which is
+    /// exactly this one — so it keeps the plain name and the other two are
+    /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: None, source: None }
     }
 
     /// Create the error with the code's default message — used by
-    /// [`Errors::error`](crate::common::protocol::Errors::error).
+    /// [`Errors::error`](crate::common::Errors::error).
     pub fn with_default_message() -> Self {
         Self::new(Errors::DuplicateResource.message())
     }
 
     /// Create the error naming the offending resource — Java's
     /// `DuplicateResourceException(String resource, String message)`.
-    pub fn with_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Suffixed per [`new`](Self::new).
+    pub fn new_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: Some(resource.into()), source: None }
     }
 
@@ -63,7 +68,8 @@ impl DuplicateResourceError {
 
     /// Create the error with a resource, message, and underlying cause,
     /// mirroring Java's `DuplicateResourceException(String resource, String message, Throwable cause)`.
-    pub fn with_resource_and_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
+    /// Suffixed per [`new`](Self::new).
+    pub fn new_resource_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
         Self {
             message: message.into(),
             resource: Some(resource.into()),

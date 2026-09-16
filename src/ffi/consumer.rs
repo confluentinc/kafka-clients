@@ -58,7 +58,7 @@ use crate::common::header::{Header, RecordHeader};
 use crate::common::metrics::KafkaMetric;
 use crate::common::serialization::BytesDeserializer;
 use crate::common::{Error, Node, PartitionInfo, TopicPartition};
-use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
+use crate::consumer::AsyncKafkaConsumer;
 // `crate::consumer::ConsumerHandle` is aliased because this module already has a
 // private `ConsumerHandle` (the state behind `kafka_consumer_Consumer_t`), which
 // is an unrelated concept.
@@ -415,7 +415,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
         return std::ptr::null_mut();
     }
     let map = unsafe { properties_ref(props) };
-    let config = match crate::consumer::ConsumerConfig::from_properties(map) {
+    let config = match crate::consumer::ConsumerConfig::new(map) {
         Ok(c) => c,
         Err(e) => {
             if !out_error.is_null() {
@@ -1519,6 +1519,16 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_destroy(tp: *mut kafka_co
     }
 }
 
+/// Boxes a single [`TopicPartition`] into an owned handle, mirroring the
+/// per-entry construction used by the map/list handles below. Reused by
+/// `kafka_common_RecordDeserializationError_partition`
+/// (`src/ffi/common.rs`) since `RecordDeserializationError` carries a single
+/// non-optional `TopicPartition` rather than a collection.
+pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_consumer_TopicPartition_t {
+    let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
+    Box::into_raw(Box::new(TopicPartitionInner { tp, topic_c })) as *mut kafka_consumer_TopicPartition_t
+}
+
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
 pub struct kafka_consumer_OffsetAndMetadata_t {
@@ -1706,7 +1716,7 @@ fn box_group_metadata(meta: ConsumerGroupMetadata) -> *mut kafka_consumer_Consum
 /// - `group_id` and `member_id` must be valid NUL-terminated C strings.
 /// - `group_instance_id` must be null or a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-#[allow(deprecated)] // ConsumerGroupMetadata::with_details is deprecated in the public API but is the constructor the FFI must expose.
+#[allow(deprecated)] // ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     group_id: *const c_char,
     generation_id: i32,
@@ -1720,7 +1730,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     } else {
         Some(unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().to_string())
     };
-    let meta = ConsumerGroupMetadata::with_details(group_id, generation_id, member_id, group_instance_id);
+    let meta = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+        group_id,
+        generation_id,
+        member_id,
+        group_instance_id,
+    );
     box_group_metadata(meta)
 }
 
@@ -2976,7 +2991,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe(
     count: i32,
 ) -> *mut kafka_common_Error_t {
     let topic_vec = unsafe { read_topics(topics, count) };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe(topic_vec))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe_with_topics(topic_vec))) }
 }
 
 /// Completion callback for void-returning async consumer ops.
@@ -2996,7 +3011,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
     user_data: *mut c_void,
 ) {
     let topic_vec = unsafe { read_topics(topics, count) };
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.subscribe(topic_vec)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.subscribe_with_topics(topic_vec)) };
 }
 
 // ── subscribe with a ConsumerRebalanceListener ──
@@ -3379,7 +3394,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
     // rejection) releases it and fires the destroy hook.
     let listener = unsafe { take_rebalance_listener(listener, h.completion_tx.clone()) };
     let topic_vec = unsafe { read_topics(topics, count) };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe_with_listener(topic_vec, listener))) }
+    unsafe {
+        sync_void_op(consumer, move |c| {
+            Box::pin(c.subscribe_with_topics_listener(topic_vec, listener))
+        })
+    }
 }
 
 /// Subscribes to a list of topics with a rebalance listener (async). See
@@ -3405,7 +3424,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
     let topic_vec = unsafe { read_topics(topics, count) };
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
-            c.subscribe_with_listener(topic_vec, listener)
+            c.subscribe_with_topics_listener(topic_vec, listener)
         })
     };
 }
@@ -3475,7 +3494,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
 ) -> *mut kafka_common_Error_t {
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek(tp, offset))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_offset(tp, offset))) }
 }
 
 /// Seeks a single partition to `offset` (async).
@@ -3494,7 +3513,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
 ) {
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek(tp, offset)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_offset(tp, offset)) };
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch
@@ -3522,11 +3541,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_metadata(tp, oam))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_offset_and_metadata(tp, oam))) }
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch
@@ -3556,7 +3575,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => {
             // Marshaling failed: fire inline with the error (no guard taken).
@@ -3564,7 +3583,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
             return;
         },
     };
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_metadata(tp, oam)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_offset_and_metadata(tp, oam)) };
 }
 
 /// Seeks the given partitions to their beginning offsets (sync).
@@ -3783,7 +3802,7 @@ pub(crate) unsafe fn read_offset_map(
                 unsafe { CStr::from_ptr(m) }.to_string_lossy().to_string()
             }
         };
-        let oam = OffsetAndMetadata::with_leader_epoch(offset, epoch, meta)?;
+        let oam = OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, meta)?;
         map.insert(TopicPartition::new(topic, partition), oam);
     }
     Ok(map)
@@ -3810,7 +3829,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_sync_offsets(map))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_sync_with_offsets(map))) }
 }
 
 /// Commits specific offsets asynchronously (async dispatch of
@@ -3841,7 +3860,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
             return;
         },
     };
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.commit_sync_offsets(map)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.commit_sync_with_offsets(map)) };
 }
 
 /// Commits the consumed offsets asynchronously (sync call, returns once the
@@ -4065,7 +4084,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callb
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_offsets_with_callback(map, cb))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_with_offsets_callback(map, cb))) }
 }
 
 // ── enforce_rebalance ──
@@ -4088,7 +4107,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     };
     unsafe {
         sync_void_op(consumer, move |c| {
-            Box::pin(async move { c.enforce_rebalance(reason_str.as_deref()).await })
+            Box::pin(async move {
+                // The C entry point collapses Java's two overloads behind a
+                // nullable `reason`; branch onto the matching Rust method.
+                match reason_str {
+                    Some(r) => c.enforce_rebalance_with_reason(&r).await,
+                    None => c.enforce_rebalance().await,
+                }
+            })
         })
     }
 }
@@ -4118,7 +4144,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
     timeout_ms: i64,
 ) -> *mut kafka_common_Error_t {
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-    let options = CloseOptions::timeout(timeout);
+    let options = CloseOptions::new_timeout(timeout);
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_with_options(options))) }
 }
 

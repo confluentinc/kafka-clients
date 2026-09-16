@@ -19,12 +19,12 @@
 
 //! Per-partition idempotence/transaction bookkeeping.
 
+use crate::common::requests::ProduceResponse;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::record::internal::default_record_batch::increment_sequence;
-use crate::common::requests::produce_response::INVALID_OFFSET;
+use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::producer::internals::ProducerBatch;
 
@@ -112,7 +112,7 @@ impl TxnPartitionEntry {
             producer_id_and_epoch: ProducerIdAndEpoch::NONE,
             next_sequence: 0,
             last_acked_sequence: Self::NO_LAST_ACKED_SEQUENCE_NUMBER,
-            last_acked_offset: INVALID_OFFSET,
+            last_acked_offset: ProduceResponse::INVALID_OFFSET,
             inflight_batches_by_sequence: BTreeSet::new(),
         }
     }
@@ -134,7 +134,7 @@ impl TxnPartitionEntry {
 
     /// The last acknowledged offset, or `None` if none has been acknowledged.
     pub(crate) fn last_acked_offset(&self) -> Option<i64> {
-        if self.last_acked_offset != INVALID_OFFSET {
+        if self.last_acked_offset != ProduceResponse::INVALID_OFFSET {
             Some(self.last_acked_offset)
         } else {
             None
@@ -170,7 +170,7 @@ impl TxnPartitionEntry {
     /// Delegates to the shared wrapping helper, as Java delegates to
     /// `DefaultRecordBatch.incrementSequence`.
     pub(crate) fn increment_sequence(&mut self, increment: i32) {
-        self.next_sequence = increment_sequence(self.next_sequence, increment);
+        self.next_sequence = DefaultRecordBatch::increment_sequence(self.next_sequence, increment);
     }
 
     /// Records `batch` as in flight for this partition.
@@ -396,7 +396,7 @@ mod tests {
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::memory_records::MemoryRecords;
+    use crate::common::record::internal::MemoryRecords;
 
     fn tp() -> TopicPartition {
         TopicPartition::new("topic".to_string(), 0)
@@ -426,7 +426,7 @@ mod tests {
     fn test_last_acked_offset_sentinel_maps_to_none() {
         let mut entry = TxnPartitionEntry::new(tp());
         assert_eq!(entry.last_acked_offset(), None);
-        entry.set_last_acked_offset(INVALID_OFFSET);
+        entry.set_last_acked_offset(ProduceResponse::INVALID_OFFSET);
         assert_eq!(entry.last_acked_offset(), None);
         entry.set_last_acked_offset(0);
         assert_eq!(entry.last_acked_offset(), Some(0));

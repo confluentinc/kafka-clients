@@ -22,12 +22,17 @@ use std::net::SocketAddr;
 
 use confluent_kafka::common::network::NetworkSend;
 use confluent_kafka::common::network::PlaintextChannelBuilder;
-use confluent_kafka::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
-use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
+use confluent_kafka::common::network::Selectable;
+use confluent_kafka::common::network::Selector;
+
+/// Java writes `Selectable.USE_DEFAULT_BUFFER_SIZE`; Rust cannot name a trait
+/// constant without a `Self` type (E0790), so bind it once per file.
+const USE_DEFAULT_BUFFER_SIZE: i32 = <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
     ApiVersionsRequestBuilder, MetadataRequestBuilder, MetadataResponse, RequestBuilder, RequestHeader,
+    RequestHeaderOptionsBuilder,
 };
 
 use crate::common::cluster_config::ClusterConfig;
@@ -45,7 +50,7 @@ const NODE_ID: &str = "0";
 /// Helper: create a Selector with PlaintextChannelBuilder.
 fn create_selector() -> Selector {
     let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder)
+    Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: parse address from bootstrap servers string.
@@ -86,8 +91,16 @@ async fn send_and_receive(
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header =
-        RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
+    let header = RequestHeader::new_options(
+        RequestHeaderOptionsBuilder::new()
+            .set_request_api_key(api_key)
+            .set_request_version(version)
+            .set_client_id(client_id)
+            .set_correlation_id(correlation_id)
+            .build()
+            .unwrap(),
+    )
+    .expect("Failed to create request header");
 
     let send = request.to_send(&header).expect("Failed to serialize request");
     let network_send = NetworkSend::new(NODE_ID, Box::new(send));
@@ -118,7 +131,7 @@ async fn handshake_and_get_metadata_version(selector: &mut Selector) -> i16 {
     let mut builder = ApiVersionsRequestBuilder::new();
     let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", 1).await;
 
-    let mut buffer = ByteBufferAccessor::from_bytes(payload);
+    let mut buffer = ByteBufferAccessor::new(payload);
     let response = ConcreteResponse::parse_response(&mut buffer, &header).expect("Failed to parse response");
 
     let ConcreteResponse::ApiVersions(avr) = response else {
@@ -138,11 +151,12 @@ async fn send_metadata_request(
     topics: Option<&[&str]>,
     correlation_id: i32,
 ) -> MetadataResponse {
-    let mut builder = MetadataRequestBuilder::new_with_version(topics, true, metadata_version);
+    let mut builder =
+        MetadataRequestBuilder::new_topics_allow_auto_topic_creation_version(topics, true, metadata_version);
 
     let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", correlation_id).await;
 
-    let mut buffer = ByteBufferAccessor::from_bytes(payload);
+    let mut buffer = ByteBufferAccessor::new(payload);
     let response = ConcreteResponse::parse_response(&mut buffer, &header).expect("Failed to parse response");
 
     let ConcreteResponse::Metadata(mr) = response else {

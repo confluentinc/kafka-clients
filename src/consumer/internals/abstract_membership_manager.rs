@@ -28,14 +28,14 @@
 //! Composition over inheritance: this struct holds the shared
 //! membership-state fields (group ID, member ID / epoch, current /
 //! target assignments, listener registrations). The composing
-//! [`super::consumer_membership_manager::ConsumerMembershipManager`]
+//! [`super::ConsumerMembershipManager`]
 //! wraps an `Arc<Mutex<MembershipInner>>` and provides Consumer-specific
 //! configuration (group instance ID, server assignor, rack ID, commit
 //! manager, ...).
 //!
 //! The state is shared via `Arc<Mutex<MembershipInner>>` between the
 //! membership manager itself and
-//! [`super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager`]
+//! [`super::ConsumerHeartbeatRequestManager`]
 //! — both touch the state from the bg task (Java models the same shape
 //! with both managers holding plain references). Per
 //! `consumer-threading.md` §16, the lock is `std::sync::Mutex` (short
@@ -59,15 +59,15 @@ use tokio::sync::oneshot;
 
 use crate::common::metrics::Time;
 use crate::common::{Error, TopicPartition, Uuid};
-use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-use crate::consumer::internals::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
-use crate::consumer::internals::events::background_event::BackgroundEvent;
-use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
+use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::ConsumerRebalanceMetricsManager;
+use crate::consumer::internals::events::BackgroundEvent;
+use crate::consumer::internals::events::BackgroundEventHandler;
 
-use super::consumer_metadata::ConsumerMetadata;
-use super::member_state::MemberState;
-use super::member_state_listener::MemberStateListener;
-use super::subscription_state::SubscriptionState;
+use super::ConsumerMetadata;
+use super::MemberState;
+use super::MemberStateListener;
+use super::SubscriptionState;
 
 /// A member's reconciled (or target) assignment, keyed by topic ID, with
 /// a local epoch that bumps every time the value changes.
@@ -749,7 +749,7 @@ impl AbstractMembershipManager {
     ///
     /// `join_group_epoch` is supplied by the caller — Phase 10's AEP
     /// `AsyncPoll` arm reads it via
-    /// [`crate::consumer::internals::consumer_membership_manager::ConsumerMembershipManager::join_group_epoch`]
+    /// [`crate::consumer::internals::ConsumerMembershipManager::join_group_epoch`]
     /// just before invoking this method.
     pub(crate) fn maybe_rejoin_stale_member(&self, join_group_epoch: i32) {
         let should_transition_to_joining = {
@@ -971,9 +971,9 @@ impl AbstractMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -995,17 +995,17 @@ mod tests {
         Arc<Mutex<SubscriptionState>>,
         Arc<ConsumerMetadata>,
         Arc<BackgroundEventHandler>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         // Register a no-op listener so the §31 short-circuit allows
         // the handshake to enqueue an event in these tests.
         subs.lock()
             .unwrap()
-            .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+            .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
             .unwrap();
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1025,7 +1025,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         let inner = mgr.inner.lock().unwrap();
         assert_eq!(inner.state, MemberState::Unsubscribed);
@@ -1044,7 +1044,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
@@ -1062,7 +1062,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → PREPARE_LEAVING valid.
@@ -1109,7 +1109,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         // Spawn the bg-side invocation.
@@ -1151,7 +1151,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);
@@ -1183,8 +1183,8 @@ mod tests {
     async fn invoke_rebalance_callback_no_listener_short_circuits() {
         // Build a subscription state WITHOUT a registered listener.
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1198,7 +1198,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         // Without a listener, the handshake must complete immediately
@@ -1228,7 +1228,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);

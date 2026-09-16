@@ -14,8 +14,8 @@
 
 //! Delegation token types (org.apache.kafka.common.security.token.delegation).
 
-pub mod delegation_token;
-pub mod token_information;
+mod delegation_token;
+mod token_information;
 
 pub use delegation_token::DelegationToken;
 pub use token_information::TokenInformation;

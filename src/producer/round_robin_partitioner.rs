@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use dashmap::DashMap;
 
 use crate::common::Cluster;
-use crate::common::utils::to_positive;
+use crate::common::utils::Utils;
 use crate::producer::Partitioner;
 
 /// The "Round-Robin" partitioner.
@@ -78,7 +78,7 @@ impl<K, V> Partitioner<K, V> for RoundRobinPartitioner {
     /// # Precondition / panics
     ///
     /// When the topic has **no** partitions at all in `cluster`, the fallback
-    /// `to_positive(next) % 0` divides by zero — Java's identical code throws
+    /// `Utils::to_positive(next) % 0` divides by zero — Java's identical code throws
     /// `ArithmeticException` there. This is unreachable from
     /// [`KafkaProducer`](crate::producer::KafkaProducer): `wait_on_metadata`
     /// guarantees the topic has partitions before `partition` is called. Per
@@ -96,11 +96,11 @@ impl<K, V> Partitioner<K, V> for RoundRobinPartitioner {
         let next_value = self.next_value(topic);
         let available_partitions = cluster.available_partitions_for_topic(topic);
         if !available_partitions.is_empty() {
-            let part = to_positive(next_value) as usize % available_partitions.len();
+            let part = Utils::to_positive(next_value) as usize % available_partitions.len();
             available_partitions[part].partition()
         } else {
             let num_partitions = cluster.partitions_for_topic(topic).len();
-            to_positive(next_value) % num_partitions as i32
+            Utils::to_positive(next_value) % num_partitions as i32
         }
     }
 }
@@ -138,7 +138,7 @@ mod tests {
         let mut count_for_part2 = 0;
         let concrete = RoundRobinPartitioner::new();
         let partitioner: &dyn Partitioner<String, String> = &concrete;
-        let cluster = Cluster::new(
+        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             vec![n[0].clone(), n[1].clone(), n[2].clone()],
             partitions,
@@ -179,7 +179,7 @@ mod tests {
             PartitionInfo::new(topic_a.to_string(), 2, Some(n[2].clone()), n.to_vec(), n.to_vec()),
             PartitionInfo::new(topic_b.to_string(), 0, Some(n[0].clone()), n.to_vec(), n.to_vec()),
         ];
-        let test_cluster = Cluster::new(
+        let test_cluster = Cluster::new_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             vec![n[0].clone(), n[1].clone(), n[2].clone()],
             all_partitions,

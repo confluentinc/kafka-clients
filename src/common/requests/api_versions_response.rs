@@ -18,14 +18,10 @@
 
 use std::collections::HashMap;
 
+use crate::ApiVersionsResponseData;
 use crate::api_message_type::ListenerType;
-use crate::api_versions_response_data::{
-    ApiVersion, ApiVersionsResponseData, FinalizedFeatureKey, SupportedFeatureKey,
-};
+use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-
-/// Unknown finalized features epoch sentinel.
-pub const API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH: i64 = -1;
 
 /// Possible error codes:
 /// - [`Errors::UnsupportedVersion`]
@@ -36,6 +32,9 @@ pub struct ApiVersionsResponse {
 }
 
 impl ApiVersionsResponse {
+    /// Unknown finalized features epoch sentinel.
+    pub const API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH: i64 = -1;
+
     /// Creates a new `ApiVersionsResponse` from data.
     pub fn new(data: ApiVersionsResponseData) -> Self {
         Self { data }
@@ -63,7 +62,7 @@ impl ApiVersionsResponse {
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        super::abstract_response::single_error_count(Errors::for_code(self.data.error_code))
+        super::AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
 
     /// Returns the throttle time in milliseconds.
@@ -261,7 +260,7 @@ impl ApiVersionsResponse {
             ))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build()
     }
 }
@@ -418,7 +417,6 @@ fn create_finalized_feature_keys(finalized_features: &HashMap<String, i16>) -> V
 mod tests {
     use super::*;
     use crate::api_versions_response_data::SupportedFeatureKey;
-    use crate::common::protocol::api_keys::PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION;
     use std::collections::HashSet;
 
     // Helper: extract the set of ApiKeys in a response
@@ -490,7 +488,7 @@ mod tests {
 
             if *key == ApiKeys::PRODUCE {
                 assert_eq!(
-                    PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION,
+                    ApiKeys::PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION,
                     version.min_version,
                     "Incorrect min version for Api {}",
                     key.name()
@@ -514,7 +512,7 @@ mod tests {
         assert!(default_response.data().supported_features.is_empty());
         assert!(default_response.data().finalized_features.is_empty());
         assert_eq!(
-            API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH,
+            ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH,
             default_response.data().finalized_features_epoch
         );
     }
@@ -561,24 +559,24 @@ mod tests {
     #[test]
     fn test_should_return_all_keys_when_throttle_ms_is_default_throttle() {
         let response = ApiVersionsResponseBuilder::new()
-            .set_throttle_time_ms(super::super::abstract_response::DEFAULT_THROTTLE_TIME)
+            .set_throttle_time_ms(super::super::AbstractResponse::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
 
         let broker_apis: HashSet<ApiKeys> =
             ApiKeys::apis_for_listener(ListenerType::Broker).into_iter().copied().collect();
         assert_eq!(broker_apis, api_keys_in_response(&response));
         assert_eq!(
-            super::super::abstract_response::DEFAULT_THROTTLE_TIME,
+            super::super::AbstractResponse::DEFAULT_THROTTLE_TIME,
             response.throttle_time_ms()
         );
         assert!(response.data().supported_features.is_empty());
         assert!(response.data().finalized_features.is_empty());
         assert_eq!(
-            API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH,
+            ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH,
             response.data().finalized_features_epoch
         );
     }
@@ -591,7 +589,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
         verify_api_keys_for_telemetry(&response, 2);
     }
@@ -604,7 +602,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, false))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
         verify_api_keys_for_telemetry(&response, 0);
     }
@@ -613,11 +611,11 @@ mod tests {
     #[test]
     fn test_broker_apis_are_enabled() {
         let response = ApiVersionsResponseBuilder::new()
-            .set_throttle_time_ms(super::super::abstract_response::DEFAULT_THROTTLE_TIME)
+            .set_throttle_time_ms(super::super::AbstractResponse::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
 
         let exposed = api_keys_in_response(&response);
@@ -708,7 +706,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(vec![feature])
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(ApiVersionsResponse::API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .set_alter_feature_level0(alter_v0_features)
             .build();
 

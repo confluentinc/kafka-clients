@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 use txn_common::report;
 use txn_common::send_expect_failure;
 use txn_common::send_value_printed;

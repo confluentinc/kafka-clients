@@ -45,13 +45,12 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::TxnOffsetCommitResponseData;
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::txn_offset_commit_response_data::{
-    TxnOffsetCommitResponseData, TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
-};
+use crate::txn_offset_commit_response_data::{TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic};
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A `TxnOffsetCommit` response.
 ///
@@ -63,7 +62,7 @@ pub struct TxnOffsetCommitResponse {
 
 impl TxnOffsetCommitResponse {
     /// Creates a new `TxnOffsetCommitResponse` from the underlying data.
-    pub fn new(data: TxnOffsetCommitResponseData) -> Self {
+    pub fn new_data(data: TxnOffsetCommitResponseData) -> Self {
         Self { data }
     }
 
@@ -74,7 +73,10 @@ impl TxnOffsetCommitResponse {
     /// Java groups through a `HashMap` and so has unspecified order; this sorts by
     /// topic name and then partition index for a deterministic encoding — see
     /// `.claude/rules/producer-transactions.md` §10.
-    pub fn from_error_map(request_throttle_ms: i32, response_data: &HashMap<TopicPartition, Errors>) -> Self {
+    pub fn new_request_throttle_ms_response_data(
+        request_throttle_ms: i32,
+        response_data: &HashMap<TopicPartition, Errors>,
+    ) -> Self {
         let mut by_topic: HashMap<&str, Vec<(i32, Errors)>> = HashMap::new();
         for (topic_partition, error) in response_data {
             by_topic
@@ -109,7 +111,7 @@ impl TxnOffsetCommitResponse {
 
         let mut data = TxnOffsetCommitResponseData::new();
         data.set_topics(topics).set_throttle_time_ms(request_throttle_ms);
-        Self::new(data)
+        Self::new_data(data)
     }
 
     /// Returns the API key for this response.
@@ -168,7 +170,7 @@ impl TxnOffsetCommitResponse {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
             for partition in &topic.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
             }
         }
         counts
@@ -182,7 +184,7 @@ impl TxnOffsetCommitResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = TxnOffsetCommitResponseData::read(readable, version)?;
-        Ok(Self::new(data))
+        Ok(Self::new_data(data))
     }
 }
 
@@ -208,7 +210,7 @@ mod tests {
             (tp("topic-b", 1), Errors::NotCoordinator),
         ]);
 
-        let response = TxnOffsetCommitResponse::from_error_map(19, &expected);
+        let response = TxnOffsetCommitResponse::new_request_throttle_ms_response_data(19, &expected);
         assert_eq!(response.throttle_time_ms(), 19);
         assert_eq!(response.errors(), expected);
     }
@@ -221,7 +223,7 @@ mod tests {
             map.insert(tp(topic, partition), Errors::None);
         }
 
-        let response = TxnOffsetCommitResponse::from_error_map(0, &map);
+        let response = TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &map);
         let topics = &response.data().topics;
         assert_eq!(topics[0].name, "topic-a");
         assert_eq!(
@@ -242,7 +244,7 @@ mod tests {
             (tp("topic-a", 1), Errors::NotCoordinator),
             (tp("topic-b", 0), Errors::None),
         ]);
-        let response = TxnOffsetCommitResponse::from_error_map(0, &map);
+        let response = TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &map);
 
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::NotCoordinator), Some(&2));
@@ -254,14 +256,14 @@ mod tests {
     /// no counts at all — unlike most responses, which would still count `None`.
     #[test]
     fn test_error_counts_is_empty_when_no_partitions() {
-        let response = TxnOffsetCommitResponse::new(TxnOffsetCommitResponseData::new());
+        let response = TxnOffsetCommitResponse::new_data(TxnOffsetCommitResponseData::new());
         assert!(response.error_counts().is_empty());
         assert!(response.errors().is_empty());
     }
 
     #[test]
     fn test_throttle_time_round_trip() {
-        let mut response = TxnOffsetCommitResponse::new(TxnOffsetCommitResponseData::new());
+        let mut response = TxnOffsetCommitResponse::new_data(TxnOffsetCommitResponseData::new());
         assert_eq!(response.throttle_time_ms(), 0);
         response.maybe_set_throttle_time_ms(88);
         assert_eq!(response.throttle_time_ms(), 88);
@@ -269,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_should_client_throttle() {
-        let response = TxnOffsetCommitResponse::new(TxnOffsetCommitResponseData::new());
+        let response = TxnOffsetCommitResponse::new_data(TxnOffsetCommitResponseData::new());
         assert!(!response.should_client_throttle(0));
         assert!(response.should_client_throttle(1));
         assert!(response.should_client_throttle(ApiKeys::TXN_OFFSET_COMMIT.latest_version()));
@@ -277,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_api_key() {
-        let response = TxnOffsetCommitResponse::new(TxnOffsetCommitResponseData::new());
+        let response = TxnOffsetCommitResponse::new_data(TxnOffsetCommitResponseData::new());
         assert_eq!(response.api_key(), &ApiKeys::TXN_OFFSET_COMMIT);
     }
 
@@ -291,7 +293,7 @@ mod tests {
             (tp("topic-b", 2), Errors::NotCoordinator),
         ]);
 
-        let response = TxnOffsetCommitResponse::from_error_map(THROTTLE_TIME_MS, &errors_map);
+        let response = TxnOffsetCommitResponse::new_request_throttle_ms_response_data(THROTTLE_TIME_MS, &errors_map);
 
         assert_eq!(response.errors(), errors_map);
         let counts = response.error_counts();
@@ -330,7 +332,7 @@ mod tests {
             let mut data = TxnOffsetCommitResponseData::new();
             data.set_throttle_time_ms(THROTTLE_TIME_MS).set_topics(topics);
 
-            let mut concrete = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new(data));
+            let mut concrete = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new_data(data));
             let mut buffer = concrete.serialize(version).expect("serialize");
             buffer.flip();
             let response = TxnOffsetCommitResponse::parse(&mut buffer, version).expect("parse");
@@ -354,7 +356,7 @@ mod tests {
         ]);
 
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
-            let response = TxnOffsetCommitResponse::from_error_map(11, &map);
+            let response = TxnOffsetCommitResponse::new_request_throttle_ms_response_data(11, &map);
             let mut concrete = ConcreteResponse::TxnOffsetCommit(response);
             let mut buffer = concrete.serialize(version).expect("serialize");
             buffer.flip();

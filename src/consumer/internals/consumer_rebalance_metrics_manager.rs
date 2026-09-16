@@ -37,11 +37,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 #[cfg(test)]
 use crate::common::MetricName;
-use crate::common::metrics::internals::metrics_utils::TimeUnit;
+use crate::common::metrics::internals::TimeUnit;
 use crate::common::metrics::stats::{Avg, CumulativeCount, CumulativeSum, Max, Rate, WindowedCount};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
-use crate::consumer::internals::consumer_utils::{CONSUMER_METRIC_GROUP_PREFIX, COORDINATOR_METRICS_SUFFIX};
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::consumer::internals::ConsumerUtils;
+use crate::consumer::internals::SubscriptionState;
 
 /// Records consumer-group rebalance latency, rate, total, and failure metrics,
 /// plus the `assigned-partitions` and `last-rebalance-seconds-ago` gauges.
@@ -100,51 +100,55 @@ impl ConsumerRebalanceMetricsManager {
     /// `last-rebalance-seconds-ago` gauge, and the `assigned-partitions` gauge
     /// reading `subscriptions.num_assigned_partitions()`. All INFO level.
     pub(crate) fn new(metrics: &Arc<Metrics>, subscriptions: Arc<Mutex<SubscriptionState>>) -> Self {
-        let metric_group_name = format!("{CONSUMER_METRIC_GROUP_PREFIX}{COORDINATOR_METRICS_SUFFIX}");
+        let metric_group_name = format!(
+            "{}{}",
+            ConsumerUtils::CONSUMER_METRIC_GROUP_PREFIX,
+            ConsumerUtils::COORDINATOR_METRICS_SUFFIX
+        );
 
-        let rebalance_latency_avg = metrics.metric_name(
+        let rebalance_latency_avg = metrics.metric_name_description_tags(
             "rebalance-latency-avg",
             &metric_group_name,
             "The average time in ms taken for a group to complete a rebalance",
             BTreeMap::new(),
         );
-        let rebalance_latency_max = metrics.metric_name(
+        let rebalance_latency_max = metrics.metric_name_description_tags(
             "rebalance-latency-max",
             &metric_group_name,
             "The max time in ms taken for a group to complete a rebalance",
             BTreeMap::new(),
         );
-        let rebalance_latency_total = metrics.metric_name(
+        let rebalance_latency_total = metrics.metric_name_description_tags(
             "rebalance-latency-total",
             &metric_group_name,
             "The total number of milliseconds spent in rebalances",
             BTreeMap::new(),
         );
-        let rebalance_total = metrics.metric_name(
+        let rebalance_total = metrics.metric_name_description_tags(
             "rebalance-total",
             &metric_group_name,
             "The total number of rebalance events",
             BTreeMap::new(),
         );
-        let rebalance_rate_per_hour = metrics.metric_name(
+        let rebalance_rate_per_hour = metrics.metric_name_description_tags(
             "rebalance-rate-per-hour",
             &metric_group_name,
             "The number of rebalance events per hour",
             BTreeMap::new(),
         );
-        let failed_rebalance_total = metrics.metric_name(
+        let failed_rebalance_total = metrics.metric_name_description_tags(
             "failed-rebalance-total",
             &metric_group_name,
             "The total number of failed rebalance events",
             BTreeMap::new(),
         );
-        let failed_rebalance_rate = metrics.metric_name(
+        let failed_rebalance_rate = metrics.metric_name_description_tags(
             "failed-rebalance-rate-per-hour",
             &metric_group_name,
             "The number of failed rebalance events per hour",
             BTreeMap::new(),
         );
-        let assigned_partitions_count = metrics.metric_name(
+        let assigned_partitions_count = metrics.metric_name_description_tags(
             "assigned-partitions",
             &metric_group_name,
             "The number of partitions currently assigned to this consumer",
@@ -164,28 +168,28 @@ impl ConsumerRebalanceMetricsManager {
             guard.num_assigned_partitions() as f64
         });
         metrics
-            .add_metric(assigned_partitions_count.clone(), Box::new(num_parts))
+            .add_metric_measurable(assigned_partitions_count.clone(), Box::new(num_parts))
             .expect("registering assigned-partitions metric");
 
         let successful_rebalance_sensor =
             metrics.sensor("rebalance-latency").expect("creating rebalance-latency sensor");
         successful_rebalance_sensor
-            .add(rebalance_latency_avg.clone(), Box::new(Avg::new()))
+            .add_metric_name(rebalance_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding rebalance-latency-avg");
         successful_rebalance_sensor
-            .add(rebalance_latency_max.clone(), Box::new(Max::new()))
+            .add_metric_name(rebalance_latency_max.clone(), Box::new(Max::new()))
             .expect("adding rebalance-latency-max");
         successful_rebalance_sensor
-            .add(rebalance_latency_total.clone(), Box::new(CumulativeSum::new()))
+            .add_metric_name(rebalance_latency_total.clone(), Box::new(CumulativeSum::new()))
             .expect("adding rebalance-latency-total");
         successful_rebalance_sensor
-            .add(rebalance_total.clone(), Box::new(CumulativeCount::new()))
+            .add_metric_name(rebalance_total.clone(), Box::new(CumulativeCount::new()))
             .expect("adding rebalance-total");
         // Java: `new Rate(TimeUnit.HOURS, new WindowedCount(), 1)`.
         successful_rebalance_sensor
-            .add(
+            .add_metric_name(
                 rebalance_rate_per_hour.clone(),
-                Box::new(Rate::with_unit_stat_window(
+                Box::new(Rate::new_unit_stat_window(
                     TimeUnit::Hours,
                     Arc::new(WindowedCount::new().into_sampled_stat()),
                     1,
@@ -195,12 +199,12 @@ impl ConsumerRebalanceMetricsManager {
 
         let failed_rebalance_sensor = metrics.sensor("failed-rebalance").expect("creating failed-rebalance sensor");
         failed_rebalance_sensor
-            .add(failed_rebalance_total.clone(), Box::new(CumulativeSum::new()))
+            .add_metric_name(failed_rebalance_total.clone(), Box::new(CumulativeSum::new()))
             .expect("adding failed-rebalance-total");
         failed_rebalance_sensor
-            .add(
+            .add_metric_name(
                 failed_rebalance_rate.clone(),
-                Box::new(Rate::with_unit_stat_window(
+                Box::new(Rate::new_unit_stat_window(
                     TimeUnit::Hours,
                     Arc::new(WindowedCount::new().into_sampled_stat()),
                     1,
@@ -220,14 +224,14 @@ impl ConsumerRebalanceMetricsManager {
                 ((now - last_end) / 1000) as f64
             }
         });
-        let last_rebalance_seconds_ago = metrics.metric_name(
+        let last_rebalance_seconds_ago = metrics.metric_name_description_tags(
             "last-rebalance-seconds-ago",
             &metric_group_name,
             "The number of seconds since the last rebalance event",
             BTreeMap::new(),
         );
         metrics
-            .add_metric(last_rebalance_seconds_ago.clone(), Box::new(last_rebalance))
+            .add_metric_measurable(last_rebalance_seconds_ago.clone(), Box::new(last_rebalance))
             .expect("registering last-rebalance-seconds-ago metric");
 
         Self {
@@ -265,7 +269,7 @@ impl ConsumerRebalanceMetricsManager {
     pub(crate) fn record_rebalance_ended(&self, now_ms: i64) {
         self.last_rebalance_end_ms.store(now_ms, Ordering::SeqCst);
         let latency = now_ms - self.last_rebalance_start_ms.load(Ordering::SeqCst);
-        self.successful_rebalance_sensor.record(latency as f64);
+        self.successful_rebalance_sensor.record_value(latency as f64);
     }
 
     /// Java: `maybeRecordRebalanceFailed()`. A rebalance failed only if a start
@@ -276,7 +280,7 @@ impl ConsumerRebalanceMetricsManager {
         if start <= end {
             return;
         }
-        self.failed_rebalance_sensor.record_occurrence();
+        self.failed_rebalance_sensor.record();
     }
 
     /// Java: `rebalanceStarted()`. Part of the manager's public surface but,
@@ -292,15 +296,15 @@ impl ConsumerRebalanceMetricsManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Metric;
     use crate::common::TopicPartition;
-    use crate::common::metric::Metric;
-    use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::{Metrics, Time};
     use crate::consumer::AutoOffsetResetStrategy;
 
     /// Build a manager over a `MockTime`-backed `Metrics` plus a fresh
     /// `SubscriptionState`. Mirrors the Java test's `@BeforeEach setUp`
-    /// (MetricConfig defaults: 2 samples, 30s window — `Metrics::with_time`
+    /// (MetricConfig defaults: 2 samples, 30s window — `Metrics::new_time`
     /// uses the default `MetricConfig` which matches those defaults).
     fn setup() -> (
         Arc<MockTime>,
@@ -309,7 +313,7 @@ mod tests {
         ConsumerRebalanceMetricsManager,
     ) {
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
         let manager = ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subscriptions));
         (time, metrics, subscriptions, manager)
@@ -356,7 +360,7 @@ mod tests {
         // Automatically assigned partitions.
         {
             let mut s = subscriptions.lock().unwrap();
-            s.subscribe_topics(std::collections::HashSet::from(["topic".to_string()]), None)
+            s.subscribe_with_topics(std::collections::HashSet::from(["topic".to_string()]), None)
                 .expect("subscribe ok");
             s.assign_from_subscribed(&[tp("topic", 0)]).expect("assign ok");
         }
@@ -579,7 +583,7 @@ mod tests {
     /// without needing a broker (the live `AsyncKafkaConsumer::new` path).
     #[test]
     fn co_registration_with_callback_manager_does_not_conflict() {
-        use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
+        use crate::consumer::internals::RebalanceCallbackMetricsManager;
 
         let (_time, metrics, _subs, rebalance) = setup();
         let callback = RebalanceCallbackMetricsManager::new(&metrics);

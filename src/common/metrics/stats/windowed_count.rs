@@ -14,8 +14,8 @@
 
 //! A sampled count of recordings (`org.apache.kafka.common.metrics.stats.WindowedCount`).
 
+use crate::common::metrics::stats::WindowedSumKind;
 use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledStatKind};
-use crate::common::metrics::stats::windowed_sum::WindowedSumKind;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that maintains a simple count of what it has seen. This is
@@ -63,7 +63,7 @@ impl WindowedCount {
     /// See [`crate::common::metrics::stats::WindowedSum::into_sampled_stat`].
     ///
     /// Used to build a count-based [`crate::common::metrics::stats::Meter`]
-    /// (`Meter::with_stat(WindowedCount::new().into_sampled_stat(), ...)`), as the
+    /// (`Meter::new_rate_stat(WindowedCount::new().into_sampled_stat(), ...)`), as the
     /// consumer fetch/commit "occurrences" meters do. The production callers land
     /// with the FetchMetricsManager wiring in Phase M3; exercised here by the
     /// Meter tests. Kept `pub(crate)` API now to mirror Java's
@@ -95,9 +95,9 @@ impl Measurable for WindowedCount {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::Time;
-    use crate::common::metrics::internals::metrics_utils::TimeUnit;
-    use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::internals::TimeUnit;
 
     #[test]
     fn counts_invocations() {
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn test_time_windowing() {
         let count = WindowedCount::new();
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Milliseconds).with_samples(2);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Milliseconds).set_samples(2);
         let time = MockTime::new();
         count.record(&config, 1.0, time.milliseconds());
         time.sleep(1);

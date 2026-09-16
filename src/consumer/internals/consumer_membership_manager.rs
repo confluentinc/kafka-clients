@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! `ConsumerMembershipManager` — KIP-848 consumer-group membership
-//! manager. Composes [`super::abstract_membership_manager::AbstractMembershipManager`]
+//! manager. Composes [`super::AbstractMembershipManager`]
 //! and supplies the Consumer-specific configuration (group instance
 //! ID, server assignor, rack ID), and the §31 reconcile pipeline
 //! (which is async because it `.await`s rebalance-listener callbacks).
@@ -23,33 +23,32 @@
 
 #![allow(dead_code)]
 
+use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::common::Errors;
 use crate::common::metrics::Time;
-use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
-use crate::common::requests::consumer_group_heartbeat_request::{
-    JOIN_GROUP_MEMBER_EPOCH, LEAVE_GROUP_MEMBER_EPOCH, LEAVE_GROUP_STATIC_MEMBER_EPOCH,
-};
-use crate::common::{Error, TopicPartition, Uuid};
-use crate::consumer::close_options::GroupMembershipOperation;
-use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-#[cfg(test)]
-use crate::consumer::internals::events::background_event::BackgroundEvent;
-use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 
-use super::abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
-use super::commit_request_manager::CommitRequestManager;
-use super::consumer_metadata::ConsumerMetadata;
-use super::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
-use super::member_state::MemberState;
-use super::network_client_delegate::PollResult;
-use super::request_manager::RequestManager;
-use super::subscription_state::SubscriptionState;
+use crate::common::{Error, TopicPartition, Uuid};
+use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::GroupMembershipOperation;
+#[cfg(test)]
+use crate::consumer::internals::events::BackgroundEvent;
+use crate::consumer::internals::events::BackgroundEventHandler;
+
+use super::CommitRequestManager;
+use super::ConsumerMetadata;
+use super::ConsumerRebalanceMetricsManager;
+use super::MemberState;
+use super::PollResult;
+use super::RequestManager;
+use super::SubscriptionState;
+use super::{AbstractMembershipManager, LocalAssignment};
 
 /// KIP-848 consumer-group membership manager.
 ///
@@ -356,7 +355,7 @@ impl ConsumerMembershipManager {
 
     /// Java: `joinGroupEpoch()` — 0 for the consumer group protocol.
     pub(crate) fn join_group_epoch(&self) -> i32 {
-        JOIN_GROUP_MEMBER_EPOCH
+        ConsumerGroupHeartbeatRequest::JOIN_GROUP_MEMBER_EPOCH
     }
 
     /// Java: `leaveGroupEpoch()`. For static members + `LEAVE_GROUP`
@@ -365,12 +364,12 @@ impl ConsumerMembershipManager {
     pub(crate) fn leave_group_epoch(&self) -> i32 {
         let is_static_member = self.group_instance_id.is_some();
         if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
-            return LEAVE_GROUP_MEMBER_EPOCH;
+            return ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
         }
         if is_static_member {
-            LEAVE_GROUP_STATIC_MEMBER_EPOCH
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_STATIC_MEMBER_EPOCH
         } else {
-            LEAVE_GROUP_MEMBER_EPOCH
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH
         }
     }
 
@@ -2070,9 +2069,9 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -2097,7 +2096,7 @@ mod tests {
         rack_id: Option<String>,
     ) -> (
         ConsumerMembershipManager,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         make_inner(group_instance_id, server_assignor, rack_id, true)
     }
@@ -2110,7 +2109,7 @@ mod tests {
         rack_id: Option<String>,
     ) -> (
         ConsumerMembershipManager,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         make_inner(group_instance_id, server_assignor, rack_id, false)
     }
@@ -2122,17 +2121,17 @@ mod tests {
         with_listener: bool,
     ) -> (
         ConsumerMembershipManager,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         if with_listener {
             subs.lock()
                 .unwrap()
-                .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+                .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -2151,7 +2150,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         (mgr, rx)
     }
@@ -2166,17 +2165,17 @@ mod tests {
         ConsumerMembershipManager,
         Arc<crate::common::metrics::Metrics>,
         Arc<ConsumerRebalanceMetricsManager>,
-        Arc<crate::common::metrics::time::mock::MockTime>,
+        Arc<crate::common::metrics::MockTime>,
     ) {
-        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::metrics::MockTime;
         use crate::common::metrics::{Metrics, Time as MetricsTime};
 
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
         let metrics_manager = Arc::new(ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subs)));
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -2206,7 +2205,7 @@ mod tests {
     /// so the rebalance-latency/total metrics reflect the elapsed time.
     #[test]
     fn transition_to_reconciling_and_back_records_rebalance_metrics() {
-        use crate::common::metric::Metric;
+        use crate::common::Metric;
         use crate::common::metrics::Time as MetricsTime;
 
         let (mgr, metrics, metrics_manager, time) = make_with_rebalance_metrics();
@@ -2242,7 +2241,7 @@ mod tests {
     /// failure does not.
     #[test]
     fn non_retriable_heartbeat_failure_records_failed_rebalance() {
-        use crate::common::metric::Metric;
+        use crate::common::Metric;
 
         let (mgr, metrics, metrics_manager, _time) = make_with_rebalance_metrics();
         let value =
@@ -2272,28 +2271,28 @@ mod tests {
         with_listener: bool,
     ) -> (
         ConsumerMembershipManager,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         if with_listener {
             subs.lock()
                 .unwrap()
-                .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+                .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::new_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
         ));
-        let commit_mgr = Arc::new(crate::consumer::internals::commit_request_manager::CommitRequestManager::new(
+        let commit_mgr = Arc::new(crate::consumer::internals::CommitRequestManager::new(
             &config,
             metadata.clone(),
             subs.clone(),
             "test-group",
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
             0,
         ));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2310,7 +2309,7 @@ mod tests {
             beh,
             true, // auto_commit_enabled
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         (mgr, rx)
     }
@@ -2359,7 +2358,7 @@ mod tests {
     #[test]
     fn leave_group_epoch_dynamic_member() {
         let (mgr, _rx) = make(None, None, None);
-        assert_eq!(mgr.leave_group_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.leave_group_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
 
     /// `leave_group_epoch` returns -2 for static members (default
@@ -2367,7 +2366,10 @@ mod tests {
     #[test]
     fn leave_group_epoch_static_member() {
         let (mgr, _rx) = make(Some("static-1".to_string()), None, None);
-        assert_eq!(mgr.leave_group_epoch(), LEAVE_GROUP_STATIC_MEMBER_EPOCH);
+        assert_eq!(
+            mgr.leave_group_epoch(),
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_STATIC_MEMBER_EPOCH
+        );
     }
 
     /// `leave_group_epoch` returns -1 for static members when
@@ -2376,7 +2378,7 @@ mod tests {
     fn leave_group_epoch_static_member_force_leave() {
         let (mgr, _rx) = make(Some("static-1".to_string()), None, None);
         mgr.set_leave_group_operation(GroupMembershipOperation::LeaveGroup);
-        assert_eq!(mgr.leave_group_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.leave_group_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
 
     // Helper: force the manager into PREPARE_LEAVING so the
@@ -2596,7 +2598,7 @@ mod tests {
     /// when the epoch actually changed.
     #[test]
     fn listeners_notified_only_on_epoch_change() {
-        use crate::consumer::internals::member_state_listener::MemberStateListener;
+        use crate::consumer::internals::MemberStateListener;
         use std::sync::Mutex as StdMutex;
 
         #[derive(Default)]
@@ -2791,7 +2793,7 @@ mod tests {
     /// `None` when the manager transitions to FATAL.
     #[tokio::test]
     async fn listeners_get_notified_on_transitions_to_fatal() {
-        use crate::consumer::internals::member_state_listener::MemberStateListener;
+        use crate::consumer::internals::MemberStateListener;
         use std::sync::Mutex as StdMutex;
         #[derive(Default)]
         struct Recorder {
@@ -2827,7 +2829,7 @@ mod tests {
     /// with `None` via the leave-epoch path.
     #[tokio::test]
     async fn listeners_get_notified_on_transitions_to_leaving_group() {
-        use crate::consumer::internals::member_state_listener::MemberStateListener;
+        use crate::consumer::internals::MemberStateListener;
         use std::sync::Mutex as StdMutex;
         #[derive(Default)]
         struct Recorder {
@@ -2869,9 +2871,8 @@ mod tests {
 
         // Java's onHeartbeatSuccess in PREPARE_LEAVING state is a no-op
         // for new assignments. We invoke it on the response path.
-        use crate::consumer_group_heartbeat_response_data::{
-            Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions,
-        };
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions};
         let topic_id = Uuid::random_uuid();
         let mut data = ConsumerGroupHeartbeatResponseData::new();
         data.error_code = Errors::None.code();
@@ -2933,14 +2934,17 @@ mod tests {
         mgr.transition_to_joining().unwrap();
         mgr.leave_group(0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_STATIC_MEMBER_EPOCH);
+        assert_eq!(
+            mgr.member_epoch(),
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_STATIC_MEMBER_EPOCH
+        );
 
         // Dynamic member -> -1.
         let (mgr, _rx) = make(None, None, None);
         mgr.transition_to_joining().unwrap();
         mgr.leave_group(0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
 
     /// Translated from
@@ -2954,21 +2958,24 @@ mod tests {
         mgr.transition_to_joining().unwrap();
         mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_STATIC_MEMBER_EPOCH);
+        assert_eq!(
+            mgr.member_epoch(),
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_STATIC_MEMBER_EPOCH
+        );
 
         // Static member with LEAVE_GROUP -> -1.
         let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
         mgr.transition_to_joining().unwrap();
         mgr.leave_group_on_close(GroupMembershipOperation::LeaveGroup, 0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
 
         // Dynamic member with DEFAULT -> -1.
         let (mgr, _rx) = make(None, None, None);
         mgr.transition_to_joining().unwrap();
         mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
 
     /// Regression: reconcile returns Err when the rebalance listener
@@ -3023,13 +3030,12 @@ mod tests {
     // `metadata.update_requested()`.
     // ===================================================================
 
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::Node;
     use crate::common::errors::InterruptError;
-    use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
-    use crate::metadata_response_data::{
-        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
-    };
+    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
     /// Build a one-partition `MetadataResponse` per topic, mirroring
     /// `consumer_metadata.rs::tests::build_response`. The membership
@@ -3069,7 +3075,7 @@ mod tests {
             })
             .collect();
         data.set_topics(response_topics);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Feed REAL topic-name metadata to the manager so that
@@ -3157,9 +3163,8 @@ mod tests {
     /// mirroring the Java `receiveAssignment(topicId, partitions, mgr)`
     /// helper.
     fn receive_assignment(mgr: &ConsumerMembershipManager, topic_id: Uuid, partitions: Vec<i32>) {
-        use crate::consumer_group_heartbeat_response_data::{
-            Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions,
-        };
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions};
         let mut data = ConsumerGroupHeartbeatResponseData::new();
         data.error_code = Errors::None.code();
         data.member_id = Some(mgr.member_id());
@@ -3175,9 +3180,8 @@ mod tests {
 
     /// Receive a heartbeat with a full multi-topic target assignment.
     fn receive_assignment_map(mgr: &ConsumerMembershipManager, assignment: &[(Uuid, Vec<i32>)]) {
-        use crate::consumer_group_heartbeat_response_data::{
-            Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions,
-        };
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions};
         let mut data = ConsumerGroupHeartbeatResponseData::new();
         data.error_code = Errors::None.code();
         data.member_id = Some(mgr.member_id());
@@ -3200,7 +3204,8 @@ mod tests {
 
     /// Receive an empty target assignment (revoke everything).
     fn receive_empty_assignment(mgr: &ConsumerMembershipManager) {
-        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::Assignment;
         let mut data = ConsumerGroupHeartbeatResponseData::new();
         data.error_code = Errors::None.code();
         data.member_id = Some(mgr.member_id());
@@ -3219,7 +3224,7 @@ mod tests {
     /// the surrounding `maybeReconcile` flow.
     async fn reconcile_and_complete_callback(
         mgr: Arc<ConsumerMembershipManager>,
-        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
         can_commit: bool,
         expected_method: ConsumerRebalanceListenerMethodName,
         expected_partitions: &[TopicPartition],
@@ -3281,12 +3286,12 @@ mod tests {
     /// Java mocks SubscriptionState so it never exercises this gate; in
     /// Rust we must subscribe to the topics we expect to fetch — exactly
     /// what a real consumer does before being assigned them.
-    fn subscribe_topics(mgr: &ConsumerMembershipManager, topics: &[&str]) {
+    fn subscribe_with_topics(mgr: &ConsumerMembershipManager, topics: &[&str]) {
         let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         let set: HashSet<String> = topics.iter().map(|s| s.to_string()).collect();
         // Preserve the NoopListener registered by `make()` so the §31
         // handshake still enqueues callback events.
-        subs.subscribe_topics(set, Some(Arc::new(NoopListener))).unwrap();
+        subs.subscribe_with_topics(set, Some(Arc::new(NoopListener))).unwrap();
     }
 
     // ---------------------------------------------------------------
@@ -3302,8 +3307,8 @@ mod tests {
     async fn reconcile_new_partitions_assigned_when_no_partition_owned() {
         let (mgr, mut rx) = make(None, None, None);
         // Subscribe to topic1 so its assigned partitions are fetchable
-        // (real-SubscriptionState gate; see `subscribe_topics`).
-        subscribe_topics(&mgr, &["topic1"]);
+        // (real-SubscriptionState gate; see `subscribe_with_topics`).
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -3490,11 +3495,11 @@ mod tests {
         // mirroring Java's mockRevocationNoCallbacks(false).
         let (mgr, mut rx) = make_without_listener(None, None, None);
         // Auto-topic mode is required for assign_from_subscribed; the
-        // no-listener helper skips subscribe_topics, so subscribe here
+        // no-listener helper skips subscribe_with_topics, so subscribe here
         // (still without a listener).
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
         }
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
@@ -3544,7 +3549,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
         }
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
@@ -3603,7 +3608,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
         }
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
@@ -3678,7 +3683,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
         }
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
@@ -3740,7 +3745,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(true);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
         mgr.transition_to_joining().unwrap();
@@ -3818,7 +3823,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
         }
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
@@ -3882,7 +3887,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(true);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
         mgr.transition_to_joining().unwrap();
@@ -4459,7 +4464,7 @@ mod tests {
         // Case 1 — step 9: a partition is owned and then revoked.
         {
             let (mgr, rx) = make(None, None, None);
-            subscribe_topics(&mgr, &["topic1"]);
+            subscribe_with_topics(&mgr, &["topic1"]);
             mgr.transition_to_joining().unwrap();
             let topic1 = Uuid::random_uuid();
             seed_metadata(&mgr, &[("topic1", topic1)]);
@@ -4486,7 +4491,7 @@ mod tests {
         // enqueue reached is the assigned callback.
         {
             let (mgr, rx) = make(None, None, None);
-            subscribe_topics(&mgr, &["topic1"]);
+            subscribe_with_topics(&mgr, &["topic1"]);
             mgr.transition_to_joining().unwrap();
             let topic1 = Uuid::random_uuid();
             seed_metadata(&mgr, &[("topic1", topic1)]);
@@ -4548,7 +4553,7 @@ mod tests {
         let (mgr, mut rx) = make_with_commit_manager(true);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
                 .unwrap();
         }
         mgr.transition_to_joining().unwrap();
@@ -4621,7 +4626,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_reconciliation_result_discarded_if_member_not_in_reconciling_state_anymore() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -4685,7 +4690,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_reconciliation_result_discarded_after_partitions_assigned_callback_if_member_rejoins() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1", "topic3"]);
+        subscribe_with_topics(&mgr, &["topic1", "topic3"]);
         mgr.transition_to_joining().unwrap();
         let topic1 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1)]);
@@ -4749,7 +4754,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_reconciliation_result_discarded_after_partitions_revoked_callback_if_member_rejoins() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1", "topic3"]);
+        subscribe_with_topics(&mgr, &["topic1", "topic3"]);
         mgr.transition_to_joining().unwrap();
         let topic1 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1)]);
@@ -4845,7 +4850,7 @@ mod tests {
         let (mgr, _rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
-            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
         }
         mgr.transition_to_joining().unwrap();
         let topic1 = Uuid::random_uuid();
@@ -4911,7 +4916,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_reconciliation_result_applied_when_target_changed_with_new_assignment() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1", "topic2"]);
+        subscribe_with_topics(&mgr, &["topic1", "topic2"]);
         mgr.transition_to_joining().unwrap();
         let topic1 = Uuid::random_uuid();
         let topic2 = Uuid::random_uuid();
@@ -4979,7 +4984,7 @@ mod tests {
     #[tokio::test]
     async fn delayed_reconciliation_result_applied_when_target_changed_with_metadata_update() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1", "topic2"]);
+        subscribe_with_topics(&mgr, &["topic1", "topic2"]);
         mgr.transition_to_joining().unwrap();
         let topic1 = Uuid::random_uuid();
         let topic2 = Uuid::random_uuid();
@@ -5044,7 +5049,7 @@ mod tests {
     // Java's `listener.assignedCount()` becomes "number of
     // OnPartitionsAssigned events the test drained", and Java's
     // "listener throws" becomes "the test acks with Err". A listener must
-    // still be REGISTERED (NoopListener via `make`/`subscribe_topics`) for
+    // still be REGISTERED (NoopListener via `make`/`subscribe_with_topics`) for
     // events to be enqueued (the §31 listener-presence short-circuit).
     // ---------------------------------------------------------------
 
@@ -5057,7 +5062,7 @@ mod tests {
     /// can `apply_assignment` before acking). `mgr` is `None` when the caller
     /// knows only revoke/lost events will be drained.
     async fn expect_callback(
-        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
         mgr: Option<&ConsumerMembershipManager>,
         expected_method: ConsumerRebalanceListenerMethodName,
         expected_partitions: &[TopicPartition],
@@ -5100,7 +5105,7 @@ mod tests {
     #[tokio::test]
     async fn listener_callbacks_basic() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5190,7 +5195,7 @@ mod tests {
         ];
         for make_err in errors {
             let (mgr, mut rx) = make(None, None, None);
-            subscribe_topics(&mgr, &["topic1"]);
+            subscribe_with_topics(&mgr, &["topic1"]);
             mgr.transition_to_joining().unwrap();
             let topic_id = Uuid::random_uuid();
             seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5236,7 +5241,7 @@ mod tests {
     #[tokio::test]
     async fn added_partitions_temporarily_disabled_awaiting_on_partitions_assigned_callback() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5298,7 +5303,7 @@ mod tests {
     #[tokio::test]
     async fn added_partitions_not_enabled_after_failed_on_partitions_assigned_callback() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5362,7 +5367,7 @@ mod tests {
 
     async fn on_partitions_lost_impl(callback_result: Result<(), Error>) {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5428,7 +5433,7 @@ mod tests {
 
     async fn assert_marks_pending_revocation_before_lost(kind: ReleaseTransition) {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5487,7 +5492,7 @@ mod tests {
     #[tokio::test]
     async fn leave_group_during_reconciliation_then_rejoin() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5553,7 +5558,7 @@ mod tests {
     #[tokio::test]
     async fn release_transition_does_not_block_on_callback_ack() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5643,7 +5648,7 @@ mod tests {
         group_instance_id: Option<String>,
     ) -> (
         Arc<ConsumerMembershipManager>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let (mgr, mut rx) = make(group_instance_id, None, None);
         mgr.transition_to_joining().unwrap();
@@ -5672,7 +5677,8 @@ mod tests {
     /// Build a successful (empty assignment) heartbeat response with the
     /// given member epoch.
     fn heartbeat_response(member_id: String, epoch: i32) -> ConsumerGroupHeartbeatResponse {
-        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::Assignment;
         let mut data = ConsumerGroupHeartbeatResponseData::new();
         data.error_code = Errors::None.code();
         data.member_id = Some(member_id);
@@ -5684,11 +5690,11 @@ mod tests {
 
     /// Build a leave-group heartbeat response (epoch == LEAVE_GROUP_MEMBER_EPOCH).
     fn leave_response(member_id: String) -> ConsumerGroupHeartbeatResponse {
-        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        use crate::ConsumerGroupHeartbeatResponseData;
         let mut data = ConsumerGroupHeartbeatResponseData::new();
         data.error_code = Errors::None.code();
         data.member_id = Some(member_id);
-        data.member_epoch = LEAVE_GROUP_MEMBER_EPOCH;
+        data.member_epoch = ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
         ConsumerGroupHeartbeatResponse::new(data)
     }
 
@@ -5699,7 +5705,7 @@ mod tests {
         let (mgr, _rx) = create_member_in_stable_state(None).await;
         mgr.leave_group(0).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
 
         // Leave heartbeat sent -> UNSUBSCRIBED.
@@ -5717,7 +5723,7 @@ mod tests {
     #[tokio::test]
     async fn leave_group_when_member_owns_assignment() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -5749,7 +5755,7 @@ mod tests {
         .await;
         leave.await.unwrap().unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
     }
 
@@ -5829,7 +5835,7 @@ mod tests {
     #[tokio::test]
     async fn fatal_failure_when_state_is_prepare_leaving() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         // Member epoch > 0 so the leave releases the assignment via
         // onPartitionsRevoked (not onPartitionsLost), mirroring Java's
@@ -5928,7 +5934,7 @@ mod tests {
         // The leave response completes the leave.
         mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
     }
 
@@ -5950,7 +5956,7 @@ mod tests {
             mgr.on_heartbeat_failure(retriable);
             // Member remains UNSUBSCRIBED; the leave is complete.
             assert_eq!(mgr.state(), MemberState::Unsubscribed);
-            assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+            assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
             assert!(mgr.current_assignment().is_none());
         }
     }
@@ -6020,7 +6026,7 @@ mod tests {
     #[tokio::test]
     async fn fencing_when_state_is_prepare_leaving_completes_the_leave_operation() {
         let (mgr, mut rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -6052,7 +6058,7 @@ mod tests {
     /// `on_heartbeat_success` with an illegal-argument error.
     #[test]
     fn update_state_fails_on_responses_with_errors() {
-        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        use crate::ConsumerGroupHeartbeatResponseData;
         let (mgr, _rx) = make(None, None, None);
         mgr.transition_to_joining().unwrap();
         let mut data = ConsumerGroupHeartbeatResponseData::new();
@@ -6089,7 +6095,8 @@ mod tests {
     /// An empty assignment with a new epoch keeps us in RECONCILING.
     #[test]
     fn on_heartbeat_success_empty_assignment_transitions_to_reconciling() {
-        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::Assignment;
 
         let (mgr, _rx) = make(None, None, None);
         mgr.transition_to_joining().unwrap();
@@ -6120,10 +6127,10 @@ mod tests {
     /// `mockJoinAndReceiveAssignment(true)` tail (leaves the member in
     /// ACKNOWLEDGING after the assigned callback completes).
     async fn create_member_acknowledging(
-        mut rx: mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mut rx: mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
         mgr: Arc<ConsumerMembershipManager>,
         topic_id: Uuid,
-    ) -> mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope> {
+    ) -> mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope> {
         receive_assignment(&mgr, topic_id, vec![0]);
         assert_eq!(mgr.state(), MemberState::Reconciling);
         reconcile_and_complete_callback(
@@ -6145,7 +6152,7 @@ mod tests {
     /// `transition_to_stale` for owned-partition cases.)
     fn leave_group_due_to_expired_poll_and_transition_to_stale(mgr: &ConsumerMembershipManager) {
         mgr.transition_to_sending_leave_group(true).unwrap();
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Stale);
     }
@@ -6157,7 +6164,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Stale);
         assert!(mgr.current_assignment().is_none());
         assert!(topics_awaiting_reconciliation(mgr).is_empty());
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
 
     /// Translated from
@@ -6204,7 +6211,7 @@ mod tests {
     #[tokio::test]
     async fn transition_to_leaving_while_acknowledging_due_to_stale_member() {
         let (mgr, rx) = make(None, None, None);
-        subscribe_topics(&mgr, &["topic1"]);
+        subscribe_with_topics(&mgr, &["topic1"]);
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -6218,7 +6225,7 @@ mod tests {
         // clears `current_assignment` to NONE, so the assignment is already
         // released from the membership manager's view.
         assert!(mgr.current_assignment().is_none());
-        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+        assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
     }
 
     /// Translated from
@@ -6252,7 +6259,7 @@ mod tests {
     /// `mockStaleMember`).
     async fn mock_stale_member() -> (
         Arc<ConsumerMembershipManager>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let (mgr, rx) = create_member_in_stable_state(None).await;
         mgr.transition_to_sending_leave_group(true).unwrap();

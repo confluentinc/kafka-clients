@@ -21,7 +21,7 @@
 //! The full `RecordBatch` trait will be implemented in a later phase when
 //! `DefaultRecordBatch` is translated.
 
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 
 /// Constants for record batch magic values and sentinel values.
 ///

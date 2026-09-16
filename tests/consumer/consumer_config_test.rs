@@ -56,7 +56,7 @@ fn base_props() -> HashMap<String, String> {
 /// `ConsumerConfigTest.ensureDefaultThrowOnUnsupportedStableFlagToFalse`.
 #[test]
 fn ensure_default_throw_on_unsupported_stable_flag_to_false() {
-    let config = ConsumerConfig::from_properties(&base_props()).unwrap();
+    let config = ConsumerConfig::new(&base_props()).unwrap();
     assert!(!config.throw_on_fetch_stable_offset_unsupported());
 }
 
@@ -69,7 +69,7 @@ fn ensure_default_throw_on_unsupported_stable_flag_to_false() {
 /// but the actual values are class objects which we don't translate).
 #[test]
 fn test_default_partition_assignor_is_accepted() {
-    let config = ConsumerConfig::from_properties(&base_props()).unwrap();
+    let config = ConsumerConfig::new(&base_props()).unwrap();
     // Default is empty in the Rust struct; the actual class-name list is
     // tracked silently for forward compatibility.
     assert!(config.partition_assignment_strategy().is_empty());
@@ -82,7 +82,7 @@ fn test_default_partition_assignor_is_accepted() {
 fn test_invalid_group_instance_id() {
     let mut props = base_props();
     props.insert(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG.to_string(), String::new());
-    let err = ConsumerConfig::from_properties(&props).unwrap_err();
+    let err = ConsumerConfig::new(&props).unwrap_err();
     assert!(
         err.message().contains(ConsumerConfig::GROUP_INSTANCE_ID_CONFIG),
         "error message should mention the failing config key, got: {}",
@@ -95,7 +95,7 @@ fn test_invalid_group_instance_id() {
 fn test_invalid_security_protocol() {
     let mut props = base_props();
     props.insert(ConsumerConfig::SECURITY_PROTOCOL_CONFIG.to_string(), "abc".to_string());
-    let err = ConsumerConfig::from_properties(&props).unwrap_err();
+    let err = ConsumerConfig::new(&props).unwrap_err();
     assert!(
         err.message().contains(ConsumerConfig::SECURITY_PROTOCOL_CONFIG),
         "error message should mention the failing config key, got: {}",
@@ -108,7 +108,7 @@ fn test_invalid_security_protocol() {
 fn test_case_insensitive_security_protocol() {
     let mut props = base_props();
     props.insert(ConsumerConfig::SECURITY_PROTOCOL_CONFIG.to_string(), "sasl_ssl".to_string());
-    let config = ConsumerConfig::from_properties(&props).unwrap();
+    let config = ConsumerConfig::new(&props).unwrap();
     // A lowercase value is parsed case-insensitively into the canonical
     // `SecurityProtocol`, mirroring Java's `SecurityProtocol.forName` and the
     // producer's `testCaseInsensitiveSecurityProtocol`. The accessor returns
@@ -123,7 +123,7 @@ fn test_case_insensitive_security_protocol() {
 /// `null`.
 #[test]
 fn test_default_consumer_group_config() {
-    let config = ConsumerConfig::from_properties(&base_props()).unwrap();
+    let config = ConsumerConfig::new(&base_props()).unwrap();
     assert_eq!(config.group_protocol(), "classic");
     assert_eq!(config.group_remote_assignor(), None);
 }
@@ -139,7 +139,7 @@ fn test_remote_assignor_config() {
         remote_assignor_name.to_string(),
     );
     props.insert(ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), protocol.to_string());
-    let config = ConsumerConfig::from_properties(&props).unwrap();
+    let config = ConsumerConfig::new(&props).unwrap();
     assert_eq!(config.group_protocol(), protocol);
     assert_eq!(config.group_remote_assignor(), Some(remote_assignor_name));
 }
@@ -147,7 +147,7 @@ fn test_remote_assignor_config() {
 /// Translated from `ConsumerConfigTest.testDefaultMetadataRecoveryStrategy`.
 #[test]
 fn test_default_metadata_recovery_strategy() {
-    let config = ConsumerConfig::from_properties(&base_props()).unwrap();
+    let config = ConsumerConfig::new(&base_props()).unwrap();
     assert_eq!(config.metadata_recovery_strategy(), "rebootstrap");
 }
 
@@ -156,7 +156,7 @@ fn test_default_metadata_recovery_strategy() {
 fn test_invalid_metadata_recovery_strategy() {
     let mut props = base_props();
     props.insert(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(), "abc".to_string());
-    let err = ConsumerConfig::from_properties(&props).unwrap_err();
+    let err = ConsumerConfig::new(&props).unwrap_err();
     assert!(
         err.message().contains(ConsumerConfig::METADATA_RECOVERY_STRATEGY_CONFIG),
         "error message should mention the failing config key, got: {}",
@@ -181,10 +181,10 @@ fn test_protocol_config_validation() {
         let mut props = base_props();
         props.insert(ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), protocol.to_string());
         if *is_valid {
-            let config = ConsumerConfig::from_properties(&props).unwrap();
+            let config = ConsumerConfig::new(&props).unwrap();
             assert_eq!(config.group_protocol(), *protocol);
         } else {
-            let err = ConsumerConfig::from_properties(&props).unwrap_err();
+            let err = ConsumerConfig::new(&props).unwrap_err();
             assert!(
                 err.message().contains(ConsumerConfig::GROUP_PROTOCOL_CONFIG),
                 "case {protocol}: {}",

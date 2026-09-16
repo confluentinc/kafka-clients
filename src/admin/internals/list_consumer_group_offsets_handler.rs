@@ -19,21 +19,22 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::OffsetFetchRequestData;
 use crate::admin::{GroupOffsets, ListConsumerGroupOffsetsSpec};
-use crate::common::protocol::Errors;
-use crate::common::requests::request_utils::get_leader_epoch;
+use crate::common::Errors;
+use crate::common::requests::RequestUtils;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetFetchRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::kafka_warn;
-use crate::offset_fetch_request_data::{OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics};
+use crate::offset_fetch_request_data::{OffsetFetchRequestGroup, OffsetFetchRequestTopics};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The `listConsumerGroupOffsets` handler.
 ///
@@ -97,7 +98,7 @@ impl ListConsumerGroupOffsetsHandler {
                     .group_specs
                     .get(&group_id.id_value)
                     .expect("validated: key belongs to a spec");
-                let topics = spec.get_topic_partitions().map(|partitions| {
+                let topics = spec.topic_partitions().map(|partitions| {
                     let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
                     for tp in partitions {
                         by_topic.entry(tp.topic().to_string()).or_default().push(tp.partition());
@@ -246,9 +247,9 @@ impl AdminApiHandler<CoordinatorKey, GroupOffsets> for ListConsumerGroupOffsetsH
                             if partition.committed_offset < 0 {
                                 offsets.insert(tp, None);
                             } else {
-                                let offset_and_metadata = OffsetAndMetadata::with_leader_epoch(
+                                let offset_and_metadata = OffsetAndMetadata::new_leader_epoch_metadata(
                                     partition.committed_offset,
-                                    get_leader_epoch(partition.committed_leader_epoch),
+                                    RequestUtils::get_leader_epoch(partition.committed_leader_epoch),
                                     partition.metadata.clone().unwrap_or_default(),
                                 )
                                 .expect("committed offset is non-negative in this branch");
@@ -281,10 +282,11 @@ mod tests {
     use std::collections::{BTreeSet, HashMap, HashSet};
 
     use super::*;
-    use crate::common::protocol::ApiKeys;
+    use crate::OffsetFetchResponseData;
+    use crate::common::ApiKeys;
     use crate::common::requests::{ConcreteResponse, OffsetFetchResponse};
     use crate::offset_fetch_response_data::{
-        OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
+        OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,
     };
 
     const GROUP0: &str = "group0";
@@ -301,7 +303,7 @@ mod tests {
     }
 
     fn spec(partitions: &[TopicPartition]) -> ListConsumerGroupOffsetsSpec {
-        ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(partitions.to_vec()))
+        ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(partitions.to_vec()))
     }
 
     fn single_group_spec() -> HashMap<String, ListConsumerGroupOffsetsSpec> {

@@ -363,7 +363,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek(
     offset: i64,
 ) -> *mut kafka_common_Error_t {
     let tp = unsafe { topic_partition(topic, partition) };
-    block_on_void(handle, move |h| Box::pin(async move { h.seek(tp, offset).await }))
+    block_on_void(handle, move |h| Box::pin(async move { h.seek_with_offset(tp, offset).await }))
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch.
@@ -390,11 +390,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
-    block_on_void(handle, move |h| Box::pin(async move { h.seek_with_metadata(tp, oam).await }))
+    block_on_void(handle, move |h| {
+        Box::pin(async move { h.seek_with_offset_and_metadata(tp, oam).await })
+    })
 }
 
 /// Seeks the given partitions to their beginning offsets. Returns null on
@@ -505,7 +507,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_timeout(
     let tp = unsafe { topic_partition(topic, partition) };
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     block_on_position(handle, out_position, move |h| {
-        Box::pin(async move { h.position_timeout(&tp, timeout).await })
+        Box::pin(async move { h.position_with_timeout(&tp, timeout).await })
     })
 }
 
@@ -655,7 +657,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_offsets(
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    block_on_void(handle, move |h| Box::pin(async move { h.commit_sync_offsets(map).await }))
+    block_on_void(handle, move |h| Box::pin(async move { h.commit_sync_with_offsets(map).await }))
 }
 
 /// Commits the offsets the owning consumer has consumed asynchronously

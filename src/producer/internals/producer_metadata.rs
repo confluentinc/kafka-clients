@@ -24,13 +24,13 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
+use crate::Metadata;
+use crate::common::Errors;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::protocol::Errors;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
 use crate::common::utils::LogContext;
 use crate::kafka_debug;
-use crate::metadata::Metadata;
 
 /// Producer-specific inner state, protected by its own mutex.
 ///
@@ -147,7 +147,7 @@ impl ProducerMetadata {
         let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
             let state = builder_inner.lock().unwrap();
             let topics: Vec<&str> = state.topics.keys().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::new(Some(&topics), true)
+            MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&topics), true)
         });
 
         // Closure for new_topics_request_builder_fn: returns a builder with just the new topics
@@ -156,7 +156,7 @@ impl ProducerMetadata {
             Box::new(move || {
                 let state = new_topics_inner.lock().unwrap();
                 let topics: Vec<&str> = state.new_topics.iter().map(|s| s.as_str()).collect();
-                MetadataRequestBuilder::new(Some(&topics), true)
+                MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&topics), true)
             });
 
         // Closure for post_update_fn: tracks per-topic errors and removes confirmed
@@ -257,7 +257,7 @@ impl ProducerMetadata {
     /// from the network layer are visible to the producer, mirroring Java's
     /// inheritance model where `ProducerMetadata extends Metadata`.
     ///
-    /// [`NetworkClient`]: crate::network_client::NetworkClient
+    /// [`NetworkClient`]: crate::NetworkClient
     pub fn metadata_arc(&self) -> Arc<Metadata> {
         Arc::clone(&self.metadata)
     }
@@ -274,9 +274,10 @@ impl Deref for ProducerMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::Node;
-    use crate::common::protocol::ApiKeys;
-    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
+    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     const REFRESH_BACKOFF_MS: i64 = 100;
     const REFRESH_BACKOFF_MAX_MS: i64 = 1000;
@@ -323,7 +324,7 @@ mod tests {
             .collect();
         data.set_topics(topic_list);
 
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `ProducerMetadataTest.testTimeToNextUpdateOverwriteBackoff`.
@@ -570,7 +571,7 @@ mod tests {
             .collect();
         data.set_topics(topic_list);
 
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Helper: create a metadata response with the metadata's current topic set.

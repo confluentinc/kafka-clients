@@ -17,11 +17,11 @@
 //! Provides the [`Serializer`] and [`Deserializer`] traits and common
 //! implementations for strings and byte arrays.
 
-pub mod byte_array_deserializer;
-pub mod byte_array_serializer;
-pub mod bytes_deserializer;
-pub mod deserializer;
-pub mod string_serializer;
+mod byte_array_deserializer;
+mod byte_array_serializer;
+mod bytes_deserializer;
+mod deserializer;
+mod string_serializer;
 
 pub use byte_array_deserializer::ByteArrayDeserializer;
 pub use byte_array_serializer::ByteArraySerializer;
@@ -30,7 +30,7 @@ pub use deserializer::Deserializer;
 pub use string_serializer::StringSerializer;
 
 use crate::common::Error;
-use crate::common::header::internals::RecordHeaders;
+use crate::common::header::RecordHeaders;
 
 /// An interface for converting objects to bytes.
 ///
@@ -62,7 +62,11 @@ pub trait Serializer<T: ?Sized> {
     /// serializer implementations that need to inspect or modify headers during
     /// serialization (e.g., for schema registry integration).
     ///
-    /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`.
+    /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`
+    /// (`Serializer.java:82`). The two Java overloads intersect on
+    /// `{topic, data}`, which is exactly `serialize(String, T)` (`:62`) — so that
+    /// one keeps the plain name and this one is suffixed with the parameter that
+    /// distinguishes it (CLAUDE.md §2).
     ///
     /// # Arguments
     ///
@@ -73,7 +77,7 @@ pub trait Serializer<T: ?Sized> {
     /// # Returns
     ///
     /// Serialized bytes; may be `None`.
-    fn serialize_with_headers(
+    fn serialize_headers(
         &self,
         topic: &str,
         _headers: &RecordHeaders,
@@ -85,10 +89,10 @@ pub trait Serializer<T: ?Sized> {
     /// Serialize owned data, avoiding a clone when the input is already bytes.
     ///
     /// The default implementation borrows `data` and delegates to
-    /// [`serialize_with_headers`](Serializer::serialize_with_headers).
+    /// [`serialize_headers`](Serializer::serialize_headers).
     /// Implementations for types that are already byte buffers (e.g. `Vec<u8>`)
     /// can override this to pass ownership through without copying.
-    fn serialize_owned_with_headers(
+    fn serialize_owned_headers(
         &self,
         topic: &str,
         headers: &RecordHeaders,
@@ -97,6 +101,6 @@ pub trait Serializer<T: ?Sized> {
     where
         T: Sized,
     {
-        self.serialize_with_headers(topic, headers, data.as_ref())
+        self.serialize_headers(topic, headers, data.as_ref())
     }
 }

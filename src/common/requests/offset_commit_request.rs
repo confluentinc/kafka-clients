@@ -29,30 +29,16 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::OffsetCommitRequestData;
+use crate::OffsetCommitResponseData;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::offset_commit_request_data::OffsetCommitRequestData;
-use crate::offset_commit_response_data::{
-    OffsetCommitResponseData, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
-};
+use crate::offset_commit_response_data::{OffsetCommitResponsePartition, OffsetCommitResponseTopic};
 
 use super::ConcreteResponse;
 use super::OffsetCommitResponse;
 use super::abstract_request::{ConcreteRequest, RequestBuilder};
-
-/// Default value for the `generation_id_or_member_epoch` wire field when no
-/// generation is known. Mirrors Java's `OffsetCommitRequest.DEFAULT_GENERATION_ID`.
-pub const DEFAULT_GENERATION_ID: i32 = -1;
-/// Default value for the `member_id` wire field when no member id is known.
-/// Mirrors Java's `OffsetCommitRequest.DEFAULT_MEMBER_ID`.
-pub const DEFAULT_MEMBER_ID: &str = "";
-/// Default value for the `retention_time_ms` wire field (v2..v4 only).
-/// Mirrors Java's `OffsetCommitRequest.DEFAULT_RETENTION_TIME`.
-pub const DEFAULT_RETENTION_TIME: i64 = -1;
-/// Default value for the `committed_timestamp` field (v0..v1 only).
-/// Mirrors Java's `OffsetCommitRequest.DEFAULT_TIMESTAMP`.
-pub const DEFAULT_TIMESTAMP: i64 = -1;
 
 /// An `OffsetCommit` request.
 ///
@@ -64,6 +50,22 @@ pub struct OffsetCommitRequest {
 }
 
 impl OffsetCommitRequest {
+    /// Default value for the `generation_id_or_member_epoch` wire field when no
+    /// generation is known. Mirrors Java's `OffsetCommitRequest.DEFAULT_GENERATION_ID`.
+    pub const DEFAULT_GENERATION_ID: i32 = -1;
+
+    /// Default value for the `member_id` wire field when no member id is known.
+    /// Mirrors Java's `OffsetCommitRequest.DEFAULT_MEMBER_ID`.
+    pub const DEFAULT_MEMBER_ID: &str = "";
+
+    /// Default value for the `retention_time_ms` wire field (v2..v4 only).
+    /// Mirrors Java's `OffsetCommitRequest.DEFAULT_RETENTION_TIME`.
+    pub const DEFAULT_RETENTION_TIME: i64 = -1;
+
+    /// Default value for the `committed_timestamp` field (v0..v1 only).
+    /// Mirrors Java's `OffsetCommitRequest.DEFAULT_TIMESTAMP`.
+    pub const DEFAULT_TIMESTAMP: i64 = -1;
+
     /// Creates a new `OffsetCommitRequest` from data and version.
     ///
     /// Mirrors Java's constructor `OffsetCommitRequest(OffsetCommitRequestData, short)`.
@@ -111,7 +113,7 @@ impl OffsetCommitRequest {
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = Self::error_response_data(&self.data, *error);
         data.set_throttle_time_ms(throttle_time_ms);
-        ConcreteResponse::OffsetCommit(OffsetCommitResponse::new(data))
+        ConcreteResponse::OffsetCommit(OffsetCommitResponse::new_data(data))
     }
 
     /// Builds an `OffsetCommitResponseData` carrying the given error code for

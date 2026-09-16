@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::common::MetricName;
 use crate::common::metrics::stats::{Avg, Max, Meter, WindowedCount};
 use crate::common::metrics::{Metrics, Sensor};
-use crate::consumer::internals::consumer_utils::{CONSUMER_METRIC_GROUP_PREFIX, COORDINATOR_METRICS_SUFFIX};
+use crate::consumer::internals::ConsumerUtils;
 
 /// Records offset-commit request latency and rate. Mirrors Java's
 /// `OffsetCommitMetricsManager`.
@@ -47,36 +47,40 @@ impl OffsetCommitMetricsManager {
     /// `WindowedCount` producing the rate/total). All metrics are INFO (Java's
     /// `metrics.sensor` default) — full Java parity.
     pub(crate) fn new(metrics: &Arc<Metrics>) -> Self {
-        let metric_group_name = format!("{CONSUMER_METRIC_GROUP_PREFIX}{COORDINATOR_METRICS_SUFFIX}");
+        let metric_group_name = format!(
+            "{}{}",
+            ConsumerUtils::CONSUMER_METRIC_GROUP_PREFIX,
+            ConsumerUtils::COORDINATOR_METRICS_SUFFIX
+        );
         let commit_sensor = metrics.sensor("commit-latency").expect("creating commit-latency sensor");
 
-        let commit_latency_avg = metrics.metric_name(
+        let commit_latency_avg = metrics.metric_name_description_tags(
             "commit-latency-avg",
             &metric_group_name,
             "The average time taken for a commit request",
             BTreeMap::new(),
         );
         commit_sensor
-            .add(commit_latency_avg.clone(), Box::new(Avg::new()))
+            .add_metric_name(commit_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding commit-latency-avg");
 
-        let commit_latency_max = metrics.metric_name(
+        let commit_latency_max = metrics.metric_name_description_tags(
             "commit-latency-max",
             &metric_group_name,
             "The max time taken for a commit request",
             BTreeMap::new(),
         );
         commit_sensor
-            .add(commit_latency_max.clone(), Box::new(Max::new()))
+            .add_metric_name(commit_latency_max.clone(), Box::new(Max::new()))
             .expect("adding commit-latency-max");
 
-        let commit_rate = metrics.metric_name(
+        let commit_rate = metrics.metric_name_description_tags(
             "commit-rate",
             &metric_group_name,
             "The number of commit calls per second",
             BTreeMap::new(),
         );
-        let commit_total = metrics.metric_name(
+        let commit_total = metrics.metric_name_description_tags(
             "commit-total",
             &metric_group_name,
             "The total number of commit calls",
@@ -84,7 +88,7 @@ impl OffsetCommitMetricsManager {
         );
         // Java: `new Meter(new WindowedCount(), commitRate, commitTotal)`.
         commit_sensor
-            .add_compound(Box::new(Meter::with_stat(
+            .add(Box::new(Meter::new_rate_stat(
                 Arc::new(WindowedCount::new().into_sampled_stat()),
                 commit_rate.clone(),
                 commit_total.clone(),
@@ -106,22 +110,22 @@ impl OffsetCommitMetricsManager {
 
     /// Java: `recordRequestLatency(long responseLatencyMs)`.
     pub(crate) fn record_request_latency(&self, response_latency_ms: i64) {
-        self.commit_sensor.record(response_latency_ms as f64);
+        self.commit_sensor.record_value(response_latency_ms as f64);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metric::Metric;
+    use crate::common::Metric;
     use crate::common::metrics::Metrics;
-    use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::MockTime;
 
     /// Java: `OffsetCommitMetricsManagerTest.testOffsetCommitMetrics`.
     #[test]
     fn test_offset_commit_metrics() {
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(time));
+        let metrics = Arc::new(Metrics::new_time(time));
         let manager = OffsetCommitMetricsManager::new(&metrics);
 
         // Assert the existence of metrics.

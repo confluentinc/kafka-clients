@@ -35,7 +35,7 @@ use crate::common::internals::ClusterResourceListeners;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::utils::LogContext;
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::consumer::internals::SubscriptionState;
 use crate::metadata::{Metadata, MetadataOverrides};
 
 /// Consumer-specific inner state. Holds the transient-topics set used to
@@ -180,7 +180,7 @@ impl ConsumerMetadata {
     /// `allow_auto_create_topics` via the `pub(crate)` fields on
     /// `ConsumerConfig` (no public getters currently exist for these — the
     /// fields are accessed directly within the crate).
-    pub(crate) fn from_config(
+    pub(crate) fn new_config(
         config: &ConsumerConfig,
         subscription: Arc<Mutex<SubscriptionState>>,
         cluster_resource_listeners: ClusterResourceListeners,
@@ -263,12 +263,13 @@ mod tests {
     //! `ConsumerMetadata`.
 
     use super::*;
-    use crate::common::internals::topic::GROUP_METADATA_TOPIC_NAME;
+    use crate::MetadataResponseData;
+    use crate::common::internals::Topic;
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::requests::MetadataResponse;
     use crate::common::{Node, TopicPartition, Uuid};
     use crate::consumer::{AutoOffsetResetStrategy, SubscriptionPattern};
-    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
+    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     fn topics_set(metadata: &ConsumerMetadata) -> HashSet<String> {
         metadata.fetch().topics().map(|s| s.to_string()).collect()
@@ -339,7 +340,7 @@ mod tests {
             .collect();
         data.set_topics(response_topics);
 
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `ConsumerMetadataTest.testPatternSubscriptionNoInternalTopics` and
@@ -385,7 +386,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_re2j_pattern(SubscriptionPattern::new("__.*"), None)
+            .subscribe_with_pattern(SubscriptionPattern::new("__.*"), None)
             .unwrap();
 
         let assigned_topic_id = Uuid::random_uuid();
@@ -406,7 +407,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_re2j_pattern(SubscriptionPattern::new("__.*"), None)
+            .subscribe_with_pattern(SubscriptionPattern::new("__.*"), None)
             .unwrap();
 
         let assigned_topic_id = Uuid::random_uuid();
@@ -435,7 +436,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_re2j_pattern(SubscriptionPattern::new("__.*"), None)
+            .subscribe_with_pattern(SubscriptionPattern::new("__.*"), None)
             .unwrap();
         let assigned_topic_id = Uuid::random_uuid();
         sub.lock().unwrap().set_assigned_topic_ids(HashSet::from([assigned_topic_id]));
@@ -499,7 +500,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_topics(
+            .subscribe_with_topics(
                 HashSet::from(["foo".to_string(), "bar".to_string(), "__consumer_offsets".to_string()]),
                 None,
             )
@@ -533,7 +534,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_topics(HashSet::from(["foo".to_string()]), None)
+            .subscribe_with_topics(HashSet::from(["foo".to_string()]), None)
             .unwrap();
         let metadata = new_consumer_metadata(Arc::clone(&sub), false);
 
@@ -613,6 +614,6 @@ mod tests {
     /// don't exercise that path here.
     #[test]
     fn test_topic_constant_is_accessible() {
-        assert_eq!(GROUP_METADATA_TOPIC_NAME, "__consumer_offsets");
+        assert_eq!(Topic::GROUP_METADATA_TOPIC_NAME, "__consumer_offsets");
     }
 }

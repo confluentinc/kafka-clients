@@ -18,6 +18,7 @@
 //!
 //! This class is not thread safe and external synchronization must be used when modifying it.
 
+use crate::producer::RecordMetadata;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,19 +28,18 @@ use log::{debug, error, trace};
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::header::Header;
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionRatioEstimator;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::Record;
 use crate::common::record::internal::RecordBatch;
-use crate::common::record::internal::abstract_records;
 use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
-use crate::producer::record_metadata;
 
 /// The final state of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,7 +227,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -273,7 +273,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -320,7 +320,7 @@ impl ProducerBatch {
             Arc::new(move |_idx| Some((*err).clone()))
         };
         self.complete_future_and_fire_callbacks(
-            record_metadata::INVALID_OFFSET,
+            RecordMetadata::INVALID_OFFSET,
             RecordBatch::NO_TIMESTAMP,
             Some(error_fn),
         );
@@ -346,7 +346,7 @@ impl ProducerBatch {
         _top_level_error: Error,
         record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
     ) -> bool {
-        self.done(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
+        self.done(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
     }
 
     /// Finalize the state of a batch.
@@ -550,7 +550,7 @@ impl ProducerBatch {
         let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
             Arc::new(|_idx| Some(Error::record_batch_too_large("Record batch too large".to_string())));
         self.produce_future
-            .set(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
+            .set(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         self.produce_future.done();
 
         self.assign_producer_state_to_batches(batches);
@@ -594,7 +594,7 @@ impl ProducerBatch {
         headers: &[RecordHeader],
         batch_size: i32,
     ) -> ProducerBatch {
-        let initial_size = (abstract_records::estimate_size_in_bytes_upper_bound(
+        let initial_size = (AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -862,8 +862,8 @@ impl std::fmt::Debug for ProducerBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
     use crate::common::compress::Compression;
-    use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;
 

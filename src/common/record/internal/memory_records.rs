@@ -23,16 +23,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
+use crate::common::Errors;
 use crate::common::compress::Compression;
-use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
-use crate::common::record::internal::abstract_records;
-use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
 
 /// A records implementation backed by a byte buffer.
 ///
@@ -145,7 +144,7 @@ impl MemoryRecords {
         //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
         const LEGACY_RECORD_OVERHEAD_V0: i32 = 14;
 
-        if self.buffer.len() < LOG_OVERHEAD {
+        if self.buffer.len() < AbstractRecords::LOG_OVERHEAD {
             return Ok(None);
         }
 
@@ -173,7 +172,7 @@ impl MemoryRecords {
         // enormous sizes. Since we already checked >= LEGACY_RECORD_OVERHEAD_V0
         // and record_size is i32, the max check here matches Java behavior.
 
-        if self.buffer.len() < abstract_records::HEADER_SIZE_UP_TO_MAGIC {
+        if self.buffer.len() < AbstractRecords::HEADER_SIZE_UP_TO_MAGIC {
             return Ok(None);
         }
 
@@ -186,7 +185,7 @@ impl MemoryRecords {
             ));
         }
 
-        Ok(Some(LOG_OVERHEAD + record_size as usize))
+        Ok(Some(AbstractRecords::LOG_OVERHEAD + record_size as usize))
     }
 
     /// Returns `true` if the buffer holds at least one *complete* record batch.
@@ -606,7 +605,7 @@ impl MemoryRecords {
             return MemoryRecords::empty();
         }
 
-        let size_estimate = abstract_records::estimate_size_in_bytes(magic, compression.compression_type(), records);
+        let size_estimate = AbstractRecords::estimate_size_in_bytes(magic, compression.compression_type(), records);
         let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
             current_time_millis()
         } else {
@@ -675,14 +674,14 @@ impl<'a> Iterator for BatchIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // Need at least LOG_OVERHEAD bytes to read base_offset + length
-        if self.pos + LOG_OVERHEAD > self.data.len() {
+        if self.pos + AbstractRecords::LOG_OVERHEAD > self.data.len() {
             return None;
         }
 
         // Read the batch length from the length field
         let length_bytes = &self.data[self.pos + RecordBatch::LENGTH_OFFSET..self.pos + RecordBatch::LENGTH_OFFSET + 4];
         let batch_length = i32::from_be_bytes(length_bytes.try_into().ok()?) as usize;
-        let total_batch_size = LOG_OVERHEAD + batch_length;
+        let total_batch_size = AbstractRecords::LOG_OVERHEAD + batch_length;
 
         if self.pos + total_batch_size > self.data.len() {
             return None;
@@ -703,7 +702,7 @@ fn current_time_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::header::internals::RecordHeader as HeaderImpl;
+    use crate::common::header::RecordHeader as HeaderImpl;
     use crate::common::record::internal::DefaultRecordBatch;
     use crate::common::record::internal::Record;
 
@@ -914,12 +913,12 @@ mod tests {
             assert_eq!(None, short_records.first_batch_size().unwrap());
 
             // magic not in buffer (only LOG_OVERHEAD bytes = 12)
-            let short_records = MemoryRecords::new(records.buffer()[..LOG_OVERHEAD].to_vec().into());
+            let short_records = MemoryRecords::new(records.buffer()[..AbstractRecords::LOG_OVERHEAD].to_vec().into());
             assert_eq!(None, short_records.first_batch_size().unwrap());
 
             // payload not in buffer, but header up to magic is present
             let short_records =
-                MemoryRecords::new(records.buffer()[..abstract_records::HEADER_SIZE_UP_TO_MAGIC].to_vec().into());
+                MemoryRecords::new(records.buffer()[..AbstractRecords::HEADER_SIZE_UP_TO_MAGIC].to_vec().into());
             assert_eq!(Some(size), short_records.first_batch_size().unwrap());
 
             // Invalid magic byte (10) should return CorruptMessage error
@@ -1162,7 +1161,7 @@ mod tests {
     /// Fewer bytes than `LOG_OVERHEAD`: `nextBatchSize()` returns null.
     #[test]
     fn test_has_complete_first_batch_no_header() {
-        let records = MemoryRecords::readable_records(&[0u8; LOG_OVERHEAD - 1]);
+        let records = MemoryRecords::readable_records(&[0u8; AbstractRecords::LOG_OVERHEAD - 1]);
         assert_eq!(None, records.first_batch_size().unwrap());
         assert!(!records.has_complete_first_batch().unwrap());
     }
@@ -1173,7 +1172,7 @@ mod tests {
     /// the two would relabel a retriable `CORRUPT_MESSAGE` as something else.
     #[test]
     fn test_has_complete_first_batch_propagates_corrupt_size() {
-        let mut buf = vec![0u8; LOG_OVERHEAD];
+        let mut buf = vec![0u8; AbstractRecords::LOG_OVERHEAD];
         buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&3i32.to_be_bytes());
         let err = MemoryRecords::readable_records(&buf).has_complete_first_batch().unwrap_err();
         assert_eq!(Errors::CorruptMessage, err.error());
@@ -1184,7 +1183,7 @@ mod tests {
     /// (`ByteBufferLogInputStream.java:83-84`).
     #[test]
     fn test_has_complete_first_batch_propagates_corrupt_magic() {
-        let mut buf = vec![0u8; abstract_records::HEADER_SIZE_UP_TO_MAGIC];
+        let mut buf = vec![0u8; AbstractRecords::HEADER_SIZE_UP_TO_MAGIC];
         buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&64i32.to_be_bytes());
         buf[RecordBatch::MAGIC_OFFSET] = 99;
         let err = MemoryRecords::readable_records(&buf).has_complete_first_batch().unwrap_err();

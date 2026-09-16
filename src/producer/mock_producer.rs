@@ -49,13 +49,13 @@ use super::internals::FutureRecordMetadata;
 use super::internals::ProduceRequestResult;
 use crate::common::Cluster;
 use crate::common::Error;
+use crate::common::Errors;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::metrics::KafkaMetric;
-use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::Serializer;
 use crate::consumer::ConsumerGroupMetadata;
@@ -120,7 +120,7 @@ use super::Callback;
 //
 //   `clientInstanceId` (401), `registerMetricForSubscription` (666),
 //     `unregisterMetricFromSubscription` (671) — `Producer`-interface methods
-//     the *Rust trait does not declare*. The gap is in `producer_trait.rs`, not
+//     the *Rust trait does not declare*. The gap is in `producer.rs`, not
 //     here: a `MockProducer` impl would have nothing to override. Tracked as
 //     PLAN §9.23.
 //   `disableTelemetry` (378), `injectTimeoutException` (387),
@@ -156,7 +156,7 @@ use super::Callback;
 //
 // Two Java names cover four Rust `fn`s, so "33 present" is not "33 signatures":
 // `send` (287, 297) → `send` / `send_with_callback`, and `close` (431, 436) →
-// `close` / `close_timeout`. The nested `Completion` class sits at 8-space
+// `close` / `close_with_timeout`. The nested `Completion` class sits at 8-space
 // indent and so is outside the scan; its one method, `complete` (639), is
 // translated as `Completion::complete`.
 //
@@ -349,13 +349,11 @@ impl<K, V> MockProducerInner<K, V> {
             return Ok(partition);
         }
         let key_bytes = match self.key_serializer.as_ref() {
-            Some(key_serializer) => key_serializer.serialize_with_headers(topic, record.headers(), record.key())?,
+            Some(key_serializer) => key_serializer.serialize_headers(topic, record.headers(), record.key())?,
             None => None,
         };
         let value_bytes = match self.value_serializer.as_ref() {
-            Some(value_serializer) => {
-                value_serializer.serialize_with_headers(topic, record.headers(), record.value())?
-            },
+            Some(value_serializer) => value_serializer.serialize_headers(topic, record.headers(), record.value())?,
             None => None,
         };
         match self.partitioner.as_ref() {
@@ -420,7 +418,148 @@ impl Completion {
     }
 }
 
+/// Parameters for [`MockProducer::new_options`].
+///
+/// This struct has **no Java counterpart** (DoD #7). It exists solely to
+/// satisfy CLAUDE.md §2's cap on derived overload names: Java's widest
+/// `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`
+/// constructor (`MockProducer.java:113`) differs from the group's parameter-name
+/// intersection — which is EMPTY, since the no-arg `:149` is in the group — by
+/// five parameters, so the cap fires and this struct becomes the method's *only*
+/// parameter, carrying every Java parameter.
+///
+/// It deliberately has **no** `Default`. `auto_complete` is what both
+/// parameter-taking Java constructors (`:113`, `:137`) take from their caller, so
+/// it has no Java-derived default; the no-arg `:149`, which does default it to
+/// `false`, is translated as [`Default for MockProducer`](MockProducer) instead.
+/// Construct it with [`MockProducerOptionsBuilder::new`] and set it:
+/// [`MockProducerOptionsBuilder::build`] returns an error if `auto_complete` was
+/// not set.
+#[non_exhaustive]
+pub struct MockProducerOptions<K, V> {
+    /// The cluster holding metadata for this producer. Java's `cluster`; starts
+    /// as [`Cluster::empty`], the value `:137` passes on the caller's behalf.
+    pub cluster: Cluster,
+    /// If `true`, automatically complete all requests successfully and execute
+    /// the callback. Java's `autoComplete`.
+    pub auto_complete: bool,
+    /// The partition strategy, or `None`. Java's `partitioner`, which `:149`
+    /// passes as `null`.
+    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    /// The key serializer, or `None`. Java's `keySerializer`, which `:149`
+    /// passes as `null`.
+    pub key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+    /// The value serializer, or `None`. Java's `valueSerializer`, which `:149`
+    /// passes as `null`.
+    pub value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+}
+
+/// Fluent builder for [`MockProducerOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
+/// [`Error::LocalIllegalArgument`] if they were not set. Like
+/// [`MockProducerOptions`] it has no Java counterpart and exists solely to
+/// satisfy that naming rule (DoD #7).
+pub struct MockProducerOptionsBuilder<K, V> {
+    cluster: Option<Cluster>,
+    auto_complete: Option<bool>,
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+    value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+}
+
+impl<K, V> Default for MockProducerOptionsBuilder<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> MockProducerOptionsBuilder<K, V> {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            cluster: None,
+            auto_complete: None,
+            partitioner: None,
+            key_serializer: None,
+            value_serializer: None,
+        }
+    }
+
+    /// Sets [`MockProducerOptions::cluster`].
+    pub fn set_cluster(mut self, cluster: Cluster) -> Self {
+        self.cluster = Some(cluster);
+        self
+    }
+    /// Sets [`MockProducerOptions::auto_complete`], a mandatory parameter:
+    /// [`Self::build`] returns an error if it was not set.
+    pub fn set_auto_complete(mut self, auto_complete: bool) -> Self {
+        self.auto_complete = Some(auto_complete);
+        self
+    }
+    /// Sets [`MockProducerOptions::partitioner`].
+    pub fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
+        self.partitioner = partitioner;
+        self
+    }
+    /// Sets [`MockProducerOptions::key_serializer`].
+    pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>) -> Self {
+        self.key_serializer = key_serializer;
+        self
+    }
+    /// Sets [`MockProducerOptions::value_serializer`].
+    pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>) -> Self {
+        self.value_serializer = value_serializer;
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `auto_complete`. `cluster`
+    /// is not in it because Java's `:137` supplies `Cluster.empty()` itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
+    /// set which was not given a setter call. Only presence is checked here;
+    /// semantic validation belongs to the method the options are passed to
+    /// (CLAUDE.md §2).
+    pub fn build(self) -> Result<MockProducerOptions<K, V>, Error> {
+        Ok(MockProducerOptions {
+            cluster: self.cluster.unwrap_or_else(Cluster::empty),
+            auto_complete: self.auto_complete.ok_or_else(|| Self::missing("auto_complete"))?,
+            partitioner: self.partitioner,
+            key_serializer: self.key_serializer,
+            value_serializer: self.value_serializer,
+        })
+    }
+
+    /// Builds the [`Error::LocalIllegalArgument`] naming a mandatory parameter
+    /// [`Self::build`] found unset.
+    fn missing(parameter: &str) -> Error {
+        Error::local_illegal_argument(format!(
+            "MockProducerOptionsBuilder::build: mandatory parameter `{parameter}` was not set"
+        ))
+    }
+}
+
 impl<K, V> MockProducer<K, V> {
+    // Java's three `MockProducer` constructors (`MockProducer.java:113,137,149`)
+    // have an EMPTY parameter-name intersection, and the no-arg `:149` matches
+    // it — so that one owns the plain name and every sibling is suffixed with
+    // its full Rust parameter list (CLAUDE.md §2). Rust translates `:149` as
+    // [`Default`] rather than an inherent `new`, which is why no constructor
+    // here is called `new`. `:113` and `:137` take the partitioner and the two
+    // serializers as values, so they DO contribute name tokens: five and four
+    // respectively, past §2's cap of three, which is why both are served by
+    // [`Self::new_options`] and [`MockProducerOptions`] rather than by a name
+    // listing every parameter.
+
     /// Create a mock producer.
     ///
     /// # Arguments
@@ -429,14 +568,20 @@ impl<K, V> MockProducer<K, V> {
     /// * `auto_complete` - If `true`, automatically complete all requests
     ///   successfully. Otherwise the user must call [`complete_next()`](Self::complete_next)
     ///   or [`error_next()`](Self::error_next) after [`send()`](Producer::send)
-    ///   to complete the call and resolve the [`FutureRecordMetadata`].
+    ///   to complete the call and resolve the returned future (the crate-internal `FutureRecordMetadata`).
     ///
     /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
     /// Serializer, Serializer)` constructor invoked with a null partitioner and
     /// null serializers (`MockProducer.java:113`). Delegates to
-    /// [`with_partitioner`](Self::with_partitioner).
-    pub fn new(cluster: Cluster, auto_complete: bool) -> Self {
-        Self::with_partitioner(cluster, auto_complete, None, None, None)
+    /// [`new_options`](Self::new_options).
+    pub fn new_cluster_auto_complete(cluster: Cluster, auto_complete: bool) -> Self {
+        Self::new_options(
+            MockProducerOptionsBuilder::new()
+                .set_cluster(cluster)
+                .set_auto_complete(auto_complete)
+                .build()
+                .expect("MockProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        )
     }
 
     /// Create a mock producer with a custom partitioner and key/value
@@ -444,24 +589,17 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// # Arguments
     ///
-    /// * `cluster` - The cluster holding metadata for this producer.
-    /// * `auto_complete` - If `true`, automatically complete all requests
-    ///   successfully. Otherwise the user must call [`complete_next()`](Self::complete_next)
-    ///   or [`error_next()`](Self::error_next) after [`send()`](Producer::send)
-    ///   to complete the call and resolve the [`FutureRecordMetadata`].
-    /// * `partitioner` - The partition strategy, or `None`.
-    /// * `key_serializer` - The key serializer, or `None`.
-    /// * `value_serializer` - The value serializer, or `None`.
+    /// * `options` - Every Java parameter, built through
+    ///   [`MockProducerOptionsBuilder`]. [`MockProducerOptions`] is this
+    ///   method's only parameter because the derived name would list five
+    ///   parameters, past CLAUDE.md §2's cap of three.
     ///
     /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
-    /// Serializer, Serializer)` constructor (`MockProducer.java:113`).
-    pub fn with_partitioner(
-        cluster: Cluster,
-        auto_complete: bool,
-        partitioner: Option<Box<dyn Partitioner<K, V>>>,
-        key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
-        value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
-    ) -> Self {
+    /// Serializer, Serializer)` constructor (`MockProducer.java:113`), and — with
+    /// `cluster` left unset — to `MockProducer(boolean, Partitioner, Serializer,
+    /// Serializer)` (`:137`), which passes `Cluster.empty()` itself.
+    pub fn new_options(options: MockProducerOptions<K, V>) -> Self {
+        let MockProducerOptions { cluster, auto_complete, partitioner, key_serializer, value_serializer } = options;
         Self {
             inner: Mutex::new(MockProducerInner {
                 cluster,
@@ -500,12 +638,12 @@ impl<K, V> MockProducer<K, V> {
     /// Create a new mock producer with an empty cluster and the given
     /// `auto_complete` setting.
     ///
-    /// Equivalent to `MockProducer::new(Cluster::empty(), auto_complete)`.
+    /// Equivalent to `MockProducer::new_cluster_auto_complete(Cluster::empty(), auto_complete)`.
     ///
     /// Corresponds to Java's `MockProducer(boolean, Partitioner, Serializer,
     /// Serializer)`.
-    pub fn with_auto_complete(auto_complete: bool) -> Self {
-        Self::new(Cluster::empty(), auto_complete)
+    pub fn new_auto_complete(auto_complete: bool) -> Self {
+        Self::new_cluster_auto_complete(Cluster::empty(), auto_complete)
     }
 
     /// Get the list of sent records since the last call to [`clear()`](Self::clear).
@@ -831,7 +969,7 @@ impl<K, V> Default for MockProducer<K, V> {
     ///
     /// Corresponds to Java's no-arg `MockProducer()` constructor.
     fn default() -> Self {
-        Self::new(Cluster::empty(), false)
+        Self::new_cluster_auto_complete(Cluster::empty(), false)
     }
 }
 
@@ -1047,7 +1185,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         // error must therefore be a bare `KafkaError` — `is_api_error()` is `false`
         // for it and `true` for `ProducerFencedError`.
         if inner.producer_fenced {
-            return Err(Error::kafka_with_source(
+            return Err(Error::kafka_message_source(
                 "MockProducer is fenced.",
                 Error::with_message(Errors::ProducerFenced, "Fenced"),
             ));
@@ -1072,10 +1210,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             // empty-cluster mock keeps working
             // (`bindings/c/tests/test_mock_producer.c:133,600,640,735,1637`).
             if let Some(key_serializer) = inner.key_serializer.as_ref() {
-                key_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.key())?;
+                key_serializer.serialize_headers(record.topic(), &RecordHeaders::new(), record.key())?;
             }
             if let Some(value_serializer) = inner.value_serializer.as_ref() {
-                value_serializer.serialize_with_headers(record.topic(), &RecordHeaders::new(), record.value())?;
+                value_serializer.serialize_headers(record.topic(), &RecordHeaders::new(), record.value())?;
             }
             record.partition().unwrap_or(0)
         };
@@ -1148,7 +1286,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    async fn close_timeout(&self, _timeout: Duration) -> Result<(), Error> {
+    async fn close_with_timeout(&self, _timeout: Duration) -> Result<(), Error> {
         self.close().await
     }
 }
@@ -1195,7 +1333,7 @@ mod tests {
     const GROUP_ID: &str = "group";
 
     fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, String> {
-        ProducerRecord::with_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
+        ProducerRecord::new_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
     }
 
     /// Java's `MockProducerTest.record1` (`MockProducerTest.java:58`). A function
@@ -1212,9 +1350,9 @@ mod tests {
     /// Java's `MockProducerTest.buildMockProducer(boolean)`
     /// (`MockProducerTest.java:62`), which passes `Cluster.empty()` and the two
     /// `MockSerializer`s the Rust mock has no counterpart for (it takes
-    /// pre-serialized bytes — see [`MockProducer::new`]).
+    /// pre-serialized bytes — see [`MockProducer::new_options`]).
     fn build_mock_producer(auto_complete: bool) -> MockProducer<String, String> {
-        MockProducer::with_auto_complete(auto_complete)
+        MockProducer::new_auto_complete(auto_complete)
     }
 
     /// Java's `new ConsumerGroupMetadata(groupId)`. The Rust constructor carries
@@ -1294,13 +1432,14 @@ mod tests {
 
     /// Two-partition cluster whose partitions have **no** leader, matching Java's
     /// `testPartitioner` fixture (`MockProducerTest.java:87-90`, `new
-    /// PartitionInfo(topic, n, null, null, null)`). The Rust `Cluster::new` takes
-    /// eight arguments where Java's constructor takes five; the extra three
-    /// (controller, topic-ids, unauthorized/invalid topics) default to empty.
+    /// PartitionInfo(topic, n, null, null, null)`). The Rust
+    /// `Cluster::new_invalid_topics_controller_topic_ids` takes eight arguments
+    /// where Java's constructor takes five; the extra three (controller,
+    /// topic-ids, unauthorized/invalid topics) default to empty.
     fn two_partition_cluster() -> Cluster {
         let pi0 = PartitionInfo::new(TOPIC.to_string(), 0, None, vec![], vec![]);
         let pi1 = PartitionInfo::new(TOPIC.to_string(), 1, None, vec![], vec![]);
-        Cluster::new(
+        Cluster::new_invalid_topics_controller_topic_ids(
             None,
             vec![],
             vec![pi0, pi1],
@@ -1320,15 +1459,18 @@ mod tests {
     /// on partition 0 — the value Java asserts.
     #[tokio::test]
     async fn test_partitioner() {
-        let producer: MockProducer<String, String> = MockProducer::with_partitioner(
-            two_partition_cluster(),
-            true,
-            Some(Box::new(RoundRobinPartitioner::new())),
-            Some(Box::new(StringSerializer)),
-            Some(Box::new(StringSerializer)),
+        let producer: MockProducer<String, String> = MockProducer::new_options(
+            MockProducerOptionsBuilder::new()
+                .set_cluster(two_partition_cluster())
+                .set_auto_complete(true)
+                .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
+                .set_key_serializer(Some(Box::new(StringSerializer)))
+                .set_value_serializer(Some(Box::new(StringSerializer)))
+                .build()
+                .expect("every mandatory parameter is set above"),
         );
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let future = producer.send(record).await.unwrap();
         let md = future.get().await.unwrap();
         assert_eq!(0, md.partition(), "Partition should be correct");
@@ -1344,8 +1486,9 @@ mod tests {
     /// test for this branch, so it is local coverage of a translated behaviour.
     #[tokio::test]
     async fn test_partition_out_of_range_is_rejected() {
-        let producer: MockProducer<String, String> = MockProducer::new(two_partition_cluster(), true);
-        let record = ProducerRecord::with_partition(
+        let producer: MockProducer<String, String> =
+            MockProducer::new_cluster_auto_complete(two_partition_cluster(), true);
+        let record = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(2),
             Some("key".to_string()),
@@ -1371,14 +1514,17 @@ mod tests {
     /// (`MockProducer.java:610`), taking priority over the partitioner.
     #[tokio::test]
     async fn test_explicit_partition_is_honoured() {
-        let producer: MockProducer<String, String> = MockProducer::with_partitioner(
-            two_partition_cluster(),
-            true,
-            Some(Box::new(RoundRobinPartitioner::new())),
-            Some(Box::new(StringSerializer)),
-            Some(Box::new(StringSerializer)),
+        let producer: MockProducer<String, String> = MockProducer::new_options(
+            MockProducerOptionsBuilder::new()
+                .set_cluster(two_partition_cluster())
+                .set_auto_complete(true)
+                .set_partitioner(Some(Box::new(RoundRobinPartitioner::new())))
+                .set_key_serializer(Some(Box::new(StringSerializer)))
+                .set_value_serializer(Some(Box::new(StringSerializer)))
+                .build()
+                .expect("every mandatory parameter is set above"),
         );
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(1),
             Some("key".to_string()),
@@ -1395,8 +1541,9 @@ mod tests {
     /// null` branch (`MockProducer.java:614-615`).
     #[tokio::test]
     async fn test_no_partitioner_uses_first_partition() {
-        let producer: MockProducer<String, String> = MockProducer::new(two_partition_cluster(), true);
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let producer: MockProducer<String, String> =
+            MockProducer::new_cluster_auto_complete(two_partition_cluster(), true);
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
 
         let md = producer.send(record).await.unwrap().get().await.unwrap();
         assert_eq!(0, md.partition(), "no-partitioner path uses the first partition");
@@ -1409,13 +1556,13 @@ mod tests {
     /// path the C FFI empty-cluster mock relies on.
     #[tokio::test]
     async fn test_empty_cluster_honours_explicit_partition() {
-        let producer: MockProducer<String, String> = MockProducer::new(Cluster::empty(), true);
+        let producer: MockProducer<String, String> = MockProducer::new_cluster_auto_complete(Cluster::empty(), true);
 
-        let keyless = ProducerRecord::with_key(TOPIC.to_string(), None, Some("value".to_string()));
+        let keyless = ProducerRecord::new_key(TOPIC.to_string(), None, Some("value".to_string()));
         let md = producer.send(keyless).await.unwrap().get().await.unwrap();
         assert_eq!(0, md.partition(), "empty cluster with no explicit partition defaults to 0");
 
-        let pinned = ProducerRecord::with_partition(
+        let pinned = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(7),
             Some("key".to_string()),
@@ -1805,7 +1952,7 @@ mod tests {
         assert_eq!("MockProducer is fenced.", error.message());
 
         // `assertInstanceOf(ProducerFencedException.class, e.getCause())`.
-        let cause = crate::common::kafka_error::ErrorSource::source(&error)
+        let cause = crate::common::error::ErrorSource::source(&error)
             .expect("Java chains a ProducerFencedException as the cause");
         assert_eq!(Errors::ProducerFenced, cause.error(), "expected ProducerFenced, got {cause}");
         assert_eq!("Fenced", cause.message());
@@ -2326,8 +2473,8 @@ mod tests {
     #[tokio::test]
     async fn test_independent_topic_partition_offsets() {
         let producer = build_mock_producer(true);
-        let r1 = ProducerRecord::with_value("t1".to_string(), Some("k".to_string()));
-        let r2 = ProducerRecord::with_value("t2".to_string(), Some("k".to_string()));
+        let r1 = ProducerRecord::new("t1".to_string(), Some("k".to_string()));
+        let r2 = ProducerRecord::new("t2".to_string(), Some("k".to_string()));
 
         let f1 = producer.send(r1.clone()).await.unwrap();
         let f2 = producer.send(r2.clone()).await.unwrap();
@@ -2435,7 +2582,7 @@ mod tests {
         let pi0 = PartitionInfo::new("topic".to_string(), 0, Some(node.clone()), vec![], vec![]);
         let pi1 = PartitionInfo::new("topic".to_string(), 1, Some(node), vec![], vec![]);
 
-        let cluster = Cluster::new(
+        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
             None,
             vec![],
             vec![pi0, pi1],
@@ -2445,7 +2592,7 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let producer: MockProducer<String, String> = MockProducer::new(cluster, true);
+        let producer: MockProducer<String, String> = MockProducer::new_cluster_auto_complete(cluster, true);
 
         let partitions = producer.partitions_for("topic").await.unwrap();
         assert_eq!(2, partitions.len());
@@ -2457,12 +2604,12 @@ mod tests {
         assert!(partitions.is_empty());
     }
 
-    /// Tests `close_timeout` behaves like `close`.
+    /// Tests `close_with_timeout` behaves like `close`.
     #[tokio::test]
     async fn test_close_timeout() {
         let producer = build_mock_producer(true);
         assert!(!producer.closed());
-        producer.close_timeout(Duration::from_secs(5)).await.unwrap();
+        producer.close_with_timeout(Duration::from_secs(5)).await.unwrap();
         assert!(producer.closed());
     }
 
@@ -2536,8 +2683,8 @@ mod tests {
         // Build a real KafkaMetric via a Metrics registry.
         let registry = Metrics::new();
         let sensor = registry.sensor("mock-sensor").unwrap();
-        let name = registry.metric_name_group("mock-metric", "mock-group");
-        sensor.add(name.clone(), Box::new(CumulativeSum::new())).unwrap();
+        let name = registry.metric_name("mock-metric", "mock-group");
+        sensor.add_metric_name(name.clone(), Box::new(CumulativeSum::new())).unwrap();
         let metric = registry.metric(&name).unwrap();
 
         producer.set_mock_metrics(name.clone(), Arc::clone(&metric));
@@ -2825,7 +2972,7 @@ mod tests {
     //   - No test remains weakened. `test_partitioner` (Java 86) was the last
     //     such case: Java drives a `RoundRobinPartitioner` and asserts it picks
     //     partition 0, and the translation now does the same through
-    //     `MockProducer::with_partitioner`, replacing the earlier stopgap that had
+    //     `MockProducer::new_options`, replacing the earlier stopgap that had
     //     no partitioner and asserted an explicit `record.partition()` instead.
     //
     //     **Five** tests were weakened at some point and are no longer. Naming all
@@ -2835,7 +2982,7 @@ mod tests {
     //     count-level check finds nothing wrong with two lists that agree on `3`;
     //     only membership does. So the set is re-derived from the diff rather than
     //     from either list — normalise away the two mechanical swaps
-    //     (`MockProducer::with_auto_complete(x)` → `build_mock_producer(x)`, and
+    //     (`MockProducer::new_auto_complete(x)` → `build_mock_producer(x)`, and
     //     `make_record("topic", "keyN", "valueN")` → `recordN()`), then compare
     //     every pre-Phase-7 test body at `82aa2da` against its current form. Seven
     //     bodies differ before that normalisation and exactly these five after

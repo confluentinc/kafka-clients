@@ -31,22 +31,14 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::AddPartitionsToTxnResponseData;
 use crate::add_partitions_to_txn_response_data::{
-    AddPartitionsToTxnPartitionResult, AddPartitionsToTxnResponseData, AddPartitionsToTxnResult,
-    AddPartitionsToTxnTopicResult,
+    AddPartitionsToTxnPartitionResult, AddPartitionsToTxnResult, AddPartitionsToTxnTopicResult,
 };
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::abstract_response::update_error_counts;
-
-/// The key under which a v3-and-below response's errors are reported.
-///
-/// Below v4 the response carries no transactional id — the request was for a
-/// single transaction — so [`AddPartitionsToTxnResponse::errors`] files those
-/// results under the empty string. Corresponds to
-/// `AddPartitionsToTxnResponse.V3_AND_BELOW_TXN_ID`.
-pub const V3_AND_BELOW_TXN_ID: &str = "";
+use super::AbstractResponse;
 
 /// An `AddPartitionsToTxn` response.
 ///
@@ -57,6 +49,14 @@ pub struct AddPartitionsToTxnResponse {
 }
 
 impl AddPartitionsToTxnResponse {
+    /// The key under which a v3-and-below response's errors are reported.
+    ///
+    /// Below v4 the response carries no transactional id — the request was for a
+    /// single transaction — so [`AddPartitionsToTxnResponse::errors`] files those
+    /// results under the empty string. Corresponds to
+    /// `AddPartitionsToTxnResponse.V3_AND_BELOW_TXN_ID`.
+    pub const V3_AND_BELOW_TXN_ID: &str = "";
+
     /// Creates a new `AddPartitionsToTxnResponse` from the underlying data.
     pub fn new(data: AddPartitionsToTxnResponseData) -> Self {
         Self { data }
@@ -97,7 +97,7 @@ impl AddPartitionsToTxnResponse {
     /// Per-transaction, per-partition errors.
     ///
     /// Corresponds to Java's `errors()`. A v3-and-below response contributes one
-    /// entry keyed by [`V3_AND_BELOW_TXN_ID`]; a v4+ response contributes one
+    /// entry keyed by [`Self::V3_AND_BELOW_TXN_ID`]; a v4+ response contributes one
     /// entry per transaction. The producer reads the former — it is the only
     /// shape it ever sends.
     pub fn errors(&self) -> HashMap<String, HashMap<TopicPartition, Errors>> {
@@ -105,7 +105,7 @@ impl AddPartitionsToTxnResponse {
 
         if !self.data.results_by_topic_v3_and_below.is_empty() {
             errors_map.insert(
-                V3_AND_BELOW_TXN_ID.to_string(),
+                AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID.to_string(),
                 Self::errors_for_transaction(&self.data.results_by_topic_v3_and_below),
             );
         }
@@ -216,12 +216,12 @@ impl AddPartitionsToTxnResponse {
         let mut counts = HashMap::new();
 
         if self.data.results_by_topic_v3_and_below.is_empty() {
-            update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         }
 
         for errors in self.errors().values() {
             for error in errors.values() {
-                update_error_counts(&mut counts, *error);
+                AbstractResponse::update_error_counts(&mut counts, *error);
             }
         }
         counts
@@ -248,7 +248,7 @@ impl std::fmt::Display for AddPartitionsToTxnResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::requests::add_partitions_to_txn_request::EARLIEST_BROKER_VERSION;
+    use crate::common::requests::AddPartitionsToTxnRequest;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
@@ -271,7 +271,7 @@ mod tests {
 
         let errors = response.errors();
         assert_eq!(errors.len(), 1, "one entry for the single implicit transaction");
-        let per_partition = &errors[V3_AND_BELOW_TXN_ID];
+        let per_partition = &errors[AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID];
         assert_eq!(per_partition[&tp("topic-a", 0)], Errors::NotCoordinator);
         assert_eq!(per_partition[&tp("topic-b", 1)], Errors::None);
     }
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(errors["txn-1"][&tp("topic-a", 0)], Errors::InvalidTxnState);
         assert_eq!(errors["txn-2"][&tp("topic-b", 3)], Errors::ProducerFenced);
         // The v3-and-below key must be absent.
-        assert!(!errors.contains_key(V3_AND_BELOW_TXN_ID));
+        assert!(!errors.contains_key(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID));
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
 
         for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=ApiKeys::ADD_PARTITIONS_TO_TXN.latest_version()
         {
-            let data = if version < EARLIEST_BROKER_VERSION {
+            let data = if version < AddPartitionsToTxnRequest::EARLIEST_BROKER_VERSION {
                 let mut data = AddPartitionsToTxnResponseData::new();
                 data.set_results_by_topic_v3_and_below(topic_collection.clone())
                     .set_throttle_time_ms(THROTTLE_TIME_MS);
@@ -476,7 +476,7 @@ mod tests {
             assert_eq!(parsed.should_client_throttle(version), version >= 1, "v{version}");
 
             let counts = parsed.error_counts();
-            if version < EARLIEST_BROKER_VERSION {
+            if version < AddPartitionsToTxnRequest::EARLIEST_BROKER_VERSION {
                 assert_eq!(counts.get(&error_one), Some(&1), "v{version}");
                 assert_eq!(counts.get(&error_two), Some(&1), "v{version}");
                 assert_eq!(counts.len(), 2, "no top-level error counted below v4, v{version}");

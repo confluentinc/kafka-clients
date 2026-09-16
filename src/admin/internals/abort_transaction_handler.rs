@@ -21,18 +21,19 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::abort_transaction_spec::AbortTransactionSpec;
-use crate::common::protocol::Errors;
+use crate::WriteTxnMarkersRequestData;
+use crate::admin::AbortTransactionSpec;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, WriteTxnMarkersRequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_error;
-use crate::write_txn_markers_request_data::{WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequestData};
+use crate::write_txn_markers_request_data::{WritableTxnMarker, WritableTxnMarkerTopic};
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::partition_leader_cache::PartitionLeaderCache;
-use super::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
+use super::AdminApiLookupStrategy;
+use super::PartitionLeaderCache;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 
 /// Handler for `abortTransaction`.
 ///
@@ -208,7 +209,7 @@ fn completed(tp: TopicPartition) -> ApiResult<TopicPartition, ()> {
 /// carries an [`Errors`] code, so the neutral `UnknownServerError` code is used
 /// while the message preserves the Java text.
 fn bare_kafka_error(message: String) -> Error {
-    Error::kafka(message)
+    Error::kafka_message(message)
 }
 
 impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
@@ -297,10 +298,10 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WriteTxnMarkersResponseData;
     use crate::common::requests::WriteTxnMarkersResponse;
     use crate::write_txn_markers_response_data::{
         WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
-        WriteTxnMarkersResponseData,
     };
 
     fn log_context() -> LogContext {

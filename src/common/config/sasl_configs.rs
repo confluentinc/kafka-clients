@@ -32,27 +32,35 @@
 // Config key constants (matching Java SaslConfigs constant values)
 // ---------------------------------------------------------------------------
 
-/// Config key: `sasl.mechanism`.
-///
-/// SASL mechanism used for client connections. This may be any mechanism for
-/// which a security provider is available. GSSAPI is the default mechanism.
-pub const SASL_MECHANISM: &str = "sasl.mechanism";
-
-/// Config key: `sasl.jaas.config`.
-///
-/// JAAS login context parameters for SASL connections in the format used by
-/// JAAS configuration files.
-pub const SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
-
-/// The GSSAPI (Kerberos) mechanism name.
-pub const GSSAPI_MECHANISM: &str = "GSSAPI";
-
-/// Default SASL mechanism (matches Java `DEFAULT_SASL_MECHANISM`).
-pub const DEFAULT_SASL_MECHANISM: &str = GSSAPI_MECHANISM;
-
 // ---------------------------------------------------------------------------
 // SaslConfig struct
 // ---------------------------------------------------------------------------
+
+/// Translates the Java constants class
+/// `org.apache.kafka.common.config.SaslConfigs`,
+/// which has no instance state, so it becomes a unit struct hosting its
+/// statics as associated items.
+pub struct SaslConfigs;
+
+impl SaslConfigs {
+    /// Config key: `sasl.mechanism`.
+    ///
+    /// SASL mechanism used for client connections. This may be any mechanism for
+    /// which a security provider is available. GSSAPI is the default mechanism.
+    pub const SASL_MECHANISM: &str = "sasl.mechanism";
+
+    /// Config key: `sasl.jaas.config`.
+    ///
+    /// JAAS login context parameters for SASL connections in the format used by
+    /// JAAS configuration files.
+    pub const SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
+
+    /// The GSSAPI (Kerberos) mechanism name.
+    pub const GSSAPI_MECHANISM: &str = "GSSAPI";
+
+    /// Default SASL mechanism (matches Java `DEFAULT_SASL_MECHANISM`).
+    pub const DEFAULT_SASL_MECHANISM: &str = Self::GSSAPI_MECHANISM;
+}
 
 /// SASL configuration for Kafka connections.
 ///
@@ -91,7 +99,7 @@ pub struct SaslConfig {
 impl Default for SaslConfig {
     fn default() -> Self {
         SaslConfig {
-            mechanism: DEFAULT_SASL_MECHANISM.to_owned(),
+            mechanism: SaslConfigs::DEFAULT_SASL_MECHANISM.to_owned(),
             jaas_config: None,
             username: None,
             password: None,
@@ -100,6 +108,64 @@ impl Default for SaslConfig {
 }
 
 impl SaslConfig {
+    /// Parses an option value from a JAAS configuration string.
+    ///
+    /// JAAS config format:
+    /// ```text
+    /// <loginModuleClass> <controlFlag> (<key>=<value>)*;
+    /// ```
+    ///
+    /// Values may be quoted with double quotes. Keys are matched case-sensitively.
+    ///
+    /// Returns a reference into the original `jaas` string if found, `None` otherwise.
+    fn parse_jaas_option<'a>(jaas: &'a str, key: &str) -> Option<&'a str> {
+        // Build the search pattern: "key="
+        // We need to find the key followed by '=' in the JAAS string.
+        // The key could appear after whitespace or at the beginning of options.
+        let key_eq = format!("{}=", key);
+
+        // Search for the key= pattern in the string
+        let mut search_from = 0;
+        while search_from < jaas.len() {
+            let pos = {
+                let p = jaas[search_from..].find(&key_eq)?;
+                search_from + p
+            };
+
+            // Check that key= appears at a word boundary (preceded by whitespace or start of string)
+            let at_boundary = pos == 0 || jaas.as_bytes()[pos - 1].is_ascii_whitespace();
+            if !at_boundary {
+                search_from = pos + key_eq.len();
+                continue;
+            }
+
+            let value_start = pos + key_eq.len();
+            if value_start >= jaas.len() {
+                return None;
+            }
+
+            // Check if value is quoted
+            if jaas.as_bytes()[value_start] == b'"' {
+                let quote_start = value_start + 1;
+                // Find closing quote
+                if let Some(quote_end) = jaas[quote_start..].find('"') {
+                    return Some(&jaas[quote_start..quote_start + quote_end]);
+                }
+                // No closing quote found — malformed
+                return None;
+            }
+
+            // Unquoted value: read until whitespace or semicolon
+            let value_end = jaas[value_start..]
+                .find(|c: char| c.is_ascii_whitespace() || c == ';')
+                .map(|e| value_start + e)
+                .unwrap_or(jaas.len());
+            return Some(&jaas[value_start..value_end]);
+        }
+
+        None
+    }
+
     /// Resolve the effective username, checking the `username` field first,
     /// then parsing from `jaas_config` if present.
     pub fn resolve_username(&self) -> Option<&str> {
@@ -107,7 +173,7 @@ impl SaslConfig {
             return Some(u.as_str());
         }
         if let Some(ref jaas) = self.jaas_config {
-            return parse_jaas_option(jaas, "username");
+            return SaslConfig::parse_jaas_option(jaas, "username");
         }
         None
     }
@@ -119,68 +185,10 @@ impl SaslConfig {
             return Some(p.as_str());
         }
         if let Some(ref jaas) = self.jaas_config {
-            return parse_jaas_option(jaas, "password");
+            return SaslConfig::parse_jaas_option(jaas, "password");
         }
         None
     }
-}
-
-/// Parses an option value from a JAAS configuration string.
-///
-/// JAAS config format:
-/// ```text
-/// <loginModuleClass> <controlFlag> (<key>=<value>)*;
-/// ```
-///
-/// Values may be quoted with double quotes. Keys are matched case-sensitively.
-///
-/// Returns a reference into the original `jaas` string if found, `None` otherwise.
-fn parse_jaas_option<'a>(jaas: &'a str, key: &str) -> Option<&'a str> {
-    // Build the search pattern: "key="
-    // We need to find the key followed by '=' in the JAAS string.
-    // The key could appear after whitespace or at the beginning of options.
-    let key_eq = format!("{}=", key);
-
-    // Search for the key= pattern in the string
-    let mut search_from = 0;
-    while search_from < jaas.len() {
-        let pos = {
-            let p = jaas[search_from..].find(&key_eq)?;
-            search_from + p
-        };
-
-        // Check that key= appears at a word boundary (preceded by whitespace or start of string)
-        let at_boundary = pos == 0 || jaas.as_bytes()[pos - 1].is_ascii_whitespace();
-        if !at_boundary {
-            search_from = pos + key_eq.len();
-            continue;
-        }
-
-        let value_start = pos + key_eq.len();
-        if value_start >= jaas.len() {
-            return None;
-        }
-
-        // Check if value is quoted
-        if jaas.as_bytes()[value_start] == b'"' {
-            let quote_start = value_start + 1;
-            // Find closing quote
-            if let Some(quote_end) = jaas[quote_start..].find('"') {
-                return Some(&jaas[quote_start..quote_start + quote_end]);
-            }
-            // No closing quote found — malformed
-            return None;
-        }
-
-        // Unquoted value: read until whitespace or semicolon
-        let value_end = jaas[value_start..]
-            .find(|c: char| c.is_ascii_whitespace() || c == ';')
-            .map(|e| value_start + e)
-            .unwrap_or(jaas.len());
-        return Some(&jaas[value_start..value_end]);
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -328,10 +336,10 @@ mod tests {
 
     #[test]
     fn test_config_key_constants() {
-        assert_eq!(SASL_MECHANISM, "sasl.mechanism");
-        assert_eq!(SASL_JAAS_CONFIG, "sasl.jaas.config");
-        assert_eq!(DEFAULT_SASL_MECHANISM, "GSSAPI");
-        assert_eq!(GSSAPI_MECHANISM, "GSSAPI");
+        assert_eq!(SaslConfigs::SASL_MECHANISM, "sasl.mechanism");
+        assert_eq!(SaslConfigs::SASL_JAAS_CONFIG, "sasl.jaas.config");
+        assert_eq!(SaslConfigs::DEFAULT_SASL_MECHANISM, "GSSAPI");
+        assert_eq!(SaslConfigs::GSSAPI_MECHANISM, "GSSAPI");
     }
 
     #[test]

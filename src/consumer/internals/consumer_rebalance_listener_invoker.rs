@@ -74,12 +74,12 @@ use std::sync::{Arc, Mutex};
 
 use log::{error, info};
 
+use crate::common::metrics::SystemTime;
 use crate::common::metrics::Time;
-use crate::common::metrics::time::SystemTime;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
-use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::consumer::internals::RebalanceCallbackMetricsManager;
+use crate::consumer::internals::SubscriptionState;
 
 /// Invokes the user-supplied
 /// [`crate::consumer::ConsumerRebalanceListener`] methods on the
@@ -492,7 +492,7 @@ mod tests {
     /// Listener that advances a shared `MockTime` by a fixed amount inside each
     /// callback so the invoker measures a deterministic non-zero latency.
     struct SleepingListener {
-        time: Arc<crate::common::metrics::time::mock::MockTime>,
+        time: Arc<crate::common::metrics::MockTime>,
         sleep_ms: i64,
     }
 
@@ -519,13 +519,13 @@ mod tests {
     /// wiring the `start_ms` capture + record-on-success path is unexercised.
     #[tokio::test]
     async fn invoke_records_per_callback_latency_on_success() {
-        use crate::common::metric::Metric;
-        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::Metric;
+        use crate::common::metrics::MockTime;
         use crate::common::metrics::{Metrics, Time};
-        use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
+        use crate::consumer::internals::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let manager = RebalanceCallbackMetricsManager::new(&metrics);
         let assign_avg = manager.partition_assign_latency_avg.clone();
         let revoke_max = manager.partition_revoke_latency_max.clone();
@@ -557,13 +557,13 @@ mod tests {
     /// after a successful return).
     #[tokio::test]
     async fn invoke_does_not_record_latency_on_error() {
-        use crate::common::metric::Metric;
-        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::Metric;
+        use crate::common::metrics::MockTime;
         use crate::common::metrics::{Metrics, Time};
-        use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
+        use crate::consumer::internals::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let manager = RebalanceCallbackMetricsManager::new(&metrics);
         let assign_avg = manager.partition_assign_latency_avg.clone();
 

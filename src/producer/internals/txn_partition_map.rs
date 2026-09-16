@@ -19,11 +19,11 @@
 
 //! Per-partition idempotence/transaction bookkeeping, keyed by topic-partition.
 
+use crate::common::requests::ProduceResponse;
 use std::collections::HashMap;
 
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::producer::internals::ProducerBatch;
 use crate::producer::internals::{InFlightBatchKey, TxnPartitionEntry};
@@ -156,7 +156,7 @@ impl TxnPartitionMap {
         if last_acked_offset.is_none() && !is_transactional {
             self.get_or_create(topic_partition);
         }
-        if last_offset > last_acked_offset.unwrap_or(INVALID_OFFSET) {
+        if last_offset > last_acked_offset.unwrap_or(ProduceResponse::INVALID_OFFSET) {
             self.get_mut(topic_partition)?.set_last_acked_offset(last_offset);
         } else {
             kafka_trace!(
@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::memory_records::MemoryRecords;
+    use crate::common::record::internal::MemoryRecords;
 
     fn tp(partition: i32) -> TopicPartition {
         TopicPartition::new("topic".to_string(), partition)

@@ -21,9 +21,6 @@ use std::collections::HashMap;
 use crate::admin::Config;
 use crate::common::{Error, KafkaFuture, Uuid};
 
-/// Sentinel used when the broker did not return partition/replication metadata.
-pub(crate) const UNKNOWN: i32 = -1;
-
 /// Topic metadata and configuration returned per created topic.
 ///
 /// Corresponds to `CreateTopicsResult.TopicMetadataAndConfig`. Carries either
@@ -46,12 +43,12 @@ impl TopicMetadataAndConfig {
 
     /// Creates a holder representing a failure; every accessor returns the
     /// error.
-    pub fn with_error(error: Error) -> Self {
+    pub fn new_error(error: Error) -> Self {
         Self {
             error: Some(error),
             topic_id: Uuid::zero(),
-            num_partitions: UNKNOWN,
-            replication_factor: UNKNOWN,
+            num_partitions: CreateTopicsResult::UNKNOWN,
+            replication_factor: CreateTopicsResult::UNKNOWN,
             config: None,
         }
     }
@@ -98,6 +95,9 @@ pub struct CreateTopicsResult {
 }
 
 impl CreateTopicsResult {
+    /// Sentinel used when the broker did not return partition/replication metadata.
+    pub(crate) const UNKNOWN: i32 = -1;
+
     /// Creates a result from a map of topic name to per-topic future.
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
         Self { futures }
@@ -182,7 +182,7 @@ impl CreateTopicsResult {
 mod tests {
     use super::*;
     use crate::admin::ConfigEntry;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn config() -> Config {
         Config::new([ConfigEntry::new("k".to_string(), Some("v".to_string()))])
@@ -240,7 +240,7 @@ mod tests {
         futures.insert("t".to_string(), handle.future());
         let result = CreateTopicsResult::new(futures);
 
-        handle.complete(TopicMetadataAndConfig::with_error(Error::local_illegal_state("unsupported")));
+        handle.complete(TopicMetadataAndConfig::new_error(Error::local_illegal_state("unsupported")));
 
         assert!(matches!(result.config("t").get().await, Err(Error::LocalIllegalState(_))));
         assert!(matches!(result.topic_id("t").get().await, Err(Error::LocalIllegalState(_))));

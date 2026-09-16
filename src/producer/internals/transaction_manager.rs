@@ -20,61 +20,36 @@
 
 //! State for transactions, and the state needed to ensure idempotent production.
 
+use crate::common::requests::ProduceResponse;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::AddOffsetsToTxnRequestData;
+use crate::AddPartitionsToTxnRequestData;
 use crate::ApiVersions;
-use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
-use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
+use crate::EndTxnRequestData;
+use crate::FindCoordinatorRequestData;
+use crate::InitProducerIdRequestData;
+use crate::TxnOffsetCommitRequestData;
 use crate::common::errors::TransactionAbortableError;
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::record::internal::RecordBatch;
-use crate::common::requests::find_coordinator_request::CoordinatorType;
-use crate::common::requests::produce_response::INVALID_OFFSET;
+use crate::common::requests::CoordinatorType;
 use crate::common::requests::{
-    AddOffsetsToTxnRequestBuilder, AddPartitionsToTxnRequestBuilder, CommittedOffset, ConcreteResponse,
-    EndTxnRequestBuilder, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder, PartitionResponse,
-    RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder, V3_AND_BELOW_TXN_ID,
+    AddOffsetsToTxnRequestBuilder, AddPartitionsToTxnRequestBuilder, AddPartitionsToTxnResponse, CommittedOffset,
+    ConcreteResponse, EndTxnRequestBuilder, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder,
+    PartitionResponse, RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder,
+    TxnOffsetCommitRequestBuilderOptionsBuilder,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
 use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, OffsetAndMetadata};
-use crate::end_txn_request_data::EndTxnRequestData;
-use crate::find_coordinator_request_data::FindCoordinatorRequestData;
-use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::producer::internals::{
     InFlightBatchKey, ProducerBatch, TransactionalRequestResult, TxnPartitionEntry, TxnPartitionMap,
 };
-use crate::txn_offset_commit_request_data::TxnOffsetCommitRequestData;
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
-
-/// Sentinel for "no transactional request is currently in flight".
-///
-/// `pub(crate)` because the field it guards lives on the [`Sender`] task
-/// (rules §2); see [`PendingRequests`].
-///
-/// [`Sender`]: crate::producer::internals::Sender
-pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
-
-/// The KIP-890 feature flag whose finalized level decides whether Transaction V2
-/// is in force.
-///
-/// Java writes the string literal inline at `TransactionManager.java:499`; named
-/// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and the
-/// tests in this file and in `sender.rs` all need it. Per CLAUDE.md §2 it is
-/// exported only by this file — reached as
-/// `producer::internals::transaction_manager::TRANSACTION_VERSION_FEATURE`, never
-/// re-exported through the parent module.
-pub(crate) const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
-
-/// The `retryBackoffMs` an `AddPartitionsToTxn` retry uses after the first
-/// `CONCURRENT_TRANSACTIONS` error of a transaction.
-///
-/// Translated from `TransactionManager.ADD_PARTITIONS_RETRY_BACKOFF_MS`
-/// (Java 133).
-const ADD_PARTITIONS_RETRY_BACKOFF_MS: i64 = 20;
 
 /// The Sender task's queue of transactional requests waiting to be sent.
 ///
@@ -314,7 +289,7 @@ impl CoordinatorNodes {
             CoordinatorType::Transaction => Ok(self.transaction.as_ref()),
             CoordinatorType::Share => Err(Error::local_illegal_state(format!(
                 "Received an invalid coordinator type: {}",
-                coordinator_type_name(coordinator_type)
+                coordinator_type.name()
             ))),
         }
     }
@@ -331,7 +306,7 @@ impl CoordinatorNodes {
             CoordinatorType::Share => {
                 return Err(Error::local_illegal_state(format!(
                     "Invalid coordinator type: {}",
-                    coordinator_type_name(coordinator_type)
+                    coordinator_type.name()
                 )));
             },
         }
@@ -355,19 +330,6 @@ impl CoordinatorNodes {
             },
         }
         Ok(())
-    }
-}
-
-/// Java's `CoordinatorType.name()`, as interpolated into the two
-/// `IllegalStateException` messages in `TransactionManager`.
-///
-/// The Rust enum has no `Display`, and `Debug` would print `Share` where Java
-/// prints `SHARE`.
-pub(crate) fn coordinator_type_name(coordinator_type: CoordinatorType) -> &'static str {
-    match coordinator_type {
-        CoordinatorType::Group => "GROUP",
-        CoordinatorType::Transaction => "TRANSACTION",
-        CoordinatorType::Share => "SHARE",
     }
 }
 
@@ -1254,6 +1216,32 @@ pub(crate) struct TransactionManager {
 }
 
 impl TransactionManager {
+    /// Sentinel for "no transactional request is currently in flight".
+    ///
+    /// `pub(crate)` because the field it guards lives on the [`Sender`] task
+    /// (rules §2); see [`PendingRequests`].
+    ///
+    /// [`Sender`]: crate::producer::internals::Sender
+    pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
+
+    /// The KIP-890 feature flag whose finalized level decides whether Transaction V2
+    /// is in force.
+    ///
+    /// Java writes the string literal inline at `TransactionManager.java:499`; named
+    /// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and the
+    /// tests in this file and in `sender.rs` all need it. Per CLAUDE.md §2 it is
+    /// exported only by this file — reached as
+    /// `producer::internals::transaction_manager::TRANSACTION_VERSION_FEATURE`, never
+    /// re-exported through the parent module.
+    pub(crate) const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
+
+    /// The `retryBackoffMs` an `AddPartitionsToTxn` retry uses after the first
+    /// `CONCURRENT_TRANSACTIONS` error of a transaction.
+    ///
+    /// Translated from `TransactionManager.ADD_PARTITIONS_RETRY_BACKOFF_MS`
+    /// (Java 133).
+    const ADD_PARTITIONS_RETRY_BACKOFF_MS: i64 = 20;
+
     /// Creates a transaction manager.
     ///
     /// Translated from `TransactionManager(LogContext, String, int, long,
@@ -1263,7 +1251,7 @@ impl TransactionManager {
     /// the untranslated transactional arms stayed unreachable, is gone: Phase 5a
     /// implemented the transactional state machine and Phase 5b the four request
     /// handlers, Transaction V2 and two-phase commit, so nothing is deferred here
-    /// any more. `KafkaProducer::from_config` keeps its own guard on
+    /// any more. `KafkaProducer::new_config` keeps its own guard on
     /// `transactional.id` until Phase 6 wires the public API (PLAN §7.1), so the
     /// only way to build a transactional manager today is directly.
     pub(crate) fn new(
@@ -1559,7 +1547,7 @@ impl TransactionManager {
     /// identically there.
     ///
     /// The Sender is currently the *only* live caller, since
-    /// `KafkaProducer::from_config` still rejects `transactional.id` until Phase 6
+    /// `KafkaProducer::new_config` still rejects `transactional.id` until Phase 6
     /// (PLAN §7.1) — so hardcoding [`Caller::App`] was wrong for the one caller that
     /// exists.
     ///
@@ -1723,17 +1711,20 @@ impl TransactionManager {
                 .insert(topic_partition.clone(), committed_offset);
         }
 
-        let builder = TxnOffsetCommitRequestBuilder::new(
+        let builder = TxnOffsetCommitRequestBuilder::new_options(
             // `ensureTransactional()` has already run, so the id is present.
-            self.transactional_id.clone().unwrap_or_default(),
-            group_metadata.group_id(),
-            self.producer_id_and_epoch.producer_id,
-            self.producer_id_and_epoch.epoch,
-            &self.pending_txn_offset_commits,
-            group_metadata.member_id(),
-            group_metadata.generation_id(),
-            group_metadata.group_instance_id().map(ToString::to_string),
-            self.is_transaction_v2_enabled(),
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
+                .set_consumer_group_id(group_metadata.group_id())
+                .set_producer_id(self.producer_id_and_epoch.producer_id)
+                .set_producer_epoch(self.producer_id_and_epoch.epoch)
+                .set_pending_txn_offset_commits(&self.pending_txn_offset_commits)
+                .set_is_transaction_v2_enabled(self.is_transaction_v2_enabled())
+                .set_member_id(group_metadata.member_id().to_string())
+                .set_generation_id(group_metadata.generation_id())
+                .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
+                .build()
+                .expect("TxnOffsetCommitRequestBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder };
         match result {
@@ -1862,7 +1853,7 @@ impl TransactionManager {
         let transaction_version = info
             .finalized_features
             .as_ref()
-            .and_then(|features| features.get(TRANSACTION_VERSION_FEATURE).copied());
+            .and_then(|features| features.get(TransactionManager::TRANSACTION_VERSION_FEATURE).copied());
         let was_transaction_v2_enabled = self.is_transaction_v2_enabled;
         self.is_transaction_v2_enabled = transaction_version.is_some_and(|version| version >= 2);
         kafka_debug!(
@@ -2262,7 +2253,7 @@ impl TransactionManager {
     ///
     /// Java's parameter is narrowed to `AuthenticationException`. This crate has
     /// no `Error` variant for that family — a genuine authentication failure
-    /// is an [`AuthenticationError`](crate::common::network::authentication_error::AuthenticationError)
+    /// is an [`AuthenticationError`](crate::common::errors::AuthenticationError)
     /// carried inside an `io::Error` at the transport layer — so the parameter is
     /// a plain [`Error`] and the caller supplies it. The body treats it as a
     /// `RuntimeException` in Java too.
@@ -2349,7 +2340,7 @@ impl TransactionManager {
         // 953-955) — all fatal transitions. Every copy carries the same message;
         // the fatality of the situation lives in the state machine, so a woken
         // caller learns it from `has_fatal_error()` rather than from the error.
-        let shutdown_error = Error::kafka("The producer closed forcefully");
+        let shutdown_error = Error::kafka_message("The producer closed forcefully");
         for handler in pending_requests.iter() {
             handler.fail(shutdown_error.clone());
             self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
@@ -2557,7 +2548,7 @@ impl TransactionManager {
             ),
             // Java: `new IllegalStateException(msg, lastError)` — the cause is
             // carried, so the caller can see which transition poisoned the manager.
-            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::with_source(
+            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::new_source(
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
@@ -2573,14 +2564,14 @@ impl TransactionManager {
             _ => {
                 const MESSAGE: &str = "Cannot execute transactional method because we are in an error state";
                 match &self.last_error {
-                    Some(cause) => Error::KafkaError(KafkaError::with_message_and_source(
+                    Some(cause) => Error::KafkaError(KafkaError::new_message_source(
                         Errors::UnknownServerError,
                         MESSAGE,
                         cause.clone(),
                     )),
                     // `has_error()` is state-driven, so a set state with no recorded
                     // error is reachable; Java would pass a null cause here.
-                    None => Error::kafka(MESSAGE),
+                    None => Error::kafka_message(MESSAGE),
                 }
             },
         };
@@ -2632,7 +2623,7 @@ impl TransactionManager {
             // error as `last_error`, so this is the value `maybe_fail_with_error`
             // hands the application, and its `source()` must be the original.
             let error = if error.is_retriable_error() || error.error() == Errors::InvalidTxnState {
-                Error::TransactionAbortable(TransactionAbortableError::with_source(
+                Error::TransactionAbortable(TransactionAbortableError::new_source(
                     "Transaction Request was aborted after exhausting retries.",
                     error.clone(),
                 ))
@@ -3113,7 +3104,7 @@ impl TransactionManager {
     /// Corresponds to `updateLastAckedOffset(PartitionResponse, ProducerBatch)`
     /// (Java 738).
     fn update_last_acked_offset(&mut self, response: &PartitionResponse, batch: &ProducerBatch) -> Result<(), Error> {
-        if response.base_offset == INVALID_OFFSET {
+        if response.base_offset == ProduceResponse::INVALID_OFFSET {
             return Ok(());
         }
         let last_offset = response.base_offset + i64::from(batch.record_count) - 1;
@@ -3311,10 +3302,10 @@ impl TransactionManager {
                 // resolves the code to `UnknownServerException`, an `ApiException`.
                 const UNACKED_MESSAGES_ERR: &str = "The client hasn't received acknowledgment for some previously \
                                                     sent messages and can no longer retry them. ";
-                let abortable_error = Error::kafka(format!(
+                let abortable_error = Error::kafka_message(format!(
                     "{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."
                 ));
-                let fatal_error = Error::kafka(format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."));
+                let fatal_error = Error::kafka_message(format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."));
                 self.transition_to_abortable_error_or_fatal_error(abortable_error, fatal_error, caller)?;
                 self.partitions_with_unresolved_sequences.remove(&topic_partition);
                 continue;
@@ -3863,7 +3854,7 @@ impl TransactionManager {
             kafka_info!(
                 self.log_context,
                 "Discovered {} coordinator {}",
-                coordinator_type_name(coordinator_type).to_lowercase(),
+                coordinator_type.name().to_lowercase(),
                 node
             );
             return Ok(());
@@ -3891,9 +3882,9 @@ impl TransactionManager {
         // Java 1716: `new KafkaException(String.format(..))` — a bare `KafkaException`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!(
+            Error::kafka_message(format!(
                 "Could not find a coordinator with type {} with key {key} due to unexpected error: {error_message}",
-                coordinator_type_name(coordinator_type)
+                coordinator_type.name()
             )),
         )
     }
@@ -3997,7 +3988,7 @@ impl TransactionManager {
         // Java 1536: `new KafkaException("Unexpected error in InitProducerIdResponse; " + ..)`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!("Unexpected error in InitProducerIdResponse; {}", error.message())),
+            Error::kafka_message(format!("Unexpected error in InitProducerIdResponse; {}", error.message())),
         )
     }
 
@@ -4018,7 +4009,7 @@ impl TransactionManager {
     ///
     /// # A response with no v3-and-below results
     ///
-    /// Java reads `errors().get(V3_AND_BELOW_TXN_ID)` (Java 1561) and then iterates
+    /// Java reads `errors().get(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID)` (Java 1561) and then iterates
     /// it unchecked. `errors()` omits that key entirely when the response carries no
     /// v3-and-below topic results, so a malformed or v4+-shaped response makes Java
     /// raise a `NullPointerException` inside `NetworkClient.poll`. Rust must not
@@ -4040,7 +4031,10 @@ impl TransactionManager {
                 "Expected an AddPartitionsToTxn response for an AddPartitionsToTxn request, got {response}"
             )));
         };
-        let Some(errors) = add_partitions_to_txn_response.errors().remove(V3_AND_BELOW_TXN_ID) else {
+        let Some(errors) = add_partitions_to_txn_response
+            .errors()
+            .remove(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID)
+        else {
             // See the method docs: Java raises NullPointerException here.
             return Err(Error::local_illegal_state(
                 "AddPartitionsToTxn response carries no results for this client's transaction",
@@ -4128,7 +4122,7 @@ impl TransactionManager {
             // message is reproducible.
             return self.abortable_error(
                 &handler,
-                Error::kafka(format!(
+                Error::kafka_message(format!(
                     "Could not add partitions to transaction due to errors: {}",
                     format_partition_errors(&errors)
                 )),
@@ -4235,7 +4229,7 @@ impl TransactionManager {
             // Folding the cause into the message changed both the class and the text.
             return self.fatal_error(
                 &handler,
-                Error::kafka_with_source("Failed to abort transaction", Error::new(error)),
+                Error::kafka_message_source("Failed to abort transaction", Error::new(error)),
             );
         }
         if error == Errors::TransactionAbortable {
@@ -4244,7 +4238,7 @@ impl TransactionManager {
         // Java 1791: `new KafkaException("Unhandled error in EndTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!("Unhandled error in EndTxnResponse: {}", error.message())),
+            Error::kafka_message(format!("Unhandled error in EndTxnResponse: {}", error.message())),
         )
     }
 
@@ -4332,7 +4326,7 @@ impl TransactionManager {
         // Java 1851: `new KafkaException("Unexpected error in AddOffsetsToTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message())),
+            Error::kafka_message(format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message())),
         )
     }
 
@@ -4354,7 +4348,9 @@ impl TransactionManager {
     ///
     /// Both builders snapshot the topic collection at construction — Java's
     /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
-    /// and [`TxnOffsetCommitRequestBuilder::new`] takes the map by reference and
+    /// and
+    /// [`TxnOffsetCommitRequestBuilder::new_options`]
+    /// takes the map by reference and
     /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
     /// since the handler outlives the call). `reenqueue()` (Java 1394) and
     /// [`Self::retry`] both re-enqueue the *same handler with the same builder*, and
@@ -4453,7 +4449,7 @@ impl TransactionManager {
                 // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
                 self.fatal_error(
                     &handler,
-                    Error::kafka(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
+                    Error::kafka_message(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
                 )?;
                 break;
             }
@@ -4501,7 +4497,7 @@ impl TransactionManager {
             return;
         }
         if let TxnRequestHandlerKind::AddPartitionsToTxn { retry_backoff_ms, .. } = &mut handler.kind {
-            *retry_backoff_ms = ADD_PARTITIONS_RETRY_BACKOFF_MS;
+            *retry_backoff_ms = TransactionManager::ADD_PARTITIONS_RETRY_BACKOFF_MS;
         }
     }
 
@@ -4741,21 +4737,21 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::AddOffsetsToTxnResponseData;
+    use crate::AddPartitionsToTxnResponseData;
+    use crate::EndTxnResponseData;
+    use crate::InitProducerIdResponseData;
     use crate::NodeApiVersions;
-    use crate::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
-    use crate::add_partitions_to_txn_response_data::AddPartitionsToTxnResponseData;
     use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
+    use crate::common::ApiKeys;
     use crate::common::compress::Compression;
-    use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::memory_records::MemoryRecords;
+    use crate::common::record::internal::MemoryRecords;
     use crate::common::requests::{
         AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse,
-        FindCoordinatorResponse, InitProducerIdResponse, TxnOffsetCommitResponse,
+        FindCoordinatorResponse, InitProducerIdResponse, PartitionResponseOptionsBuilder, TxnOffsetCommitResponse,
     };
-    use crate::end_txn_response_data::EndTxnResponseData;
-    use crate::init_producer_id_response_data::InitProducerIdResponseData;
-    use crate::producer::internals::sender::is_authorization_error_handled_by_sender;
+    use crate::producer::internals::SenderStatics;
 
     // Constants mirroring `TransactionManagerTest`'s fields (Java 125-155).
     const TRANSACTIONAL_ID: &str = "foobar";
@@ -4848,7 +4844,7 @@ mod tests {
         let api_versions = Arc::new(ApiVersions::new());
         api_versions.update(
             "0",
-            NodeApiVersions::new(
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
                 &[
                     api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
                     api_version(
@@ -4887,7 +4883,7 @@ mod tests {
     /// The `supportedFeatures` list Java's fixture builds (Java 198-201).
     fn transaction_version_supported_features(level: i16) -> Vec<SupportedFeatureKey> {
         let mut supported_feature = SupportedFeatureKey::new();
-        supported_feature.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        supported_feature.set_name(TransactionManager::TRANSACTION_VERSION_FEATURE.to_string());
         supported_feature.set_max_version(level);
         supported_feature.set_min_version(0);
         vec![supported_feature]
@@ -4896,7 +4892,7 @@ mod tests {
     /// The `finalizedFeatures` list Java's fixture builds (Java 202-205).
     fn transaction_version_finalized_features(level: i16) -> Vec<FinalizedFeatureKey> {
         let mut finalized_feature = FinalizedFeatureKey::new();
-        finalized_feature.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        finalized_feature.set_name(TransactionManager::TRANSACTION_VERSION_FEATURE.to_string());
         finalized_feature.set_max_version_level(level);
         finalized_feature.set_min_version_level(level);
         vec![finalized_feature]
@@ -4915,7 +4911,7 @@ mod tests {
         init_producer_id.set_max_version(3);
         api_versions.update(
             "0",
-            NodeApiVersions::new(
+            NodeApiVersions::new_node_finalized_features_finalized_features_epoch(
                 &[init_producer_id],
                 &transaction_version_supported_features(level),
                 &transaction_version_finalized_features(level),
@@ -5022,9 +5018,10 @@ mod tests {
 
     /// The `AddPartitionsToTxnResponse` Java's `prepareAddPartitionsToTxn`
     /// (Java 4027) builds: the per-partition errors filed under
-    /// [`V3_AND_BELOW_TXN_ID`], which is the only shape a client request produces.
+    /// [`AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID`], which is the only shape a client request produces.
     fn add_partitions_to_txn_response(errors: &HashMap<TopicPartition, Errors>) -> ConcreteResponse {
-        let result = AddPartitionsToTxnResponse::result_for_transaction(V3_AND_BELOW_TXN_ID, errors);
+        let result =
+            AddPartitionsToTxnResponse::result_for_transaction(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID, errors);
         let mut data = AddPartitionsToTxnResponseData::new();
         data.set_results_by_topic_v3_and_below(result.topic_results)
             .set_throttle_time_ms(0);
@@ -5264,7 +5261,9 @@ mod tests {
         }
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
-        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(0, &error_map));
+        let response = ConcreteResponse::TxnOffsetCommit(
+            TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &error_map),
+        );
         manager.handle_response(handler, &response, coordinators, pending_requests)
     }
 
@@ -5598,8 +5597,9 @@ mod tests {
         }
 
         // Sender.java:325-327 → shouldHandleAuthorizationError, :351-360.
-        let authorization_error =
-            last_error.filter(|error| manager.has_abortable_error() && is_authorization_error_handled_by_sender(error));
+        let authorization_error = last_error.filter(|error| {
+            manager.has_abortable_error() && SenderStatics::is_authorization_error_handled_by_sender(error)
+        });
         if let Some(error) = authorization_error {
             // Java wraps the cause in `new AuthenticationException(exception)`
             // (Sender.java:354), so the class is `AuthenticationException` and the
@@ -5613,11 +5613,11 @@ mod tests {
             // This is the same spelling `Sender::handle_authorization_error` uses:
             // `Error::with_message(Errors::UnknownServerError, ..)` resolved to an
             // `ApiException`, for which `is_authentication_error()` — and hence
-            // `request_utils::is_fatal_error` — answered `false`.
+            // `request_utils::RequestUtils::is_fatal_error` — answered `false`.
             manager
                 .fail_pending_requests(
                     pending_requests,
-                    &Error::Authentication(crate::common::errors::AuthenticationError::with_source(
+                    &Error::Authentication(crate::common::errors::AuthenticationError::new_source(
                         error.message(),
                         error.clone(),
                     )),
@@ -5636,7 +5636,7 @@ mod tests {
             .expect("bumping the epoch succeeds");
 
         // Sender.java:333-335 — see the doc comment for why this is a predicate.
-        if in_flight_request_correlation_id != NO_INFLIGHT_REQUEST_CORRELATION_ID
+        if in_flight_request_correlation_id != TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
             || (!pending_requests.is_empty() && !manager.has_error())
         {
             return SenderPhaseOutcome::ReturnedOnTransactionalRequest;
@@ -5916,7 +5916,7 @@ mod tests {
     /// So what the pair pins is a **contract**, not a live path: the poisoning
     /// asymmetry must already hold when Phase 6 opens the application-side caller
     /// (`KafkaProducer.abortTransaction`) and removes
-    /// `KafkaProducer::from_config`'s `transactional.id` guard. That is worth as much
+    /// `KafkaProducer::new_config`'s `transactional.id` guard. That is worth as much
     /// — it is the guarantee Java's shutdown loop is written against
     /// (`Sender.java:269-271`) — and it is why an unreachable-today invalid source is
     /// a fine choice.
@@ -6063,7 +6063,7 @@ mod tests {
                     &mut manager,
                     &mut pool,
                     &mut pending,
-                    NO_INFLIGHT_REQUEST_CORRELATION_ID
+                    TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
                 ),
                 SenderPhaseOutcome::RecoveredFromAuthorizationError
             );
@@ -6094,7 +6094,7 @@ mod tests {
                     &mut manager,
                     &mut pool,
                     &mut pending,
-                    NO_INFLIGHT_REQUEST_CORRELATION_ID
+                    TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
                 ),
                 SenderPhaseOutcome::ReturnedOnTransactionalRequest
             );
@@ -6979,7 +6979,7 @@ mod tests {
         let mut pending = PendingRequests::new();
         let mut coordinators = CoordinatorNodes::new();
         #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_details(
+        let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             fenced_member_id,
@@ -7049,7 +7049,12 @@ mod tests {
             let mut pending = PendingRequests::new();
             let mut coordinators = CoordinatorNodes::new();
             #[allow(deprecated)]
-            let group_metadata = ConsumerGroupMetadata::with_details(CONSUMER_GROUP_ID, generation_id, member_id, None);
+            let group_metadata = ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id(
+                CONSUMER_GROUP_ID,
+                generation_id,
+                member_id,
+                None,
+            );
             let partition = TopicPartition::new("foo".to_string(), 0);
             let send_offsets_result = send_offsets_and_discover_group_coordinator(
                 &mut manager,
@@ -7382,8 +7387,8 @@ mod tests {
         assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
         assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
         assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
-        let cause = crate::common::kafka_error::ErrorSource::source(last_error)
-            .expect("Java passes error.exception() as the cause");
+        let cause =
+            crate::common::error::ErrorSource::source(last_error).expect("Java passes error.exception() as the cause");
         assert_eq!(cause.error(), Errors::TransactionAbortable, "got {cause:?}");
     }
 
@@ -7497,7 +7502,7 @@ mod tests {
             .next_request(&mut pending, false)
             .expect("next_request does not fail on this path")
             .expect("the retry must be pending");
-        assert_eq!(handler.retry_backoff_ms(), ADD_PARTITIONS_RETRY_BACKOFF_MS);
+        assert_eq!(handler.retry_backoff_ms(), TransactionManager::ADD_PARTITIONS_RETRY_BACKOFF_MS);
     }
 
     /// Translated from
@@ -8932,7 +8937,7 @@ mod tests {
             // `maybe_fail_with_error` hands the application, so the chain must survive
             // the store — the message and code are identical for every input, and the
             // cause is the only thing that says which error exhausted its retries.
-            let cause = crate::common::kafka_error::ErrorSource::source(last_error)
+            let cause = crate::common::error::ErrorSource::source(last_error)
                 .expect("Java chains the original error as the cause");
             assert_eq!(
                 cause.error(),
@@ -9544,7 +9549,7 @@ mod tests {
                 .set_max_version(max_version);
             api_versions.update(
                 broker_node().id_string(),
-                NodeApiVersions::new(&[init_producer_id], &[], &[], 0),
+                NodeApiVersions::new_node_finalized_features_finalized_features_epoch(&[init_producer_id], &[], &[], 0),
             );
             let mut manager = TransactionManager::new(
                 LogContext::empty(),
@@ -9711,14 +9716,36 @@ mod tests {
 
             // First batch succeeds
             let b1_append_time = 0;
-            let b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+            let b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(b1_append_time)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             b1.complete(500, b1_append_time);
             manager
                 .handle_completed_batch(&b1, &b1_response)
                 .expect("the completion is recorded");
 
             // We get an UNKNOWN_PRODUCER_ID, so bump the epoch and set sequence numbers back to 0
-            let b2_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 500, Vec::new(), None);
+            let b2_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::UnknownProducerId)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(500)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             assert!(
                 manager
                     .can_retry(
@@ -9743,7 +9770,7 @@ mod tests {
                         &mut manager,
                         &mut pool,
                         &mut pending,
-                        NO_INFLIGHT_REQUEST_CORRELATION_ID
+                        TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
                     ),
                     SenderPhaseOutcome::Continued
                 );
@@ -9772,12 +9799,34 @@ mod tests {
             let tp0b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
 
-            let tp0b1_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            let tp0b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&tp0b1, &tp0b1_response)
                 .expect("the completion is recorded");
 
-            let tp1b1_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            let tp1b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&tp1b1, &tp1b1_response)
                 .expect("the completion is recorded");
@@ -9787,7 +9836,18 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp0()), 2);
             assert_eq!(manager.sequence_number(&tp1()), 2);
 
-            let b1_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 400, Vec::new(), None);
+            let b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::UnknownProducerId)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             assert!(
                 manager
                     .can_retry(
@@ -9800,7 +9860,18 @@ mod tests {
                     .expect("the retry decision is made")
             );
 
-            let b2_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            let b2_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&tp1b1, &b2_response)
                 .expect("the completion is recorded");
@@ -9866,7 +9937,18 @@ mod tests {
             initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID + 1, 0);
 
             // We continue to track the state of tp0 until in-flight requests complete
-            let b1_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
+            let b1_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(0)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&b1, &b1_response)
                 .expect("the completion is recorded");
@@ -9885,7 +9967,18 @@ mod tests {
                 Some(epoch)
             );
 
-            let b2_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
+            let b2_response = PartitionResponse::new_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(0)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&b2, &b2_response)
                 .expect("the completion is recorded");
@@ -9969,7 +10062,21 @@ mod tests {
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
             assert_eq!(manager.sequence_number(&tp0), 1);
             manager
-                .handle_completed_batch(&b1, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .handle_completed_batch(
+                    &b1,
+                    &PartitionResponse::new_options(
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build()
+                            .unwrap(),
+                    ),
+                )
                 .expect("the completion is recorded");
             assert_eq!(manager.last_acked_sequence(&tp0), Some(0));
 
@@ -9995,7 +10102,12 @@ mod tests {
 
             // Java reaches the bump through `runUntil(.. epoch == 6)`.
             let mut pool = InFlightBatchPool::new();
-            run_manager_transaction_phase(&mut manager, &mut pool, &mut pending, NO_INFLIGHT_REQUEST_CORRELATION_ID);
+            run_manager_transaction_phase(
+                &mut manager,
+                &mut pool,
+                &mut pending,
+                TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID,
+            );
             assert_eq!(manager.producer_id_and_epoch().epoch, 6);
         }
     }
@@ -10046,7 +10158,21 @@ mod tests {
             // The third batch succeeds, which should resolve the sequence number without
             // requiring a producerId reset.
             manager
-                .handle_completed_batch(&b3, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .handle_completed_batch(
+                    &b3,
+                    &PartitionResponse::new_options(
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build()
+                            .unwrap(),
+                    ),
+                )
                 .expect("the completion is recorded");
             manager.maybe_resolve_sequences(Caller::Sender).expect("resolving succeeds");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
@@ -10081,7 +10207,21 @@ mod tests {
 
             // The second batch succeeds, but sequence numbers are still not resolved
             manager
-                .handle_completed_batch(&b2, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .handle_completed_batch(
+                    &b2,
+                    &PartitionResponse::new_options(
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build()
+                            .unwrap(),
+                    ),
+                )
                 .expect("the completion is recorded");
             let mut pool = InFlightBatchPool::new();
             manager
@@ -10096,7 +10236,12 @@ mod tests {
                 .expect("the failure is recorded");
 
             // Java reaches the bump through `runUntil(.. epoch == 2)`.
-            run_manager_transaction_phase(&mut manager, &mut pool, &mut pending, NO_INFLIGHT_REQUEST_CORRELATION_ID);
+            run_manager_transaction_phase(
+                &mut manager,
+                &mut pool,
+                &mut pending,
+                TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID,
+            );
             assert_eq!(manager.producer_id_and_epoch().epoch, 2);
             assert!(!manager.has_unresolved_sequences());
             assert_eq!(manager.sequence_number(&tp0), 0);

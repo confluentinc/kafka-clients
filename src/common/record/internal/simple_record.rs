@@ -19,7 +19,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
 
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::internal::RecordBatch;
 
 /// High-level representation of a Kafka record.
@@ -81,7 +81,7 @@ impl SimpleRecord {
     /// Copies the key, value, and headers from the record.
     ///
     /// Corresponds to Java's `SimpleRecord(Record)`.
-    pub fn from_record(record: &dyn super::record_trait::Record) -> Self {
+    pub fn new_record(record: &dyn super::Record) -> Self {
         Self::new(
             record.timestamp(),
             record.key().map(|k| k.to_vec()),
@@ -146,7 +146,7 @@ impl std::fmt::Display for SimpleRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::header::internals::RecordHeader;
+    use crate::common::header::RecordHeader;
 
     #[test]
     fn test_new_with_all_fields() {

@@ -23,12 +23,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{
-    AutoOffsetResetStrategy, Consumer, ConsumerRebalanceListener, ConsumerRecord, MockConsumer, OffsetAndMetadata,
-    SubscriptionPattern,
+    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecordOptionsBuilder, MockConsumer, OffsetAndMetadata, SubscriptionPattern,
 };
 
 /// Compile-time check that [`MockConsumer<K, V>`] is object-safe and can be
@@ -43,19 +42,19 @@ fn mock_consumer_is_consumer_trait_object() {
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
 /// offset, ts, tsType, sizeK, sizeV, key, value, headers, leaderEpoch)`.
 fn build_record(topic: &str, partition: i32, offset: i64, key: &str, value: &str) -> ConsumerRecord<String, String> {
-    ConsumerRecord::with_headers(
-        topic.to_string(),
-        partition,
-        offset,
-        0,
-        TimestampType::CreateTime,
-        0,
-        0,
-        Some(key.to_string()),
-        Some(value.to_string()),
-        RecordHeaders::new(),
-        None,
-    )
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(topic.to_string())
+        .set_partition(partition)
+        .set_offset(offset)
+        .set_key(Some(key.to_string()))
+        .set_value(Some(value.to_string()))
+        .set_timestamp(0)
+        .set_timestamp_type(TimestampType::CreateTime)
+        .set_serialized_key_size(0)
+        .set_serialized_value_size(0)
+        .build()
+        .unwrap();
+    ConsumerRecord::new_options(options)
 }
 
 /// Builder helper: matches Java's 5-arg `new ConsumerRecord<>(topic,
@@ -69,7 +68,7 @@ fn build_null_record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord
 async fn test_simple_mock() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
-    consumer.subscribe(vec!["test".to_string()]).await.unwrap();
+    consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
     assert_eq!(0, consumer.poll(std::time::Duration::ZERO).await.unwrap().count());
 
     consumer
@@ -85,7 +84,10 @@ async fn test_simple_mock() {
     beginning_offsets.insert(TopicPartition::new("test".to_string(), 0), 0i64);
     beginning_offsets.insert(TopicPartition::new("test".to_string(), 1), 0i64);
     consumer.update_beginning_offsets(beginning_offsets);
-    consumer.seek(TopicPartition::new("test".to_string(), 0), 0).await.unwrap();
+    consumer
+        .seek_with_offset(TopicPartition::new("test".to_string(), 0), 0)
+        .await
+        .unwrap();
 
     consumer.add_record(build_record("test", 0, 0, "key1", "value1")).unwrap();
     consumer.add_record(build_record("test", 0, 1, "key2", "value2")).unwrap();
@@ -104,7 +106,7 @@ async fn test_simple_mock() {
 
     assert_eq!(1, recs.next_offsets().len());
     assert_eq!(
-        &OffsetAndMetadata::with_leader_epoch(2, None, String::new()).unwrap(),
+        &OffsetAndMetadata::new_leader_epoch_metadata(2, None, String::new()).unwrap(),
         recs.next_offsets().get(&tp).unwrap(),
     );
 
@@ -157,7 +159,7 @@ async fn should_not_clear_records_for_paused_partitions() {
     assert_eq!(1, records_second_poll.count());
     assert_eq!(1, records_second_poll.next_offsets().len());
     assert_eq!(
-        &OffsetAndMetadata::with_leader_epoch(1, None, String::new()).unwrap(),
+        &OffsetAndMetadata::new_leader_epoch_metadata(1, None, String::new()).unwrap(),
         records_second_poll
             .next_offsets()
             .get(&TopicPartition::new("test".to_string(), 0))
@@ -197,7 +199,7 @@ async fn test_duration_based_offset_reset() {
     let strategy = AutoOffsetResetStrategy::from_string("by_duration:PT1H").unwrap();
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(strategy);
 
-    consumer.subscribe(vec!["test".to_string()]).await.unwrap();
+    consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
     consumer
         .rebalance(&[
             TopicPartition::new("test".to_string(), 0),
@@ -264,7 +266,7 @@ async fn test_rebalance_listener() {
         Arc::new(RecorderListener { revoked: revoked.clone(), assigned: assigned.clone() });
 
     consumer
-        .subscribe_with_listener(vec!["test".to_string()], listener)
+        .subscribe_with_topics_listener(vec!["test".to_string()], listener)
         .await
         .unwrap();
     assert_eq!(0, consumer.poll(std::time::Duration::ZERO).await.unwrap().count());
@@ -318,13 +320,13 @@ async fn test_rebalance_listener() {
 /// **Dropped null-input assertions:**
 /// - Java's `assertThrows(IllegalArgumentException.class, () ->
 ///   consumer.subscribe((SubscriptionPattern) null))` cannot be expressed
-///   in Rust — the `subscribe_pattern` parameter is `SubscriptionPattern`
+///   in Rust — the `subscribe_with_pattern` parameter is `SubscriptionPattern`
 ///   by value (not `Option<SubscriptionPattern>`), so a null call is a
 ///   compile-time error. The behavioral contract is preserved by type
 ///   non-nullability.
 /// - Java's `assertThrows(IllegalArgumentException.class, () ->
 ///   consumer.subscribe(pattern, null))` (null listener) cannot be
-///   expressed — `subscribe_pattern_with_listener` takes `Arc<dyn
+///   expressed — `subscribe_with_pattern_listener` takes `Arc<dyn
 ///   ConsumerRebalanceListener>` (not `Option<...>`).
 ///
 /// The remaining two assertions — empty-pattern and mixed-subscription
@@ -334,15 +336,15 @@ async fn test_re2j_pattern_subscription() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
     // Empty pattern → IllegalArgumentException (Java line 194).
-    let err = consumer.subscribe_pattern(SubscriptionPattern::new("")).await.unwrap_err();
+    let err = consumer.subscribe_with_pattern(SubscriptionPattern::new("")).await.unwrap_err();
     assert!(matches!(err, Error::LocalIllegalArgument(_)));
 
     let pattern = SubscriptionPattern::new("t.*");
-    consumer.subscribe_pattern(pattern).await.unwrap();
+    consumer.subscribe_with_pattern(pattern).await.unwrap();
     assert!(consumer.subscription().is_empty());
 
     // Mixed subscription → IllegalStateException (Java line 203).
-    let err = consumer.subscribe(vec!["topic1".to_string()]).await.unwrap_err();
+    let err = consumer.subscribe_with_topics(vec!["topic1".to_string()]).await.unwrap_err();
     assert!(matches!(err, Error::LocalIllegalState(_)));
 }
 
@@ -377,4 +379,62 @@ async fn should_return_max_poll_records() {
 
     let records = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
     assert!(records.is_empty());
+}
+
+/// The three `close` forms Java declares (`Consumer.java:277,283,288`) are one
+/// overload group, so CLAUDE.md §2 gives the no-arg form the plain name and
+/// suffixes the other two with their parameter names. This asserts the split
+/// preserves `MockConsumer`'s observable behaviour: all three set `closed()`.
+///
+/// `close(Duration)` is checked separately rather than by forwarding, because
+/// Java's `MockConsumer.close(Duration)` (`MockConsumer.java:578-582`) sets the
+/// flag *directly* — unlike `AsyncKafkaConsumer.close(Duration)`
+/// (`AsyncKafkaConsumer.java:1543-1545`), which forwards to
+/// `close(CloseOptions.timeout(timeout))`.
+#[tokio::test]
+async fn close_overloads_all_mark_the_consumer_closed() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.closed(), "fresh mock is open");
+    consumer.close().await.expect("close");
+    assert!(consumer.closed(), "close() closes");
+
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.closed());
+    #[allow(deprecated)]
+    consumer
+        .close_with_timeout(std::time::Duration::from_secs(1))
+        .await
+        .expect("close_with_timeout");
+    assert!(consumer.closed(), "close_with_timeout(..) closes");
+
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.closed());
+    consumer
+        .close_with_options(CloseOptions::new_timeout(std::time::Duration::from_secs(1)))
+        .await
+        .expect("close_with_options");
+    assert!(consumer.closed(), "close_with_options(..) closes");
+}
+
+/// Java declares two `enforceRebalance` overloads (`Consumer.java:267,272`);
+/// Rust used to merge them behind one `Option<&str>` parameter. CLAUDE.md §2
+/// un-merges them, so this asserts both forms still set the pending-rebalance
+/// flag that `MockConsumer.java:697-704` sets — i.e. the split is behaviour
+/// preserving, and the `reason` really is ignored as Java ignores it.
+#[tokio::test]
+async fn enforce_rebalance_overloads_both_set_the_pending_flag() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.should_rebalance(), "fresh mock has no pending rebalance");
+
+    consumer.enforce_rebalance().await.expect("enforce_rebalance");
+    assert!(consumer.should_rebalance(), "enforce_rebalance() sets the flag");
+
+    consumer.reset_should_rebalance();
+    assert!(!consumer.should_rebalance());
+
+    consumer
+        .enforce_rebalance_with_reason("a reason")
+        .await
+        .expect("enforce_rebalance_with_reason");
+    assert!(consumer.should_rebalance(), "enforce_rebalance_with_reason(..) sets the flag");
 }

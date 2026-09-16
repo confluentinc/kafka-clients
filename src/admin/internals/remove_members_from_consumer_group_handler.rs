@@ -19,18 +19,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, LeaveGroupRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
 use crate::kafka_debug;
 use crate::leave_group_request_data::MemberIdentity;
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The per-member removal result value produced by this handler.
 type MemberErrors = HashMap<MemberIdentity, Errors>;
@@ -199,8 +199,9 @@ impl AdminApiHandler<CoordinatorKey, MemberErrors> for RemoveMembersFromConsumer
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LeaveGroupResponseData;
     use crate::common::requests::{LeaveGroupResponse, RequestBuilder};
-    use crate::leave_group_response_data::{LeaveGroupResponseData, MemberResponse};
+    use crate::leave_group_response_data::MemberResponse;
 
     const GROUP_ID: &str = "group-id";
 

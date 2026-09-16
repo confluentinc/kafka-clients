@@ -23,22 +23,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::protocol::Errors;
+use crate::FindCoordinatorRequestData;
+use crate::common::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
 };
 use crate::common::{Error, Node};
-use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 
-use super::network_client_delegate::{PollResult, UnsentRequest};
-use super::request_manager::RequestManager;
-use super::request_state::RequestState;
-
-/// How long to wait between "consumer has been disconnected from the
-/// coordinator for Nms" warning log entries.
-///
-/// Java: `CoordinatorRequestManager.COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS`.
-pub(crate) const COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS: i64 = 60_000;
+use super::RequestManager;
+use super::RequestState;
+use super::{PollResult, UnsentRequest};
 
 /// Mutable state held behind `Arc<CoordinatorRequestManagerInner>` so the
 /// spawned response forwarder (launched inside
@@ -85,6 +79,12 @@ pub(crate) struct CoordinatorRequestManager {
 }
 
 impl CoordinatorRequestManager {
+    /// How long to wait between "consumer has been disconnected from the
+    /// coordinator for Nms" warning log entries.
+    ///
+    /// Java: `CoordinatorRequestManager.COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS`.
+    pub(crate) const COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS: i64 = 60_000;
+
     /// Constructs a new [`CoordinatorRequestManager`].
     ///
     /// # Panics
@@ -192,7 +192,8 @@ impl CoordinatorRequestManager {
             );
         } else {
             let duration_of_ongoing_disconnect_ms = (current_time_ms - *anchor_guard).max(0);
-            let curr_disconnect_min = duration_of_ongoing_disconnect_ms / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
+            let curr_disconnect_min = duration_of_ongoing_disconnect_ms
+                / CoordinatorRequestManager::COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
             // The warning is emitted at most once per one-minute window of
             // ongoing disconnect. The decision and the formatted message are
             // computed together in `disconnect_warning_message` so the
@@ -426,7 +427,7 @@ impl CoordinatorRequestManager {
             .lock()
             .expect("request_state poisoned")
             .remaining_backoff_ms(current_time_ms);
-        PollResult::from_wait(remaining)
+        PollResult::new_time_until_next_poll_ms(remaining)
     }
 }
 
@@ -478,9 +479,9 @@ impl CoordinatorRequestManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client_response::ClientResponse;
-    use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader};
+    use crate::ClientResponse;
+    use crate::common::ApiKeys;
+    use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
     const RETRY_BACKOFF_MS: i64 = 500;
     const GROUP_ID: &str = "group-1";
@@ -508,9 +509,18 @@ mod tests {
             .expect("builder still present")
             .build_version(api_version)
             .expect("build ok");
-        let header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, api_version, "", 1).expect("header ok");
+        let header = RequestHeader::new_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FIND_COORDINATOR)
+                .set_request_version(api_version)
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("header ok");
         let response_body = FindCoordinatorResponse::prepare_response(error, GROUP_ID, &node());
-        ClientResponse::with_timeout(
+        ClientResponse::new_timed_out(
             header,
             None,
             "1",
@@ -603,7 +613,7 @@ mod tests {
     /// `firstLogMs`/`secondLogMs` assertions check.
     #[test]
     fn test_mark_coordinator_unknown_logging_accuracy() {
-        let one_minute = COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
+        let one_minute = CoordinatorRequestManager::COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
         let manager = setup_manager();
         assert!(manager.coordinator().is_none());
 

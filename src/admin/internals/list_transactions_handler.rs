@@ -19,19 +19,19 @@
 
 use std::collections::HashSet;
 
-use crate::admin::options::ListTransactionsOptions;
-use crate::admin::transaction_listing::TransactionListing;
-use crate::admin::transaction_state::TransactionState;
-use crate::common::protocol::Errors;
+use crate::ListTransactionsRequestData;
+use crate::admin::ListTransactionsOptions;
+use crate::admin::TransactionListing;
+use crate::admin::TransactionState;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, ListTransactionsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
-use crate::list_transactions_request_data::ListTransactionsRequestData;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::all_brokers_strategy::{AllBrokersFuture, AllBrokersStrategy, BrokerKey};
+use super::AdminApiLookupStrategy;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{AllBrokersFuture, AllBrokersStrategy, BrokerKey};
 
 /// Handler for `listTransactions`.
 ///
@@ -194,8 +194,9 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ListTransactionsResponseData;
     use crate::common::requests::ListTransactionsResponse;
-    use crate::list_transactions_response_data::{ListTransactionsResponseData, TransactionState as WireTxnState};
+    use crate::list_transactions_response_data::TransactionState as WireTxnState;
 
     fn log_context() -> LogContext {
         LogContext::new("[test] ")

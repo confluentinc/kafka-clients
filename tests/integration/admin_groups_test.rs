@@ -107,7 +107,7 @@ use confluent_kafka::admin::{
     DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
     ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
 };
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
@@ -163,7 +163,7 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid consumer test config")
+    ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
 /// Build a KIP-848 `ConsumerConfig` for a static member (with a
@@ -179,7 +179,7 @@ fn static_consumer_config(bootstrap: &str, group_id: &str, instance_id: &str) ->
         ("group.id".to_string(), group_id.to_string()),
         ("group.instance.id".to_string(), instance_id.to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid consumer test config")
+    ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
 fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
@@ -205,7 +205,7 @@ fn new_static_bytes_consumer(bootstrap: &str, group_id: &str, instance_id: &str)
 /// Returns the assigned partition count.
 async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) -> usize {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_with_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     for _ in 0..60 {
@@ -612,7 +612,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
         let outcomes = admin
             .describe_consumer_groups(
                 std::slice::from_ref(&group_id),
-                DescribeConsumerGroupsOptions::new().include_authorized_operations(true),
+                DescribeConsumerGroupsOptions::new().set_include_authorized_operations(true),
             )
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe consumer groups: {e}"));
@@ -1174,8 +1174,14 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
     // Two static members share the topic's partitions.
     let mut member_one = new_static_bytes_consumer(&bootstrap, &group_id, "instance-1");
     let mut member_two = new_static_bytes_consumer(&bootstrap, &group_id, "instance-2");
-    member_one.subscribe(vec![topic.clone()]).await.expect("subscribe m1");
-    member_two.subscribe(vec![topic.clone()]).await.expect("subscribe m2");
+    member_one
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe m1");
+    member_two
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe m2");
     // Drive both members until the group reconciles to two members.
     for _ in 0..60 {
         let _ = member_one.poll(Duration::from_millis(300)).await;

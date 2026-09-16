@@ -16,7 +16,7 @@
 
 use confluent_kafka::common::header::{Headers, RecordHeader, RecordHeaders};
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::consumer::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
+use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder};
 
 /// Translated from `ConsumerRecordTest.testShortConstructor`.
 #[test]
@@ -35,9 +35,9 @@ fn test_short_constructor() {
     assert_eq!(record.key(), Some(&key));
     assert_eq!(record.value(), Some(&value));
     assert_eq!(record.timestamp_type(), TimestampType::NoTimestampType);
-    assert_eq!(record.timestamp(), NO_TIMESTAMP);
-    assert_eq!(record.serialized_key_size(), NULL_SIZE);
-    assert_eq!(record.serialized_value_size(), NULL_SIZE);
+    assert_eq!(record.timestamp(), ConsumerRecord::<&str, &str>::NO_TIMESTAMP);
+    assert_eq!(record.serialized_key_size(), ConsumerRecord::<&str, &str>::NULL_SIZE);
+    assert_eq!(record.serialized_value_size(), ConsumerRecord::<&str, &str>::NULL_SIZE);
     assert_eq!(record.leader_epoch(), None);
     assert_eq!(record.delivery_count(), None);
     // Empty `RecordHeaders` — assert empty rather than constructing a new
@@ -62,23 +62,24 @@ fn test_long_constructor() {
 
     let mut headers = RecordHeaders::new();
     headers
-        .add(RecordHeader::new("header key".to_string(), Some(b"header value".to_vec())))
+        .add_header(RecordHeader::new("header key".to_string(), Some(b"header value".to_vec())))
         .unwrap();
 
     // 11-arg constructor (no delivery count, no leader epoch)
-    let record: ConsumerRecord<&str, &str> = ConsumerRecord::with_headers(
-        topic,
-        partition,
-        offset,
-        timestamp,
-        timestamp_type,
-        serialized_key_size,
-        serialized_value_size,
-        Some(key),
-        Some(value),
-        headers.clone(),
-        None,
-    );
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(topic)
+        .set_partition(partition)
+        .set_offset(offset)
+        .set_key(Some(key))
+        .set_value(Some(value))
+        .set_timestamp(timestamp)
+        .set_timestamp_type(timestamp_type)
+        .set_serialized_key_size(serialized_key_size)
+        .set_serialized_value_size(serialized_value_size)
+        .set_headers(headers.clone())
+        .build()
+        .unwrap();
+    let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(options);
 
     assert_eq!(record.topic(), topic);
     assert_eq!(record.partition(), partition);
@@ -96,20 +97,22 @@ fn test_long_constructor() {
     // 12-arg constructor (with leader epoch and delivery count)
     let leader_epoch: Option<i32> = Some(10);
     let delivery_count: Option<i16> = Some(1);
-    let record: ConsumerRecord<&str, &str> = ConsumerRecord::with_all(
-        topic,
-        partition,
-        offset,
-        timestamp,
-        timestamp_type,
-        serialized_key_size,
-        serialized_value_size,
-        Some(key),
-        Some(value),
-        headers.clone(),
-        leader_epoch,
-        delivery_count,
-    );
+    let options = ConsumerRecordOptionsBuilder::new()
+        .set_topic(topic)
+        .set_partition(partition)
+        .set_offset(offset)
+        .set_key(Some(key))
+        .set_value(Some(value))
+        .set_timestamp(timestamp)
+        .set_timestamp_type(timestamp_type)
+        .set_serialized_key_size(serialized_key_size)
+        .set_serialized_value_size(serialized_value_size)
+        .set_headers(headers.clone())
+        .set_leader_epoch(leader_epoch)
+        .set_delivery_count(delivery_count)
+        .build()
+        .unwrap();
+    let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(options);
 
     assert_eq!(record.topic(), topic);
     assert_eq!(record.partition(), partition);

@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::Error;
+use crate::common::KafkaFutureOps;
 use crate::common::TopicPartition;
-use crate::common::kafka_future::KafkaFutureOps;
 use crate::common::record::internal::RecordBatch;
 use crate::producer::RecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
@@ -162,7 +162,7 @@ impl FutureRecordMetadata {
     ///
     /// Returns [`Error::Timeout`] if the timeout elapses before the result is available.
     /// Returns the error from the produce response if the record failed.
-    pub fn get_timeout(
+    pub fn get_with_timeout(
         &self,
         timeout: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
@@ -196,7 +196,7 @@ impl FutureRecordMetadata {
 
             if let Some(chained) = next {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                return chained.get_timeout(remaining).await;
+                return chained.get_with_timeout(remaining).await;
             }
 
             self.value_or_error()
@@ -285,11 +285,11 @@ impl KafkaFutureOps<RecordMetadata> for FutureRecordMetadata {
         FutureRecordMetadata::get(self)
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: Duration,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
-        FutureRecordMetadata::get_timeout(self, timeout)
+        FutureRecordMetadata::get_with_timeout(self, timeout)
     }
 
     fn is_done(&self) -> bool {
@@ -366,7 +366,7 @@ mod tests {
         result2.set(200, RecordBatch::NO_TIMESTAMP, None);
         result2.done();
 
-        let metadata = future1.get_timeout(std::time::Duration::from_secs(1)).await.unwrap();
+        let metadata = future1.get_with_timeout(std::time::Duration::from_secs(1)).await.unwrap();
         assert_eq!(200, metadata.offset());
     }
 
@@ -408,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_get_with_error() {
-        use crate::common::protocol::Errors;
+        use crate::common::Errors;
 
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);
@@ -436,7 +436,7 @@ mod tests {
 
         let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
 
-        let err = future.get_timeout(std::time::Duration::from_millis(10)).await.unwrap_err();
+        let err = future.get_with_timeout(std::time::Duration::from_millis(10)).await.unwrap_err();
         // Java throws `java.util.concurrent.TimeoutException` here
         // (`FutureRecordMetadata.java:25` imports it, `:76` throws it), which
         // `Future.get(timeout, unit)` declares — not the retriable Kafka

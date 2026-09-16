@@ -139,7 +139,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str) -> ConsumerConfig
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
@@ -155,11 +155,11 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid producer test config")
+    ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::from_config(
+    KafkaProducer::new_config(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -170,17 +170,17 @@ fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
 /// Provision a single-partition topic (this suite only cares about
 /// partition 0 of `topic` and `newTopic`).
 async fn ensure_topic(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    let record = ProducerRecord::with_partition(
+    let record = ProducerRecord::new_partition_key(
         topic.to_string(),
         Some(0),
         Some(b"__provisioner__".to_vec()),
         Some(b"__provisioner__".to_vec()),
     )
-    .expect("ProducerRecord::with_partition should succeed");
+    .expect("ProducerRecord::new_partition_key should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
         .await
         .expect("provisioner send should succeed");
-    fut.get_timeout(Duration::from_secs(30))
+    fut.get_with_timeout(Duration::from_secs(30))
         .await
         .expect("provisioner send should ack");
     producer.flush().await.expect("producer.flush should succeed");
@@ -263,7 +263,7 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
         captured: Arc::clone(&captured1),
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener1)
+        .subscribe_with_topics_listener(vec![topic.clone()], listener1)
         .await
         .expect("first subscribe should succeed");
     let got1 = poll_until_captured(consumer.as_mut(), &captured1, Duration::from_secs(90)).await;
@@ -283,7 +283,7 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
         captured: Arc::clone(&captured2),
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone(), new_topic.clone()], listener2)
+        .subscribe_with_topics_listener(vec![topic.clone(), new_topic.clone()], listener2)
         .await
         .expect("expand subscribe should succeed");
     let got2 = poll_until_captured(consumer.as_mut(), &captured2, Duration::from_secs(90)).await;
@@ -336,7 +336,7 @@ enum CallbackAction {
         tp: TopicPartition,
         result: Arc<Mutex<Option<Result<i64, Error>>>>,
     },
-    /// Java: `consumer.seek(tp, offset); consumer.pause([tp])`. Records the
+    /// Java: `consumer.seek_with_offset(tp, offset); consumer.pause([tp])`. Records the
     /// combined result.
     SeekAndPause {
         tp: TopicPartition,
@@ -368,7 +368,7 @@ impl CallbackAction {
             },
             CallbackAction::SeekAndPause { tp, offset, result } => {
                 let r = async {
-                    handle.seek(tp.clone(), *offset).await?;
+                    handle.seek_with_offset(tp.clone(), *offset).await?;
                     handle.pause(std::slice::from_ref(tp)).await
                 }
                 .await;
@@ -431,7 +431,7 @@ async fn trigger_on_partitions_assigned(
         done: Arc::clone(&done),
     });
     consumer
-        .subscribe_with_listener(vec![topic.to_string()], listener)
+        .subscribe_with_topics_listener(vec![topic.to_string()], listener)
         .await
         .expect("subscribe should succeed");
     poll_until_flag(consumer, &done, Duration::from_secs(90)).await;
@@ -457,7 +457,7 @@ async fn trigger_on_partitions_revoked(
         revoked: Arc::clone(&revoked),
     });
     consumer
-        .subscribe_with_listener(vec![topic.to_string()], listener)
+        .subscribe_with_topics_listener(vec![topic.to_string()], listener)
         .await
         .expect("subscribe should succeed");
     poll_until_flag(consumer, &assigned, Duration::from_secs(90)).await;
@@ -762,17 +762,17 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     for i in 0..total_records {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.clone(),
             Some(0),
             Some(format!("key-{i}").into_bytes()),
             Some(format!("value-{i}").into_bytes()),
         )
-        .expect("ProducerRecord::with_partition should succeed");
+        .expect("ProducerRecord::new_partition_key should succeed");
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
             .await
             .expect("send should succeed");
-        fut.get_timeout(Duration::from_secs(30)).await.expect("send should ack");
+        fut.get_with_timeout(Duration::from_secs(30)).await.expect("send should ack");
     }
     producer.flush().await.expect("producer.flush should succeed");
     producer.close().await.expect("producer close should succeed");
@@ -808,7 +808,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
         let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
-        for rec in records.records_for_partition(&tp) {
+        for rec in records.records_partition(&tp) {
             assert_eq!(
                 rec.offset(),
                 next_offset,

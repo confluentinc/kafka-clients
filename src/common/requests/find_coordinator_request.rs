@@ -23,21 +23,16 @@
 
 use std::io;
 
+use crate::FindCoordinatorRequestData;
+use crate::FindCoordinatorResponseData;
 use crate::common::Node;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::find_coordinator_request_data::FindCoordinatorRequestData;
-use crate::find_coordinator_response_data::{Coordinator, FindCoordinatorResponseData};
+use crate::find_coordinator_response_data::Coordinator;
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::FindCoordinatorResponse;
 use super::RequestBuilder;
-
-/// Minimum version supporting batched `coordinator_keys` instead of a single
-/// `key` field.
-///
-/// Corresponds to `FindCoordinatorRequest.MIN_BATCHED_VERSION` in Java.
-pub const MIN_BATCHED_VERSION: i16 = 4;
 
 /// Coordinator type identifier for a `FindCoordinator` request.
 ///
@@ -53,6 +48,21 @@ pub enum CoordinatorType {
 }
 
 impl CoordinatorType {
+    /// Java's `CoordinatorType.name()` — the enum constant's own name, as
+    /// interpolated into `TransactionManager`'s two `IllegalStateException`
+    /// messages (`TransactionManager.java:1179,1199`).
+    ///
+    /// `name()` is inherited from `java.lang.Enum`, so there is no Java body to
+    /// translate. The Rust enum has no `Display`, and `Debug` would print
+    /// `Share` where Java prints `SHARE`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Group => "GROUP",
+            Self::Transaction => "TRANSACTION",
+            Self::Share => "SHARE",
+        }
+    }
+
     /// Returns the wire-format `i8` id for this coordinator type.
     pub fn id(self) -> i8 {
         match self {
@@ -90,6 +100,12 @@ pub struct FindCoordinatorRequest {
 }
 
 impl FindCoordinatorRequest {
+    /// Minimum version supporting batched `coordinator_keys` instead of a single
+    /// `key` field.
+    ///
+    /// Corresponds to `FindCoordinatorRequest.MIN_BATCHED_VERSION` in Java.
+    pub const MIN_BATCHED_VERSION: i16 = 4;
+
     /// Creates a new `FindCoordinatorRequest` from data and version.
     pub fn new(data: FindCoordinatorRequestData, version: i16) -> Self {
         Self { data, version }
@@ -122,7 +138,7 @@ impl FindCoordinatorRequest {
         if self.version >= 2 {
             response.set_throttle_time_ms(throttle_time_ms);
         }
-        if self.version < MIN_BATCHED_VERSION {
+        if self.version < FindCoordinatorRequest::MIN_BATCHED_VERSION {
             // <= v3: single coordinator embedded in the top-level fields.
             let no_node = Node::no_node();
             response
@@ -226,13 +242,14 @@ impl RequestBuilder for FindCoordinatorRequestBuilder {
 
         let mut data = self.data.clone();
         let batched_keys = data.coordinator_keys.len();
-        if version < MIN_BATCHED_VERSION {
+        if version < FindCoordinatorRequest::MIN_BATCHED_VERSION {
             if batched_keys > 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!(
                         "Cannot create a v{version} FindCoordinator request because we require features \
-                         supported only in {MIN_BATCHED_VERSION} or later."
+                         supported only in {} or later.",
+                        FindCoordinatorRequest::MIN_BATCHED_VERSION
                     ),
                 ));
             }

@@ -96,26 +96,26 @@ use log::{debug, error};
 use rustc_hash::FxHashSet;
 
 use crate::common::Error;
+use crate::common::Errors;
 use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
 use crate::common::errors::DeserializationErrorOrigin;
 use crate::common::errors::RecordDeserializationError;
-use crate::common::header::internals::RecordHeaders;
-use crate::common::memory::buffer_supplier::BufferSupplier;
-use crate::common::protocol::Errors;
+use crate::common::header::RecordHeaders;
+use crate::common::memory::BufferSupplier;
 use crate::common::record::TimestampType;
-use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::{
     ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch,
     RecordVersion,
 };
 use crate::common::serialization::Deserializer;
-use crate::consumer::ConsumerRecord;
-use crate::consumer::internals::fetch_config::FetchConfig;
-use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::consumer::internals::FetchConfig;
+use crate::consumer::internals::FetchMetricsAggregator;
+use crate::consumer::internals::SubscriptionState;
+use crate::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder};
 use crate::fetch_response_data::{AbortedTransaction, PartitionData};
 
 /// Sentinel value: a partition leader epoch that is unknown / unset.
@@ -487,8 +487,8 @@ impl CompletedFetch {
                 self.partition
             );
             return Err(match self.cached_record_error.clone() {
-                Some(cause) => Error::kafka_with_source(message, cause),
-                None => Error::kafka(message),
+                Some(cause) => Error::kafka_message_source(message, cause),
+                None => Error::kafka_message(message),
             });
         }
         if self.is_consumed || max_records <= 0 {
@@ -532,7 +532,7 @@ impl CompletedFetch {
             Err(err) if err.is_kafka_error() => {
                 self.cached_record_error = Some(err.clone());
                 if out.is_empty() {
-                    Err(Error::KafkaError(KafkaError::with_message_and_source(
+                    Err(Error::KafkaError(KafkaError::new_message_source(
                         Errors::UnknownServerError,
                         format!(
                             "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
@@ -667,11 +667,11 @@ impl CompletedFetch {
                         e
                     )))
                 })?;
-                headers_owned = RecordHeaders::from_headers(headers_vec);
+                headers_owned = RecordHeaders::new_header_iter(headers_vec);
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
-                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
+                        .deserialize_from_shared_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
                         .map(Some),
                 };
                 // Java's `parseRecord` is two sequential `try` blocks and the first
@@ -686,7 +686,7 @@ impl CompletedFetch {
                     match record.value() {
                         None => Ok(None),
                         Some(value_bytes) => value_deserializer
-                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
+                            .deserialize_from_shared_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
                             .map(Some),
                     }
                 };
@@ -748,18 +748,20 @@ impl CompletedFetch {
 
             // §27: cheap Arc clone — atomic pointer bump, no UTF-8 copy.
             let topic_arc = Arc::clone(&self.topic_arc);
-            let consumer_record = ConsumerRecord::with_headers(
-                topic_arc,
-                self.partition.partition(),
-                offset,
-                timestamp,
-                timestamp_type,
-                key_size,
-                value_size,
-                key,
-                value,
-                headers_owned,
-                leader_epoch,
+            let consumer_record = ConsumerRecord::new_options(
+                ConsumerRecordOptionsBuilder::new()
+                    .set_topic(topic_arc)
+                    .set_partition(self.partition.partition())
+                    .set_offset(offset)
+                    .set_key(key)
+                    .set_value(value)
+                    .set_timestamp(timestamp)
+                    .set_timestamp_type(timestamp_type)
+                    .set_serialized_key_size(key_size)
+                    .set_serialized_value_size(value_size)
+                    .set_headers(headers_owned)
+                    .set_leader_epoch(leader_epoch)
+                    .build()?,
             );
             self.records_read += 1;
             self.bytes_read += record_size_in_bytes;
@@ -1114,7 +1116,7 @@ impl CompletedFetch {
                 // Need at least LOG_OVERHEAD bytes to read base_offset + length;
                 // mirrors `BatchIterator::next`'s bounds checks. A partial or
                 // trailing batch terminates iteration.
-                if batch_start + LOG_OVERHEAD > buffer.len() {
+                if batch_start + AbstractRecords::LOG_OVERHEAD > buffer.len() {
                     cursor.next_batch_start = None;
                     return Ok(false);
                 }
@@ -1130,7 +1132,7 @@ impl CompletedFetch {
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(Error::kafka(format!(
+                    return Err(Error::kafka_message(format!(
                         "Record batch for partition {} at offset {} is invalid, cause: {}",
                         self.partition,
                         batch.base_offset(),
@@ -1163,7 +1165,7 @@ impl CompletedFetch {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        Error::kafka(format!(
+                        Error::kafka_message(format!(
                             "Record batch for partition {} at offset {} is invalid, cause: {}",
                             self.partition, meta.base_offset, e
                         ))
@@ -1353,8 +1355,8 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::serialization::Deserializer;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-    use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
+    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::FetchMetricsManager;
     use crate::fetch_response_data::PartitionData;
     use std::sync::{Arc, Mutex};
 
@@ -1620,13 +1622,13 @@ mod tests {
         let alloc_count;
         let n_records;
         {
-            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
-            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
             // The measured call drives ONLY the per-record loop — no drain().
             let recs = cf
                 .fetch_records::<usize, usize>(&fetch_config, &key_de, &value_de, RECORD_COUNT)
                 .unwrap();
-            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            alloc_count = crate::AllocTrackingGuard::count();
             n_records = recs.len();
         }
 
@@ -1890,7 +1892,7 @@ mod tests {
         assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
         // Recoverable, not fatal: propagates out of poll() rather than aborting.
         assert!(
-            !crate::common::requests::request_utils::is_fatal_error(&err),
+            !crate::common::requests::RequestUtils::is_fatal_error(&err),
             "invalid-record-count error must be recoverable"
         );
     }
@@ -1941,7 +1943,7 @@ mod tests {
                         "cause must be the ensureNoneRemaining fault, got: {cause}"
                     );
                     assert!(
-                        !crate::common::requests::request_utils::is_fatal_error(&e),
+                        !crate::common::requests::RequestUtils::is_fatal_error(&e),
                         "invalid-record-count error must be recoverable"
                     );
                     saw_error = true;

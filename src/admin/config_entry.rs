@@ -16,6 +16,8 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.ConfigEntry`.
 
+use crate::common::Error;
+
 /// Data type of configuration entry.
 ///
 /// Corresponds to `ConfigEntry.ConfigType`.
@@ -187,46 +189,205 @@ pub struct ConfigEntry {
     documentation: Option<String>,
 }
 
+/// The parameters of Java's widest `ConfigEntry` constructor
+/// (`ConfigEntry(String, String, ConfigSource, boolean, boolean, List, ConfigType, String)`,
+/// `ConfigEntry.java:59`).
+///
+/// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
+/// CLAUDE.md §2's cap on derived overload names: that constructor differs from
+/// the group's intersection `{name, value}` by six parameters, so the cap fires
+/// and this struct becomes the method's *only* parameter, carrying every Java
+/// parameter including the intersection's own.
+///
+/// It deliberately has **no** `Default`. `name` and `value` are what even Java's
+/// narrow constructor (`:44`) takes from its caller, so neither has a
+/// Java-derived default, and a synthesised empty name would produce an entry
+/// naming no config at all. Construct it with [`ConfigEntryOptionsBuilder::new`]
+/// and set them: [`ConfigEntryOptionsBuilder::build`] returns an error if any of `name`, `value` was not set.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntryOptions {
+    /// The non-null config name. Java's `name`.
+    pub name: String,
+    /// The config value or `None`. Java's `value`.
+    pub value: Option<String>,
+    /// The source of this config entry. Java's `source`; starts as
+    /// [`ConfigSource::Unknown`], as in `:44`.
+    pub source: ConfigSource,
+    /// Whether the config value is sensitive; the broker never returns the
+    /// value if it is sensitive. Java's `isSensitive`; starts as `false`, as in
+    /// `:44`.
+    pub is_sensitive: bool,
+    /// Whether the config is read-only and cannot be updated. Java's
+    /// `isReadOnly`; starts as `false`, as in `:44`.
+    pub is_read_only: bool,
+    /// Synonym configs in order of precedence. Java's `synonyms`; starts empty,
+    /// as in `:44` (`Collections.emptyList()`).
+    pub synonyms: Vec<ConfigSynonym>,
+    /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`],
+    /// as in `:44`.
+    pub config_type: ConfigType,
+    /// The config documentation. Java's `documentation`; starts as `None`, as in
+    /// `:44`.
+    pub documentation: Option<String>,
+}
+
+/// Fluent builder for [`ConfigEntryOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
+/// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConfigEntryOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct ConfigEntryOptionsBuilder {
+    name: Option<String>,
+    value: Option<Option<String>>,
+    source: ConfigSource,
+    is_sensitive: bool,
+    is_read_only: bool,
+    synonyms: Vec<ConfigSynonym>,
+    config_type: ConfigType,
+    documentation: Option<String>,
+}
+
+impl Default for ConfigEntryOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConfigEntryOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            value: None,
+            source: ConfigSource::Unknown,
+            is_sensitive: false,
+            is_read_only: false,
+            synonyms: Vec::new(),
+            config_type: ConfigType::Unknown,
+            documentation: None,
+        }
+    }
+
+    /// Sets [`ConfigEntryOptions::name`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+    /// Sets [`ConfigEntryOptions::value`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_value(mut self, value: Option<String>) -> Self {
+        self.value = Some(value);
+        self
+    }
+    /// Sets [`ConfigEntryOptions::source`].
+    pub fn set_source(mut self, source: ConfigSource) -> Self {
+        self.source = source;
+        self
+    }
+    /// Sets [`ConfigEntryOptions::is_sensitive`].
+    pub fn set_is_sensitive(mut self, is_sensitive: bool) -> Self {
+        self.is_sensitive = is_sensitive;
+        self
+    }
+    /// Sets [`ConfigEntryOptions::is_read_only`].
+    pub fn set_is_read_only(mut self, is_read_only: bool) -> Self {
+        self.is_read_only = is_read_only;
+        self
+    }
+    /// Sets [`ConfigEntryOptions::synonyms`].
+    pub fn set_synonyms(mut self, synonyms: Vec<ConfigSynonym>) -> Self {
+        self.synonyms = synonyms;
+        self
+    }
+    /// Sets [`ConfigEntryOptions::config_type`].
+    pub fn set_config_type(mut self, config_type: ConfigType) -> Self {
+        self.config_type = config_type;
+        self
+    }
+    /// Sets [`ConfigEntryOptions::documentation`].
+    pub fn set_documentation(mut self, documentation: Option<String>) -> Self {
+        self.documentation = documentation;
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `name`, `value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
+    /// set which was not given a setter call. Only presence is checked here;
+    /// semantic validation belongs to the method the options are passed to
+    /// (CLAUDE.md §2).
+    pub fn build(self) -> Result<ConfigEntryOptions, Error> {
+        Ok(ConfigEntryOptions {
+            name: self.name.ok_or_else(|| Self::missing("name"))?,
+            value: self.value.ok_or_else(|| Self::missing("value"))?,
+            source: self.source,
+            is_sensitive: self.is_sensitive,
+            is_read_only: self.is_read_only,
+            synonyms: self.synonyms,
+            config_type: self.config_type,
+            documentation: self.documentation,
+        })
+    }
+
+    /// Builds the [`Error::LocalIllegalArgument`] naming a mandatory parameter
+    /// [`Self::build`] found unset.
+    fn missing(parameter: &str) -> Error {
+        Error::local_illegal_argument(format!(
+            "ConfigEntryOptionsBuilder::build: mandatory parameter `{parameter}` was not set"
+        ))
+    }
+}
+
 impl ConfigEntry {
     /// Create a configuration entry with the provided name and value.
+    ///
+    /// Corresponds to Java's `ConfigEntry(String, String)`
+    /// (`ConfigEntry.java:44`), whose parameters `{name, value}` are the
+    /// intersection across both constructors — so it owns the plain name
+    /// (CLAUDE.md §2).
     ///
     /// * `name` - the non-null config name
     /// * `value` - the config value or `None`
     pub fn new(name: String, value: Option<String>) -> Self {
-        Self::with_metadata(
-            name,
-            value,
-            ConfigSource::Unknown,
-            false,
-            false,
-            Vec::new(),
-            ConfigType::Unknown,
-            None,
+        Self::new_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name(name)
+                .set_value(value)
+                .build()
+                .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
         )
     }
 
     /// Create a configuration entry with all values.
     ///
-    /// * `name` - the non-null config name
-    /// * `value` - the config value or `None`
-    /// * `source` - the source of this config entry
-    /// * `is_sensitive` - whether the config value is sensitive; the broker
-    ///   never returns the value if it is sensitive
-    /// * `is_read_only` - whether the config is read-only and cannot be updated
-    /// * `synonyms` - synonym configs in order of precedence
-    /// * `config_type` - the config data type
-    /// * `documentation` - the config documentation
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_metadata(
-        name: String,
-        value: Option<String>,
-        source: ConfigSource,
-        is_sensitive: bool,
-        is_read_only: bool,
-        synonyms: Vec<ConfigSynonym>,
-        config_type: ConfigType,
-        documentation: Option<String>,
-    ) -> Self {
+    /// Corresponds to Java's widest constructor (`ConfigEntry.java:59`). Its
+    /// eight parameters exceed CLAUDE.md §2's three-parameter cap on derived
+    /// overload names, so [`ConfigEntryOptions`] is this method's only
+    /// parameter and carries all of them.
+    ///
+    /// * `options` - every parameter of Java's widest constructor
+    pub fn new_options(options: ConfigEntryOptions) -> Self {
+        let ConfigEntryOptions {
+            name,
+            value,
+            source,
+            is_sensitive,
+            is_read_only,
+            synonyms,
+            config_type,
+            documentation,
+        } = options;
         Self {
             name,
             value,
@@ -334,15 +495,14 @@ mod tests {
 
     #[test]
     fn is_default_only_for_default_config_source() {
-        let default = ConfigEntry::with_metadata(
-            "k".to_string(),
-            None,
-            ConfigSource::DefaultConfig,
-            false,
-            false,
-            Vec::new(),
-            ConfigType::String,
-            None,
+        let default = ConfigEntry::new_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("k".to_string())
+                .set_value(None)
+                .set_source(ConfigSource::DefaultConfig)
+                .set_config_type(ConfigType::String)
+                .build()
+                .unwrap(),
         );
         assert!(default.is_default());
         assert!(!ConfigEntry::new("k".to_string(), None).is_default());
@@ -350,15 +510,14 @@ mod tests {
 
     #[test]
     fn display_redacts_sensitive_value() {
-        let entry = ConfigEntry::with_metadata(
-            "password".to_string(),
-            Some("secret".to_string()),
-            ConfigSource::Unknown,
-            true,
-            false,
-            Vec::new(),
-            ConfigType::Password,
-            None,
+        let entry = ConfigEntry::new_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("password".to_string())
+                .set_value(Some("secret".to_string()))
+                .set_is_sensitive(true)
+                .set_config_type(ConfigType::Password)
+                .build()
+                .unwrap(),
         );
         let s = entry.to_string();
         assert!(s.contains("value=Redacted"), "{s}");
@@ -372,5 +531,37 @@ mod tests {
         let c = ConfigEntry::new("k".to_string(), Some("other".to_string()));
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`ConfigEntryOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    fn config_entry_options_builder_build_errors_when_no_mandatory_parameter_is_set() {
+        let Err(error) = ConfigEntryOptionsBuilder::new().build() else {
+            panic!("build must reject the unset mandatory parameter");
+        };
+        assert!(matches!(error, Error::LocalIllegalArgument(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "ConfigEntryOptionsBuilder::build: mandatory parameter `name` was not set"
+        );
+    }
+
+    /// Validation covers every mandatory parameter, not just the first: setting
+    /// all but one still panics, naming the one left unset.
+    #[test]
+    fn config_entry_options_builder_build_errors_when_only_value_is_unset() {
+        let Err(error) = ConfigEntryOptionsBuilder::new()
+            .set_name("compression.type".to_string())
+            .build()
+        else {
+            panic!("build must reject the unset mandatory parameter");
+        };
+        assert!(matches!(error, Error::LocalIllegalArgument(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "ConfigEntryOptionsBuilder::build: mandatory parameter `value` was not set"
+        );
     }
 }

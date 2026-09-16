@@ -44,7 +44,7 @@ impl TerminateTransactionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn result_returns_the_wrapped_future() {

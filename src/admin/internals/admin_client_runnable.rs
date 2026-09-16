@@ -26,27 +26,18 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use tokio::sync::mpsc;
 
-use crate::client_response::ClientResponse;
+use crate::ClientResponse;
+use crate::KafkaClient;
+use crate::admin::KafkaAdminClient;
+use crate::common::Errors;
 use crate::common::errors::{DisconnectError, TimeoutError};
-use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, Node};
-use crate::kafka_client::KafkaClient;
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
-use super::admin_metadata_manager::AdminMetadataManager;
-use super::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
-
-/// Sentinel for "no hard-shutdown deadline set".
-///
-/// Plays the role of Java's `KafkaAdminClient.INVALID_SHUTDOWN_TIME`: it is
-/// lower than every reachable deadline, so the "is an earlier deadline already
-/// installed?" comparison in `KafkaAdminClient::close` orders the same way.
-pub(crate) const NO_HARD_SHUTDOWN: i64 = i64::MIN;
-
-/// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
-const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
+use super::AdminMetadataManager;
+use super::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 
 /// Computes the remaining time until `deadline`, clamped to the `i32` range.
 ///
@@ -72,7 +63,7 @@ struct InFlightCall {
 pub(crate) struct ShutdownSignal {
     /// Set once `close` has begun.
     pub(crate) closing: AtomicBool,
-    /// The hard-shutdown deadline in epoch ms, or [`NO_HARD_SHUTDOWN`].
+    /// The hard-shutdown deadline in epoch ms, or [`KafkaAdminClient::NO_HARD_SHUTDOWN`].
     pub(crate) hard_shutdown_deadline_ms: AtomicI64,
 }
 
@@ -81,7 +72,7 @@ impl ShutdownSignal {
     pub(crate) fn new() -> Self {
         Self {
             closing: AtomicBool::new(false),
-            hard_shutdown_deadline_ms: AtomicI64::new(NO_HARD_SHUTDOWN),
+            hard_shutdown_deadline_ms: AtomicI64::new(KafkaAdminClient::NO_HARD_SHUTDOWN),
         }
     }
 }
@@ -116,6 +107,12 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
 }
 
 impl<C: KafkaClient> AdminClientRunnable<C> {
+    /// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
+    ///
+    /// Java writes the literal inline in `AdminClientRunnable.run()`
+    /// (`KafkaAdminClient.java:1512`) rather than naming a static.
+    const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
+
     /// Creates a new runnable.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -243,7 +240,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             return true;
         }
         let deadline = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
-        if deadline != NO_HARD_SHUTDOWN && now >= deadline {
+        if deadline != KafkaAdminClient::NO_HARD_SHUTDOWN && now >= deadline {
             kafka_info!(
                 self.log_context,
                 "Forcing a hard I/O task shutdown. Requests in progress will be aborted."
@@ -283,7 +280,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         let now = (self.time_provider)();
 
         // 2. Time out expired calls; base poll timeout.
-        let mut poll_timeout = MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
+        let mut poll_timeout = Self::MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
 
         // Once `close()` has been called, bound the poll by the time remaining
         // to the hard-shutdown deadline, so the loop is guaranteed to reach
@@ -292,7 +289,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // the (far larger) call deadline, and `close(timeout)` overruns by up to
         // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1500-1502`.
         let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
-        if hard_shutdown_deadline_ms != NO_HARD_SHUTDOWN {
+        if hard_shutdown_deadline_ms != KafkaAdminClient::NO_HARD_SHUTDOWN {
             poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
         }
 
@@ -525,7 +522,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         // `false` — carrying the original as its cause. Neither the
                         // class nor the cause survived being flattened into an
                         // `LocalIllegalState` with the message text appended.
-                        let wrapped = Error::kafka_with_source(
+                        let wrapped = Error::kafka_message_source(
                             format!("Internal error sending {} to {}.", call.call_name, node),
                             err,
                         );
@@ -726,7 +723,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             // `Call(...)` rendering, and append the cause as text — which left
             // `Error::source()` empty where Java's `getCause()` is populated.
             let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
-            Error::Timeout(TimeoutError::with_source(message, cause))
+            Error::Timeout(TimeoutError::new_source(message, cause))
         };
         call.handle_failure(&error);
     }
@@ -772,7 +769,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             NodeProvider::MetadataUpdate,
             Box::new(|_timeout_ms| {
                 // Empty topic list: request brokers + controller only, matching Java.
-                Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
+                Ok(
+                    Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true))
+                        as Box<dyn RequestBuilder>,
+                )
             }),
             Box::new(move |response, now, _cur_node| {
                 // Java does `(MetadataResponse) abstractResponse` unguarded

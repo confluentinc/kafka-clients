@@ -36,7 +36,7 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListTopicsOptions, NewTopic,
 };
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 
 use crate::common::admin_backend::{
     AdminBackend, admin_config, admin_for, all_of, bootstrap_for, create_topic, wait_for_all_partitions_metadata,
@@ -77,7 +77,14 @@ async fn create_then_list_and_describe_topics<F: AdminBackendFactory>(ctx: &mut 
 
     let topic = ctx.topic("admin_create_list");
     let created = admin
-        .create_topics(&[NewTopic::new(topic.clone(), 2, 1)], CreateTopicsOptions::new())
+        .create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.clone(),
+                Some(2),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create topics: {e}"));
     all_of(&created).unwrap_or_else(|e| panic!("{backend} backend: create topics should succeed: {e}"));
@@ -90,7 +97,7 @@ async fn create_then_list_and_describe_topics<F: AdminBackendFactory>(ctx: &mut 
 
     // describe_topics reports the partition count and replication factor.
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let desc = described[&topic]
@@ -116,7 +123,7 @@ async fn describe_nonexistent_topic_is_unknown<F: AdminBackendFactory>(ctx: &mut
 
     let topic = ctx.topic("admin_nonexistent");
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     // The *call* succeeds and the failure is per key — a nonexistent topic does
@@ -155,7 +162,7 @@ async fn delete_topics_removes_them<F: AdminBackendFactory>(ctx: &mut TestContex
 
     // Describing the deleted topic now fails with UNKNOWN_TOPIC_OR_PARTITION.
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let err = described[&topic]
@@ -179,8 +186,8 @@ async fn create_multiple_topics_partition_round_trip<F: AdminBackendFactory>(ctx
     let created = admin
         .create_topics(
             &[
-                NewTopic::new(topic_a.clone(), 3, 1),
-                NewTopic::new(topic_b.clone(), 1, 1),
+                NewTopic::new_num_partitions_replication_factor(topic_a.clone(), Some(3), Some(1)),
+                NewTopic::new_num_partitions_replication_factor(topic_b.clone(), Some(1), Some(1)),
             ],
             CreateTopicsOptions::new(),
         )
@@ -199,7 +206,7 @@ async fn create_multiple_topics_partition_round_trip<F: AdminBackendFactory>(ctx
     wait_for_all_partitions_metadata(&admin, &topic_b, 1).await;
 
     let described = admin
-        .describe_topics(&[topic_a.clone(), topic_b.clone()], DescribeTopicsOptions::new())
+        .describe_topics_with_topics(&[topic_a.clone(), topic_b.clone()], DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let a = described[&topic_a]
@@ -332,8 +339,10 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
     let topic = ctx.topic("admin_create_metadata");
     let created = admin
         .create_topics(
-            &[NewTopic::new(topic.clone(), 2, 1)
-                .configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())]))],
+            &[
+                NewTopic::new_num_partitions_replication_factor(topic.clone(), Some(2), Some(1))
+                    .set_configs(BTreeMap::from([("retention.ms".to_string(), retention.to_string())])),
+            ],
             CreateTopicsOptions::new(),
         )
         .await
@@ -381,7 +390,7 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
     // The same id the create reported is the one the topic is described by.
     wait_for_all_partitions_metadata(&admin, &topic, 2).await;
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let desc = described[&topic]
@@ -415,7 +424,7 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
     let probe = ctx.topic("admin_assign_probe");
     create_topic(&admin, &probe, 1, 1).await;
     let described = admin
-        .describe_topics(std::slice::from_ref(&probe), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&probe), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe probe: {e}"));
     let broker_id = described[&probe]
@@ -430,7 +439,7 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
     let assignments = BTreeMap::from([(0, vec![broker_id]), (1, vec![broker_id])]);
     let created = admin
         .create_topics(
-            &[NewTopic::with_replicas_assignments(topic.clone(), assignments)],
+            &[NewTopic::new_replicas_assignments(topic.clone(), assignments)],
             CreateTopicsOptions::new(),
         )
         .await
@@ -439,7 +448,7 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
 
     wait_for_all_partitions_metadata(&admin, &topic, 2).await;
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let desc = described[&topic]
@@ -492,8 +501,12 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
     let topic = ctx.topic("admin_validate_only");
     let created = admin
         .create_topics(
-            &[NewTopic::new(topic.clone(), 1, 1)],
-            CreateTopicsOptions::new().validate_only(true),
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.clone(),
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new().set_validate_only(true),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create topics: {e}"));
@@ -514,7 +527,7 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
         );
 
         let described = admin
-            .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+            .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
         let err = described[&topic]
@@ -555,7 +568,14 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
 
     let topic = ctx.topic("admin_unreachable");
     let created = admin
-        .create_topics(&[NewTopic::new(topic.clone(), 1, 1)], CreateTopicsOptions::new())
+        .create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.clone(),
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        )
         .await;
     // Either shape is a legitimate failure: the batch may fail as a whole or per
     // key, depending on where the deadline hits. What must not happen is

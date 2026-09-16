@@ -62,8 +62,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use confluent_kafka::common::Error;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
@@ -73,7 +73,7 @@ use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
-use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
@@ -114,8 +114,8 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
         ("linger.ms".to_string(), "0".to_string()),
         ("transaction.timeout.ms".to_string(), "60000".to_string()),
     ]);
-    KafkaProducer::from_config(
-        ProducerConfig::from_properties(&props).expect("invalid transactional producer config"),
+    KafkaProducer::new_config(
+        ProducerConfig::new(&props).expect("invalid transactional producer config"),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -124,7 +124,7 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
 
 /// The transactional-producer config as a flat property map. The multilanguage
 /// factories forward this verbatim to `CreateProducer`, and `RustNativeFactory`
-/// parses it with `ProducerConfig::from_properties` — same keys as
+/// parses it with `ProducerConfig::new` — same keys as
 /// [`transactional_producer`], which stays for the native-only scenarios.
 fn make_txn_config(bootstrap: &str, transactional_id: &str) -> HashMap<String, String> {
     HashMap::from([
@@ -158,8 +158,8 @@ fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Ve
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
-    KafkaProducer::from_config(
-        ProducerConfig::from_properties(&props).expect("invalid plain producer config"),
+    KafkaProducer::new_config(
+        ProducerConfig::new(&props).expect("invalid plain producer config"),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -181,7 +181,7 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
         ("client.id".to_string(), format!("txn-consumer-{group_id}")),
     ]);
     new_consumer::<Vec<u8>, Vec<u8>>(
-        ConsumerConfig::from_properties(&props).expect("invalid consumer config"),
+        ConsumerConfig::new(&props).expect("invalid consumer config"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -197,18 +197,17 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
 /// shadowing, so no UFCS is needed.
 async fn send_all<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, partition: i32, values: &[&str]) {
     for value in values {
-        let record = ProducerRecord::new(
-            topic.to_string(),
-            Some(partition),
-            None,
-            Some(format!("k-{value}").into_bytes()),
-            Some(value.as_bytes().to_vec()),
-            None,
-        )
-        .expect("ProducerRecord::new should not fail");
+        let options = ProducerRecordOptionsBuilder::new()
+            .set_topic(topic.to_string())
+            .set_value(Some(value.as_bytes().to_vec()))
+            .set_partition(Some(partition))
+            .set_key(Some(format!("k-{value}").into_bytes()))
+            .build()
+            .unwrap();
+        let record = ProducerRecord::new_options(options).expect("ProducerRecord::new should not fail");
         let future = producer.send(record).await.expect("send should be accepted");
         future
-            .get_timeout(Duration::from_secs(30))
+            .get_with_timeout(Duration::from_secs(30))
             .await
             .expect("the broker acked the record");
     }
@@ -333,15 +332,14 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
 
     // The fenced producer can no longer produce.
     first.begin_transaction().expect("beginTransaction is a local state change");
-    let record = ProducerRecord::new(
-        topic.clone(),
-        Some(0),
-        None,
-        Some(b"k-fenced".to_vec()),
-        Some(b"fenced".to_vec()),
-        None,
-    )
-    .expect("ProducerRecord::new should not fail");
+    let options = ProducerRecordOptionsBuilder::new()
+        .set_topic(topic.clone())
+        .set_value(Some(b"fenced".to_vec()))
+        .set_partition(Some(0))
+        .set_key(Some(b"k-fenced".to_vec()))
+        .build()
+        .unwrap();
+    let record = ProducerRecord::new_options(options).expect("ProducerRecord::new should not fail");
     let sent = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&first, record).await;
     let fenced = match sent {
         // The fencing may be reported synchronously (the manager already knows it
@@ -349,7 +347,7 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
         // whether the EndTxn or the Produce is the first request to learn of it.
         Err(error) => error,
         Ok(future) => future
-            .get_timeout(Duration::from_secs(30))
+            .get_with_timeout(Duration::from_secs(30))
             .await
             .expect_err("a fenced producer must not be able to produce"),
     };
@@ -581,7 +579,10 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
     // TxnOffsetCommit the producer sends on its behalf.
     let input_group = ctx.group_id("txn-ctp-group");
     let mut input_consumer = assigned_consumer(&bootstrap, &input_group, "read_committed");
-    input_consumer.subscribe(vec![input_topic.clone()]).await.expect("subscribe");
+    input_consumer
+        .subscribe_with_topics(vec![input_topic.clone()])
+        .await
+        .expect("subscribe");
 
     let consumed = consume_values(&mut input_consumer, 3, CONSUME_DEADLINE).await;
     assert_eq!(

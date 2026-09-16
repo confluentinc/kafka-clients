@@ -18,9 +18,6 @@
 
 use super::ResourceType;
 
-/// The name of the `CLUSTER` resource.
-pub const CLUSTER_NAME: &str = "kafka-cluster";
-
 /// Represents a cluster resource with a tuple of (type, name).
 ///
 /// Corresponds to `org.apache.kafka.common.resource.Resource`.
@@ -31,6 +28,9 @@ pub struct Resource {
 }
 
 impl Resource {
+    /// The name of the `CLUSTER` resource.
+    pub const CLUSTER_NAME: &str = "kafka-cluster";
+
     /// Create an instance of this class with the provided parameters.
     ///
     /// # Arguments
@@ -42,7 +42,7 @@ impl Resource {
 
     /// A resource representing the whole cluster.
     pub fn cluster() -> Resource {
-        Resource::new(ResourceType::Cluster, CLUSTER_NAME)
+        Resource::new(ResourceType::Cluster, Resource::CLUSTER_NAME)
     }
 
     /// Return the resource type.

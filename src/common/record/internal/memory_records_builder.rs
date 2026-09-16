@@ -22,15 +22,15 @@
 use std::io::{self, Write};
 
 use crate::common::compress::{CompressingWriter, Compression};
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
-use crate::common::record::internal::abstract_records::record_batch_header_size_in_bytes;
 
 /// Estimation factor to account for compression overhead.
 const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
@@ -139,7 +139,8 @@ impl MemoryRecordsBuilder {
             }
         }
 
-        let batch_header_size = record_batch_header_size_in_bytes(magic, compression.compression_type());
+        let batch_header_size =
+            AbstractRecords::record_batch_header_size_in_bytes(magic, compression.compression_type());
         let initial_buffer_capacity = buffer.capacity();
 
         // Ensure the buffer is large enough for the header

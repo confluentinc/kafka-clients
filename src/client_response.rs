@@ -90,7 +90,7 @@ impl ClientResponse {
         authentication_error: Option<Error>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
-        Self::with_timeout(
+        Self::new_timed_out(
             request_header,
             callback,
             destination,
@@ -125,7 +125,7 @@ impl ClientResponse {
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
     #[allow(clippy::too_many_arguments)]
-    pub fn with_timeout(
+    pub fn new_timed_out(
         request_header: RequestHeader,
         callback: Option<RequestCompletionHandler>,
         destination: &str,

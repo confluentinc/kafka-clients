@@ -36,8 +36,8 @@ use indexmap::IndexMap;
 
 use crate::common::metrics::KafkaMetric;
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
-use crate::consumer::internals::auto_offset_reset_strategy::StrategyType;
-use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
+use crate::consumer::StrategyType;
+use crate::consumer::internals::{FetchPosition, SubscriptionState};
 use crate::consumer::{
     AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
     ConsumerRecord, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
@@ -331,6 +331,48 @@ impl<K, V> MockConsumer<K, V> {
         }
     }
 
+    /// Mirrors Java's private
+    /// `subscribe(Collection<String>, Optional<ConsumerRebalanceListener>)`
+    /// (`MockConsumer.java:196-200`).
+    fn subscribe_internal_topics(
+        &mut self,
+        topics: Vec<String>,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), Error> {
+        self.ensure_not_closed()?;
+        self.committed.clear();
+        self.subscriptions
+            .subscribe_with_topics(topics.into_iter().collect(), listener)?;
+        Ok(())
+    }
+
+    // Java's private `subscribe(Pattern, Optional<ConsumerRebalanceListener>)`
+    // (`MockConsumer.java:202-222`) has no Rust counterpart: the two public
+    // `subscribe(Pattern ...)` overloads it serves are deliberately NOT
+    // implemented (see `Consumer`), so the client-side matching loop it
+    // contained has no caller. Only the `SubscriptionPattern` form below is
+    // translated.
+
+    /// Mirrors Java's private
+    /// `subscribe(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`
+    /// (`MockConsumer.java:180-186`).
+    fn subscribe_internal_subscription_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), Error> {
+        // Java line 181-182: an empty pattern is rejected. Java also rejects
+        // `null`, which Rust's non-`Option` parameter makes unrepresentable,
+        // so only the "empty" half of the message can be produced.
+        if pattern.pattern().is_empty() {
+            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
+        }
+        self.ensure_not_closed()?;
+        self.committed.clear();
+        self.subscriptions.subscribe_with_pattern(pattern, listener)?;
+        Ok(())
+    }
+
     /// Mirrors Java's `updateFetchPosition(TopicPartition)`
     /// (`MockConsumer.java:622-631`).
     fn update_fetch_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
@@ -409,8 +451,9 @@ where
 
     fn group_metadata(&self) -> ConsumerGroupMetadata {
         // Java line 692-693: hard-coded sentinel values.
-        #[allow(deprecated)] // ConsumerGroupMetadata::with_details is the only way to set the fields.
-        ConsumerGroupMetadata::with_details("dummy.group.id", 1, "1", None)
+        #[allow(deprecated)]
+        // ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id is the only way to set the fields.
+        ConsumerGroupMetadata::new_generation_id_member_id_group_instance_id("dummy.group.id", 1, "1", None)
     }
 
     fn client_id(&self) -> &str {
@@ -476,49 +519,28 @@ where
 
     // ── Subscription / assignment ──────────────────────────────────────
 
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions.subscribe_topics(topics.into_iter().collect(), None)?;
-        Ok(())
+    async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
+        self.subscribe_internal_topics(topics, None)
     }
 
-    async fn subscribe_with_listener(
+    async fn subscribe_with_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions
-            .subscribe_topics(topics.into_iter().collect(), Some(listener))?;
-        Ok(())
+        self.subscribe_internal_topics(topics, Some(listener))
     }
 
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
-        // Java line 180-186: empty pattern → IllegalArgumentException.
-        if pattern.pattern().is_empty() {
-            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
-        }
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions.subscribe_re2j_pattern(pattern, None)?;
-        Ok(())
+    async fn subscribe_with_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
+        self.subscribe_internal_subscription_pattern(pattern, None)
     }
 
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_with_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        // Java line 180-186: empty pattern → IllegalArgumentException.
-        if pattern.pattern().is_empty() {
-            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
-        }
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions.subscribe_re2j_pattern(pattern, Some(listener))?;
-        Ok(())
+        self.subscribe_internal_subscription_pattern(pattern, Some(listener))
     }
 
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
@@ -666,7 +688,7 @@ where
                     self.subscriptions.set_position(&tp, new_position)?;
 
                     // Build the next-offsets entry (Java line 307).
-                    let oam = OffsetAndMetadata::with_leader_epoch(next_offset, leader_epoch, String::new())?;
+                    let oam = OffsetAndMetadata::new_leader_epoch_metadata(next_offset, leader_epoch, String::new())?;
                     next_offset_and_metadata.insert(tp.clone(), oam);
 
                     num_poll_records += 1;
@@ -685,7 +707,7 @@ where
             // `remove` above — no further action needed.
         }
 
-        Ok(ConsumerRecords::new(results, next_offset_and_metadata))
+        Ok(ConsumerRecords::new_next_offsets(results, next_offset_and_metadata))
     }
 
     // ── Commit ─────────────────────────────────────────────────────────
@@ -704,23 +726,26 @@ where
         self.commit_async_impl(offsets, None).await
     }
 
-    async fn commit_sync_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
+    async fn commit_sync_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
         // Java line 383-385: ignores the timeout.
         self.commit_sync().await
     }
 
-    async fn commit_sync_offsets(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
+    async fn commit_sync_with_offsets(
+        &mut self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<(), Error> {
         // Java line 362-364: delegates to commitAsync.
         self.commit_async_impl(offsets, None).await
     }
 
-    async fn commit_sync_offsets_timeout(
+    async fn commit_sync_with_offsets_timeout(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _timeout: Duration,
     ) -> Result<(), Error> {
         // Java line 388-390: ignores the timeout.
-        self.commit_sync_offsets(offsets).await
+        self.commit_sync_with_offsets(offsets).await
     }
 
     async fn commit_async(&mut self) -> Result<(), Error> {
@@ -745,7 +770,7 @@ where
         self.commit_async_impl(offsets, Some(callback)).await
     }
 
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_with_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
@@ -756,14 +781,14 @@ where
 
     // ── Seek ───────────────────────────────────────────────────────────
 
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+    async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         // Java line 393-396.
         self.ensure_not_closed()?;
         self.subscriptions.seek(&partition, offset)?;
         Ok(())
     }
 
-    async fn seek_with_metadata(
+    async fn seek_with_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -818,7 +843,7 @@ where
         Ok(pos)
     }
 
-    async fn position_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
+    async fn position_with_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
         // Java line 433-435: ignores the timeout.
         self.position(partition).await
     }
@@ -845,7 +870,7 @@ where
         Ok(result)
     }
 
-    async fn committed_timeout(
+    async fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
@@ -862,7 +887,11 @@ where
         Ok(self.partitions.get(topic).cloned().unwrap_or_default())
     }
 
-    async fn partitions_for_timeout(&mut self, topic: &str, _timeout: Duration) -> Result<Vec<PartitionInfo>, Error> {
+    async fn partitions_for_with_timeout(
+        &mut self,
+        topic: &str,
+        _timeout: Duration,
+    ) -> Result<Vec<PartitionInfo>, Error> {
         // Java line 655-657.
         self.partitions_for(topic).await
     }
@@ -875,7 +904,10 @@ where
         Ok(self.partitions.clone())
     }
 
-    async fn list_topics_timeout(&mut self, _timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
+    async fn list_topics_with_timeout(
+        &mut self,
+        _timeout: Duration,
+    ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
         // Java line 660-662.
         self.list_topics().await
     }
@@ -892,7 +924,7 @@ where
         Err(Error::unsupported_version("Not implemented yet."))
     }
 
-    async fn offsets_for_times_timeout(
+    async fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         _timeout: Duration,
@@ -919,7 +951,7 @@ where
         Ok(result)
     }
 
-    async fn beginning_offsets_timeout(
+    async fn beginning_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
@@ -943,7 +975,7 @@ where
         Ok(result)
     }
 
-    async fn end_offsets_timeout(
+    async fn end_offsets_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
@@ -974,23 +1006,40 @@ where
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
-    async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
-        // Java line 697-704: sets the flag; the reason is ignored.
+    async fn enforce_rebalance(&mut self) -> Result<(), Error> {
+        // Java line 697-699: `enforceRebalance()` forwards to
+        // `enforceRebalance(null)`; Rust's suffixed form takes a non-null
+        // `&str`, so the flag is set directly here instead.
+        self.should_rebalance = true;
+        Ok(())
+    }
+
+    async fn enforce_rebalance_with_reason(&mut self, _reason: &str) -> Result<(), Error> {
+        // Java line 702-704: sets the flag; the reason is ignored.
         self.should_rebalance = true;
         Ok(())
     }
 
     async fn close(&mut self) -> Result<(), Error> {
-        // AK 4.3.1: Java's `close()` now delegates to
+        // Java line 574-576: `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
-        self.close_with_options(CloseOptions::timeout(Duration::from_millis(
-            crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS,
+        self.close_with_options(CloseOptions::new_timeout(Duration::from_millis(
+            CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS,
         )))
         .await
     }
 
+    #[allow(deprecated)]
+    async fn close_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
+        // Java line 578-582: `@Deprecated close(Duration)` sets the flag
+        // directly; unlike `AsyncKafkaConsumer` it does NOT forward to
+        // `close(CloseOptions.timeout(..))`.
+        self.closed = true;
+        Ok(())
+    }
+
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
-        // Java line 593-596: ignores the options.
+        // Java line 594-596: ignores the options.
         self.closed = true;
         Ok(())
     }

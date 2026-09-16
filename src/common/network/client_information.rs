@@ -18,12 +18,9 @@
 
 use std::fmt;
 
-/// The value used when the client software name or version is unknown.
-pub const CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION: &str = "unknown";
-
 /// Client software name and version information.
 ///
-/// Empty names and versions are replaced with [`CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
+/// Empty names and versions are replaced with [`ClientInformation::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClientInformation {
     software_name: String,
@@ -31,18 +28,21 @@ pub struct ClientInformation {
 }
 
 impl ClientInformation {
+    /// The value used when the client software name or version is unknown.
+    pub const CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION: &str = "unknown";
+
     /// Creates a new `ClientInformation` with the given software name and version.
     ///
-    /// Empty strings are replaced with [`CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
+    /// Empty strings are replaced with [`Self::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
     pub fn new(software_name: &str, software_version: &str) -> Self {
         Self {
             software_name: if software_name.is_empty() {
-                CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION.to_string()
+                ClientInformation::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION.to_string()
             } else {
                 software_name.to_string()
             },
             software_version: if software_version.is_empty() {
-                CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION.to_string()
+                ClientInformation::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION.to_string()
             } else {
                 software_version.to_string()
             },
@@ -52,8 +52,8 @@ impl ClientInformation {
     /// Returns an empty `ClientInformation` with unknown name and version.
     pub fn empty() -> Self {
         Self::new(
-            CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION,
-            CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION,
+            ClientInformation::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION,
+            ClientInformation::CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION,
         )
     }
 
