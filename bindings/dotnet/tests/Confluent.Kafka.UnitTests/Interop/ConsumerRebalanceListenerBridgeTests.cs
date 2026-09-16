@@ -153,7 +153,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     public void ThrowingListener_DoesNotUnwind_ReturnsErrorHandleWithCodeAndVerbatimMessage()
     {
         // A managed exception must never unwind into native (there is no caller frame — it
-        // would be UB). It is converted into an owned KafkaError* returned to the core; the
+        // would be UB). It is converted into an owned Error* returned to the core; the
         // observable contract Python pins is code -1 plus the message verbatim.
         const string Message = "listener blew up — 例外";
         using NativeConsumer consumer = NativeConsumer.CreateMock();

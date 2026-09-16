@@ -673,7 +673,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let send = request.to_send(&header).expect("Failed to serialize request");
 
         // The selector gets the serialized send for actual I/O.
-        let selector_send = NetworkSend::new(&destination, Box::new(send));
+        let mut selector_send = NetworkSend::new(&destination, Box::new(send));
+        // Fire-and-forget requests (producer `acks=0`) never get a response, so
+        // the selector must treat the send completing as the terminal event and
+        // break its poll loop — otherwise the synthesized completion (see
+        // `handle_completed_sends`) is delayed until the poll deadline. All
+        // response-expecting requests leave this `false` (unchanged behavior).
+        selector_send.set_fire_and_forget(!client_request.expect_response());
 
         // InFlightRequest stores a placeholder send — the real send is owned
         // by the selector. The `send` field is not read after construction.

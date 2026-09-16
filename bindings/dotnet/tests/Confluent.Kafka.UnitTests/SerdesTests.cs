@@ -278,9 +278,9 @@ public sealed class SerdesTests
         Assert.IsType<SerializationException>(ex);
         Assert.IsAssignableFrom<KafkaException>(ex);
 
-        // A serde error originates in the binding, not the core: no error code / flags.
+        // A serde error originates in the binding, not the core: no error code, and the
+        // retriable flag stays at its default.
         Assert.Equal(0, ex.Code);
         Assert.False(ex.IsRetriable);
-        Assert.False(ex.IsFatal);
     }
 }

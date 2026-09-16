@@ -45,7 +45,7 @@ internal static class ConsumerCallbacks
 {
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_op_callback_t</c>:
-    /// <c>void (*)(kafka_common_KafkaError_t* error, void* user_data)</c>. A non-null
+    /// <c>void (*)(kafka_common_Error_t* error, void* user_data)</c>. A non-null
     /// <paramref name="error"/> is failure; null is success — there is no result
     /// handle for void-result ops.
     /// </summary>
@@ -84,7 +84,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_poll_callback_t</c>:
     /// <c>void (*)(kafka_consumer_ConsumerRecords_t* records,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the <b>owned-handle</b>
+    /// kafka_common_Error_t* error, void* user_data)</c> — the <b>owned-handle</b>
     /// completion shape (ffi-marshalling.md §B6/§B7). On success
     /// <paramref name="records"/> is a non-null owned batch and <paramref name="error"/>
     /// is null; on failure (incl. the inline core-guard rejection)
@@ -109,7 +109,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_position_callback_t</c>:
-    /// <c>void (*)(int64_t position, kafka_common_KafkaError_t* error,
+    /// <c>void (*)(int64_t position, kafka_common_Error_t* error,
     /// void* user_data)</c> — the <b>scalar</b> completion shape (ffi-marshalling.md
     /// §B6/§B7), the third bridge shape after the void (<c>op</c>) and owned-handle
     /// (<c>poll</c>) forms. On success <paramref name="position"/> is the offset and
@@ -143,7 +143,7 @@ internal static class ConsumerCallbacks
     /// failure / inline core-rejection / no-throw; submit-threw is handled by
     /// <c>AbandonBeforeSubmit</c> instead, since native never ran here) via
     /// <see cref="OperationCompletionSource{TResult}.FreeGcHandle"/> (idempotent). The
-    /// <c>KafkaError</c> on the failure path is freed exactly once inside
+    /// <c>Error</c> on the failure path is freed exactly once inside
     /// <see cref="OperationCompletionSource{TResult}.Complete(IntPtr)"/> via
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// <para>
@@ -208,7 +208,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_committed_callback_t</c>:
-    /// <c>void (*)(kafka_consumer_OffsetMap_t* map, kafka_common_KafkaError_t* error,
+    /// <c>void (*)(kafka_consumer_OffsetMap_t* map, kafka_common_Error_t* error,
     /// void* user_data)</c> — the owned-handle completion shape (§B6/§B7), the
     /// <c>OffsetMap_t</c> analog of <see cref="PollCallback"/>.
     /// </summary>
@@ -267,7 +267,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_offsets_for_times_callback_t</c>:
     /// <c>void (*)(kafka_consumer_OffsetAndTimestampMap_t* map,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the owned-handle shape
+    /// kafka_common_Error_t* error, void* user_data)</c> — the owned-handle shape
     /// (§B6/§B7), the <c>OffsetAndTimestampMap_t</c> analog of <see cref="PollCallback"/>.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -318,7 +318,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_long_offsets_callback_t</c>:
-    /// <c>void (*)(kafka_consumer_LongOffsetMap_t* map, kafka_common_KafkaError_t* error,
+    /// <c>void (*)(kafka_consumer_LongOffsetMap_t* map, kafka_common_Error_t* error,
     /// void* user_data)</c> — the owned-handle shape (§B6/§B7), <b>shared</b> by
     /// <c>beginning_offsets_async</c> and <c>end_offsets_async</c> (both return a
     /// <c>LongOffsetMap_t</c>).
@@ -393,7 +393,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_partitions_for_callback_t</c>:
     /// <c>void (*)(kafka_consumer_PartitionInfoList_t* list,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the owned-handle completion
+    /// kafka_common_Error_t* error, void* user_data)</c> — the owned-handle completion
     /// shape (§B6/§B7), the <c>PartitionInfoList_t</c> analog of <see cref="PollCallback"/>.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -452,7 +452,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_list_topics_callback_t</c>:
     /// <c>void (*)(kafka_consumer_TopicPartitionInfoMap_t* map,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the owned-handle completion
+    /// kafka_common_Error_t* error, void* user_data)</c> — the owned-handle completion
     /// shape (§B6/§B7), the <c>TopicPartitionInfoMap_t</c> analog of
     /// <see cref="PollCallback"/>.
     /// </summary>
@@ -514,7 +514,7 @@ internal static class ConsumerCallbacks
     // would be a use-after-free on fire 2..N.
     //
     // The other three differences from the completion trampolines, all forced by the ABI:
-    //   * they RETURN a value — NULL for success, or an owned KafkaError* whose ownership
+    //   * they RETURN a value — NULL for success, or an owned Error* whose ownership
     //     transfers to the core (confluent_kafka.h:200-207), so it must NOT be destroyed;
     //   * the delivered TopicPartitionList_t is owned by the callback and destroyed by
     //     TopicPartitionListMarshal.CopyOutAndDestroy (which frees it in a finally, so the
@@ -525,7 +525,7 @@ internal static class ConsumerCallbacks
     /// <summary>
     /// The C signature shared by all three listener callbacks
     /// (<c>kafka_consumer_ConsumerRebalanceListener_on_partitions_{revoked,assigned,lost}_callback_t</c>):
-    /// <c>kafka_common_KafkaError_t* (*)(kafka_consumer_TopicPartitionList_t* partitions,
+    /// <c>kafka_common_Error_t* (*)(kafka_consumer_TopicPartitionList_t* partitions,
     /// void* user_data)</c>. The three ABI typedefs are distinct C types with an identical
     /// layout, so one delegate type binds all three parameters of
     /// <see cref="NativeMethods.ConsumerRebalanceListenerNew"/>.
@@ -642,7 +642,7 @@ internal static class ConsumerCallbacks
     }
 
     /// <summary>
-    /// Converts a listener's exception into the owned <c>kafka_common_KafkaError_t</c> the
+    /// Converts a listener's exception into the owned <c>kafka_common_Error_t</c> the
     /// core expects back — the C equivalent of a Java listener throwing. <b>Ownership
     /// transfers to the core: the handle must not be destroyed here</b>
     /// (<c>confluent_kafka.h:200-207</c>).
@@ -737,7 +737,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_commit_async_callback_t</c>:
-    /// <c>void (*)(kafka_consumer_OffsetMap_t* offsets, kafka_common_KafkaError_t* error,
+    /// <c>void (*)(kafka_consumer_OffsetMap_t* offsets, kafka_common_Error_t* error,
     /// void* user_data)</c> (<c>confluent_kafka.h:264</c>). It shares the
     /// <c>(handle*, error*, ud)</c> layout of <see cref="OffsetMapCallback"/> but is a
     /// distinct ABI typedef with a completely different contract — <c>offsets</c> is
@@ -801,7 +801,7 @@ internal static class ConsumerCallbacks
     /// </para>
     /// <para>
     /// <b>Both delivered handles are owned by the callback</b>
-    /// (<c>confluent_kafka.h:243-248</c>). The <c>KafkaError_t</c> is consumed by
+    /// (<c>confluent_kafka.h:243-248</c>). The <c>Error_t</c> is consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>, which frees it exactly once in its own
     /// <c>finally</c> and returns <see langword="null"/> on success — so it is called
     /// <b>first</b>, before anything that can fail. The <c>OffsetMap_t</c> is then handed to

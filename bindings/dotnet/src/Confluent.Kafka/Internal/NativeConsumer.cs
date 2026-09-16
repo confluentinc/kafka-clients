@@ -261,7 +261,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// The <b>sync</b> ABI shape shared by the five void partition-collection ops
     /// (<c>assign</c> / <c>pause</c> / <c>resume</c> / <c>seek_to_beginning</c> /
     /// <c>seek_to_end</c>, M5/P8a) — the parallel <c>(topics[], partitions[], count)</c> arrays
-    /// returning a <c>KafkaError*</c> handle (null = success). The synchronous analog of
+    /// returning an <c>Error*</c> handle (null = success). The synchronous analog of
     /// <see cref="NativePartitionOpSubmit"/>: a method-group reference to each
     /// <c>NativeMethods.Consumer&lt;Op&gt;</c> binds to this, so <see cref="RunPartitionOpSync"/>
     /// marshals once and dispatches to any of the five (the async
@@ -280,7 +280,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// The <b>sync</b> ABI shape shared by the three collection-input query ops
     /// (<c>committed</c> / <c>beginning_offsets</c> / <c>end_offsets</c>, M5/P8b) — the parallel
     /// <c>(topics[], partitions[], count)</c> arrays plus an <b>out-param owned-container
-    /// handle</b>, returning a <c>KafkaError*</c> (null = success). The query analog of
+    /// handle</b>, returning an <c>Error*</c> (null = success). The query analog of
     /// <see cref="NativePartitionOpSync"/> (which has no result handle): a method-group reference
     /// to each <c>NativeMethods.Consumer{Committed,BeginningOffsets,EndOffsets}</c> binds to
     /// this, so <see cref="RunContainerQuerySync{TResult}"/> marshals + copies-out once and
@@ -1216,7 +1216,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     //     yes   |   yes    | Consumer_commit_async_offsets_with_callback
     //
     // Both are SYNC ABI calls in the shipped CommitAsync() / EnforceRebalance shape: no
-    // completion bridge, no Task, no CancellationToken — the returned KafkaError* is a
+    // completion bridge, no Task, no CancellationToken — the returned Error* is a
     // commit-INITIATION failure, while the commit's own outcome reaches the callback later
     // (or inline, on a mock).
     //
@@ -1881,7 +1881,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // ListTopicsWithCallback). Each calls the SYNC C ABI DIRECTLY (no completion callback, no
     // GCHandle, no CancellationToken): the core's block_on parks the caller thread inside the
     // Rust multi-thread runtime (deadlock-free, ffi §B1) — the shipped M5/P8a sync core-loop
-    // precedent, NOT sync-over-async. The sync ABI returns a KafkaError* handle (null = success)
+    // precedent, NOT sync-over-async. The sync ABI returns an Error* handle (null = success)
     // AND writes an owned-container handle to an out-param. Discipline: preconditions BEFORE any
     // pin / P-Invoke (§B5, reusing SnapshotPartitions / SnapshotTimestamps) → ThrowIfClosed →
     // call-scoped pin (reusing WithPinnedTopics / WithPinnedTopicsAndTimestamps / Utf8Marshal.Pin)
@@ -3160,10 +3160,15 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // this disposer, so the core guard is free for the close op.
             await CloseWithCallbackInternal().ConfigureAwait(false);
         }
-        catch (KafkaException)
+        catch (Exception)
         {
             // Best-effort teardown — Dispose/DisposeAsync must not surface a close
-            // error; that is the public Close()'s job.
+            // error; that is the public Close()'s job. Deliberately catches every
+            // exception type, not just KafkaException: the awaited Task is completed
+            // by ConsumerCallbacks.OnOperation's no-throw boundary, whose own
+            // catch-all can fault it with an unexpected managed exception (e.g. from
+            // GCHandle recovery) as well as a well-formed KafkaException, and both
+            // must be swallowed here the same way.
         }
         finally
         {

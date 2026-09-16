@@ -42,6 +42,14 @@ internal static class StringListMarshal
         try
         {
             int count = NativeMethods.StringListCount(list);
+            if (count <= 0)
+            {
+                // Shared empty instance — matches the sibling marshallers
+                // (TopicPartitionListMarshal, OffsetMapMarshal, ...) and avoids a negative
+                // count reaching `new string[count]`, which throws OverflowException.
+                return Array.Empty<string>();
+            }
+
             string[] result = new string[count];
             for (int i = 0; i < count; i++)
             {
