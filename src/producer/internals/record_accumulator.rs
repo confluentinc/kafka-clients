@@ -1837,6 +1837,18 @@ impl RecordAccumulator {
         }
     }
 
+    /// Whether adaptive partitioning is enabled on this accumulator.
+    ///
+    /// Test-only. `KafkaProducer` disables adaptive partitioning whenever a custom
+    /// [`Partitioner`](crate::producer::Partitioner) is configured
+    /// (`KafkaProducer.java:428-433`: "There is no need to do work required for
+    /// adaptive partitioning, if we use a custom partitioner."); this accessor lets a
+    /// producer-level test verify that gating against the built-in-partitioner case.
+    #[cfg(test)]
+    pub(crate) fn enable_adaptive_partitioning_for_test(&self) -> bool {
+        self.enable_adaptive_partitioning
+    }
+
     /// Registers `batch` in the incomplete set as [`Self::append`] would.
     ///
     /// Test-only. `TransactionManagerTest`'s `writeIdempotentBatchWithValue`
