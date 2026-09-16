@@ -1,13 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <!--
-    The .NET gRPC consumer backend for the Rust multilanguage integration-test
-    harness (M8/P1). NOT part of the shipped Confluent.Kafka package — it is a
-    test-harness artifact that exposes the binding's synchronous
-    KafkaConsumer<byte[],byte[]> / MockConsumer<byte[],byte[]> over the
-    ConsumerService gRPC contract so the repo's consumer integration tests can
-    run against the .NET binding (the consumer-side twin of the Python / C
-    backends). See design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md.
+    The .NET gRPC backend for the Rust multilanguage integration-test harness
+    (consumer M8/P1+P2; producer M12/P1). NOT part of the shipped Confluent.Kafka
+    package — it is a test-harness artifact that exposes the binding's generic
+    KafkaProducer/MockProducer and KafkaConsumer/MockConsumer (both
+    <byte[],byte[]> with Serdes.ByteArray) over the ProducerService +
+    ConsumerService gRPC contracts, so the repo's producer AND consumer
+    integration tests can run against the .NET binding (the .NET twin of the
+    Python / C backends). One server per flavor hosts BOTH services
+    (Python-parity), flavor-selected by CONSUMER_FLAVOR (Program.cs). See
+    design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md and
+    design/history/M12/P1-producer-grpc-backend/PLAN.md.
 
     Framework choice (PLAN item B): Grpc.AspNetCore (Kestrel) on net8.0 — the
     supported, pure-managed HTTP/2 server path (Grpc.Core is EOL). Serves h2c
@@ -39,21 +43,26 @@
   </PropertyGroup>
 
   <!--
-    Proto codegen (PLAN item A). Single source of truth = the proto crate at
-    multilanguage-test-server/proto (3 dir levels up: grpc-server -> dotnet ->
-    bindings -> repo). ProtoRoot puts the proto dir on protoc's import path so
-    `import "producer_service.proto"` resolves. producer_service.proto is
-    compiled messages-only (GrpcServices=None) — we reuse its shared messages
-    (KafkaError / PartitionInfo / Node / Header / StatusResponse /
-    PartitionsForResponse) but implement ConsumerService only.
-    Grpc.Tools flows in transitively via Grpc.AspNetCore.
+    Proto codegen (PLAN item A; M12/P1 producer). Single source of truth = the
+    proto crate at multilanguage-test-server/proto (3 dir levels up: grpc-server
+    -> dotnet -> bindings -> repo). ProtoRoot puts the proto dir on protoc's
+    import path so `import "producer_service.proto"` resolves. Both services are
+    compiled with GrpcServices="Server": consumer_service.proto (M8) and now
+    producer_service.proto (M12/P1) — the .NET backend hosts BOTH ProducerService
+    and ConsumerService from one server (Python-parity, PLAN §3). The shared
+    messages (KafkaError / PartitionInfo / Node / Header / StatusResponse /
+    PartitionsForResponse) are defined once in producer_service.proto and reused
+    by the consumer service. Flipping producer_service.proto from
+    GrpcServices="None" to "Server" is a binding-local BUILD-CONFIG change — it
+    emits the ProducerService server base into the same assembly; the proto
+    CONTENT is untouched. Grpc.Tools flows in transitively via Grpc.AspNetCore.
   -->
   <PropertyGroup>
     <ProtoRoot>$(MSBuildProjectDirectory)/../../../multilanguage-test-server/proto</ProtoRoot>
   </PropertyGroup>
 
   <ItemGroup>
-    <Protobuf Include="$(ProtoRoot)/producer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="None" />
+    <Protobuf Include="$(ProtoRoot)/producer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
     <Protobuf Include="$(ProtoRoot)/consumer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
   </ItemGroup>
 
