@@ -44,10 +44,10 @@ namespace Confluent.Kafka;
 /// (<see cref="IConsumerCommon.GroupMetadata"/>) throws
 /// <see cref="InvalidOperationException"/>. <see cref="IConsumerCommon.Wakeup"/> is the
 /// one method deliberately callable from another thread. Do not share one consumer
-/// across threads without external synchronization, and do not race
-/// <see cref="IConsumerCommon.Wakeup"/> against disposal (the canonical pattern — thread
-/// A blocked in <see cref="Poll"/>, thread B wakes it, thread A then disposes — is
-/// safe).
+/// across threads without external synchronization. Racing
+/// <see cref="IConsumerCommon.Wakeup"/> against disposal is safe (the canonical pattern — thread
+/// A blocked in <see cref="Poll"/>, thread B wakes it, thread A then disposes — as well as
+/// a concurrent <see cref="IConsumerCommon.Wakeup"/> from a second thread during disposal).
 /// </para>
 /// <para>
 /// <b>Additive-growth surface.</b> This is a deliberate <em>subset</em> of Java's
