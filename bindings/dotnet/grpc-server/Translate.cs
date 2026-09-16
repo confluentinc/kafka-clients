@@ -24,17 +24,17 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// Pure value &lt;-&gt; proto translation helpers for the .NET consumer gRPC backend — the
 /// C# port of <c>bindings/python/grpc_translate.py</c>. Converts between the generated
-/// protobuf messages and the binding's public value types, and infers a proto
-/// <c>KafkaError.Variant</c> from a flat <see cref="KafkaException"/> message.
+/// protobuf messages and the binding's public value types.
 /// </summary>
 /// <remarks>
-/// The central non-trivial piece is <see cref="GuessVariant"/>: the flat
-/// <see cref="KafkaException"/> carries no variant discriminator (only
-/// <see cref="KafkaException.Code"/> / <see cref="KafkaException.IsRetriable"/> /
-/// <see cref="KafkaException.IsFatal"/> / message), but the proto <c>KafkaError</c> has a
-/// <c>variant</c> enum the Rust client <c>matches!</c> on — so it must be sniffed from the
-/// message string, a faithful, ordered, first-match-wins port of
-/// <c>grpc_translate.py</c>'s <c>_guess_variant</c> (case-insensitive).
+/// The proto <c>KafkaError</c>'s <c>variant</c> / <c>is_retriable</c> / <c>is_fatal</c>
+/// fields are gone (<c>reserved 1, 4, 5</c> in <c>producer_service.proto</c>): <c>code</c>
+/// is the sole discriminator — it is injective over the client's error classes, so the
+/// receiver derives the class from it alone. This retired the substring-sniffing
+/// <c>GuessVariant</c>/<c>_guess_variant</c> port that used to recover a variant the code
+/// could not carry back when several classes shared code -1; see
+/// <c>grpc_translate.py</c>'s <c>_kafka_error_to_proto</c> for the Python side of the same
+/// simplification.
 /// </remarks>
 internal static class Translate
 {
@@ -116,110 +116,48 @@ internal static class Translate
     }
 
     /// <summary>
-    /// Infers the proto <c>KafkaError.Variant</c> from a <see cref="KafkaException"/>
-    /// message — an exact, ordered, first-match-wins port of
-    /// <c>grpc_translate.py</c>'s <c>_guess_variant</c> over
-    /// <c>message.ToLowerInvariant()</c>. <c>ILLEGAL_ARGUMENT</c> is defined by the proto
-    /// but never emitted (Python never emits it either — kept that way deliberately).
+    /// <c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c> — the code this server stamps
+    /// on errors it manufactures itself (an unexpected non-Kafka exception, or an
+    /// unknown <c>consumer_id</c>), mirroring <c>grpc_translate.py</c>'s
+    /// <c>ec.LOCAL_ILLEGAL_STATE</c> (also -4).
     /// </summary>
-    internal static Proto.KafkaError.Types.Variant GuessVariant(string? message)
-    {
-        if (string.IsNullOrEmpty(message))
-        {
-            return Proto.KafkaError.Types.Variant.Generic;
-        }
-
-        string lowered = message!.ToLowerInvariant();
-
-        if (Has(lowered, "max.request.size") || Has(lowered, "is larger than") || Has(lowered, "too large"))
-        {
-            return Proto.KafkaError.Types.Variant.RecordTooLarge;
-        }
-
-        if (Has(lowered, "buffer is full") || Has(lowered, "buffer.memory"))
-        {
-            return Proto.KafkaError.Types.Variant.BufferExhausted;
-        }
-
-        if (Has(lowered, "timed out") || Has(lowered, "expired") || Has(lowered, "not present in metadata"))
-        {
-            return Proto.KafkaError.Types.Variant.Timeout;
-        }
-
-        if (Has(lowered, "topic authorization"))
-        {
-            return Proto.KafkaError.Types.Variant.TopicAuthorization;
-        }
-
-        if (Has(lowered, "invalid topic"))
-        {
-            return Proto.KafkaError.Types.Variant.InvalidTopic;
-        }
-
-        if (Has(lowered, "group authorization"))
-        {
-            return Proto.KafkaError.Types.Variant.GroupAuthorization;
-        }
-
-        if (Has(lowered, "illegal state") || Has(lowered, "already been closed"))
-        {
-            return Proto.KafkaError.Types.Variant.IllegalState;
-        }
-
-        if (Has(lowered, "serialization") || Has(lowered, "failed to serialize"))
-        {
-            return Proto.KafkaError.Types.Variant.Serialization;
-        }
-
-        return Proto.KafkaError.Types.Variant.Generic;
-    }
+    private const int LocalIllegalStateCode = -4;
 
     /// <summary>
     /// Translates a binding <see cref="KafkaException"/> (or any other
     /// <see cref="Exception"/>) into a proto <c>KafkaError</c> — the port of
     /// <c>grpc_translate.py</c>'s <c>_kafka_error_to_proto</c>. A <see cref="KafkaException"/>
-    /// keeps its code / retriable / fatal flags and gets a sniffed variant; any other
-    /// exception surfaces as <c>ILLEGAL_STATE</c> with a <c>"dotnet server: &lt;Type&gt;:
+    /// keeps its own code untouched; any other exception is fabricated as
+    /// <see cref="LocalIllegalStateCode"/> with a <c>"dotnet server: &lt;Type&gt;:
     /// &lt;msg&gt;"</c> message so the Rust client sees a clear server-side signal.
     /// </summary>
     internal static Proto.KafkaError ToProto(Exception error)
     {
         if (error is KafkaException ke)
         {
-            string message = ke.Message ?? string.Empty;
             return new Proto.KafkaError
             {
-                Variant = GuessVariant(message),
                 Code = ke.Code,
-                Message = message,
-                IsRetriable = ke.IsRetriable,
-                IsFatal = ke.IsFatal,
+                Message = ke.Message ?? string.Empty,
             };
         }
 
         return new Proto.KafkaError
         {
-            Variant = Proto.KafkaError.Types.Variant.IllegalState,
-            Code = -1,
+            Code = LocalIllegalStateCode,
             Message = $"dotnet server: {error.GetType().Name}: {error.Message}",
-            IsRetriable = false,
-            IsFatal = true,
         };
     }
 
     /// <summary>
-    /// Builds the hand-crafted <c>ILLEGAL_STATE</c> error returned when an RPC names an
-    /// unknown <c>consumer_id</c> (Python parity — <c>grpc_server.py</c> returns the same
-    /// <c>{variant=ILLEGAL_STATE, code=-1, "unknown consumer_id N", retriable=false,
-    /// fatal=true}</c>).
+    /// Builds the hand-crafted <c>LOCAL_ILLEGAL_STATE</c> error returned when an RPC names
+    /// an unknown <c>consumer_id</c> (Python parity — <c>grpc_server.py</c> returns the same
+    /// <c>{code=LOCAL_ILLEGAL_STATE, "unknown consumer_id N"}</c>).
     /// </summary>
     internal static Proto.KafkaError UnknownConsumer(ulong consumerId) => new Proto.KafkaError
     {
-        Variant = Proto.KafkaError.Types.Variant.IllegalState,
-        Code = -1,
+        Code = LocalIllegalStateCode,
         Message = $"unknown consumer_id {consumerId}",
-        IsRetriable = false,
-        IsFatal = true,
     };
 
     /// <summary>Proto <c>TopicPartition</c> -&gt; binding <see cref="TopicPartition"/>.</summary>
@@ -432,7 +370,4 @@ internal static class Translate
 
         return proto;
     }
-
-    private static bool Has(string haystack, string needle) =>
-        haystack.Contains(needle, StringComparison.Ordinal);
 }

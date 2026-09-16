@@ -75,10 +75,10 @@ namespace Confluent.Kafka.Internal.Interop;
 /// otherwise the marshaller probes the short name and throws
 /// <see cref="EntryPointNotFoundException"/> at runtime.
 ///
-/// The shared <c>KafkaError</c> foundation (declared in M1/P1) is now live:
-/// <see cref="KafkaException.FromHandle(IntPtr)"/> reads the four accessors and
+/// The shared <c>Error</c> foundation (declared in M1/P1) is now live:
+/// <see cref="KafkaException.FromHandle(IntPtr)"/> reads the three accessors and
 /// frees the handle (ffi §A5/§B5) — the first runtime validation of their
-/// <c>EntryPoint</c>s and the <c>I1</c> bools. M2/P1 adds the consumer client
+/// <c>EntryPoint</c>s and the <c>I1</c> bool. M2/P1 adds the consumer client
 /// lifecycle (<c>KafkaConsumer_new</c> / <c>MockConsumer_new</c> / <c>close</c> /
 /// <c>close_with_timeout</c> / <c>destroy</c>, ffi §B2) plus the group-metadata
 /// getter trio used to round-trip a UTF-8 config value (ffi §B3).
@@ -94,27 +94,23 @@ internal static class NativeMethods
     /// </summary>
     private const string DllName = "confluent_kafka";
 
-    // ---- kafka_common_KafkaError_t — the shared error handle (ffi §A5/§B5) ----
+    // ---- kafka_common_Error_t — the shared error handle (ffi §A5/§B5) ----
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_code", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_code", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int Code(IntPtr error);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_message", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_message", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr Message(IntPtr error);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_is_retriable", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_retriable_error", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool IsRetriable(IntPtr error);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_is_fatal", CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool IsFatal(IntPtr error);
-
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_destroy", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ErrorDestroy(IntPtr error);
 
     /// <summary>
-    /// <c>kafka_common_KafkaError_new</c> — the <b>inverse</b> of the accessors above:
+    /// <c>kafka_common_Error_new</c> — the <b>inverse</b> of the accessors above:
     /// builds an error handle a managed callback can <b>return</b> to the Rust core. The
     /// rebalance-listener trampolines are the motivating (and only) caller: a listener that
     /// throws must hand the core an error rather than unwind into native (ffi §B6), and the
@@ -134,7 +130,7 @@ internal static class NativeMethods
     /// <see cref="ErrorDestroy"/>.
     /// </para>
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_new", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_new", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr KafkaErrorNew(int code, IntPtr message);
 
     // ---- kafka_consumer_ConsumerProperties_t — config (ffi §0.1 "put") ----
@@ -192,7 +188,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_close</c> — graceful close with the default
     /// timeout (sync; joins the background task). Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <c>kafka_common_Error_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// </summary>
     /// <remarks>
@@ -212,7 +208,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_close_with_timeout</c> — graceful close bounded by
     /// <paramref name="timeoutMs"/> (sync; joins the background task). Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <c>kafka_common_Error_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// </summary>
     /// <remarks>
@@ -724,7 +720,7 @@ internal static class NativeMethods
     /// arrays <paramref name="topics"/> (pinned NUL-terminated UTF-8 <c>const char*</c>
     /// = <c>const char* const*</c>) and <paramref name="partitions"/>. Read
     /// synchronously during the call (call-scoped pin, ffi §A4). Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <c>kafka_common_Error_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
     /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
@@ -738,7 +734,7 @@ internal static class NativeMethods
     // Five identically-shaped void-result async ops (assign / pause / resume /
     // seekToBeginning / seekToEnd), each over the parallel (topics[], partitions[], count)
     // arrays. All reuse the SAME void-result completion callback as
-    // ConsumerSubscribeAsync (op_callback_t = (KafkaError*, void*)) — NO new callback type
+    // ConsumerSubscribeAsync (op_callback_t = (Error*, void*)) — NO new callback type
     // this phase. The core reads the topic strings + partition ints SYNCHRONOUSLY during the
     // call (into an owned Vec<TopicPartition>, via read_topic_partitions in src/ffi/consumer.rs)
     // BEFORE spawning the op, so the pinned buffers + the partitions int[] are call-scoped —
@@ -844,7 +840,7 @@ internal static class NativeMethods
     /// (EARLIEST) offset used by a subsequent <c>seekToBeginning</c> reset on a mock consumer
     /// (mock only; mirrors Java <c>updateBeginningOffsets(Map)</c>, one entry at a time).
     /// <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <c>kafka_common_Error_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
@@ -873,7 +869,7 @@ internal static class NativeMethods
     /// already be assigned (via <see cref="ConsumerAssign"/>) or this errors.
     /// <paramref name="key"/> / <paramref name="value"/> are <c>(ptr, len)</c> pairs;
     /// pass <c>len &lt; 0</c> (or a null ptr) for an absent key/value. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_add_record", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerAddRecord(
@@ -891,7 +887,7 @@ internal static class NativeMethods
     /// <c>illegal_state</c> error returned by the <b>next</b> poll on a mock consumer
     /// (mock only; mirrors Java <c>setPollException</c>). Drives the FAILURE test
     /// broker-free. <paramref name="message"/> is a pinned NUL-terminated UTF-8 buffer.
-    /// Returns a <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// Returns a <c>kafka_common_Error_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerSetPollError(SafeConsumerHandle consumer, IntPtr message);
@@ -903,7 +899,7 @@ internal static class NativeMethods
     /// <paramref name="topics"/> / <paramref name="partitions"/> are the familiar
     /// <b>parallel arrays</b> of length <paramref name="count"/> (as
     /// <see cref="ConsumerAssign"/>) describing the <b>new full assignment</b> — <em>not</em>
-    /// a <c>TopicPartitionList_t</c>. Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// a <c>TopicPartitionList_t</c>. Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success), including <c>illegal_state</c> for a real consumer.
     /// <para>
     /// Semantics the core pins (<c>confluent_kafka.h:1228-1250</c>): it requires a
@@ -974,7 +970,7 @@ internal static class NativeMethods
     /// <paramref name="topics"/> is the parallel array of pinned NUL-terminated UTF-8
     /// <c>const char*</c> read synchronously during the call (call-scoped pin, ffi §A3), and
     /// <paramref name="listener"/> is <b>consumed unconditionally</b>. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
     /// holds a reference for the whole call (ffi §A2; M9/P4 H1) — load-bearing here, since
     /// the listener callbacks fire <em>inside</em> this call and that reference is what keeps
@@ -1045,7 +1041,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_enforce_rebalance</c> — triggers a rebalance (sync).
     /// <paramref name="reason"/> is a pinned NUL-terminated UTF-8 buffer or
     /// <see cref="IntPtr.Zero"/> (the ABI accepts a null reason). Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
+    /// <c>kafka_common_Error_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>. Under the current KIP-848 core the
     /// returned handle is always null — a logged no-op that returns success (Java
     /// <c>AsyncKafkaConsumer.enforceRebalance</c> throws nothing; the core's
@@ -1064,7 +1060,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_seek</c> — seeks <c>(topic, partition)</c> to
     /// <paramref name="offset"/> (sync). <paramref name="topic"/> is a pinned
     /// NUL-terminated UTF-8 buffer read <b>synchronously</b> during the call
-    /// (call-scoped pin). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (call-scoped pin). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success) consumed by <see cref="KafkaException.FromHandle(IntPtr)"/> — the
     /// shipped <see cref="ConsumerEnforceRebalance"/> sync-op shape. Seeking an unassigned
     /// partition is a genuine broker-free failure (a non-null error handle).
@@ -1083,7 +1079,7 @@ internal static class NativeMethods
     /// "no leader epoch" and <paramref name="metadata"/> == <see cref="IntPtr.Zero"/> means
     /// "no metadata" — the binding always passes a valid pointer, since
     /// <see cref="OffsetAndMetadata.Metadata"/> is never null. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success), the same sync-op shape as
+    /// <c>kafka_common_Error_t</c> handle (null = success), the same sync-op shape as
     /// <see cref="ConsumerSeek"/>. <paramref name="consumer"/> is the
     /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
     /// call (ffi §A2; M9/P4 H1).
@@ -1117,7 +1113,7 @@ internal static class NativeMethods
     // DIRECTLY (NO completion callback, NO GCHandle): the core's block_on parks the caller
     // thread inside the Rust multi-thread runtime (deadlock-free, ffi §B1) — the shipped
     // Seek / CurrentLag / EnforceRebalance sync-op precedent, NOT sync-over-async. The
-    // result ops return a kafka_common_KafkaError_t handle (null = success) consumed by
+    // result ops return a kafka_common_Error_t handle (null = success) consumed by
     // KafkaException.FromHandle; poll additionally returns a ConsumerRecords_t* + an
     // out_error; position writes the offset to an out param. The parallel-array input
     // shapes are IDENTICAL to the async DllImports above (same call-scoped pinning).
@@ -1132,7 +1128,7 @@ internal static class NativeMethods
     /// <c>ConsumerRecords_t</c> (Category-3 borrow-root; free with
     /// <see cref="ConsumerRecordsDestroy"/> after copy-out) on success with
     /// <paramref name="outError"/> null; on failure returns null with
-    /// <paramref name="outError"/> set to a <c>kafka_common_KafkaError_t</c> consumed by
+    /// <paramref name="outError"/> set to a <c>kafka_common_Error_t</c> consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>. A <c>wakeup()</c> from another thread
     /// makes the in-flight poll return a Wakeup error (one-shot). <paramref name="timeoutMs"/>
     /// is the Java <c>Duration</c> → <c>int64_t</c> ms.
@@ -1150,7 +1146,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_subscribe</c> — subscribes to <paramref name="count"/>
     /// topics (sync). <paramref name="topics"/> is the parallel array of pinned NUL-terminated
     /// UTF-8 <c>const char*</c> (= <c>const char* const*</c>) read synchronously during the
-    /// call (call-scoped pin, ffi §A3). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// call (call-scoped pin, ffi §A3). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success) consumed by <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
     /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
@@ -1160,7 +1156,7 @@ internal static class NativeMethods
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_unsubscribe</c> — unsubscribes from all topics / partitions
-    /// (sync). Returns a <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// (sync). Returns a <c>kafka_common_Error_t</c> handle (null = success).
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
     /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
@@ -1170,7 +1166,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_pause</c> — pauses fetching for the <paramref name="count"/>
     /// <c>(topic, partition)</c> pairs (sync; parallel arrays as
-    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success). <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/>
     /// so the marshaller holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
@@ -1181,7 +1177,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_resume</c> — resumes fetching for the
     /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
-    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success). <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/>
     /// so the marshaller holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
@@ -1192,7 +1188,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_seek_to_beginning</c> — requests an EARLIEST offset reset for
     /// the <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
-    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_beginning", CallingConvention = CallingConvention.Cdecl)]
@@ -1202,7 +1198,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_seek_to_end</c> — requests a LATEST offset reset for the
     /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
-    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_end", CallingConvention = CallingConvention.Cdecl)]
@@ -1213,7 +1209,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_position</c> — the current position of
     /// <c>(topic, partition)</c> (sync). On success writes the offset to
     /// <paramref name="outPosition"/> and returns null; on failure returns a non-null
-    /// <c>kafka_common_KafkaError_t</c> handle (consumed by
+    /// <c>kafka_common_Error_t</c> handle (consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>) and leaves
     /// <paramref name="outPosition"/> untouched. <paramref name="topic"/> is a pinned
     /// NUL-terminated UTF-8 buffer read synchronously during the call.
@@ -1227,7 +1223,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_commit_sync</c> — commits the current positions (sync; Java
     /// <c>commitSync()</c>). No offsets argument means commit the current positions. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
     /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
@@ -1242,7 +1238,7 @@ internal static class NativeMethods
     /// <paramref name="leaderEpochs"/> entry <c>&lt; 0</c> means "no epoch". Both string
     /// arrays map C's <c>const char* const*</c> (same shape as
     /// <see cref="ConsumerCommitSyncOffsetsAsync"/>). Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
     /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
@@ -1261,13 +1257,13 @@ internal static class NativeMethods
     // The synchronous variant of the six blocking-in-Java query ops, each calling the sync C
     // ABI DIRECTLY (NO completion callback, NO GCHandle): the core's block_on parks the caller
     // thread inside the Rust multi-thread runtime (deadlock-free, ffi §B1) — the shipped M5/P8a
-    // sync core-loop precedent, NOT sync-over-async. Each returns a kafka_common_KafkaError_t
+    // sync core-loop precedent, NOT sync-over-async. Each returns a kafka_common_Error_t
     // handle (null = success) consumed by KafkaException.FromHandle AND writes an owned
     // container handle to an out-param on success. Per the header contract, on FAILURE the
     // out-param is LEFT UNTOUCHED — the binding pre-initializes it to IntPtr.Zero, so the
     // container _destroy (null-safe) is a no-op on the error path. The parallel-array input
     // shapes are IDENTICAL to the async DllImports above (same call-scoped pinning); the only
-    // difference is the KafkaError* return + out-param handle in place of the async callback.
+    // difference is the Error* return + out-param handle in place of the async callback.
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_committed</c> — the last committed offsets for the
@@ -1275,7 +1271,7 @@ internal static class NativeMethods
     /// <see cref="ConsumerAssign"/>). On success writes an owned <c>OffsetMap_t</c>
     /// (Category-3 borrow-root; free with <see cref="OffsetMapDestroy"/> after copy-out) to
     /// <paramref name="outMap"/> and returns null; on failure returns a non-null
-    /// <c>kafka_common_KafkaError_t</c> handle (consumed by
+    /// <c>kafka_common_Error_t</c> handle (consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>) and leaves <paramref name="outMap"/>
     /// untouched. The sync mirror of <see cref="ConsumerCommittedAsync"/>.
     /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
@@ -1507,7 +1503,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_Consumer_commit_async</c> — commits the consumed offsets
     /// fire-and-forget (Java <c>commitAsync()</c>). A <b>sync</b> call that returns once the
-    /// async commit is initiated, yielding a <c>kafka_common_KafkaError_t*</c>
+    /// async commit is initiated, yielding a <c>kafka_common_Error_t*</c>
     /// (<see cref="IntPtr"/>) — null = success, non-null = error (the shipped
     /// <see cref="ConsumerEnforceRebalance"/> sync-op shape). No callback, no offsets, no
     /// user data (M5/P6). <paramref name="consumer"/> is the
@@ -1521,7 +1517,7 @@ internal static class NativeMethods
 
     // ---- The commit-callback registrations (M9/P7) — Java commitAsync(cb) / (Map, cb) ----
     //
-    // Both are SYNC ABI functions (they return a KafkaError* the moment the commit is
+    // Both are SYNC ABI functions (they return an Error* the moment the commit is
     // *initiated*), so both take the SafeConsumerHandle parameter per the M9/P4 H1 sync
     // convention — load-bearing, because on a MockConsumer the completion callback fires
     // INLINE inside the call and the marshaller's reference is what keeps a concurrent
@@ -1539,7 +1535,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_commit_async_with_callback</c> — commits the consumed
     /// offsets, notifying <paramref name="callback"/> when the commit completes (Java
     /// <c>commitAsync(OffsetCommitCallback)</c>). A <b>sync</b> call returning a
-    /// <c>kafka_common_KafkaError_t*</c> (null = success) as soon as the commit is
+    /// <c>kafka_common_Error_t*</c> (null = success) as soon as the commit is
     /// <em>initiated</em>; the commit's own outcome arrives at
     /// <paramref name="callback"/>.
     /// </summary>
@@ -1548,7 +1544,7 @@ internal static class NativeMethods
     /// <paramref name="callback"/> is <b>not nullable</b> (the header spells it as the
     /// <c>_t</c> alias) and fires <b>exactly once per successful call</b>, on the consumer's
     /// dispatcher thread — inline during the call on a <c>MockConsumer</c>. It <b>owns</b> the
-    /// delivered <c>OffsetMap_t</c> and any non-null <c>KafkaError_t</c>.
+    /// delivered <c>OffsetMap_t</c> and any non-null <c>Error_t</c>.
     /// </para>
     /// <para>
     /// <paramref name="userData"/> ownership transfers <b>unconditionally</b>:
@@ -2161,7 +2157,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_ConsumerHandle_assign</c> — assigns the owning consumer to the
     /// <paramref name="count"/> <c>(topic, partition)</c> pairs (parallel arrays as
-    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success).
     /// </summary>
     /// <remarks>
@@ -2178,7 +2174,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_ConsumerHandle_seek</c> — seeks <c>(topic, partition)</c> to
     /// <paramref name="offset"/>. <paramref name="topic"/> is a pinned NUL-terminated UTF-8
     /// buffer read synchronously during the call (call-scoped pin). Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success). The
+    /// <c>kafka_common_Error_t</c> handle (null = success). The
     /// <see cref="ConsumerSeek"/> shape.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_seek", CallingConvention = CallingConvention.Cdecl)]
@@ -2205,7 +2201,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_ConsumerHandle_seek_to_beginning</c> — requests an EARLIEST offset
     /// reset for the <paramref name="count"/> <c>(topic, partition)</c> pairs. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_seek_to_beginning", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandleSeekToBeginning(
@@ -2222,7 +2218,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_ConsumerHandle_pause</c> — pauses fetching for the
     /// <paramref name="count"/> <c>(topic, partition)</c> pairs. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_pause", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandlePause(
@@ -2231,7 +2227,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_consumer_ConsumerHandle_resume</c> — resumes fetching for the
     /// <paramref name="count"/> <c>(topic, partition)</c> pairs. Returns a
-    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_resume", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandleResume(
@@ -2317,7 +2313,7 @@ internal static class NativeMethods
     /// <c>kafka_consumer_ConsumerHandle_commit_sync</c> — commits the consumed offsets
     /// synchronously (Java <c>commitSync()</c>). Per the header this is "the operation a
     /// rebalance listener calls to flush offsets before its partitions are taken away
-    /// (<c>consumer-threading.md</c> §31)". Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (<c>consumer-threading.md</c> §31)". Returns a <c>kafka_common_Error_t</c> handle
     /// (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync", CallingConvention = CallingConvention.Cdecl)]

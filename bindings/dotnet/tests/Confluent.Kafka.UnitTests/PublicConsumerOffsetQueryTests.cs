@@ -184,11 +184,12 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_OnMock_FaultsWithUnsupportedVersion()
     {
-        // The mock's offsets_for_times returns unsupported_version unconditionally (mirroring
-        // Java's not-implemented MockConsumer). Assert the faulted Task + the message content
-        // + the UnsupportedVersion code (35). The full member is wired (Java-public); the
-        // success/copy-out path is proven by the other two offset-map marshallers of identical
-        // shape and by OffsetAndTimestampMapMarshalTests.
+        // The mock's offsets_for_times returns unsupported_version unconditionally, with the
+        // Java-verbatim message from UnsupportedOperationException("Not implemented yet.")
+        // (Java line 534-537, admin-client.md §9 / DoD #3). Assert the faulted Task + the
+        // message content + the UnsupportedVersion code (35). The full member is wired
+        // (Java-public); the success/copy-out path is proven by the other two offset-map
+        // marshallers of identical shape and by OffsetAndTimestampMapMarshalTests.
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
@@ -198,7 +199,7 @@ public sealed class PublicConsumerOffsetQueryTests
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
             () => OffsetsForTimesOf(consumer, search));
 
-        Assert.Equal("MockConsumer::offsets_for_times is not implemented", ex.Message);
+        Assert.Equal("Not implemented yet.", ex.Message);
         Assert.Equal(35, ex.Code); // Errors::UnsupportedVersion
     }
 
@@ -217,7 +218,7 @@ public sealed class PublicConsumerOffsetQueryTests
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
             () => OffsetsForTimesOf(consumer, search));
 
-        Assert.Equal("MockConsumer::offsets_for_times is not implemented", ex.Message);
+        Assert.Equal("Not implemented yet.", ex.Message);
     }
 
     [Fact]
