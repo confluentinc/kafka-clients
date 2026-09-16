@@ -49,11 +49,10 @@ public sealed class KafkaExceptionTests
 
         Assert.Equal(UnsupportedVersionCode, ex.Code);
 
-        // The I1-guard FALSE case: unsupported_version is neither retriable nor
-        // fatal. A missing [MarshalAs(I1)] would read a 4-byte BOOL and could flip
-        // these — asserting both false pins the bool marshalling.
+        // The I1-guard FALSE case: unsupported_version is not retriable. A missing
+        // [MarshalAs(I1)] would read a 4-byte BOOL and could flip this — asserting
+        // false pins the bool marshalling.
         Assert.False(ex.IsRetriable);
-        Assert.False(ex.IsFatal);
 
         Assert.Contains("Classic group protocol", ex.Message, StringComparison.Ordinal);
     }

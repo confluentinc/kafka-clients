@@ -58,8 +58,13 @@ namespace Confluent.Kafka;
 /// <typeparam name="TValue">The deserialized value type.</typeparam>
 public sealed class ConsumerRecord<TKey, TValue>
 {
-    /// <summary>The timestamp value for a record with no timestamp (ABI sentinel).</summary>
-    internal const long NoTimestamp = -1;
+    /// <summary>
+    /// The timestamp value for a record with no timestamp. The .NET realization of Java's
+    /// <c>public static final long NO_TIMESTAMP</c> (<c>ConsumerRecord.java</c>), public so
+    /// callers can distinguish an absent timestamp from a real one without hardcoding
+    /// <c>-1</c>.
+    /// </summary>
+    public const long NoTimestamp = -1;
 
     /// <summary>
     /// Initializes an owned record from values already copied out of (topic / headers) or

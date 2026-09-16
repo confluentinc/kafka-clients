@@ -189,7 +189,7 @@ internal class OperationCompletionSource<TResult>
 
         if (error != IntPtr.Zero)
         {
-            // FromHandle copies the values out and frees the KafkaError handle in a
+            // FromHandle copies the values out and frees the Error handle in a
             // finally (freed exactly once), even if construction throws.
             KafkaException failure = KafkaException.FromHandle(error)!;
             if (Volatile.Read(ref _cancellationRequested) != 0)

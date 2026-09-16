@@ -59,7 +59,7 @@ internal static class ProducerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_producer_Producer_flush_callback_t</c> /
     /// <c>kafka_producer_Producer_close_callback_t</c>:
-    /// <c>void (*)(kafka_common_KafkaError_t* error, void* user_data)</c>. A non-null
+    /// <c>void (*)(kafka_common_Error_t* error, void* user_data)</c>. A non-null
     /// <paramref name="error"/> is failure; null is success — there is no result handle for
     /// these void-result ops (the producer twin of the consumer's <c>OperationCallback</c>).
     /// </summary>
@@ -98,7 +98,7 @@ internal static class ProducerCallbacks
     /// <summary>
     /// The C signature for <c>kafka_producer_Producer_partitions_for_callback_t</c>:
     /// <c>void (*)(kafka_consumer_PartitionInfoList_t* list,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c> — the <b>owned-handle</b>
+    /// kafka_common_Error_t* error, void* user_data)</c> — the <b>owned-handle</b>
     /// completion shape (ffi §A6/§B6). On success <paramref name="list"/> is a non-null owned
     /// list and <paramref name="error"/> is null; on failure <paramref name="list"/> is null
     /// and <paramref name="error"/> is non-null. The callback <b>takes ownership</b> of

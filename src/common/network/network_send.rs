@@ -32,17 +32,41 @@ pub struct NetworkSend {
     destination_id: String,
     /// The inner send that performs the actual data writing.
     send: Box<dyn KafkaSend>,
+    /// Whether this send expects no response (producer `acks=0`).
+    ///
+    /// When `true`, the request is fire-and-forget: the broker never replies,
+    /// so the network stack must treat the *send completing* as the terminal
+    /// event. The selector uses this to break its poll loop as soon as such a
+    /// send finishes writing, rather than blocking until the poll deadline
+    /// waiting for a receive that will never arrive. Defaults to `false` — every
+    /// other request (all consumer requests, and `acks=1`/`acks=all` produce)
+    /// expects a response and is unaffected.
+    fire_and_forget: bool,
 }
 
 impl NetworkSend {
     /// Creates a new `NetworkSend` with the given destination and inner send.
+    ///
+    /// The send defaults to expecting a response (`fire_and_forget = false`);
+    /// callers that know the request is fire-and-forget (producer `acks=0`) mark
+    /// it via [`set_fire_and_forget`](Self::set_fire_and_forget).
     pub fn new(destination_id: &str, send: Box<dyn KafkaSend>) -> Self {
-        Self { destination_id: destination_id.to_string(), send }
+        Self { destination_id: destination_id.to_string(), send, fire_and_forget: false }
     }
 
     /// Returns the destination identifier.
     pub fn destination_id(&self) -> &str {
         &self.destination_id
+    }
+
+    /// Marks whether this send is fire-and-forget (expects no response).
+    pub fn set_fire_and_forget(&mut self, value: bool) {
+        self.fire_and_forget = value;
+    }
+
+    /// Returns whether this send is fire-and-forget (producer `acks=0`).
+    pub fn is_fire_and_forget(&self) -> bool {
+        self.fire_and_forget
     }
 
     /// Returns a reference to the inner send.

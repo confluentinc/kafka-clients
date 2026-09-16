@@ -47,7 +47,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// (dispatcher) thread BEFORE the batch <c>_destroy</c>; the batch is destroyed exactly once
 /// via the null-safe <see cref="NativeMethods.ConsumerRecordsDestroy"/> in the
 /// <c>finally</c> (a no-op on the failure / inline-rejection null path); the
-/// <c>KafkaError</c> on failure is freed inside
+/// <c>Error</c> on failure is freed inside
 /// <see cref="OperationCompletionSource{TResult}.Complete(IntPtr)"/>; and the per-op
 /// <see cref="GCHandle"/> is freed exactly once via
 /// <see cref="OperationCompletionSource{TResult}.FreeGcHandle"/>. The awaiter's continuation

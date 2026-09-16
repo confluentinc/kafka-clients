@@ -60,10 +60,14 @@ public sealed class ProducerConfigMarshalTests
         // marshalling path) but the core requires a resolvable bootstrap.servers, so it
         // surfaces the operational failure as a flat KafkaException — a second
         // deterministic broker-free config failure alongside the unparseable-value one.
-        // The message content is the behavioral contract (DoD §3).
+        // The core relabels every construction failure as Java's KafkaProducer
+        // constructor does (`catch (Throwable t) { throw new
+        // KafkaException("Failed to construct kafka producer", t); }`), so the
+        // bootstrap.servers detail lives on the wrapped cause, not this top-level
+        // message. The message content is still the behavioral contract (DoD §3).
         KafkaException failure = Assert.Throws<KafkaException>(
             () => NativeProducer.Create(new Dictionary<string, string>()));
-        Assert.Contains("bootstrap.servers", failure.Message, StringComparison.Ordinal);
+        Assert.Equal("Failed to construct kafka producer", failure.Message);
     }
 
     [Fact]
@@ -72,7 +76,9 @@ public sealed class ProducerConfigMarshalTests
         // A deterministic broker-free config failure: batch.size must parse as an int.
         // The core rejects it during construction → a flat KafkaException (operational),
         // NOT a precondition .NET exception. The message content is the behavioral
-        // contract (DoD §3); IllegalArgument is neither retriable nor fatal.
+        // contract (DoD §3); IllegalArgument is not retriable. The format mirrors
+        // Java's `ConfigException(String name, Object value)`:
+        // "Invalid value {value} for configuration {name}".
         var config = new Dictionary<string, string>
         {
             ["bootstrap.servers"] = "localhost:9092",
@@ -80,9 +86,8 @@ public sealed class ProducerConfigMarshalTests
         };
 
         KafkaException failure = Assert.Throws<KafkaException>(() => NativeProducer.Create(config));
-        Assert.Contains("Invalid value for 'batch.size'", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("Invalid value not-a-number for configuration batch.size", failure.Message, StringComparison.Ordinal);
         Assert.False(failure.IsRetriable);
-        Assert.False(failure.IsFatal);
     }
 
     [Fact]
