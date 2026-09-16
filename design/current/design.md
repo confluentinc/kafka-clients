@@ -305,9 +305,14 @@ concrete type or take `impl Producer<K, V>`. Transactional methods
 completes the future later.*
 
 The app-side path is `do_send` (`kafka_producer.rs:486`) →
-`wait_on_metadata(max_block_ms)` → serialize key/value → choose partition
-(explicit → `BuiltInPartitioner::partition_for_key` → `UNKNOWN_PARTITION`) →
-`ensure_valid_record_size` → `accumulator.append(...)`. The sender is woken
+`wait_on_metadata(max_block_ms)` → serialize key/value → choose partition →
+`ensure_valid_record_size` → `accumulator.append(...)`. Partition choice: an
+explicit partition wins; otherwise a present, non-ignored key is hashed by the
+configured `KeyHasher` (CRC-32 by default, for co-partitioning parity with
+librdkafka's `consistent_random`; or murmur2 for exact Java parity, selected via
+`partitioner.class`) through `BuiltInPartitioner::partition_for_key`; failing
+that, `UNKNOWN_PARTITION` defers to the sticky partitioner (see
+`design/current/partitioner.md`). The sender is woken
 only when the append filled a batch or started a new one
 (`kafka_producer.rs:604-611`), matching Java.
 

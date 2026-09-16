@@ -33,12 +33,13 @@ use tokio::task::JoinHandle;
 
 use crate::client_utils;
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
+use crate::common::errors::TimeoutError;
 use crate::common::header::Headers;
 use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
@@ -46,7 +47,6 @@ use crate::common::metrics::time::{SystemTime, Time};
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
-use crate::common::protocol::Errors;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::abstract_records;
@@ -59,11 +59,11 @@ use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
 use crate::producer::Callback;
+use crate::producer::Partitioner;
 use crate::producer::Producer;
 use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::internals::BufferPool;
-use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::KafkaProducerMetrics;
@@ -74,7 +74,7 @@ use crate::producer::internals::Sender;
 use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::TransactionManager;
 use crate::producer::internals::sender::throttle_time_sensor;
-use crate::producer::internals::{AppendError, PartitionerConfig, RecordAccumulator};
+use crate::producer::internals::{BuiltInPartitioner, KeyHasher, PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
 use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
@@ -85,7 +85,7 @@ pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
 /// Producer metric group name.
 pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
 
-/// Timeout reason appended to the [`KafkaError::Timeout`] message when
+/// Timeout reason appended to the [`Error::Timeout`] message when
 /// [`KafkaProducer::init_transactions`] does not complete within `max.block.ms`.
 const INIT_TXN_TIMEOUT_MSG: &str = "InitTransactions timed out - did not complete coordinator discovery or \
      receive the InitProducerId response within max.block.ms.";
@@ -183,8 +183,26 @@ pub struct KafkaProducer<K, V> {
     compression_type: CompressionType,
     /// The maximum time to block on send/partitionsFor.
     max_block_ms: i64,
+    /// The custom partitioner, if one is configured; `None` uses the built-in
+    /// default partitioner (the keyed CRC-32 / murmur2 path plus adaptive
+    /// partitioning).
+    ///
+    /// Translated from `KafkaProducer.partitionerPlugin` (Java 264), a
+    /// `Plugin<Partitioner>`. The `Plugin<>` wrapper is `Monitorable`/metrics
+    /// plumbing (KIP-877) with no Rust counterpart in this milestone, so the
+    /// bare [`Partitioner`] trait object is held directly. Nullable in Java
+    /// (built-in partitioning when unset) — hence [`Option`]. Resolved from
+    /// `partitioner.class` via
+    /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)
+    /// or supplied as an instance through
+    /// [`from_config_with_partitioner`](Self::from_config_with_partitioner).
+    partitioner: Option<Box<dyn Partitioner<K, V>>>,
     /// Whether to ignore keys for partitioning.
     partitioner_ignore_keys: bool,
+    /// Which hash the keyed partition path uses, resolved from
+    /// `partitioner.class` (default [`KeyHasher::Crc32`], librdkafka
+    /// `consistent_random` parity). Copy-cheap; consulted once per keyed record.
+    key_hasher: KeyHasher,
     /// Whether the sender task is still running.
     running: Arc<AtomicBool>,
     /// Whether the caller wants to force-close.
@@ -237,6 +255,10 @@ impl<K, V> KafkaProducer<K, V> {
     ///   when idempotence is disabled
     /// * `pending_requests` - The transactional request queue this producer shares
     ///   with the [`Sender`]
+    /// * `partitioner` - The custom partitioner instance, or `None` to use the
+    ///   built-in default partitioner. Stored as-is and **not** configured, mirroring
+    ///   Java's internal constructor (`KafkaProducer.java:502`), which wraps a
+    ///   pre-built `Partitioner` without calling `configure`
     // `TransactionManager` is `pub(crate)` per CLAUDE.md §2; see the note on
     // [`Self::with_client`] for why this constructor stays nominally `pub`.
     #[allow(private_interfaces)]
@@ -254,6 +276,7 @@ impl<K, V> KafkaProducer<K, V> {
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
+        partitioner: Option<Box<dyn Partitioner<K, V>>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let (metrics, producer_metrics) = Self::create_metrics(config);
@@ -269,7 +292,9 @@ impl<K, V> KafkaProducer<K, V> {
             pending_requests,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
+            partitioner,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            key_hasher: config.key_hasher(),
             running,
             force_close,
             wakeup,
@@ -302,7 +327,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if no valid bootstrap server addresses
+    /// Returns [`Error::LocalIllegalArgument`] if no valid bootstrap server addresses
     /// can be resolved from `config.bootstrap_servers`.
     ///
     /// # Examples
@@ -330,7 +355,90 @@ impl<K, V> KafkaProducer<K, V> {
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
+        // Java wraps the whole constructor body in `catch (Throwable t)` and
+        // relabels every failure (`KafkaProducer.java:461-466`):
+        //
+        //     throw new KafkaException("Failed to construct kafka producer", t);
+        //
+        // so a caller has exactly one class to guard construction with, whatever
+        // went wrong inside. Without this, a bad `ssl.truststore.location` reached
+        // the caller as something for which `is_kafka_error()` is `false`.
+        //
+        // The `close(Duration.ofMillis(0), true)` half of Java's catch (KAFKA-2121)
+        // has nothing to do here: every fallible step in `from_config_impl`
+        // precedes the `Selector` / `NetworkClient` / sender-task construction, so
+        // no socket and no spawned task can leak.
+        Self::from_config_impl(config, key_serializer, value_serializer, None)
+            .map_err(|e| Error::kafka_with_source("Failed to construct kafka producer", e))
+    }
+
+    /// Creates a `KafkaProducer` from configuration, serializers, and an explicit
+    /// custom [`Partitioner`] instance.
+    ///
+    /// This is Rust's counterpart to configuring a user-written partitioner
+    /// through Java's `partitioner.class`. Java loads the named class reflectively
+    /// (`KafkaProducer.java:381-388`), but Rust has no reflection, so a
+    /// user-written [`Partitioner`] is supplied here as an instance instead. The
+    /// producer takes ownership and `configure`s it exactly as the
+    /// `partitioner.class` path does — with the user config map
+    /// ([`ProducerConfig::originals`](crate::producer::ProducerConfig)) plus the
+    /// resolved `client.id` — before sharing it with the send path. As with a
+    /// `partitioner.class` partitioner, adaptive partitioning is disabled while a
+    /// custom partitioner is in use.
+    ///
+    /// The explicit instance takes precedence over any built-in partitioner that
+    /// `partitioner.class` would otherwise name, mirroring how Java's
+    /// `getConfiguredInstance` returns the caller-provided instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The producer configuration
+    /// * `key_serializer` - The key serializer
+    /// * `value_serializer` - The value serializer
+    /// * `partitioner` - The custom partitioner instance to use
+    ///
+    /// # Errors
+    ///
+    /// Exactly as for [`from_config`](Self::from_config): every construction
+    /// failure — such as the [`Error::LocalIllegalArgument`] raised when no valid
+    /// bootstrap server addresses can be resolved from `config.bootstrap_servers`
+    /// — is returned relabelled as Java's
+    /// `KafkaException("Failed to construct kafka producer", t)`, an
+    /// [`Error::KafkaError`] carrying the underlying failure as its source.
+    pub fn from_config_with_partitioner(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        partitioner: Box<dyn Partitioner<K, V>>,
+    ) -> Result<Self, Error> {
+        // Same `catch (Throwable t)` relabelling as `from_config` above
+        // (`KafkaProducer.java:461-466`): Java has a single constructor body
+        // behind both the `partitioner.class` and the caller-supplied-instance
+        // paths, so both Rust constructors wrap identically.
+        Self::from_config_impl(config, key_serializer, value_serializer, Some(partitioner))
+            .map_err(|e| Error::kafka_with_source("Failed to construct kafka producer", e))
+    }
+
+    /// Shared implementation behind [`from_config`](Self::from_config) and
+    /// [`from_config_with_partitioner`](Self::from_config_with_partitioner).
+    ///
+    /// `explicit_partitioner` is `Some` only on the
+    /// [`from_config_with_partitioner`](Self::from_config_with_partitioner) path;
+    /// when it is `None`, the partitioner is resolved from `partitioner.class`
+    /// (built-in names only, via
+    /// [`ProducerConfig::resolve_partitioner`](crate::producer::ProducerConfig)).
+    /// Either way, a resolved partitioner is `configure`d exactly once here
+    /// (`originals` + `client.id`, Java `KafkaProducer.java:381-388`), and adaptive
+    /// partitioning is gated on its absence, so both public constructors share one
+    /// configure + adaptive-gating code path. Errors escape raw from here; the
+    /// public constructors relabel them (`KafkaProducer.java:461-466`).
+    fn from_config_impl(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        explicit_partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    ) -> Result<Self, Error> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
         kafka_trace!(log_context, "Starting the Kafka producer");
@@ -340,7 +448,7 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 2. Validate delivery timeout configuration
         //    Translated from KafkaProducer.configureDeliveryTimeout().
-        let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
+        let delivery_timeout_ms = Self::configure_delivery_timeout(&config, &log_context)?;
 
         // The MILESTONE-11 GUARD that used to sit here is gone. Its idempotence arm
         // was removed in Phase 4, when `enable.idempotence` began to be honoured for
@@ -387,7 +495,13 @@ impl<K, V> KafkaProducer<K, V> {
             &config.client_id,
             log_context.clone(),
         )
-        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        // Java's reachable failure here is `SslFactory.configure` throwing
+        // `ConfigException` (`SslFactory.java:104-107`) — the missing-argument
+        // `IllegalArgumentException`s in `ChannelBuilders.create` cannot be reached
+        // from a `ProducerConfig`, which always supplies both sub-configs. So the
+        // class is `ConfigException`, inside the `KafkaException` hierarchy;
+        // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
+        .map_err(|e| Error::config(format!("Failed to create channel builder: {}", e)))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -427,6 +541,33 @@ impl<K, V> KafkaProducer<K, V> {
         //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
         let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
 
+        // 9b. Resolve and configure the partitioner. Translated from
+        //     `KafkaProducer.java:381-388`: Java reflectively instantiates
+        //     `partitioner.class` and calls `partitioner.configure(originals +
+        //     {client.id -> clientId})`. Rust has no reflection, so an explicit
+        //     instance (`from_config_with_partitioner`) wins; otherwise the built-in
+        //     `partitioner.class` names resolve here, and a user-written partitioner
+        //     is always supplied as an instance. It is configured with the user
+        //     config map (`originals`) plus the resolved (possibly generated)
+        //     `client.id`, so a generated `producer-N` id is visible to `configure`
+        //     just as in Java. Resolved after metrics/`TransactionManager` creation
+        //     (matching Java's ordering) and before the `RecordAccumulator`, whose
+        //     adaptive-partitioning flag is gated on the partitioner's absence below.
+        //
+        //     KAFKA-2121: Java's constructor `catch (Throwable)` closes an
+        //     already-constructed partitioner. Here, partitioner setup is infallible
+        //     (`resolve_partitioner` -> `Option`, `configure` -> `()`), and every
+        //     fallible `?` step above runs *before* this point, so no reachable
+        //     fallible step follows the partitioner's construction; the normal
+        //     `close()` path is therefore the only one, and no close-on-error path is
+        //     needed.
+        let mut partitioner = explicit_partitioner.or_else(|| config.resolve_partitioner::<K, V>());
+        if let Some(partitioner) = partitioner.as_mut() {
+            let mut configs = config.originals.clone();
+            configs.insert(ProducerConfig::CLIENT_ID_CONFIG.to_string(), config.client_id.clone());
+            partitioner.configure(&configs);
+        }
+
         // 10. Create BufferPool and RecordAccumulator, threading the shared
         //    `Arc<Metrics>` and time provider into both (KafkaProducer.java:438
         //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
@@ -448,7 +589,11 @@ impl<K, V> KafkaProducer<K, V> {
             config.retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig {
-                enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
+                // Java `KafkaProducer.java:428-433`: "There is no need to do work
+                // required for adaptive partitioning, if we use a custom
+                // partitioner." So adaptive partitioning is enabled only when no
+                // custom partitioner is present AND the config opts in.
+                enable_adaptive_partitioning: partitioner.is_none() && config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
             Arc::clone(&metrics),
@@ -485,6 +630,7 @@ impl<K, V> KafkaProducer<K, V> {
             sender_metrics_registry,
             transaction_manager,
             Arc::new(Mutex::new(PendingRequests::new())),
+            partitioner,
         ))
     }
 
@@ -552,6 +698,14 @@ impl<K, V> KafkaProducer<K, V> {
     /// # Type Parameters
     ///
     /// * `C` - The KafkaClient implementation type
+    ///
+    /// # Arguments
+    ///
+    /// * `partitioner` - The custom partitioner instance (already `configure`d by
+    ///   the caller), or `None` for the built-in default partitioner. Callers that
+    ///   resolve a partitioner also gate adaptive partitioning on its absence before
+    ///   building the `accumulator` they pass in (see
+    ///   [`from_config_with_partitioner`](Self::from_config_with_partitioner)).
     #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_client<C: KafkaClient + Send + 'static>(
@@ -567,6 +721,7 @@ impl<K, V> KafkaProducer<K, V> {
         sender_metrics_registry: SenderMetricsRegistry,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
+        partitioner: Option<Box<dyn Partitioner<K, V>>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
@@ -617,7 +772,9 @@ impl<K, V> KafkaProducer<K, V> {
             pending_requests,
             compression_type: config.compression_type,
             max_block_ms: config.max_block_ms,
+            partitioner,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            key_hasher: config.key_hasher(),
             running,
             force_close,
             wakeup,
@@ -666,32 +823,49 @@ impl<K, V> KafkaProducer<K, V> {
     /// Validate and optionally adjust `delivery.timeout.ms` against
     /// `linger.ms + request.timeout.ms`.
     ///
-    /// Translated from `KafkaProducer.configureDeliveryTimeout()`.
-    ///
-    /// Since the Rust config struct does not track which fields were explicitly
-    /// set by the user (unlike Java's `ConfigDef`), this always returns an error
-    /// when `delivery_timeout_ms < linger_ms + request_timeout_ms`. With the
-    /// default values (delivery=120000, linger=5, request=30000) the constraint
-    /// is satisfied, so this only triggers when the user supplies inconsistent
-    /// overrides — matching the Java "explicitly set" branch.
+    /// Translated from `KafkaProducer.configureDeliveryTimeout()`
+    /// (`KafkaProducer.java:569-590`). Java's check has two arms and both are
+    /// reproduced: an *explicitly supplied* inconsistent `delivery.timeout.ms` is
+    /// a `ConfigException`, while an inconsistency that comes only from the
+    /// default is clamped up to `linger.ms + request.timeout.ms` and warned about,
+    /// for backward compatibility. `ProducerConfig::user_configured` stands for
+    /// Java's `config.originals().containsKey(..)`.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if the delivery timeout is too
-    /// small (corresponds to Java's `ConfigException`).
-    fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, KafkaError> {
-        let delivery_timeout_ms = config.delivery_timeout_ms;
+    /// Returns [`Error::Config`] — Java's `ConfigException`, which is inside the
+    /// `KafkaException` hierarchy — if the user explicitly set a
+    /// `delivery.timeout.ms` smaller than `linger.ms + request.timeout.ms`.
+    fn configure_delivery_timeout(config: &ProducerConfig, log_context: &LogContext) -> Result<i32, Error> {
+        let mut delivery_timeout_ms = config.delivery_timeout_ms;
         let linger_ms = config.linger_ms.min(i32::MAX as i64) as i32;
         let request_timeout_ms = config.request_timeout_ms;
         let linger_and_request_timeout_ms = (linger_ms as i64 + request_timeout_ms as i64).min(i32::MAX as i64) as i32;
 
         if delivery_timeout_ms < linger_and_request_timeout_ms {
-            return Err(KafkaError::illegal_argument(format!(
-                "{} should be equal to or larger than {} + {}",
+            if config.user_configured(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG) {
+                // Java `:578`: throw if the user explicitly set an inconsistent value.
+                // The class is `ConfigException`, inside the `KafkaException`
+                // hierarchy (`KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`
+                // asserts `KafkaException.class`); `illegal_argument` put it outside,
+                // where `is_kafka_error()` answers `false`.
+                return Err(Error::config(format!(
+                    "{} should be equal to or larger than {} + {}",
+                    ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
+                    ProducerConfig::LINGER_MS_CONFIG,
+                    ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
+                )));
+            }
+            // Java `:583-587`: override the default for backward compatibility.
+            delivery_timeout_ms = linger_and_request_timeout_ms;
+            kafka_warn!(
+                log_context,
+                "{} should be equal to or larger than {} + {}. Setting it to {}.",
                 ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
                 ProducerConfig::LINGER_MS_CONFIG,
                 ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
-            )));
+                delivery_timeout_ms
+            );
         }
         Ok(delivery_timeout_ms)
     }
@@ -730,7 +904,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///    transactional messages issued by the producer.
     ///
     /// Java blocks on `result.await(maxBlockTimeMs, ..)`, so this is `async`
-    /// (CLAUDE.md §9.1) and returns [`KafkaError::Timeout`] when the transactional
+    /// (CLAUDE.md §9.1) and returns [`Error::Timeout`] when the transactional
     /// state cannot be initialized before `max.block.ms` expires. It is safe to
     /// retry in that case, but once the transactional state has been successfully
     /// initialized this method should no longer be used.
@@ -740,16 +914,16 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
     ///   is not authorized, or the idempotent producer id is unavailable; the user
     ///   may retry after fixing the permission
     /// - Any previous fatal error the producer has encountered
-    /// - [`KafkaError::Timeout`] if initializing the transaction takes longer than
+    /// - [`Error::Timeout`] if initializing the transaction takes longer than
     ///   `max.block.ms`
-    pub async fn init_transactions(&self) -> Result<(), KafkaError> {
+    pub async fn init_transactions(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         // Java measures `time.nanoseconds()` around the wait for
@@ -787,16 +961,16 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or if [`Self::init_transactions`] has not yet been invoked
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
     /// - An invalid-producer-epoch error if the producer has attempted to produce
     ///   with an old epoch to the partition leader
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - Any previous fatal error the producer has encountered
-    pub fn begin_transaction(&self) -> Result<(), KafkaError> {
+    pub fn begin_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         transaction_manager.lock().unwrap().begin_transaction()
@@ -836,13 +1010,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalArgument`] if `group_metadata` has a generation id
+    /// - [`Error::LocalIllegalArgument`] if `group_metadata` has a generation id
     ///   greater than zero but an unknown member id
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions, or does not support the latest version of
     ///   the transactional API with all consumer group metadata
     /// - An authorization error indicating that the configured `transactional.id`
@@ -850,13 +1024,13 @@ impl<K, V> KafkaProducer<K, V> {
     /// - A commit-failed error if the commit cannot be retried (e.g. the consumer
     ///   has been kicked out of the group); users should handle this by aborting
     ///   the transaction
-    /// - [`KafkaError::Timeout`] if sending the offsets takes longer than
+    /// - [`Error::Timeout`] if sending the offsets takes longer than
     ///   `max.block.ms`
     pub async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Self::throw_if_invalid_group_metadata(&group_metadata)?;
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
@@ -899,7 +1073,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// by callbacks are ignored; the producer proceeds to commit the transaction in
     /// any case.
     ///
-    /// A [`KafkaError::Timeout`] does **not** mean the request did not reach the
+    /// A [`Error::Timeout`] does **not** mean the request did not reach the
     /// broker — only that the acknowledgement did not arrive in time, so it is up
     /// to the application to decide how to handle it. It is safe to retry, but it
     /// is not possible to attempt a different operation (such as
@@ -908,19 +1082,19 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
     ///   is not authorized
     /// - An invalid-producer-epoch error if the producer has attempted to produce
     ///   with an old epoch to the partition leader
     /// - Any previous fatal or abortable error the producer has encountered
-    /// - [`KafkaError::Timeout`] if committing takes longer than `max.block.ms`
-    pub async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    /// - [`Error::Timeout`] if committing takes longer than `max.block.ms`
+    pub async fn commit_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         let result = {
@@ -943,25 +1117,25 @@ impl<K, V> KafkaProducer<K, V> {
     /// This call returns an error immediately if any prior [`send`](Self::send)
     /// call failed with a producer-fenced or an authorization error.
     ///
-    /// A [`KafkaError::Timeout`] does **not** mean the request did not reach the
+    /// A [`Error::Timeout`] does **not** mean the request did not reach the
     /// broker — see [`Self::commit_transaction`] for the full note; it is safe to
     /// retry, but not to attempt a different operation.
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
     /// - An invalid-producer-epoch error if the producer has attempted to produce
     ///   with an old epoch to the partition leader
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
     ///   is not authorized
     /// - Any previous fatal error the producer has encountered
-    /// - [`KafkaError::Timeout`] if aborting takes longer than `max.block.ms`
-    pub async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    /// - [`Error::Timeout`] if aborting takes longer than `max.block.ms`
+    pub async fn abort_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         kafka_info!(self.log_context, "Aborting incomplete transaction");
@@ -987,10 +1161,10 @@ impl<K, V> KafkaProducer<K, V> {
     /// passes this check and is rejected one level down by the manager's own
     /// `ensureTransactional()` with a different message. That split is preserved:
     /// this must not also test `is_transactional()`.
-    fn transaction_manager_or_error(&self) -> Result<Arc<Mutex<TransactionManager>>, KafkaError> {
+    fn transaction_manager_or_error(&self) -> Result<Arc<Mutex<TransactionManager>>, Error> {
         match &self.transaction_manager {
             Some(transaction_manager) => Ok(Arc::clone(transaction_manager)),
-            None => Err(KafkaError::illegal_state(format!(
+            None => Err(Error::local_illegal_state(format!(
                 "Cannot use transactional methods without enabling transactions by setting the {} configuration property",
                 ProducerConfig::TRANSACTIONAL_ID_CONFIG
             ))),
@@ -1007,13 +1181,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalArgument`] when the generation id is greater than zero
+    /// [`Error::LocalIllegalArgument`] when the generation id is greater than zero
     /// but the member id is unknown.
-    fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), KafkaError> {
+    fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), Error> {
         if group_metadata.generation_id() > 0
             && group_metadata.member_id() == txn_offset_commit_request::UNKNOWN_MEMBER_ID
         {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Passed in group metadata {} has generationId > 0 but the member.id is unknown",
                 group_metadata
             )));
@@ -1024,9 +1198,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// Verify that this producer instance has not been closed.
     ///
     /// Corresponds to Java's `throwIfProducerClosed()`.
-    fn ensure_not_closed(&self) -> Result<(), KafkaError> {
+    fn ensure_not_closed(&self) -> Result<(), Error> {
         if !self.running.load(Ordering::Acquire) {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Cannot perform operation after producer has been closed",
             ));
         }
@@ -1037,19 +1211,25 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Translated from `KafkaProducer.doSend()`.
     ///
-    /// For `ApiException`-type errors (serialization, record-too-large, invalid
-    /// topic, etc.), the callback is invoked with the error and a
-    /// completed-with-error future is returned (`Ok(failed_future)`). This matches
-    /// Java's contract where `send()` always returns a `Future` for API errors and
-    /// always invokes the callback.
+    /// For `ApiException`-type errors (record-too-large, invalid topic, an
+    /// `ApiException` raised by a serializer, etc.), the callback is invoked with
+    /// the error and a completed-with-error future is returned
+    /// (`Ok(failed_future)`). This matches Java's contract where `send()` always
+    /// returns a `Future` for API errors and always invokes the callback.
     ///
-    /// Only non-API errors (like `IllegalState` when the producer is closed) are
-    /// propagated as `Err(...)`.
+    /// Everything else is propagated as `Err(...)`: the generic runtime errors
+    /// (`LocalIllegalState` when the producer is closed, or `LocalIllegalArgument`
+    /// when a custom partitioner returns a negative partition —
+    /// `KafkaProducer.java:1476-1481`, which escapes `doSend` through
+    /// `catch (Exception e)` and is rethrown out of `send()`) and the
+    /// `KafkaException`s that are not `ApiException`s. `SerializationException` is
+    /// one of the latter — it extends `KafkaException` directly — so a
+    /// serialization failure is returned as `Err`, not as a failed future.
     async fn do_send(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
 
         // First make sure the metadata for the topic is available
@@ -1059,43 +1239,139 @@ impl<K, V> KafkaProducer<K, V> {
             .await
         {
             Ok(cwt) => cwt,
-            Err(e) if e.is_api_exception() => {
-                return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+            Err(e) => {
+                // Java 993-998 relabels a closed-producer race first, then the
+                // outer catches dispatch on the resulting class.
+                let e = self.relabel_if_closed_while_sending(e);
+                if e.is_api_error() {
+                    return self.handle_api_error(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+                }
+                return Err(e);
             },
-            Err(e) => return Err(e),
         };
         let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
-        // Destructure the record to take ownership of key/value for zero-copy serialization
+        // Destructure the record to take ownership of key/value for serialization.
         let (record_topic, partition_opt, timestamp_opt, record_headers, key, value) = record.into_parts();
 
-        let serialized_key = self
-            .key_serializer
-            .serialize_owned_with_headers(&record_topic, &record_headers, key)
-            .map_err(|e| KafkaError::serialization(format!("Failed to serialize key: {}", e)))?;
+        // Java's only catch around either serializer call is
+        // `catch (ClassCastException cce)` (`KafkaProducer.java:1006` / `:1013`),
+        // which relabels a key/value whose runtime class does not match the
+        // configured serializer. That cannot happen here — the serializer is
+        // statically typed on `K` / `V` — so there is nothing to convert, and the
+        // serializer's own error propagates with its class intact. `doSend`'s outer
+        // catches then dispatch on that class exactly as Java does: an
+        // `ApiException` (a schema-registry `TimeoutException`, say) fires the
+        // callback and yields a failed future (`:1056`), anything else is returned
+        // as `Err` (`:1073` / `:1077`). Rewriting every serializer error as
+        // `SerializationException` flipped `is_retriable_error()` for the first
+        // case and skipped its callback entirely. Both branches below — the
+        // custom-partitioner one that serializes by borrowing and the owned
+        // zero-copy one — dispatch the same way.
+        if self.partitioner.is_some() {
+            // A custom partitioner is handed the *typed* key/value
+            // (`KafkaProducer.java:1474-1475` passes `record.key()` / `record.value()`),
+            // so serialize by BORROWING — `serialize_with_headers` keeps `key`/`value`
+            // alive — and compute the partition here, with the typed references. That
+            // partition is passed to `do_send_bytes` as an explicit `Some(..)`, which
+            // short-circuits its own partition step so the partitioner runs EXACTLY
+            // once, even a stateful one such as `RoundRobinPartitioner`.
+            let serialized_key =
+                match self
+                    .key_serializer
+                    .serialize_with_headers(&record_topic, &record_headers, key.as_ref())
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
 
-        let serialized_value = self
-            .value_serializer
-            .serialize_owned_with_headers(&record_topic, &record_headers, value)
-            .map_err(|e| KafkaError::serialization(format!("Failed to serialize value: {}", e)))?;
+            let serialized_value =
+                match self
+                    .value_serializer
+                    .serialize_with_headers(&record_topic, &record_headers, value.as_ref())
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
 
-        let headers = record_headers.to_array();
+            let partition = self.compute_partition(
+                &record_topic,
+                partition_opt,
+                key.as_ref(),
+                serialized_key.as_deref(),
+                value.as_ref(),
+                serialized_value.as_deref(),
+                &cluster,
+            )?;
 
-        self.do_send_bytes(
-            &record_topic,
-            partition_opt,
-            timestamp_opt,
-            serialized_key.as_deref(),
-            serialized_value.as_deref(),
-            headers,
-            callback,
-            now_ms,
-            remaining_wait_ms,
-            &cluster,
-        )
-        .await
+            let headers = record_headers.to_array();
+
+            self.do_send_bytes(
+                &record_topic,
+                Some(partition),
+                timestamp_opt,
+                serialized_key.as_deref(),
+                serialized_value.as_deref(),
+                headers,
+                callback,
+                now_ms,
+                remaining_wait_ms,
+                &cluster,
+            )
+            .await
+        } else {
+            // No custom partitioner: keep the zero-copy owned path.
+            // `serialize_owned_with_headers` moves the key/value so a `Vec<u8>` payload
+            // is written into the batch without a copy (CLAUDE.md §12); `do_send_bytes`
+            // then runs the built-in key-hash partitioning via `compute_partition`.
+            let serialized_key =
+                match self
+                    .key_serializer
+                    .serialize_owned_with_headers(&record_topic, &record_headers, key)
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
+
+            let serialized_value =
+                match self
+                    .value_serializer
+                    .serialize_owned_with_headers(&record_topic, &record_headers, value)
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.is_api_error() => {
+                        return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    },
+                    Err(e) => return Err(e),
+                };
+
+            let headers = record_headers.to_array();
+
+            self.do_send_bytes(
+                &record_topic,
+                partition_opt,
+                timestamp_opt,
+                serialized_key.as_deref(),
+                serialized_value.as_deref(),
+                headers,
+                callback,
+                now_ms,
+                remaining_wait_ms,
+                &cluster,
+            )
+            .await
+        }
     }
 
     /// Common send path for already-serialized key/value bytes.
@@ -1117,21 +1393,14 @@ impl<K, V> KafkaProducer<K, V> {
         now_ms: i64,
         remaining_wait_ms: i64,
         cluster: &Cluster,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
-        let partition = if let Some(p) = partition {
-            p
-        } else if let Some(k) = key
-            && !self.partitioner_ignore_keys
-        {
-            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
-            if num_partitions > 0 {
-                BuiltInPartitioner::partition_for_key(k, num_partitions)
-            } else {
-                record_metadata::UNKNOWN_PARTITION
-            }
-        } else {
-            record_metadata::UNKNOWN_PARTITION
-        };
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
+        // `compute_partition` with `None` typed key/value: this method has only the
+        // serialized bytes. When called from `do_send`'s custom-partitioner branch the
+        // partition arrives pre-computed as `Some(..)`, so this short-circuits and the
+        // partitioner is not consulted twice. On the borrowed `send(&[u8], &[u8])` path
+        // the typed key/value ARE the bytes, so passing them as `serialized_*` (and
+        // `None` typed) is the faithful call there.
+        let partition = self.compute_partition(topic, partition, None, key, None, value, cluster)?;
 
         let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -1141,7 +1410,7 @@ impl<K, V> KafkaProducer<K, V> {
             headers,
         );
         if let Err(err) = self.ensure_valid_record_size(serialized_size) {
-            return self.handle_api_exception(err, topic, partition, callback);
+            return self.handle_api_error(err, topic, partition, callback);
         }
 
         let timestamp = timestamp.unwrap_or(now_ms);
@@ -1181,7 +1450,7 @@ impl<K, V> KafkaProducer<K, V> {
                     //
                     // The guard is bound to its own statement so it is released at the
                     // `;`. It MUST NOT stay alive into the error handling below:
-                    // `handle_api_exception` re-locks this same non-reentrant
+                    // `handle_api_error` re-locks this same non-reentrant
                     // `std::sync::Mutex` through `maybe_transition_to_error_state`, and an
                     // `if let` scrutinee's temporaries live for the whole success arm —
                     // edition 2024 only shortens them across the `else`. Written inline,
@@ -1206,19 +1475,19 @@ impl<K, V> KafkaProducer<K, V> {
                         //   `ApiException` either, so `catch (KafkaException e)`
                         //   rethrows it as well. Neither rethrowing block calls
                         //   `maybeTransitionToErrorState`.
-                        let is_api_exception = error.is_api_exception()
-                            // This crate spells a bare `KafkaException` as
-                            // `Errors::UnknownServerError` for want of a wire code
-                            // (`transaction_manager.rs`, `maybe_fail_with_error`), which
-                            // `is_api_exception` cannot tell from a genuine
-                            // `UnknownServerException`. It is unambiguous here: this arm
-                            // sees only what `maybeAddPartition` raises locally, never a
-                            // broker error. Misfiling it would overwrite `last_error`
-                            // with "we are in an error state" and lose the real cause.
-                            && error.error() != Errors::UnknownServerError;
-                        if is_api_exception {
+                        //
+                        // `is_api_error()` alone is the whole test. It used to be
+                        // `&& error.error() != Errors::UnknownServerError`, because a bare
+                        // `KafkaException` was then spelled
+                        // `Error::with_message(Errors::UnknownServerError, ..)`, which
+                        // resolves the code to `UnknownServerException` — an
+                        // `ApiException`. Every producer site now builds a bare
+                        // `KafkaException` as `Error::kafka(..)` / `Error::kafka_with_source(..)`
+                        // (the `Error::KafkaError` variant), for which `is_api_error()`
+                        // answers `false` directly, so the code-based workaround is gone.
+                        if error.is_api_error() {
                             let partition = result.topic_partition.partition();
-                            return self.handle_api_exception(error, topic, partition, None);
+                            return self.handle_api_error(error, topic, partition, None);
                         }
                         return Err(error);
                     }
@@ -1234,20 +1503,20 @@ impl<K, V> KafkaProducer<K, V> {
                 }
                 Ok(KafkaFuture::new(result.future))
             },
-            // Java's `catch (ApiException e)` arm: fire the user callback with
-            // the placeholder metadata AND return a failed future
-            // (`KafkaProducer.java:1056-1068`). The callback comes back inside
-            // `AppendError` when no batch took ownership of it, so routing
-            // through `handle_api_exception` fires it exactly once — matching
-            // the two earlier `handle_api_exception` arms of this method.
-            Err(AppendError { error, callback }) if error.is_api_exception() => {
-                self.handle_api_exception(error, topic, partition, callback)
+            // Java's `catch (ApiException e)` (`KafkaProducer.java:1056-1068`) fires the
+            // user `Callback` with a null-metadata `RecordMetadata(tp, -1, -1,
+            // NO_TIMESTAMP, -1, -1)` *and* returns a failed future. `append` gives the
+            // callback back (`AppendFailure::callback`) precisely so this arm can honour
+            // that obligation exactly once (CLAUDE.md §9.5) — the four sibling arms
+            // covering the same Java block all route through `handle_api_error` too.
+            Err(failure) if failure.error.is_api_error() => {
+                self.handle_api_error(failure.error, topic, partition, failure.callback)
             },
-            // Non-`ApiException`: Java rethrows from `catch (KafkaException e)`
-            // without invoking the callback, so the caller learns about the
-            // failure from the returned `Err`. Match that — the callback is
-            // dropped unfired, as Java drops its `appendCallbacks`.
-            Err(AppendError { error, .. }) => Err(error),
+            // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1072-1080`)
+            // rethrow, and neither invokes the callback. `failure.callback` is dropped
+            // here, exactly as Java drops its `appendCallbacks` reference when `send()`
+            // throws.
+            Err(failure) => Err(failure.error),
         }
     }
 
@@ -1260,9 +1529,9 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Locks the [`TransactionManager`]. Java's monitor is reentrant and
     /// `std::sync::Mutex` is not, so no caller — directly or through
-    /// [`handle_api_exception`](Self::handle_api_exception) — may already hold that
+    /// [`handle_api_error`](Self::handle_api_error) — may already hold that
     /// lock, including in a still-live `if let` / `match` scrutinee temporary.
-    fn maybe_transition_to_error_state(&self, error: &KafkaError) {
+    fn maybe_transition_to_error_state(&self, error: &Error) {
         if let Some(transaction_manager) = &self.transaction_manager {
             // Java lets an invalid transition propagate out of `doSend`. That cannot
             // happen on the idempotent path — the only transition
@@ -1283,18 +1552,43 @@ impl<K, V> KafkaProducer<K, V> {
         }
     }
 
+    /// `doSend`'s **inner** `catch (KafkaException e)` around `waitOnMetadata`
+    /// (`KafkaProducer.java:993-998`):
+    ///
+    /// ```java
+    /// } catch (KafkaException e) {
+    ///     if (metadata.isClosed())
+    ///         throw new KafkaException("Producer closed while send in progress", e);
+    ///     throw e;
+    /// }
+    /// ```
+    ///
+    /// Its whole job is to relabel a `close()` racing an in-flight send, so the
+    /// caller can tell it apart from a metadata timeout. Anything else — and
+    /// anything outside the `KafkaException` hierarchy — passes through untouched,
+    /// to be dispatched by the outer `catch (ApiException e)` /
+    /// `catch (KafkaException e)` split at the call site.
+    fn relabel_if_closed_while_sending(&self, error: Error) -> Error {
+        if error.is_kafka_error() && self.metadata.is_closed() {
+            // A bare `KafkaException`, matching Java: not an `ApiException`, so the
+            // caller returns it as `Err` rather than as a failed future.
+            return Error::kafka_with_source("Producer closed while send in progress", error);
+        }
+        error
+    }
+
     /// Handle an `ApiException`-type error by invoking the callback (if any)
     /// and returning a completed-with-error future.
     ///
     /// This matches Java's `catch (ApiException e)` block in `doSend()`.
-    fn handle_api_exception(
+    fn handle_api_error(
         &self,
-        error: KafkaError,
+        error: Error,
         topic: &str,
         partition: i32,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
-        kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
+        kafka_debug!(self.log_context, "Error occurred during message send: {}", error);
         self.maybe_transition_to_error_state(&error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
@@ -1320,8 +1614,8 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     /// Returns `Err` if:
-    /// - The topic is invalid ([`InvalidTopic`](KafkaError::InvalidTopic))
-    /// - Metadata could not be refreshed within `max_wait_ms` ([`Timeout`](KafkaError::Timeout))
+    /// - The topic is invalid ([`InvalidTopic`](Error::InvalidTopic))
+    /// - Metadata could not be refreshed within `max_wait_ms` ([`Timeout`](Error::Timeout))
     /// - The producer is closed
     async fn wait_on_metadata(
         &self,
@@ -1329,11 +1623,17 @@ impl<K, V> KafkaProducer<K, V> {
         partition: Option<i32>,
         now_ms: i64,
         max_wait_ms: i64,
-    ) -> Result<ClusterAndWaitTime, KafkaError> {
+    ) -> Result<ClusterAndWaitTime, Error> {
         let cluster = self.metadata.fetch();
 
         if cluster.invalid_topics().contains(topic) {
-            return Err(KafkaError::invalid_topics([topic.to_string()].into_iter().collect()));
+            // Java: `throw new InvalidTopicException(topic)` — `topic` is a
+            // `String`, so this binds to the `(String message)` constructor:
+            // the message is the topic name and `invalidTopics()` is empty.
+            return Err(Error::invalid_topics_with_message(
+                std::collections::HashSet::new(),
+                topic.to_string(),
+            ));
         }
 
         // Add topic to metadata topic list if it is not there already and reset expiry
@@ -1378,16 +1678,25 @@ impl<K, V> KafkaProducer<K, V> {
 
             match self.metadata.await_update(version, remaining_wait_ms).await {
                 Ok(()) => {},
+                // A fatal metadata error (an authentication failure, say) must
+                // reach the caller as itself. Java's `awaitUpdate` throws it from
+                // the wait predicate via `maybeThrowFatalException()`, so it never
+                // becomes a `TimeoutException`; only an actual deadline expiry does.
+                // Re-wrapping everything as a timeout made a dead producer look
+                // retriable, so the application retried bad credentials forever.
+                Err(e) if !e.is_timeout_error() => return Err(e),
                 Err(_) => {
+                    // Rethrow with the original `max_wait_ms` to keep the message
+                    // free of the shrinking `remaining_wait_ms` (Java 1133).
                     let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
-                    if let Some(err) = self.metadata.get_error(topic) {
-                        return Err(KafkaError::timeout(format!(
-                            "{} (underlying error: {})",
-                            error_message,
-                            err.message()
-                        )));
+                    if let Some(code) = self.metadata.get_error(topic) {
+                        // `new TimeoutException(errorMessage, metadata.getError(topic).exception())`
+                        // (Java 1136): the broker error is the timeout's *cause*, so
+                        // `Error::source()` can be walked back to it. Flattening it
+                        // into the message left `source()` empty.
+                        return Err(Error::Timeout(TimeoutError::with_source(error_message, Error::new(code))));
                     }
-                    return Err(KafkaError::timeout(error_message));
+                    return Err(Error::timeout(error_message));
                 },
             }
 
@@ -1395,7 +1704,17 @@ impl<K, V> KafkaProducer<K, V> {
             elapsed = self.now_ms() - now_ms;
             if elapsed >= max_wait_ms {
                 let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
-                return Err(KafkaError::timeout(error_message));
+                // Java 1143-1146 attaches the topic's error as the cause here too,
+                // but only when it is retriable — a non-retriable one is about to be
+                // raised as itself by `maybe_return_error_for_topic` on the next
+                // iteration, so pinning it under a timeout would mislabel it.
+                if let Some(code) = self.metadata.get_error(topic) {
+                    let underlying = Error::new(code);
+                    if underlying.is_retriable_error() {
+                        return Err(Error::Timeout(TimeoutError::with_source(error_message, underlying)));
+                    }
+                }
+                return Err(Error::timeout(error_message));
             }
             self.metadata.maybe_return_error_for_topic(topic)?;
             remaining_wait_ms = max_wait_ms - elapsed;
@@ -1435,9 +1754,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// Validate that the record size isn't too large.
     ///
     /// Translated from `KafkaProducer.ensureValidRecordSize()`.
-    fn ensure_valid_record_size(&self, size: i32) -> Result<(), KafkaError> {
+    fn ensure_valid_record_size(&self, size: i32) -> Result<(), Error> {
         if size > self.max_request_size {
-            return Err(KafkaError::record_too_large(format!(
+            return Err(Error::record_too_large(format!(
                 "The message is {} bytes when serialized which is larger than {}, which is the value of the {} configuration.",
                 size,
                 self.max_request_size,
@@ -1445,7 +1764,7 @@ impl<K, V> KafkaProducer<K, V> {
             )));
         }
         if size as i64 > self.total_memory_size {
-            return Err(KafkaError::record_too_large(format!(
+            return Err(Error::record_too_large(format!(
                 "The message is {} bytes when serialized which is larger than the total memory buffer you have configured with the {} configuration.",
                 size,
                 ProducerConfig::BUFFER_MEMORY_CONFIG
@@ -1454,34 +1773,101 @@ impl<K, V> KafkaProducer<K, V> {
         Ok(())
     }
 
+    /// Resolve the key-based partition when no explicit partition was supplied,
+    /// or [`UNKNOWN_PARTITION`](record_metadata::UNKNOWN_PARTITION) to defer to
+    /// the keyless (sticky, KIP-794) path.
+    ///
+    /// Mirrors the key branch of Java's `KafkaProducer.partition()`: the key is
+    /// hashed only when it is present, keys are not being ignored
+    /// (`partitioner.ignore.keys=false`), the configured [`KeyHasher`] actually
+    /// hashes this key ([`KeyHasher::hashes_key`] — CRC-32 leaves an *empty* key
+    /// to the keyless path, matching librdkafka `consistent_random`; murmur2
+    /// hashes it, matching the Java client), and the topic has known partitions.
+    ///
+    /// Both send call sites ([`do_send_bytes`](Self::do_send_bytes) and
+    /// [`partition`](Self::partition)) route their key branch through this one
+    /// helper so the hashing gate cannot diverge between them.
+    fn partition_for_key_or_unknown(&self, key: Option<&[u8]>, topic: &str, cluster: &Cluster) -> i32 {
+        if let Some(k) = key
+            && !self.partitioner_ignore_keys
+            && self.key_hasher.hashes_key(k)
+        {
+            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
+            if num_partitions > 0 {
+                return BuiltInPartitioner::partition_for_key(k, num_partitions, self.key_hasher);
+            }
+        }
+        record_metadata::UNKNOWN_PARTITION
+    }
+
+    /// Compute the partition for a record, mirroring Java's `KafkaProducer.partition()`
+    /// (`KafkaProducer.java:1469-1489`).
+    ///
+    /// Precedence is exactly Java's:
+    /// 1. an explicit `partition` on the record wins outright;
+    /// 2. otherwise, if a custom [`Partitioner`] is configured, it decides — and a
+    ///    negative result is rejected with the same `IllegalArgumentException` message
+    ///    Java throws. In Java that exception escapes `doSend`'s `catch (Exception e)`
+    ///    and is rethrown out of `send()`; here it is the `Err` variant, propagated by
+    ///    the caller with `?`.
+    /// 3. otherwise fall back to the built-in key-hash / `UNKNOWN_PARTITION` path
+    ///    ([`partition_for_key_or_unknown`](Self::partition_for_key_or_unknown)).
+    ///
+    /// The typed `key` / `value` are handed straight to the custom partitioner (Java
+    /// passes it `record.key()` / `record.value()` alongside the serialized bytes); the
+    /// built-in fallback in step 3 uses only `serialized_key`.
+    #[allow(clippy::too_many_arguments)]
+    fn compute_partition(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<&K>,
+        serialized_key: Option<&[u8]>,
+        value: Option<&V>,
+        serialized_value: Option<&[u8]>,
+        cluster: &Cluster,
+    ) -> Result<i32, Error> {
+        if let Some(p) = partition {
+            return Ok(p);
+        }
+
+        if let Some(partitioner) = &self.partitioner {
+            let custom_partition = partitioner.partition(topic, key, serialized_key, value, serialized_value, cluster);
+            if custom_partition < 0 {
+                return Err(Error::local_illegal_argument(format!(
+                    "The partitioner generated an invalid partition number: {}. Partition number should always be non-negative.",
+                    custom_partition
+                )));
+            }
+            return Ok(custom_partition);
+        }
+
+        Ok(self.partition_for_key_or_unknown(serialized_key, topic, cluster))
+    }
+
     /// Compute partition for the given record.
     ///
-    /// If the record has a partition, return it. Otherwise, try to calculate
-    /// partition based on key. If there is no key or key should be ignored,
-    /// return `UNKNOWN_PARTITION` to indicate any partition can be used.
-    ///
-    /// Translated from `KafkaProducer.partition()`.
+    /// A thin test wrapper over [`compute_partition`](Self::compute_partition), which is
+    /// the faithful translation of `KafkaProducer.partition()`. Every caller is a test
+    /// that uses a producer WITHOUT a custom partitioner, so the negative-partition `Err`
+    /// path is unreachable and unwrapping it here is safe.
     fn partition(
         &self,
         record: &ProducerRecord<K, V>,
         serialized_key: Option<&[u8]>,
-        _serialized_value: Option<&[u8]>,
+        serialized_value: Option<&[u8]>,
         cluster: &Cluster,
     ) -> i32 {
-        if let Some(p) = record.partition() {
-            return p;
-        }
-
-        if let Some(key) = serialized_key
-            && !self.partitioner_ignore_keys
-        {
-            let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
-            if num_partitions > 0 {
-                return BuiltInPartitioner::partition_for_key(key, num_partitions);
-            }
-        }
-
-        record_metadata::UNKNOWN_PARTITION
+        self.compute_partition(
+            record.topic(),
+            record.partition(),
+            record.key(),
+            serialized_key,
+            record.value(),
+            serialized_value,
+            cluster,
+        )
+        .expect("partition() test helper is only used without a custom partitioner")
     }
 
     /// Initiate a graceful close of the sender.
@@ -1558,7 +1944,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
 
         let now_ms = self.now_ms();
@@ -1567,10 +1953,14 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
             .await
         {
             Ok(cwt) => cwt,
-            Err(e) if e.is_api_exception() => {
-                return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+            Err(e) => {
+                // Java 993-998, as in `do_send`.
+                let e = self.relabel_if_closed_while_sending(e);
+                if e.is_api_error() {
+                    return self.handle_api_error(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+                }
+                return Err(e);
             },
-            Err(e) => return Err(e),
         };
         let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
@@ -1601,12 +1991,12 @@ where
 {
     /// Needs to be called before any other method when the `transactional.id` is
     /// set in the configuration.
-    async fn init_transactions(&self) -> Result<(), KafkaError> {
+    async fn init_transactions(&self) -> Result<(), Error> {
         KafkaProducer::init_transactions(self).await
     }
 
     /// Should be called before the start of each new transaction.
-    fn begin_transaction(&self) -> Result<(), KafkaError> {
+    fn begin_transaction(&self) -> Result<(), Error> {
         KafkaProducer::begin_transaction(self)
     }
 
@@ -1616,24 +2006,24 @@ where
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         KafkaProducer::send_offsets_to_transaction(self, offsets, group_metadata).await
     }
 
     /// Commits the ongoing transaction.
-    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    async fn commit_transaction(&self) -> Result<(), Error> {
         KafkaProducer::commit_transaction(self).await
     }
 
     /// Aborts the ongoing transaction.
-    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    async fn abort_transaction(&self) -> Result<(), Error> {
         KafkaProducer::abort_transaction(self).await
     }
 
     /// Asynchronously send a record to a topic.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.do_send(record, None).await
     }
 
@@ -1643,7 +2033,7 @@ where
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.do_send(record, callback).await
     }
 
@@ -1652,7 +2042,7 @@ where
     /// records.
     ///
     /// Translated from `KafkaProducer.flush()`.
-    async fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), Error> {
         kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
         // Java: `long start = time.nanoseconds()` then a try/finally recording
         // `producerMetrics.recordFlush(time.nanoseconds() - start)`
@@ -1675,7 +2065,7 @@ where
     }
 
     /// Get the partition metadata for the given topic.
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let now_ms = self.now_ms();
         let cluster_and_wait_time = self.wait_on_metadata(topic, None, now_ms, self.max_block_ms).await?;
         Ok(cluster_and_wait_time.cluster.partitions_for_topic(topic).to_vec())
@@ -1683,7 +2073,7 @@ where
 
     /// Close this producer. This method awaits until all previously sent requests
     /// complete.
-    async fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), Error> {
         self.close_timeout(Duration::from_millis(i64::MAX as u64)).await
     }
 
@@ -1700,7 +2090,7 @@ where
     ///
     /// Note: Rust's `Duration` is unsigned, so the negative-timeout check from
     /// Java is omitted (impossible to construct a negative `Duration`).
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error> {
         let timeout_ms = timeout.as_millis() as i64;
         kafka_info!(
             self.log_context,
@@ -1733,10 +2123,19 @@ where
             self.await_sender_handle_indefinitely().await;
         }
 
-        // Java `close`: `Utils.closeQuietly(producerMetrics, ...)` then
-        // `Utils.closeQuietly(metrics, ...)` (`KafkaProducer.java:1449-1450`).
+        // Java `close`'s `Utils.closeQuietly(...)` chain, in order:
+        // `producerMetrics` → `metrics` → `keySerializer` → `valueSerializer` →
+        // `partitioner` (`KafkaProducer.java:1441-1446`). This crate does not model
+        // closeable serializers, so the partitioner is closed right after `metrics`,
+        // which is its faithful position among the closeables that exist. (The Phase 2
+        // spec cited `:1449-1450` for the position, but 4.3.1 closes the partitioner at
+        // `:1446`, after metrics rather than before — behaviourally irrelevant for the
+        // built-in partitioners, whose `close` is a no-op.)
         self.producer_metrics.close();
         self.metrics.close();
+        if let Some(partitioner) = &self.partitioner {
+            partitioner.close();
+        }
 
         kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
@@ -1767,10 +2166,13 @@ mod tests {
     use crate::common::protocol::Errors;
     use crate::common::requests::ConcreteResponse;
     use crate::common::serialization::StringSerializer;
+    use crate::common::utils::{murmur2, to_positive};
     use crate::mock_client::MockClient;
     use crate::producer::ProducerConfig;
+    use crate::producer::RoundRobinPartitioner;
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
+    use crate::producer::mock_partitioner;
 
     const TOPIC: &str = "test-topic";
 
@@ -1888,7 +2290,171 @@ mod tests {
             default_time_provider(),
             None,
             Arc::new(Mutex::new(PendingRequests::new())),
+            None,
         )
+    }
+
+    /// A serializer that always fails with a caller-chosen error, so `do_send`'s
+    /// dispatch on the serializer's error *class* is observable.
+    struct FailingSerializer(Error);
+
+    impl Serializer<String> for FailingSerializer {
+        fn serialize(&self, _topic: &str, _data: Option<&String>) -> Result<Option<Vec<u8>>, Error> {
+            Err(self.0.clone())
+        }
+    }
+
+    fn create_producer_with_key_serializer(
+        metadata: Arc<ProducerMetadata>,
+        accumulator: Arc<RecordAccumulator>,
+        key_serializer: Box<dyn Serializer<String> + Send + Sync>,
+    ) -> KafkaProducer<String, String> {
+        KafkaProducer::new(
+            &ProducerConfig::default(),
+            key_serializer,
+            Box::new(StringSerializer),
+            metadata,
+            accumulator,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+            None,
+            default_time_provider(),
+            None,
+            Arc::new(Mutex::new(PendingRequests::new())),
+            None,
+        )
+    }
+
+    /// Java's only catch around the serializer call is
+    /// `catch (ClassCastException cce)` (`KafkaProducer.java:1004-1010`), which
+    /// cannot happen in Rust — the serializer is statically typed on `K`. Everything
+    /// else the serializer throws keeps its class and is dispatched by `doSend`'s
+    /// outer catches: an `ApiException` at `:1056` fires the callback and returns a
+    /// failed future.
+    ///
+    /// Rewriting every serializer error as `SerializationException` flipped
+    /// `is_retriable_error()` from `true` to `false` for exactly this case (a
+    /// schema-registry `TimeoutException`), skipped the callback entirely because
+    /// `Serialization` is not an `ApiException`, and flattened the cause into a
+    /// display string.
+    #[tokio::test]
+    async fn a_retriable_serializer_error_keeps_its_class_and_fires_the_callback() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer_with_key_serializer(
+            metadata,
+            accumulator,
+            Box::new(FailingSerializer(Error::timeout("schema registry lookup timed out"))),
+        );
+
+        let callback_error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&callback_error);
+        let callback: Callback = Box::new(move |_metadata, error| {
+            *sink.lock().unwrap() = error.cloned();
+        });
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
+        // An `ApiException` yields `Ok(failed_future)`, not `Err` — Java's
+        // `return new FutureFailure(e)`.
+        let future = producer
+            .send_with_callback(record, Some(callback))
+            .await
+            .expect("an API-error serializer failure must come back as a failed future, not Err");
+
+        let error = future.get().await.expect_err("the future must be failed");
+        assert!(error.is_timeout_error(), "the serializer's class must survive: {error:?}");
+        assert!(error.is_retriable_error(), "a schema-registry timeout is retriable: {error:?}");
+        assert_eq!(error.message(), "schema registry lookup timed out");
+
+        let invoked = callback_error.lock().unwrap().take().expect("the callback must be invoked");
+        assert!(invoked.is_timeout_error(), "got {invoked:?}");
+    }
+
+    /// The other half of the same dispatch: a `SerializationException` — which
+    /// extends `KafkaException` directly and is NOT an `ApiException` — reaches
+    /// `catch (KafkaException e)` at `KafkaProducer.java:1073` and is rethrown, so
+    /// `send()` returns `Err` rather than a failed future.
+    #[tokio::test]
+    async fn a_serialization_error_from_the_serializer_is_returned_as_err() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer_with_key_serializer(
+            metadata,
+            accumulator,
+            Box::new(FailingSerializer(Error::serialization("not a valid string"))),
+        );
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
+        let error = producer
+            .send(record)
+            .await
+            .expect_err("a serialization error is not an API error, so send() returns Err");
+        assert!(matches!(error, Error::Serialization(_)), "got {error:?}");
+        assert!(error.is_kafka_error(), "a serialization error is a Kafka error: {error:?}");
+        assert!(!error.is_api_error(), "but it is not an API error: {error:?}");
+        assert_eq!(error.message(), "not a valid string");
+    }
+
+    /// `waitOnMetadata`'s first throw attaches the topic's metadata error as the
+    /// `TimeoutException`'s **cause** (`KafkaProducer.java:1136`,
+    /// `new TimeoutException(errorMessage, metadata.getError(topic).exception())`).
+    ///
+    /// The message used to be built by interpolating the underlying error into it,
+    /// which left `Error::source()` empty — a caller (or a log line) could no longer
+    /// walk from the timeout to the broker error that produced it.
+    #[tokio::test]
+    async fn wait_on_metadata_carries_the_topic_error_as_the_timeout_cause() {
+        use crate::common::protocol::ApiKeys;
+        use crate::common::protocol::Errors;
+        use crate::common::requests::MetadataResponse;
+        use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
+
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer(Arc::clone(&metadata), accumulator);
+
+        // A topic the broker reports a retriable error for and no partitions, so the
+        // wait times out with `get_error(topic)` populated.
+        const MISSING: &str = "topic-with-an-error";
+        let mut data = MetadataResponseData::new();
+        data.set_controller_id(0);
+        let mut broker = MetadataResponseBroker::new();
+        broker.set_node_id(0);
+        broker.set_host("localhost".to_string());
+        broker.set_port(9092);
+        data.set_brokers(vec![broker]);
+        let mut topic_resp = MetadataResponseTopic::new();
+        topic_resp.set_name(Some(MISSING.to_string()));
+        topic_resp.set_error_code(Errors::LeaderNotAvailable.code());
+        topic_resp.set_is_internal(false);
+        topic_resp.set_partitions(Vec::new());
+        data.set_topics(vec![topic_resp]);
+        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        metadata.add(MISSING, 0);
+        metadata.update_with_current_request_version(&response, false, 0);
+        assert_eq!(
+            metadata.get_error(MISSING),
+            Some(Errors::LeaderNotAvailable),
+            "the fixture must actually record a topic error"
+        );
+
+        let now_ms = producer.now_ms();
+        let error = producer
+            .wait_on_metadata(MISSING, None, now_ms, 50)
+            .await
+            .expect_err("the topic has no metadata, so the wait must time out");
+
+        assert!(error.is_timeout_error(), "got {error:?}");
+        assert!(
+            error.message().contains("not present in metadata"),
+            "the message keeps Java's text, without the cause interpolated: {}",
+            error.message()
+        );
+        assert_eq!(
+            error.source().expect("the metadata error must be the timeout's cause").error(),
+            Errors::LeaderNotAvailable
+        );
     }
 
     /// Translated from `KafkaProducerTest.testMetricConfigRecordingLevel`.
@@ -1966,7 +2532,7 @@ mod tests {
 
         let mut topic_resp = MetadataResponseTopic::new();
         topic_resp.set_name(Some("".to_string()));
-        topic_resp.set_error_code(Errors::InvalidTopicException.code());
+        topic_resp.set_error_code(Errors::InvalidTopicError.code());
         topic_resp.set_is_internal(false);
         data.set_topics(vec![topic_resp]);
 
@@ -1985,10 +2551,21 @@ mod tests {
         assert!(future.is_done(), "Failed future should be immediately done");
         let err = future.get().await.unwrap_err();
         assert!(
-            matches!(err, KafkaError::InvalidTopic(_)),
+            matches!(err, Error::InvalidTopic(_)),
             "Expected InvalidTopic error, got: {:?}",
             err
         );
+        // `waitOnMetadata` throws `new InvalidTopicException(topic)` — the
+        // `(String message)` constructor, so `getMessage()` is the topic name
+        // (empty here) and `invalidTopics()` is empty, NOT `{topic}`.
+        assert_eq!(err.message(), "");
+        match &err {
+            Error::InvalidTopic(e) => assert!(
+                e.invalid_topics().is_empty(),
+                "the (String) constructor leaves invalidTopics empty"
+            ),
+            _ => unreachable!(),
+        }
     }
 
     /// Translated from `KafkaProducerTest.closeShouldBeIdempotent`.
@@ -2048,8 +2625,8 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            KafkaError::IllegalState(msg) => {
-                assert!(msg.contains("after producer has been closed"));
+            Error::LocalIllegalState(msg) => {
+                assert!(msg.message().contains("after producer has been closed"));
             },
             other => panic!("Expected IllegalState error, got: {:?}", other),
         }
@@ -2083,9 +2660,9 @@ mod tests {
         assert!(future.is_done(), "Failed future should be immediately done");
         let err = future.get().await.unwrap_err();
         match err {
-            KafkaError::RecordTooLarge(msg) => {
+            Error::RecordTooLarge(msg) => {
                 assert!(
-                    msg.contains(ProducerConfig::MAX_REQUEST_SIZE_CONFIG),
+                    msg.message().contains(ProducerConfig::MAX_REQUEST_SIZE_CONFIG),
                     "Error message should mention the config key: {}",
                     msg
                 );
@@ -2117,15 +2694,147 @@ mod tests {
         assert!(future.is_done(), "Failed future should be immediately done");
         let err = future.get().await.unwrap_err();
         match err {
-            KafkaError::RecordTooLarge(msg) => {
+            Error::RecordTooLarge(msg) => {
                 assert!(
-                    msg.contains(ProducerConfig::BUFFER_MEMORY_CONFIG),
+                    msg.message().contains(ProducerConfig::BUFFER_MEMORY_CONFIG),
                     "Error message should mention the config key: {}",
                     msg
                 );
             },
             other => panic!("Expected RecordTooLarge error, got: {:?}", other),
         }
+    }
+
+    /// `doSend`'s `catch (ApiException e)` block invokes the user `Callback` exactly
+    /// once with a null-metadata `RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)`
+    /// and the error, then returns a failed future
+    /// (`KafkaProducer.java:1056-1068`).
+    ///
+    /// The arm covering a failure of `accumulator.append` itself used to drop the
+    /// callback: it is *moved* into `append`, and `append` returned it only on the
+    /// success path. An application that registers callbacks and never awaits the
+    /// future was therefore never told the record had been dropped.
+    ///
+    /// `buffer.memory` sized for exactly one batch plus `max.block.ms = 0` makes the
+    /// second `append` fail deterministically inside `BufferPool::allocate` with
+    /// `BufferExhaustedException`, which is an `ApiException`
+    /// (`BufferExhaustedException extends TimeoutException`) — so this is the
+    /// `catch (ApiException e)` arm.
+    #[tokio::test]
+    async fn test_api_error_from_append_fires_the_callback_exactly_once() {
+        const BATCH_SIZE: usize = 16384;
+        let config = ProducerConfig {
+            batch_size: BATCH_SIZE as i32,
+            buffer_memory: BATCH_SIZE as i64,
+            max_block_ms: 0,
+            linger_ms: 0,
+            ..Default::default()
+        };
+        // Two partitions, so the second record needs a *new* batch rather than
+        // appending to the first record's still-roomy one.
+        let metadata = create_metadata_with_topic(TOPIC, 2);
+        let accumulator = Arc::new(RecordAccumulator::new(
+            BATCH_SIZE as i32,
+            Compression::none(),
+            0,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            Arc::new(Metrics::new()),
+            PRODUCER_METRIC_GROUP_NAME,
+            // Room for exactly one batch.
+            Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
+            None,
+        ));
+        let producer = create_producer_with_config(config, metadata, accumulator);
+
+        // The first record consumes the pool's only batch.
+        producer
+            .do_send(
+                ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("first".to_string())).unwrap(),
+                None,
+            )
+            .await
+            .expect("the first send has memory");
+
+        // The second record targets partition 1, so its append has to allocate; it
+        // finds the pool empty and `max.block.ms = 0`, and fails with
+        // `BufferExhaustedException`.
+        let invocations: Arc<Mutex<Vec<(i64, i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&invocations);
+        let callback: Callback = Box::new(move |metadata, error| {
+            let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
+            let error = error.expect("Java passes the exception here");
+            recorder
+                .lock()
+                .unwrap()
+                .push((metadata.offset(), metadata.partition(), error.message().to_string()));
+        });
+
+        let future = producer
+            .do_send(
+                ProducerRecord::with_partition(TOPIC.to_string(), Some(1), None, Some("second".to_string())).unwrap(),
+                Some(callback),
+            )
+            .await
+            .expect("an ApiException becomes a failed future, not an Err");
+
+        // The callback fired exactly once. `Callback` is a `Box<dyn FnOnce>`, so
+        // "at most once" is a type-level guarantee; this pins "at least once".
+        // The guard is cloned out and dropped before the `await` below (CLAUDE.md §9.6).
+        let invocations = invocations.lock().unwrap().clone();
+        assert_eq!(invocations.len(), 1, "the callback must fire exactly once, got {invocations:?}");
+        let (offset, partition, message) = &invocations[0];
+        // Java's `nullMetadata`: `new RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)`.
+        assert_eq!(*offset, -1, "the null metadata carries offset -1");
+        assert_eq!(*partition, 1, "the null metadata names the record's topic-partition");
+        assert!(
+            message.contains("Failed to allocate"),
+            "the callback receives the BufferExhausted error: {message}"
+        );
+
+        // And the future is failed with the same error, as Java's `FutureFailure` is.
+        let error = future.get().await.expect_err("the future must be failed");
+        assert!(
+            matches!(error, Error::ProducerBufferExhausted(_)),
+            "expected ProducerBufferExhausted, got {error:?}"
+        );
+        assert!(
+            error.is_api_error(),
+            "BufferExhaustedException extends TimeoutException, an ApiException"
+        );
+    }
+
+    /// The sibling of the test above on the *rethrowing* path: Java's
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1072-1076`) does NOT invoke the
+    /// callback — it rethrows out of `send()`. `RecordAccumulator.tryAppend`'s
+    /// `KafkaException("Producer closed while send in progress")` is a bare
+    /// `KafkaException`, so it lands there.
+    #[tokio::test]
+    async fn test_non_api_error_from_append_does_not_fire_the_callback() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        accumulator.close();
+        let producer = create_producer_with_config(ProducerConfig::default(), metadata, accumulator);
+
+        let invoked = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&invoked);
+        let callback: Callback = Box::new(move |_, _| flag.store(true, Ordering::SeqCst));
+
+        let error = producer
+            .do_send(
+                ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("v".to_string())).unwrap(),
+                Some(callback),
+            )
+            .await
+            .expect_err("a bare KafkaException is rethrown out of send()");
+        assert_eq!(error.message(), "Producer closed while send in progress");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException");
+        assert!(
+            !invoked.load(Ordering::SeqCst),
+            "Java's catch (KafkaException e) block does not invoke the callback"
+        );
     }
 
     /// Tests that the partition() method returns the explicit partition when set.
@@ -2194,6 +2903,591 @@ mod tests {
         assert_eq!(record_metadata::UNKNOWN_PARTITION, partition);
     }
 
+    /// Builds a `KafkaProducer` whose `partitioner.class` selects
+    /// `Murmur2RandomPartitioner` (the `KeyHasher::Murmur2` hash).
+    fn create_murmur2_producer(
+        metadata: Arc<ProducerMetadata>,
+        accumulator: Arc<RecordAccumulator>,
+    ) -> KafkaProducer<String, String> {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("murmur2 partitioner config is valid");
+        create_producer_with_config(config, metadata, accumulator)
+    }
+
+    /// The default (unset `partitioner.class`) keyed partition path uses the
+    /// IEEE CRC-32 (librdkafka `consistent_random`) hash taken UNSIGNED modulo
+    /// the partition count — NOT murmur2 / `Utils.toPositive`. This is the
+    /// deliberate, user-approved deviation from Java parity.
+    #[test]
+    fn test_partition_default_hasher_is_crc32() {
+        let metadata = create_metadata_with_topic(TOPIC, 7);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata.clone(), accumulator);
+        assert_eq!(KeyHasher::Crc32, producer.key_hasher);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
+        assert_eq!((crc32fast::hash(b"key") % 7) as i32, partition);
+        // Both send call sites route through the same helper, so it agrees.
+        assert_eq!(partition, producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster));
+    }
+
+    /// Under the CRC-32 default, an EMPTY (but non-null) key defers to the
+    /// keyless sticky (KIP-794) path — `UNKNOWN_PARTITION` — matching
+    /// librdkafka `consistent_random` (which treats `keylen == 0` as no key).
+    /// Asserted through both send call sites' shared helper.
+    #[test]
+    fn test_partition_empty_key_crc32_defers_to_sticky() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata.clone(), accumulator);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some(String::new()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        // via KafkaProducer.partition()
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition(&record, Some(b""), Some(b"value"), &cluster)
+        );
+        // via the helper do_send_bytes uses
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition_for_key_or_unknown(Some(b""), TOPIC, &cluster)
+        );
+    }
+
+    /// `Murmur2RandomPartitioner` reproduces the exact Java-client formula
+    /// `Utils.toPositive(Utils.murmur2(key)) % numPartitions` for a non-empty
+    /// key.
+    #[test]
+    fn test_partition_murmur2_matches_java_formula() {
+        let metadata = create_metadata_with_topic(TOPIC, 7);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+        assert_eq!(KeyHasher::Murmur2, producer.key_hasher);
+
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let cluster = metadata.fetch();
+        let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
+        assert_eq!(to_positive(murmur2(b"key")) % 7, partition);
+        assert_eq!(partition, producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster));
+    }
+
+    /// murmur2 hashes an EMPTY (non-null) key rather than deferring to the
+    /// sticky path — exact Java-client parity, and the point of contrast with
+    /// the CRC-32 default (`test_partition_empty_key_crc32_defers_to_sticky`).
+    #[test]
+    fn test_partition_empty_key_murmur2_is_hashed() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+
+        let cluster = metadata.fetch();
+        let partition = producer.partition_for_key_or_unknown(Some(b""), TOPIC, &cluster);
+        assert_eq!(to_positive(murmur2(b"")) % 3, partition);
+        assert_ne!(record_metadata::UNKNOWN_PARTITION, partition);
+    }
+
+    /// An explicit record partition wins over key hashing regardless of the
+    /// selected hasher (here: murmur2). Complements
+    /// `test_partition_returns_explicit_partition` (which covers the default).
+    #[test]
+    fn test_partition_explicit_partition_wins_under_murmur2() {
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_murmur2_producer(metadata.clone(), accumulator);
+
+        let record = ProducerRecord::with_partition(
+            TOPIC.to_string(),
+            Some(2),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .unwrap();
+        let cluster = metadata.fetch();
+        assert_eq!(2, producer.partition(&record, Some(b"key"), Some(b"value"), &cluster));
+    }
+
+    /// `partitioner.ignore.keys=true` forces `UNKNOWN_PARTITION` even when a
+    /// non-empty key would otherwise hash, under murmur2 as well as the default.
+    #[test]
+    fn test_partition_ignore_keys_overrides_murmur2() {
+        let mut props = HashMap::new();
+        props.insert("partitioner.class".to_string(), "Murmur2RandomPartitioner".to_string());
+        props.insert("partitioner.ignore.keys".to_string(), "true".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        let metadata = create_metadata_with_topic(TOPIC, 3);
+        let accumulator = create_accumulator();
+        let producer = create_producer_with_config(config, metadata.clone(), accumulator);
+
+        let cluster = metadata.fetch();
+        assert_eq!(
+            record_metadata::UNKNOWN_PARTITION,
+            producer.partition_for_key_or_unknown(Some(b"key"), TOPIC, &cluster)
+        );
+    }
+
+    // =====================================================================
+    // PHASE-2 TEST ACCOUNTING — the pluggable-`Partitioner` `KafkaProducerTest` methods
+    //
+    // SCOPE CRITERION. A `KafkaProducerTest.java` method is in scope for Phase 2 iff its
+    // body sets `PARTITIONER_CLASS_CONFIG` or names one of the partitioner nested classes
+    // (`MockPartitioner` / `PartitionerForClientId` / `BuggyPartitioner` /
+    // `MonitorablePartitioner`) as its subject. That marker set is exactly five methods:
+    //
+    //   - testPartitionerClose (:668) .............. TRANSLATED -> test_partitioner_close
+    //   - negativePartitionShouldThrow (:2410) ..... TRANSLATED -> negative_partition_should_throw
+    //   - configurableObjectsShouldSeeGeneratedClientId (:2296)
+    //         ...... TRANSLATED (partitioner portion) -> configurable_objects_should_see_generated_client_id
+    //   - shouldCloseProperlyAndThrowIfInterrupted (:689) ....... N/A (see below)
+    //   - testMonitorablePlugins (:2828) ........................ N/A (see below)
+    //
+    // N/A justifications:
+    //
+    //   - shouldCloseProperlyAndThrowIfInterrupted asserts that `close()` blocks until an
+    //     in-flight `send` completes and that INTERRUPTING the closing thread surfaces an
+    //     `InterruptException`. Thread interruption (`Thread.interrupt()` /
+    //     `InterruptException`) has no Rust/Tokio analogue — the same gap the producer-
+    //     transaction rules record for `TransactionalRequestResult`. `MockPartitioner` is
+    //     incidental here (merely the configured `partitioner.class`), not the subject, so
+    //     this belongs to the close/interrupt surface, not Phase 2.
+    //   - testMonitorablePlugins exercises the `Plugin` / `Monitorable` metrics SPI, which
+    //     the Phase 2 spec places explicitly out of scope. `MonitorablePartitioner` is only
+    //     the vehicle; there is nothing partitioner-specific to translate.
+    //
+    // RUST-ONLY BEHAVIORAL TESTS. Java gets its partitioner round-trip coverage "for free"
+    // from a real/mock broker plus reflective `partitioner.class` loading. Rust has no
+    // reflection (a user partitioner is passed as an instance) and these unit tests do not
+    // stand up a broker, so five behavioral contracts that Java never asserts directly are
+    // pinned explicitly here:
+    //
+    //   - test_round_robin_partitioner_resolution_and_gating — `from_config` resolves a
+    //         built-in `partitioner.class` (both spellings) and a resolved partitioner
+    //         disables adaptive partitioning (KafkaProducer.java:428-433).
+    //   - test_round_robin_partitioner_used_once_per_record — a stateful partitioner is
+    //         consulted EXACTLY once per record on the send path (do_send computes it,
+    //         do_send_bytes short-circuits on the passed `Some(..)`).
+    //   - test_partitioner_receives_key_value_and_serialized_bytes — the typed key/value
+    //         and the serialized bytes are forwarded unchanged.
+    //   - test_explicit_partition_bypasses_partitioner — an explicit record partition
+    //         short-circuits `compute_partition` before the partitioner is consulted.
+    //   - test_explicit_partitioner_instance_wins_over_partitioner_class — an explicit
+    //         instance overrides a built-in `partitioner.class` (Java's
+    //         `getConfiguredInstance` returns the caller-provided instance).
+    // =====================================================================
+
+    // --- test-local partitioners (translated from KafkaProducerTest's nested classes) ---
+
+    /// Translated from `KafkaProducerTest.BuggyPartitioner` (`:2583-2595`): always
+    /// returns an invalid negative partition, exercising `compute_partition`'s
+    /// non-negative guard. Java's empty `close`/`configure` overrides are the trait's
+    /// default no-ops, so they are intentionally not overridden.
+    struct BuggyPartitioner;
+
+    impl<K, V> Partitioner<K, V> for BuggyPartitioner {
+        fn partition(
+            &self,
+            _topic: &str,
+            _key: Option<&K>,
+            _key_bytes: Option<&[u8]>,
+            _value: Option<&V>,
+            _value_bytes: Option<&[u8]>,
+            _cluster: &Cluster,
+        ) -> i32 {
+            -1
+        }
+    }
+
+    /// Translated from `KafkaProducerTest.PartitionerForClientId` (`:2521-2536`):
+    /// `partition` returns 0, and `configure` records the resolved `client.id` so a
+    /// test can assert the partitioner saw the generated id. Java accumulates into a
+    /// static `CLIENT_IDS` set; here the sink is an injected `Arc<Mutex<Vec<String>>>`
+    /// so tests running in parallel do not share it.
+    struct PartitionerForClientId {
+        client_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<K, V> Partitioner<K, V> for PartitionerForClientId {
+        fn configure(&mut self, configs: &HashMap<String, String>) {
+            if let Some(id) = configs.get(ProducerConfig::CLIENT_ID_CONFIG) {
+                self.client_ids.lock().unwrap().push(id.clone());
+            }
+        }
+
+        fn partition(
+            &self,
+            _topic: &str,
+            _key: Option<&K>,
+            _key_bytes: Option<&[u8]>,
+            _value: Option<&V>,
+            _value_bytes: Option<&[u8]>,
+            _cluster: &Cluster,
+        ) -> i32 {
+            0
+        }
+    }
+
+    /// One recorded `Partitioner::partition` invocation: the borrowed arguments
+    /// (captured as owned copies) and the partition the delegate returned.
+    #[derive(Debug, Clone)]
+    struct RecordedCall {
+        topic: String,
+        key: Option<String>,
+        key_bytes: Option<Vec<u8>>,
+        value: Option<String>,
+        value_bytes: Option<Vec<u8>>,
+        returned: i32,
+    }
+
+    /// A `Partitioner` decorator with no Java counterpart: it delegates to an inner
+    /// partitioner and records every `partition` call. It exists to probe two
+    /// contracts Java gets implicitly from a real broker — that a stateful partitioner
+    /// is consulted EXACTLY once per record, and that the producer forwards the typed
+    /// key/value and the serialized bytes unchanged. A justified `definition-of-done`
+    /// §7 addition (a test-only decorator, present only under `#[cfg(test)]`).
+    struct RecordingPartitioner {
+        inner: Box<dyn Partitioner<String, String>>,
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
+    }
+
+    impl Partitioner<String, String> for RecordingPartitioner {
+        fn partition(
+            &self,
+            topic: &str,
+            key: Option<&String>,
+            key_bytes: Option<&[u8]>,
+            value: Option<&String>,
+            value_bytes: Option<&[u8]>,
+            cluster: &Cluster,
+        ) -> i32 {
+            let returned = self.inner.partition(topic, key, key_bytes, value, value_bytes, cluster);
+            self.calls.lock().unwrap().push(RecordedCall {
+                topic: topic.to_string(),
+                key: key.cloned(),
+                key_bytes: key_bytes.map(|b| b.to_vec()),
+                value: value.cloned(),
+                value_bytes: value_bytes.map(|b| b.to_vec()),
+                returned,
+            });
+            returned
+        }
+    }
+
+    /// Seam constructor for a producer that owns a custom `partitioner` (the
+    /// `KafkaProducer::new` last argument). Metadata is pre-seeded (see
+    /// `create_metadata_with_topic`) and `sender_handle` is `None`, so `send()` and
+    /// `close()` neither block on metadata nor hang on a sender task — the send-path
+    /// partitioner tests need a producer that can actually append a record. NOTE the
+    /// `new()` seam stores the partitioner as-is and does NOT `configure` it or gate
+    /// adaptive partitioning; the `from_config`-based tests below cover those.
+    fn create_producer_with_partitioner(
+        config: ProducerConfig,
+        metadata: Arc<ProducerMetadata>,
+        accumulator: Arc<RecordAccumulator>,
+        partitioner: Box<dyn Partitioner<String, String>>,
+    ) -> KafkaProducer<String, String> {
+        let running = Arc::new(AtomicBool::new(true));
+        let force_close = Arc::new(AtomicBool::new(false));
+        let wakeup = Arc::new(Notify::new());
+
+        KafkaProducer::new(
+            &config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            metadata,
+            accumulator,
+            running,
+            force_close,
+            wakeup,
+            None,
+            default_time_provider(),
+            None,
+            Arc::new(Mutex::new(PendingRequests::new())),
+            Some(partitioner),
+        )
+    }
+
+    /// Translated from `KafkaProducerTest.testPartitionerClose` (`:667-686`).
+    ///
+    /// Java resolves the partitioner reflectively through `partitioner.class`, which
+    /// invokes the `MockPartitioner` constructor (bumping `INIT_COUNT`) and then
+    /// `configure`. `MockPartitioner` is a test-only type with no built-in
+    /// `partitioner.class` name, so here it is supplied as an explicit instance;
+    /// constructing it via `MockPartitioner::new()` bumps `INIT_COUNT` exactly as the
+    /// Java ctor does. `close()` then bumps `CLOSE_COUNT` (`KafkaProducer.java:1446`).
+    ///
+    /// The counters are process-global statics, so the whole body must hold
+    /// `lock_counters()` and reset at start AND end (Java's `finally`) to serialize
+    /// against the other counter-touching test (`mock_partitioner::test_counts_init_and_close`).
+    /// That serializer is a `std::sync::Mutex` guard (matching the codebase's
+    /// preference for CPU-bound state, and shared with the D6 test), and it must stay
+    /// held across the async `close()` — otherwise a parallel counter test could
+    /// interleave between the INIT and CLOSE assertions. Holding a `std` guard across
+    /// an `.await` is exactly what `clippy::await_holding_lock` forbids, so this is a
+    /// plain `#[test]` that drives `close()` on a dedicated current-thread runtime via
+    /// `block_on`: the guard spans a synchronous `block_on` call rather than an
+    /// `.await` point (and the close path never locks `COUNTER_GUARD`, so parking the
+    /// thread inside `block_on` while holding it cannot deadlock).
+    #[test]
+    fn test_partitioner_close() {
+        let _guard = mock_partitioner::lock_counters();
+        mock_partitioner::reset_counters();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let producer = create_producer_with_partitioner(
+                ProducerConfig::default(),
+                create_metadata_with_topic(TOPIC, 1),
+                create_accumulator(),
+                Box::new(mock_partitioner::MockPartitioner::new()),
+            );
+            assert_eq!(1, mock_partitioner::INIT_COUNT.load(Ordering::SeqCst));
+            assert_eq!(0, mock_partitioner::CLOSE_COUNT.load(Ordering::SeqCst));
+
+            producer.close().await.expect("seam producer closes cleanly");
+
+            assert_eq!(1, mock_partitioner::INIT_COUNT.load(Ordering::SeqCst));
+            assert_eq!(1, mock_partitioner::CLOSE_COUNT.load(Ordering::SeqCst));
+        });
+
+        // Cleanup since we use mutable process-global statics in MockPartitioner.
+        mock_partitioner::reset_counters();
+    }
+
+    /// Translated from `KafkaProducerTest.negativePartitionShouldThrow` (`:2410-2427`).
+    ///
+    /// A partitioner returning a negative partition makes `send()` fail with
+    /// `IllegalArgument` (Java: `IllegalArgumentException`). The exact message is
+    /// asserted (DoD §3): error-message content is part of the behavioral contract.
+    #[tokio::test]
+    async fn negative_partition_should_throw() {
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 1),
+            create_accumulator(),
+            Box::new(BuggyPartitioner),
+        );
+
+        let record = ProducerRecord::with_key("topic".to_string(), Some("key".to_string()), Some("value".to_string()));
+        let err = producer.send(record).await.expect_err("negative partition must be rejected");
+        match &err {
+            Error::LocalIllegalArgument(msg) => {
+                assert_eq!(
+                    msg.message(),
+                    "The partitioner generated an invalid partition number: -1. Partition number should always be non-negative."
+                );
+            },
+            other => panic!("Expected LocalIllegalArgument error, got: {:?}", other),
+        }
+    }
+
+    /// Translated from `KafkaProducerTest.configurableObjectsShouldSeeGeneratedClientId`
+    /// (`:2296-2310`), partitioner portion.
+    ///
+    /// A `configure`-able partitioner must see the generated `client.id` when the user
+    /// sets none. Java asserts the same for the two serializers and the interceptor
+    /// (`CLIENT_IDS.size() == 4`); Rust's `Serializer` has no `configure(client.id)`
+    /// hook and no `ProducerInterceptor` exists yet, so only the partitioner is checked
+    /// here — hence exactly ONE recorded id rather than four. The producer is built via
+    /// `from_config_with_partitioner` so `configure` actually runs (the `new()` seam
+    /// does not configure).
+    #[tokio::test]
+    async fn configurable_objects_should_see_generated_client_id() {
+        let client_ids = Arc::new(Mutex::new(Vec::new()));
+        let props = guard_props(&[]); // bootstrap only; NO client.id
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config_with_partitioner(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            Box::new(PartitionerForClientId { client_ids: Arc::clone(&client_ids) }),
+        )
+        .expect("constructs with an explicit partitioner");
+
+        assert!(!producer.client_id().is_empty(), "a client.id is generated when unset");
+        let recorded = client_ids.lock().unwrap();
+        assert_eq!(1, recorded.len(), "the partitioner's configure ran exactly once");
+        assert_eq!(
+            recorded[0].as_str(),
+            producer.client_id(),
+            "the partitioner saw the generated client.id"
+        );
+    }
+
+    /// A built-in `partitioner.class` (both the simple name and the fully-qualified
+    /// Java class name) is resolved by `from_config` into a live `partitioner`, and a
+    /// resolved partitioner turns OFF adaptive partitioning in the accumulator (Java
+    /// `KafkaProducer.java:428-433`: "no need ... if we use a custom partitioner"). The
+    /// control producer (no `partitioner.class`) keeps `partitioner = None` and adaptive
+    /// partitioning follows the config default.
+    ///
+    /// Rust-only behavioral test (Java never inspects these internals); it pins the
+    /// `from_config` resolution + accumulator gating D3/D4 added. `#[tokio::test]`:
+    /// `from_config` spawns the Sender task, which fails to reach localhost:9999
+    /// harmlessly and is dropped with the test.
+    #[tokio::test]
+    async fn test_round_robin_partitioner_resolution_and_gating() {
+        for name in [
+            "RoundRobinPartitioner",
+            "org.apache.kafka.clients.producer.RoundRobinPartitioner",
+        ] {
+            let props = guard_props(&[("partitioner.class", name)]);
+            let config = ProducerConfig::from_properties(&props).expect("valid config");
+            let producer = KafkaProducer::<String, String>::from_config(
+                config,
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+            )
+            .expect("RoundRobinPartitioner resolves");
+            assert!(
+                producer.partitioner.is_some(),
+                "partitioner.class={name} must resolve a partitioner"
+            );
+            assert!(
+                !producer.accumulator.enable_adaptive_partitioning_for_test(),
+                "a resolved partitioner must disable adaptive partitioning (partitioner.class={name})"
+            );
+        }
+
+        // Control: no partitioner.class -> no partitioner, adaptive follows config.
+        let props = guard_props(&[]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let adaptive_default = config.partitioner_adaptive_partitioning_enable;
+        let producer = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("default config constructs");
+        assert!(producer.partitioner.is_none(), "no partitioner.class -> no partitioner");
+        assert_eq!(
+            adaptive_default,
+            producer.accumulator.enable_adaptive_partitioning_for_test(),
+            "without a partitioner, adaptive partitioning follows partitioner.adaptive.partitioning.enable"
+        );
+    }
+
+    /// A stateful `RoundRobinPartitioner` used through the producer's send path is
+    /// consulted EXACTLY once per record and cycles through the topic's available
+    /// partitions. A recording decorator wraps the RoundRobin; four sends over a
+    /// 3-partition topic must produce four calls whose first three returned partitions
+    /// are a permutation of {0,1,2} and whose fourth repeats the first (the counter
+    /// wraps mod 3). The available-partition ORDER is not contractually fixed, so the
+    /// assertion is order-robust rather than hard-coded to `[0,1,2,0]`.
+    #[tokio::test]
+    async fn test_round_robin_partitioner_used_once_per_record() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let partitioner =
+            RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 3),
+            create_accumulator(),
+            Box::new(partitioner),
+        );
+
+        for _ in 0..4 {
+            let record = ProducerRecord::with_key("topic".to_string(), Some("k".to_string()), Some("v".to_string()));
+            producer.send(record).await.expect("send succeeds");
+        }
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(4, recorded.len(), "the partitioner is consulted exactly once per record");
+        let returned: Vec<i32> = recorded.iter().map(|c| c.returned).collect();
+        let mut first_cycle = returned[..3].to_vec();
+        first_cycle.sort_unstable();
+        assert_eq!(vec![0, 1, 2], first_cycle, "the first cycle visits every partition once");
+        assert_eq!(returned[0], returned[3], "the fourth record wraps back to the first partition");
+    }
+
+    /// The producer forwards the record's typed key/value AND the serialized bytes to
+    /// the partitioner unchanged. A single send of key "mykey"/value "myval" with no
+    /// explicit partition must record `key=Some("mykey")`, `key_bytes=b"mykey"`,
+    /// `value=Some("myval")`, `value_bytes=b"myval"` (the `StringSerializer` output).
+    #[tokio::test]
+    async fn test_partitioner_receives_key_value_and_serialized_bytes() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let partitioner =
+            RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 3),
+            create_accumulator(),
+            Box::new(partitioner),
+        );
+
+        let record =
+            ProducerRecord::with_key("topic".to_string(), Some("mykey".to_string()), Some("myval".to_string()));
+        producer.send(record).await.expect("send succeeds");
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(1, recorded.len());
+        let call = &recorded[0];
+        assert_eq!("topic", call.topic);
+        assert_eq!(Some("mykey".to_string()), call.key);
+        assert_eq!(Some(b"mykey".to_vec()), call.key_bytes);
+        assert_eq!(Some("myval".to_string()), call.value);
+        assert_eq!(Some(b"myval".to_vec()), call.value_bytes);
+    }
+
+    /// An explicit record partition short-circuits `compute_partition` before the
+    /// partitioner is consulted (it returns the given `Some(p)` immediately). A send
+    /// with an explicit partition therefore records ZERO partitioner calls and still
+    /// succeeds.
+    #[tokio::test]
+    async fn test_explicit_partition_bypasses_partitioner() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let partitioner =
+            RecordingPartitioner { inner: Box::new(RoundRobinPartitioner::new()), calls: Arc::clone(&calls) };
+        let producer = create_producer_with_partitioner(
+            ProducerConfig::default(),
+            create_metadata_with_topic("topic", 3),
+            create_accumulator(),
+            Box::new(partitioner),
+        );
+
+        let record =
+            ProducerRecord::with_partition("topic".to_string(), Some(2), Some("k".to_string()), Some("v".to_string()))
+                .unwrap();
+        producer.send(record).await.expect("send with explicit partition succeeds");
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "explicit partition must bypass the partitioner"
+        );
+    }
+
+    /// An explicit partitioner instance passed to `from_config_with_partitioner` wins
+    /// over a built-in `partitioner.class`, mirroring Java's `getConfiguredInstance`
+    /// returning the caller-provided instance. Verified via `configure`: only the
+    /// explicit `PartitionerForClientId` records the client.id (`RoundRobinPartitioner`'s
+    /// `configure` is the default no-op), so a single recorded id proves the explicit
+    /// instance — not the RoundRobin named by `partitioner.class` — was resolved and
+    /// configured.
+    #[tokio::test]
+    async fn test_explicit_partitioner_instance_wins_over_partitioner_class() {
+        let client_ids = Arc::new(Mutex::new(Vec::new()));
+        let props = guard_props(&[("partitioner.class", "RoundRobinPartitioner")]);
+        let config = ProducerConfig::from_properties(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::from_config_with_partitioner(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+            Box::new(PartitionerForClientId { client_ids: Arc::clone(&client_ids) }),
+        )
+        .expect("explicit instance overrides partitioner.class");
+
+        let recorded = client_ids.lock().unwrap();
+        assert_eq!(
+            1,
+            recorded.len(),
+            "the explicit PartitionerForClientId was configured, not RoundRobin"
+        );
+        assert_eq!(recorded[0].as_str(), producer.client_id());
+    }
+
     /// Tests that a record can be successfully sent and appended to the accumulator.
     ///
     /// Translated from `KafkaProducerTest.testFlushCompleteSendOfInflightBatches`
@@ -2229,52 +3523,76 @@ mod tests {
 
     /// Translated from `KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`.
     ///
-    /// Tests that delivery timeout must be >= linger.ms + request.timeout.ms.
-    /// Java throws ConfigException when the user explicitly sets an inconsistent
-    /// value; Rust returns Err(IllegalArgument).
+    /// `delivery.timeout.ms` must be >= `linger.ms + request.timeout.ms`. When the
+    /// user set it explicitly, Java throws `ConfigException` (`KafkaProducer.java:578`)
+    /// — and the Java test asserts `KafkaException.class`, so the error must answer
+    /// `true` to `is_kafka_error()`.
     #[test]
     fn test_delivery_timeout_and_linger_ms_config() {
-        let config = ProducerConfig {
-            delivery_timeout_ms: 1,
-            linger_ms: 10,
-            request_timeout_ms: 30_000,
-            ..Default::default()
-        };
+        let mut props = HashMap::new();
+        props.insert("client.id".to_string(), "testDeliveryTimeoutAndLingerMsConfig".to_string());
+        props.insert("bootstrap.servers".to_string(), "localhost:9999".to_string());
+        props.insert("delivery.timeout.ms".to_string(), "1000".to_string());
+        props.insert("linger.ms".to_string(), "1000".to_string());
+        props.insert("request.timeout.ms".to_string(), "1".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("these properties parse");
+        let log_context = LogContext::new("[test] ".to_string());
 
-        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
-        assert!(
-            result.is_err(),
-            "Should reject delivery_timeout_ms < linger_ms + request_timeout_ms"
+        let err = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context)
+            .expect_err("Should reject an explicit delivery_timeout_ms < linger_ms + request_timeout_ms");
+        assert_eq!(
+            err.message(),
+            "delivery.timeout.ms should be equal to or larger than linger.ms + request.timeout.ms"
         );
-        let err = result.unwrap_err();
-        match &err {
-            KafkaError::IllegalArgument(msg) => {
-                assert!(
-                    msg.contains(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
-                    "Error should mention delivery.timeout.ms: {}",
-                    msg
-                );
-                assert!(
-                    msg.contains(ProducerConfig::LINGER_MS_CONFIG),
-                    "Error should mention linger.ms: {}",
-                    msg
-                );
-                assert!(
-                    msg.contains(ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG),
-                    "Error should mention request.timeout.ms: {}",
-                    msg
-                );
-            },
-            other => panic!("Expected IllegalArgument error, got: {:?}", other),
-        }
+        assert!(matches!(err, Error::Config(_)), "Expected a Config error, got: {err:?}");
+        // `ConfigException extends KafkaException`, which is what the Java test asserts.
+        assert!(err.is_kafka_error(), "Java's ConfigException is a KafkaException");
+        assert!(!err.is_api_error(), "Java's ConfigException is not an ApiException");
+
+        // Second half of the Java test: linger.ms = 999 makes the sum exactly 1000,
+        // so construction succeeds.
+        props.insert("linger.ms".to_string(), "999".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("these properties parse");
+        assert_eq!(
+            KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context).unwrap(),
+            1000
+        );
+    }
+
+    /// Java's *other* arm: when `delivery.timeout.ms` was NOT supplied by the user,
+    /// an inconsistency is clamped up to `linger.ms + request.timeout.ms` and warned
+    /// about rather than rejected (`KafkaProducer.java:583-587`).
+    ///
+    /// `request.timeout.ms = 180000` with everything else defaulted
+    /// (`delivery.timeout.ms = 120000`, `linger.ms = 5`) is a legal Kafka
+    /// configuration: Java silently raises the delivery timeout to 180005.
+    #[test]
+    fn test_delivery_timeout_default_is_clamped_not_rejected() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "180000".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("these properties parse");
+        assert!(
+            !config.user_configured(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
+            "the test relies on delivery.timeout.ms coming from the default"
+        );
+        assert_eq!(config.delivery_timeout_ms, 120_000);
+        assert_eq!(config.linger_ms, 5);
+
+        let log_context = LogContext::new("[test] ".to_string());
+        let delivery_timeout_ms = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context)
+            .expect("an inconsistency the user did not ask for is clamped, not rejected");
+        assert_eq!(delivery_timeout_ms, 180_005, "clamped to linger.ms + request.timeout.ms");
     }
 
     /// Tests that configure_delivery_timeout accepts valid configurations.
     #[test]
     fn test_delivery_timeout_valid_config() {
+        let log_context = LogContext::new("[test] ".to_string());
+
         // Default values: delivery=120000, linger=5, request=30000
         let config = ProducerConfig::default();
-        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 120_000);
 
@@ -2285,7 +3603,7 @@ mod tests {
             request_timeout_ms: 30_000,
             ..Default::default()
         };
-        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 30_010);
     }
@@ -2347,8 +3665,8 @@ mod tests {
         let result = producer.wait_on_metadata("nonexistent-topic", None, now_ms, 100).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            KafkaError::Timeout(msg) => {
-                assert!(msg.contains("not present in metadata"), "Got: {}", msg);
+            Error::Timeout(msg) => {
+                assert!(msg.message().contains("not present in metadata"), "Got: {}", msg);
             },
             other => panic!("Expected Timeout error, got: {:?}", other),
         }
@@ -2433,7 +3751,7 @@ mod tests {
     /// (RecordTooLargeException), the callback is invoked with the error and
     /// a non-null RecordMetadata with appropriate defaults.
     #[tokio::test]
-    async fn test_callback_invoked_on_api_exception() {
+    async fn test_callback_invoked_on_api_error() {
         let config = ProducerConfig { max_request_size: 10, ..Default::default() };
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
@@ -2451,9 +3769,9 @@ mod tests {
         let mt = Arc::clone(&metadata_topic);
         let mo = Arc::clone(&metadata_offset);
 
-        let callback: Callback = Box::new(move |record_metadata, exception| {
+        let callback: Callback = Box::new(move |record_metadata, error| {
             inv.store(true, Ordering::SeqCst);
-            *err.lock().unwrap() = exception.is_some();
+            *err.lock().unwrap() = error.is_some();
             if let Some(rm) = record_metadata {
                 *meta.lock().unwrap() = true;
                 *mt.lock().unwrap() = rm.topic().to_string();
@@ -2488,7 +3806,7 @@ mod tests {
 
         // Future.get() should return the error
         let err = future.get().await.unwrap_err();
-        assert!(matches!(err, KafkaError::RecordTooLarge(_)));
+        assert!(matches!(err, Error::RecordTooLarge(_)));
     }
 
     /// Mirrors the `KafkaProducerTest.testCallbackAndInterceptorHandleError`
@@ -2502,7 +3820,7 @@ mod tests {
     /// placeholder metadata because it holds its own `callback` reference
     /// (`KafkaProducer.java:1056-1068`). Rust *moves* the callback into
     /// `append`, so the callback obligation (CLAUDE.md §5, §9.5) is only met
-    /// because `AppendError` hands it back — this test is the regression guard
+    /// because `AppendFailure` hands it back — this test is the regression guard
     /// for that hand-back.
     #[tokio::test]
     async fn test_callback_invoked_on_buffer_exhaustion() {
@@ -2558,7 +3876,7 @@ mod tests {
         assert!(future.is_done(), "the failed future should be immediately done");
         let future_error = future.get().await.unwrap_err();
         assert!(
-            matches!(future_error, KafkaError::BufferExhausted(_)),
+            matches!(future_error, Error::ProducerBufferExhausted(_)),
             "the future should report buffer exhaustion, got {:?}",
             future_error
         );
@@ -2618,13 +3936,13 @@ mod tests {
         };
 
         assert!(
-            matches!(error, KafkaError::Kafka(_)),
+            matches!(error, Error::KafkaError(_)),
             "the closed-mid-send failure must be a bare KafkaException, not an ApiException — \
-             `is_api_exception()` is what routes it away from the callback, got {:?}",
+             `is_api_error()` is what routes it away from the callback, got {:?}",
             error
         );
         assert_eq!("Producer closed while send in progress", error.message());
-        assert!(!error.is_api_exception(), "a bare KafkaException is not an ApiException");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException");
         assert!(error.is_kafka_error(), "it is still a KafkaException");
         assert_eq!(
             0,
@@ -2719,7 +4037,7 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::IllegalState(_)),
+            matches!(result.unwrap_err(), Error::LocalIllegalState(_)),
             "Expected IllegalState error after close"
         );
     }
@@ -2819,7 +4137,7 @@ mod tests {
 
         let mut topic_resp = MetadataResponseTopic::new();
         topic_resp.set_name(Some(invalid_topic.to_string()));
-        topic_resp.set_error_code(Errors::InvalidTopicException.code());
+        topic_resp.set_error_code(Errors::InvalidTopicError.code());
         topic_resp.set_is_internal(false);
         data.set_topics(vec![topic_resp]);
 
@@ -2835,9 +4153,9 @@ mod tests {
         let inv = Arc::clone(&callback_invoked);
         let err = Arc::clone(&got_error);
 
-        let callback: Callback = Box::new(move |_metadata, exception| {
+        let callback: Callback = Box::new(move |_metadata, error| {
             inv.store(true, Ordering::SeqCst);
-            err.store(exception.is_some(), Ordering::SeqCst);
+            err.store(error.is_some(), Ordering::SeqCst);
         });
 
         let record = ProducerRecord::with_value(invalid_topic.to_string(), Some("value".to_string()));
@@ -2855,10 +4173,17 @@ mod tests {
         // Verify the future contains the error
         let err = future.get().await.unwrap_err();
         assert!(
-            matches!(err, KafkaError::InvalidTopic(_)),
+            matches!(err, Error::InvalidTopic(_)),
             "Expected InvalidTopic error, got: {:?}",
             err
         );
+        // Java's `new InvalidTopicException(topic)` sets the message to the topic
+        // name and leaves `invalidTopics()` empty (the `(String message)` ctor).
+        assert_eq!(err.message(), "topic with spaces");
+        match &err {
+            Error::InvalidTopic(e) => assert!(e.invalid_topics().is_empty()),
+            _ => unreachable!(),
+        }
     }
 
     /// Tests that multiple calls to close are safe even with timeout.
@@ -2957,6 +4282,7 @@ mod tests {
                 default_time_provider(),
                 transaction_manager,
                 Arc::new(Mutex::new(PendingRequests::new())),
+                None,
             );
             let cluster = metadata.fetch();
 
@@ -2987,6 +4313,91 @@ mod tests {
             without, with,
             "enabling idempotence must add no per-record allocation to the send path; \
              got {without} without a TransactionManager vs {with} with one"
+        );
+    }
+
+    /// `definition-of-done.md` §10 / CLAUDE.md §11: dispatching through a custom
+    /// `Partitioner<K, V>` must not add a single per-record heap allocation to the
+    /// send path, matching the idempotence audit above
+    /// (`test_send_allocations_do_not_grow_when_idempotence_is_enabled`).
+    ///
+    /// `partition: None` is passed to `do_send_bytes` (rather than the pre-resolved
+    /// `Some(0)` the idempotence test uses) so `compute_partition` actually runs and,
+    /// when a partitioner is configured, calls into it — otherwise this would measure
+    /// nothing, since a pre-resolved partition short-circuits `compute_partition`
+    /// before the partitioner is ever consulted.
+    ///
+    /// `RoundRobinPartitioner` is the concrete partitioner under measurement: its
+    /// steady-state path is a `DashMap::get` on an already-present topic entry plus an
+    /// `AtomicI32` increment (CLAUDE.md §11), so the delta versus no partitioner
+    /// (built-in key-hash partitioning) must be zero.
+    #[tokio::test]
+    async fn test_send_allocations_do_not_grow_with_a_custom_partitioner() {
+        async fn steady_state_send_allocations(with_partitioner: bool) -> usize {
+            let partitioner: Option<Box<dyn Partitioner<String, String>>> = if with_partitioner {
+                Some(Box::new(RoundRobinPartitioner::new()))
+            } else {
+                None
+            };
+            let metadata = create_metadata_with_topic(TOPIC, 1);
+            // A large batch so every send below appends to the same batch.
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
+                1024 * 1024,
+                Compression::none(),
+                5,
+                100,
+                1000,
+                120_000,
+                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
+                None,
+            ));
+            let config = ProducerConfig::default();
+            let producer = KafkaProducer::<String, String>::new(
+                &config,
+                Box::new(StringSerializer),
+                Box::new(StringSerializer),
+                Arc::clone(&metadata),
+                accumulator,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Notify::new()),
+                None,
+                default_time_provider(),
+                None,
+                Arc::new(Mutex::new(PendingRequests::new())),
+                partitioner,
+            );
+            let cluster = metadata.fetch();
+
+            // Warm up: create the topic info, the deque and the batch, and (for the
+            // partitioner case) the RoundRobinPartitioner's per-topic counter entry.
+            for _ in 0..4 {
+                producer
+                    .do_send_bytes(TOPIC, None, Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .await
+                    .expect("append should succeed");
+            }
+
+            {
+                let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+                crate::test_alloc_tracker::AllocTrackingGuard::reset();
+                producer
+                    .do_send_bytes(TOPIC, None, Some(0), Some(b"k"), Some(b"v"), &[], None, 0, 0, &cluster)
+                    .await
+                    .expect("append should succeed");
+                let count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+                assert!(count > 0, "the tracker must actually be measuring");
+                count
+            }
+        }
+
+        let without = steady_state_send_allocations(false).await;
+        let with = steady_state_send_allocations(true).await;
+        assert_eq!(
+            without, with,
+            "dispatching through a custom Partitioner must add no per-record allocation \
+             to the send path; got {without} without a partitioner vs {with} with one"
         );
     }
 
@@ -3210,6 +4621,7 @@ mod tests {
                 time.as_provider(),
                 Some(Arc::clone(&transaction_manager)),
                 pending_requests,
+                None,
             );
 
             Self { producer, sender, accumulator, metadata, transaction_manager, time }
@@ -3356,10 +4768,7 @@ mod tests {
             .expect_err("no InitProducerId response is prepared");
         // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException, future,
         // INIT_TXN_TIMEOUT_MSG)`.
-        assert!(
-            matches!(error, KafkaError::Timeout(_)),
-            "expected a TimeoutException, got {error}"
-        );
+        assert!(matches!(error, Error::Timeout(_)), "expected a TimeoutException, got {error}");
         assert!(
             error.message().contains(INIT_TXN_TIMEOUT_MSG),
             "expected the InitTransactions timeout reason in the message, got {error}"
@@ -3402,10 +4811,7 @@ mod tests {
             .expect_err("the InitProducerId is unanswered");
         // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException, future,
         // INIT_TXN_TIMEOUT_MSG)` — the timeout message carries the init-txn reason.
-        assert!(
-            matches!(error, KafkaError::Timeout(_)),
-            "expected a TimeoutException, got {error}"
-        );
+        assert!(matches!(error, Error::Timeout(_)), "expected a TimeoutException, got {error}");
         assert!(
             error.message().contains(INIT_TXN_TIMEOUT_MSG),
             "expected the InitTransactions timeout reason in the message, got {error}"
@@ -3682,7 +5088,7 @@ mod tests {
     // `if let Err(e) = tm.lock().unwrap().maybe_add_partition(..)`, the scrutinee's
     // `MutexGuard` outlives the whole success arm (edition 2024 only shortens it
     // across `else`), and the body re-locked the same non-reentrant
-    // `std::sync::Mutex` through `handle_api_exception` →
+    // `std::sync::Mutex` through `handle_api_error` →
     // `maybe_transition_to_error_state`. Java's monitor is reentrant, so no Java test
     // could have caught it.
     // =====================================================================
@@ -3716,7 +5122,7 @@ mod tests {
             panic!(
                 "{what} did not return within {DEADLOCK_BOUND:?} — the send path is wedged. \
                  doSend's maybeAddPartition arm must release the TransactionManager guard \
-                 before handling the error, because handle_api_exception re-locks it."
+                 before handling the error, because handle_api_error re-locks it."
             )
         })
     }
@@ -3761,14 +5167,14 @@ mod tests {
         });
 
         assert!(
-            matches!(error, KafkaError::IllegalState(_)),
-            "IllegalStateException is not an ApiException, so it must be returned by send() \
+            matches!(error, Error::LocalIllegalState(_)),
+            "an illegal-state error is not an API error, so it must be returned by send() \
              rather than reported through the future; got {error:?}"
         );
         assert_eq!(
             error.to_string(),
             format!(
-                "IllegalStateError: Cannot add partition {TOPIC}-0 to transaction before completing a call to initTransactions"
+                "LocalIllegalStateError: Cannot add partition {TOPIC}-0 to transaction before completing a call to initTransactions"
             )
         );
     }
@@ -3792,12 +5198,12 @@ mod tests {
         });
 
         assert!(
-            matches!(error, KafkaError::IllegalState(_)),
+            matches!(error, Error::LocalIllegalState(_)),
             "expected the IllegalState to be returned by send(), got {error:?}"
         );
         assert_eq!(
             error.to_string(),
-            format!("IllegalStateError: Cannot add partition {TOPIC}-0 to transaction while in state  READY")
+            format!("LocalIllegalStateError: Cannot add partition {TOPIC}-0 to transaction while in state  READY")
         );
     }
 
@@ -3822,7 +5228,7 @@ mod tests {
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_abortable_error(KafkaError::with_message(Errors::InvalidTxnState, "cause"), Caller::App)
+                .transition_to_abortable_error(Error::with_message(Errors::InvalidTxnState, "cause"), Caller::App)
                 .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
 
             let error = ctx
@@ -3837,10 +5243,10 @@ mod tests {
         assert_eq!(
             error.error(),
             Errors::UnknownServerError,
-            "this crate spells Java's bare KafkaException as UnknownServerError; got {error:?}"
+            "this crate spells Java's bare Kafka error as UnknownServerError; got {error:?}"
         );
         assert_eq!(
-            error.to_string(),
+            error.message(),
             "Cannot execute transactional method because we are in an error state"
         );
         let last_error = last_error.expect("the manager keeps the abortable cause");
@@ -3857,34 +5263,39 @@ mod tests {
     /// asserts on. Same bare-`KafkaException` treatment as the abortable case.
     #[test]
     fn test_send_after_fatal_error_returns_error() {
-        let error = bounded_block_on("send after a fatal error", || async {
+        // The closure also reports the manager's state: Java records fatality there
+        // (`hasFatalError()` == `currentState == FATAL_ERROR`), not on the error.
+        let (error, still_fatal) = bounded_block_on("send after a fatal error", || async {
             let mut ctx = TxnProducerContext::transactional();
             init_transactions(&mut ctx).await;
             ctx.transaction_manager
                 .lock()
                 .unwrap()
                 .transition_to_fatal_error(
-                    KafkaError::with_message(Errors::ClusterAuthorizationFailed, "cause"),
+                    Error::with_message(Errors::ClusterAuthorizationFailed, "cause"),
                     Caller::App,
                 )
                 .expect("FATAL_ERROR is always reachable");
-            ctx.producer
+            let error = ctx
+                .producer
                 .send(misuse_record())
                 .await
-                .expect_err("a fatal error blocks further sends")
+                .expect_err("a fatal error blocks further sends");
+            let still_fatal = ctx.transaction_manager.lock().unwrap().has_fatal_error();
+            (error, still_fatal)
         });
 
         assert_eq!(error.error(), Errors::UnknownServerError, "got {error:?}");
         assert_eq!(
-            error.to_string(),
+            error.message(),
             "Cannot execute transactional method because we are in an error state"
         );
-        // A fatal-state error surfaced from `maybe_fail_with_error` must report
-        // `is_fatal()` so an application testing `if !err.is_fatal() { retry }`
-        // does not retry a dead (fenced/fatally-errored) producer forever. This
-        // is the production-path regression for the fatal-branch stamp added to
-        // `TransactionManager::maybe_fail_with_error`.
-        assert!(error.is_fatal(), "a fatal-state error must report is_fatal(): {error:?}");
+        // Java records fatality in the state machine, not on the exception
+        // (`TransactionManager.hasFatalError()` == `currentState == FATAL_ERROR`;
+        // `lastError` is a plain RuntimeException). The application distinguishes a
+        // dead producer by the exception *type* `maybe_fail_with_error` surfaces —
+        // asserted above — so the regression guard is the state, checked here.
+        assert!(still_fatal, "the producer must remain in the fatal state: {error:?}");
     }
 
     /// `send()` on a purely **idempotent** producer whose manager is in a fatal state,
@@ -3902,7 +5313,7 @@ mod tests {
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_fatal_error(KafkaError::with_message(Errors::UnsupportedVersion, "cause"), Caller::App)
+                .transition_to_fatal_error(Error::with_message(Errors::UnsupportedVersion, "cause"), Caller::App)
                 .expect("FATAL_ERROR is always reachable");
             ctx.producer
                 .send(misuse_record())
@@ -3917,7 +5328,7 @@ mod tests {
     /// takes `catch (ApiException e)` and is reported through the future.
     ///
     /// This is the arm that actually re-locks the manager —
-    /// `handle_api_exception` → `maybe_transition_to_error_state` — so it is the direct
+    /// `handle_api_error` → `maybe_transition_to_error_state` — so it is the direct
     /// regression test for the deadlock. `maybeFailWithError` re-raises a fenced
     /// producer as `ProducerFencedException` (`TransactionManager.java:1159`),
     /// which IS an `ApiException`.
@@ -3940,7 +5351,7 @@ mod tests {
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_abortable_error(KafkaError::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
+                .transition_to_abortable_error(Error::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
                 .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
             let fatal_before = ctx.transaction_manager.lock().unwrap().has_fatal_error();
 
@@ -3952,17 +5363,17 @@ mod tests {
             (send_result, fatal_before, fatal_after)
         });
 
-        let error = send_result.expect("an ApiException is reported through the future, not the call");
+        let error = send_result.expect("an API error is reported through the future, not the call");
         assert_eq!(
             error.error(),
             Errors::ProducerFenced,
-            "ProducerFencedException is an ApiException, so doSend returns a failed future; got {error:?}"
+            "a producer-fenced error is an API error, so doSend returns a failed future; got {error:?}"
         );
         // `maybeFailWithError` re-raises rather than re-throwing `lastError`, so the
         // message is the fresh one built at Java 1159-1161 — not the "fenced" text the
         // test seeded.
         assert_eq!(
-            error.to_string(),
+            error.message(),
             format!(
                 "Producer with transactionalId '{TRANSACTIONAL_ID}' and \
                  (producerId={PRODUCER_ID}, epoch={EPOCH}) has been fenced by another producer \
@@ -3975,7 +5386,7 @@ mod tests {
         );
         assert!(
             fatal_after,
-            "the ApiException block runs maybeTransitionToErrorState, which moves a fenced \
+            "the API-error block runs maybeTransitionToErrorState, which moves a fenced \
              producer from ABORTABLE_ERROR to FATAL_ERROR; the rethrow path would not"
         );
     }
@@ -3990,7 +5401,7 @@ mod tests {
     /// is now abortable — so the following `commitTransaction` must fail rather than
     /// commit a partial transaction.
     #[tokio::test]
-    async fn test_commit_transaction_with_record_too_large_exception() {
+    async fn test_commit_transaction_with_record_too_large_error() {
         let mut ctx =
             TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.request.size", "1000")], 1);
         ctx.time.set_auto_tick(1);
@@ -4003,10 +5414,10 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("an ApiException is reported through the future, not the call");
+            .expect("an API error is reported through the future, not the call");
         let send_error = future.get().await.expect_err("the record is too large");
         assert!(
-            matches!(send_error, KafkaError::RecordTooLarge(_)),
+            matches!(send_error, Error::RecordTooLarge(_)),
             "expected RecordTooLarge, got {:?}",
             send_error
         );
@@ -4052,16 +5463,16 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("a timeout is an ApiException and is reported through the future");
+            .expect("a timeout is an API error and is reported through the future");
         let send_error = future.get().await.expect_err("the topic never appears in metadata");
         assert!(
-            matches!(send_error, KafkaError::Timeout(_)),
+            matches!(send_error, Error::Timeout(_)),
             "expected Timeout, got {:?}",
             send_error
         );
 
         // Java asserts a bare `KafkaException` — see
-        // `test_commit_transaction_with_record_too_large_exception`.
+        // `test_commit_transaction_with_record_too_large_error`.
         let commit_error = drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect_err("the transaction is abortable after a failed send");
@@ -4090,16 +5501,16 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("a timeout is an ApiException and is reported through the future");
+            .expect("a timeout is an API error and is reported through the future");
         let send_error = future.get().await.expect_err("partition 2 never appears in metadata");
         assert!(
-            matches!(send_error, KafkaError::Timeout(_)),
+            matches!(send_error, Error::Timeout(_)),
             "expected Timeout, got {:?}",
             send_error
         );
 
         // Java asserts a bare `KafkaException` — see
-        // `test_commit_transaction_with_record_too_large_exception`.
+        // `test_commit_transaction_with_record_too_large_error`.
         let commit_error = drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect_err("the transaction is abortable after a failed send");
@@ -4142,7 +5553,7 @@ mod tests {
         data.set_brokers(vec![broker]);
         let mut invalid = MetadataResponseTopic::new();
         invalid.set_name(Some(INVALID_TOPIC.to_string()));
-        invalid.set_error_code(Errors::InvalidTopicException.code());
+        invalid.set_error_code(Errors::InvalidTopicError.code());
         data.set_topics(vec![invalid]);
         let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
         ctx.metadata.add(INVALID_TOPIC, ctx.time.milliseconds());
@@ -4154,16 +5565,16 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("an InvalidTopicException is reported through the future");
+            .expect("an invalid-topic error is reported through the future");
         let send_error = future.get().await.expect_err("the topic name is invalid");
         assert!(
-            matches!(send_error, KafkaError::InvalidTopic(_)),
+            matches!(send_error, Error::InvalidTopic(_)),
             "expected InvalidTopic, got {:?}",
             send_error
         );
 
         // Java asserts a bare `KafkaException` — see
-        // `test_commit_transaction_with_record_too_large_exception`.
+        // `test_commit_transaction_with_record_too_large_error`.
         let commit_error = drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect_err("the transaction is abortable after a failed send");
@@ -4717,6 +6128,7 @@ mod tests {
             time.as_provider(),
             Some(transaction_manager),
             pending_requests,
+            None,
         )
     }
 
@@ -5022,7 +6434,7 @@ mod tests {
     //          -> test_transaction_v2_produce_with_concurrent_transaction_error
     //   1503 testMeasureAbortTransactionDuration      -> test_measure_abort_transaction_duration
     //   1533 testCommitTransactionWithRecordTooLargeException
-    //          -> test_commit_transaction_with_record_too_large_exception
+    //          -> test_commit_transaction_with_record_too_large_error
     //   1563 testCommitTransactionWithMetadataTimeoutForMissingTopic
     //          -> test_commit_transaction_with_metadata_timeout_for_missing_topic
     //   1600 testCommitTransactionWithMetadataTimeoutForPartitionOutOfRange
@@ -5099,10 +6511,91 @@ mod tests {
         props
     }
 
-    fn from_guard_props(props: &HashMap<String, String>) -> Result<(), KafkaError> {
+    fn from_guard_props(props: &HashMap<String, String>) -> Result<(), Error> {
         let config = ProducerConfig::from_properties(props)?;
         KafkaProducer::<String, String>::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
             .map(|_| ())
+    }
+
+    /// Java wraps the whole constructor in `catch (Throwable t)` and rethrows
+    /// `new KafkaException("Failed to construct kafka producer", t)`
+    /// (`KafkaProducer.java:461-466`), so a caller has one class and one message to
+    /// guard construction with whatever went wrong inside. Every failure used to
+    /// escape raw, and one of them (`Error::local_illegal_argument` from the channel
+    /// builder) answered `false` to `is_kafka_error()`.
+    #[test]
+    fn construction_failures_are_wrapped_as_a_kafka_error() {
+        let props = HashMap::from([("bootstrap.servers".to_string(), "not-a-host-port".to_string())]);
+        let config = ProducerConfig::from_properties(&props).expect("the config itself parses");
+        let error = KafkaProducer::<String, String>::from_config(
+            config,
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .err()
+        .expect("an unparseable bootstrap.servers entry must fail construction");
+
+        assert_eq!(error.message(), "Failed to construct kafka producer");
+        // Java's replacement is a bare `KafkaException`.
+        assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
+        assert!(!error.is_api_error(), "a bare Kafka error is not an API error: {error:?}");
+        // The real cause is carried, not stringified into the message.
+        assert!(
+            error.source().is_some(),
+            "the underlying failure must be the wrapper's cause, not lost"
+        );
+    }
+
+    /// `doSend`'s inner `catch (KafkaException e)` around `waitOnMetadata`
+    /// (`KafkaProducer.java:993-998`) relabels a `close()` racing an in-flight send:
+    ///
+    /// ```java
+    /// if (metadata.isClosed())
+    ///     throw new KafkaException("Producer closed while send in progress", e);
+    /// ```
+    ///
+    /// Rust had neither layer: `await_update` ignored `is_closed()` and `do_send`
+    /// had no counterpart to this catch, so a caller shutting down while a first
+    /// send resolved metadata saw a stall followed by a misleading retriable
+    /// timeout.
+    #[tokio::test]
+    async fn closing_the_metadata_during_a_send_reports_the_close_not_a_timeout() {
+        // A producer whose metadata knows nothing, so `send` has to wait for it.
+        let metadata = Arc::new(ProducerMetadata::new(
+            100,
+            1000,
+            300_000,
+            300_000,
+            ClusterResourceListeners::new(),
+        ));
+        let accumulator = create_accumulator();
+        let config = ProducerConfig { max_block_ms: 30_000, ..Default::default() };
+        let producer = create_producer_with_config(config, Arc::clone(&metadata), accumulator);
+
+        metadata.close();
+
+        let started = std::time::Instant::now();
+        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
+        let error = producer
+            .send(record)
+            .await
+            .expect_err("a bare Kafka error is not an API error, so send() returns Err");
+
+        assert_eq!(error.message(), "Producer closed while send in progress");
+        assert!(error.is_kafka_error(), "got {error:?}");
+        assert!(!error.is_api_error(), "got {error:?}");
+        assert!(
+            !error.is_timeout_error(),
+            "the close must not be reported as a timeout: {error:?}"
+        );
+        assert_eq!(
+            error.source().expect("the awaitUpdate error is the cause").message(),
+            "Requested metadata update after close"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "it must fail fast, not wait out max.block.ms"
+        );
     }
 
     /// The default configuration must construct. `#[tokio::test]`: a successful
@@ -5198,7 +6691,7 @@ mod tests {
         const EXPECTED: &str = "Cannot use transactional methods without enabling transactions \
                                 by setting the transactional.id configuration property";
 
-        let expect_no_manager = |error: KafkaError, method: &str| {
+        let expect_no_manager = |error: Error, method: &str| {
             assert_eq!(error.message(), EXPECTED, "{} reported the wrong error", method);
         };
         expect_no_manager(producer.init_transactions().await.expect_err("no manager"), "init_transactions");

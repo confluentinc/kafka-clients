@@ -55,7 +55,7 @@ typedef struct {
 /* Per-record completion callback. Takes ownership of the handles (sync-call
  * semantics) and frees them after reading. */
 static void on_record(kafka_producer_RecordMetadata_t *metadata,
-                      kafka_common_KafkaError_t *error,
+                      kafka_common_Error_t *error,
                       void *user_data) {
     async_record_result_t *r = (async_record_result_t *)user_data;
     if (metadata != NULL) {
@@ -70,19 +70,19 @@ static void on_record(kafka_producer_RecordMetadata_t *metadata,
     }
     if (error != NULL) {
         r->had_error = 1;
-        r->error_code = kafka_common_KafkaError_code(error);
-        kafka_common_KafkaError_destroy(error);
+        r->error_code = kafka_common_Error_code(error);
+        kafka_common_Error_destroy(error);
     }
     r->thread_id = pthread_self();
     atomic_fetch_add(&r->fired, 1);
 }
 
 /* Operation (flush/close) completion callback. */
-static void on_operation(kafka_common_KafkaError_t *error, void *user_data) {
+static void on_operation(kafka_common_Error_t *error, void *user_data) {
     async_op_result_t *r = (async_op_result_t *)user_data;
     if (error != NULL) {
         r->had_error = 1;
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     r->thread_id = pthread_self();
     atomic_fetch_add(&r->fired, 1);
@@ -111,7 +111,7 @@ void test_send_with_key_and_value(void) {
     const uint8_t key[] = "my-key";
     const uint8_t value[] = "my-value";
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "test-topic", 2, -1,
         key, (int32_t)sizeof(key) - 1,
@@ -151,7 +151,7 @@ void test_send_null_key(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     const uint8_t value[] = "value-only";
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1,
@@ -169,7 +169,7 @@ void test_send_null_value(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     const uint8_t key[] = "key-only";
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         key, (int32_t)sizeof(key) - 1,
@@ -190,7 +190,7 @@ void test_multiple_sends_incrementing_offsets(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
     for (int i = 0; i < 3; i++) {
-        kafka_common_KafkaError_t *err = NULL;
+        kafka_common_Error_t *err = NULL;
         kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
             producer, "topic", 0, -1,
             NULL, -1, NULL, -1, &err);
@@ -218,7 +218,7 @@ void test_multiple_sends_incrementing_offsets(void) {
 void test_manual_complete(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
@@ -246,7 +246,7 @@ void test_manual_complete(void) {
 void test_manual_error(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
@@ -262,12 +262,12 @@ void test_manual_error(void) {
     TEST_ASSERT_NULL(metadata);
 
     /* Inspect error */
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_KafkaError_code(err));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_Error_code(err));
 
-    const char *msg = kafka_common_KafkaError_message(err);
+    const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
 
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_FutureRecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
@@ -294,7 +294,7 @@ void test_send_batch(void) {
     };
 
     kafka_producer_FutureRecordMetadata_t *futures[2] = { NULL, NULL };
-    kafka_common_KafkaError_t *errors[2] = { NULL, NULL };
+    kafka_common_Error_t *errors[2] = { NULL, NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
         producer, records, 2, futures, errors);
@@ -323,7 +323,7 @@ void test_send_batch_partial_failure(void) {
     };
 
     kafka_producer_FutureRecordMetadata_t *futures[3] = { NULL, NULL, NULL };
-    kafka_common_KafkaError_t *errors[3] = { NULL, NULL, NULL };
+    kafka_common_Error_t *errors[3] = { NULL, NULL, NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
         producer, records, 3, futures, errors);
@@ -333,16 +333,20 @@ void test_send_batch_partial_failure(void) {
     TEST_ASSERT_NOT_NULL(futures[0]);
     TEST_ASSERT_NULL(errors[0]);
 
-    /* Index 1: error */
+    /* Index 1: error. A null topic never reaches `ProducerRecord::new`; it is
+       rejected by the FFI argument check, which reports the protocol code
+       INVALID_REQUEST rather than a JDK-derived argument error. */
     TEST_ASSERT_NULL(futures[1]);
     TEST_ASSERT_NOT_NULL(errors[1]);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
+                            kafka_common_Error_code(errors[1]));
 
     /* Index 2: success */
     TEST_ASSERT_NOT_NULL(futures[2]);
     TEST_ASSERT_NULL(errors[2]);
 
     kafka_producer_FutureRecordMetadata_destroy(futures[0]);
-    kafka_common_KafkaError_destroy(errors[1]);
+    kafka_common_Error_destroy(errors[1]);
     kafka_producer_FutureRecordMetadata_destroy(futures[2]);
     kafka_producer_Producer_destroy(producer);
 }
@@ -354,7 +358,7 @@ void test_send_batch_partial_failure(void) {
 void test_close_then_send(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_close(producer, &err);
     TEST_ASSERT_NULL(err);
 
@@ -362,10 +366,14 @@ void test_close_then_send(void) {
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
+    /* `MockProducer::send` on a closed producer returns
+       `Error::local_illegal_state("MockProducer is already closed.")`. */
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                            kafka_common_Error_code(err));
     TEST_ASSERT_NULL(future);
 
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -384,7 +392,7 @@ void test_send_async_on_closed_producer_fires_callback(void) {
      * The task must fire it with the error rather than drop it — dropping it
      * would leak user_data and hang an app blocking on the callback. */
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_close(producer, &err);
     TEST_ASSERT_NULL(err);
 
@@ -417,7 +425,7 @@ void test_flush_drains_async_queued_send(void) {
     async_record_result_t result;
     memset(&result, 0, sizeof(result));
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -443,7 +451,7 @@ void test_close_drains_async_queued_send(void) {
     async_record_result_t result;
     memset(&result, 0, sizeof(result));
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -472,7 +480,7 @@ void test_send_async_then_destroy(void) {
         static const uint8_t value[] = "v";
         async_record_result_t result;
         memset(&result, 0, sizeof(result));
-        kafka_common_KafkaError_t *err = NULL;
+        kafka_common_Error_t *err = NULL;
         kafka_producer_Producer_send_async(
             producer, "topic", -1, -1, NULL, -1,
             value, (int32_t)sizeof(value) - 1,
@@ -490,7 +498,7 @@ void test_send_async_then_destroy(void) {
 void test_flush(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
@@ -513,7 +521,7 @@ void test_flush(void) {
 void test_error_inspection(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_close(producer, &err);
     TEST_ASSERT_NULL(err);
 
@@ -524,26 +532,70 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(future);
 
-    TEST_ASSERT_NOT_EQUAL(0, kafka_common_KafkaError_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                            kafka_common_Error_code(err));
 
-    const char *msg = kafka_common_KafkaError_message(err);
+    const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_TRUE(strlen(msg) > 0);
 
-    /* is_retriable and is_fatal should be callable */
-    (void)kafka_common_KafkaError_is_retriable(err);
-    (void)kafka_common_KafkaError_is_fatal(err);
+    /* Every hierarchy predicate (CLAUDE.md §10.4) on a real handle, asserted
+     * rather than merely called, so a predicate wired to the wrong Rust method
+     * fails here.
+     *
+     * The producer was closed above, so `send` returns
+     * `Error::local_illegal_state("MockProducer is already closed.")`, whose
+     * code is asserted above as `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`.
+     * That class is outside the `KafkaException` tree —
+     * `java.lang.IllegalStateException` is a sibling, not a subclass — so
+     * every predicate answers false, including `is_kafka_error`. Code and
+     * predicates are complementary, not redundant: the code names the class,
+     * while the false predicates tell a C caller "you misused the client"
+     * rather than "the broker reported an error". (Fatality is not exported:
+     * `common.requests` is not a supported Kafka API — CLAUDE.md §3.) */
+    TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_retriable_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_refresh_retriable_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_metadata_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_configuration_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_application_recoverable_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_offset_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_out_of_order_sequence_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_serialization_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_timeout_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_consumer_invalid_offset_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_consumer_offset_out_of_range_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_transaction_abortable_error(err));
 
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_Producer_destroy(producer);
 }
 
 void test_error_null_safety(void) {
-    TEST_ASSERT_EQUAL_INT32(0, kafka_common_KafkaError_code(NULL));
-    TEST_ASSERT_NULL(kafka_common_KafkaError_message(NULL));
-    TEST_ASSERT_FALSE(kafka_common_KafkaError_is_retriable(NULL));
-    TEST_ASSERT_FALSE(kafka_common_KafkaError_is_fatal(NULL));
-    kafka_common_KafkaError_destroy(NULL);  /* no-op */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_Error_code(NULL));
+    TEST_ASSERT_NULL(kafka_common_Error_message(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_retriable_error(NULL));
+    /* Every predicate is null-tolerant and answers false — the whole §10.4 set,
+     * so a newly added one cannot skip this contract. */
+    TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_refresh_retriable_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_metadata_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_configuration_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_application_recoverable_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_offset_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_out_of_order_sequence_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_serialization_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_timeout_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_consumer_invalid_offset_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_consumer_offset_out_of_range_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_transaction_abortable_error(NULL));
+    kafka_common_Error_destroy(NULL);  /* no-op */
 }
 
 // ---------------------------------------------------------------------------
@@ -553,7 +605,7 @@ void test_error_null_safety(void) {
 void test_mock_clear(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
@@ -582,14 +634,14 @@ void test_record_metadata_getters_from_batch(void) {
     };
 
     kafka_producer_FutureRecordMetadata_t *futures[1] = { NULL };
-    kafka_common_KafkaError_t *errors[1] = { NULL };
+    kafka_common_Error_t *errors[1] = { NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
         producer, records, 1, futures, errors);
     TEST_ASSERT_EQUAL_INT32(1, sent);
     TEST_ASSERT_NULL(errors[0]);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_RecordMetadata_t *metadata =
         kafka_producer_FutureRecordMetadata_get(futures[0], &err);
     TEST_ASSERT_NULL(err);
@@ -624,7 +676,7 @@ void test_send_async_with_key_and_value(void) {
     const uint8_t value[] = "my-value";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "async-topic", 3, -1,
         key, (int32_t)sizeof(key) - 1,
@@ -648,7 +700,7 @@ void test_send_async_null_key(void) {
     const uint8_t value[] = "value-only";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "topic", -1, -1,
         NULL, -1,
@@ -668,15 +720,20 @@ void test_send_async_validation_error(void) {
     const uint8_t value[] = "v";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     /* NULL topic is a synchronous validation error: out_error is set and the
-     * callback is NOT invoked. */
+     * callback is NOT invoked. The FFI argument check rejects it before
+     * `ProducerRecord::new` runs, so the code is the protocol INVALID_REQUEST
+     * (matching the sync `send_batch` path) rather than a JDK-derived
+     * argument error. */
     kafka_producer_Producer_send_async(
         producer, NULL, -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         on_record, &result, &err);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
+                            kafka_common_Error_code(err));
 
     /* Give any (erroneously dispatched) callback a chance to fire, then assert
      * none did. */
@@ -684,7 +741,7 @@ void test_send_async_validation_error(void) {
     nanosleep(&ts, NULL);
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
 
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_Producer_destroy(producer);
 }
 
@@ -701,7 +758,7 @@ void test_send_batch_async(void) {
     };
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *out_errors[3] = {NULL, NULL, NULL};
+    kafka_common_Error_t *out_errors[3] = {NULL, NULL, NULL};
     int32_t accepted = kafka_producer_Producer_send_batch_async(
         producer, records, 3, on_record, &result, out_errors);
     TEST_ASSERT_EQUAL_INT32(3, accepted);
@@ -720,7 +777,7 @@ void test_future_get_async(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     const uint8_t value[] = "fv";
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "fut-topic", 1, -1, NULL, -1, value, (int32_t)sizeof(value) - 1, &err);
     TEST_ASSERT_NULL(err);
@@ -772,7 +829,7 @@ void test_async_callbacks_single_thread(void) {
     async_record_result_t results[5];
     memset(results, 0, sizeof(results));
     for (int i = 0; i < 5; i++) {
-        kafka_common_KafkaError_t *err = NULL;
+        kafka_common_Error_t *err = NULL;
         kafka_producer_Producer_send_async(
             producer, "thread-topic", -1, -1, NULL, -1,
             value, (int32_t)sizeof(value) - 1,
@@ -809,29 +866,29 @@ void test_async_callbacks_single_thread(void) {
  * state error. Both share error code -1, so the message is the only separator —
  * which matters because a leaked transaction-control flag would turn every
  * expected-error assertion below into a silently passing guard rejection. */
-static int is_txn_guard_error(kafka_common_KafkaError_t *err) {
+static int is_txn_guard_error(kafka_common_Error_t *err) {
     if (err == NULL) {
         return 0;
     }
-    const char *msg = kafka_common_KafkaError_message(err);
+    const char *msg = kafka_common_Error_message(err);
     return msg != NULL && strstr(msg, "not safe for concurrent access") != NULL;
 }
 
 /* Asserts `err` is a real failure carrying `expected_fragment`, not the guard
  * rejection, then frees it. */
-static void assert_error_message(kafka_common_KafkaError_t *err, const char *expected_fragment) {
+static void assert_error_message(kafka_common_Error_t *err, const char *expected_fragment) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    const char *msg = kafka_common_KafkaError_message(err);
+    const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(msg, expected_fragment), msg);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 }
 
 /* Helper: sends one minimal record, asserting success, and frees the future. */
 static void send_one(kafka_producer_Producer_t *producer, const char *topic) {
     const uint8_t value[] = "v";
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, topic, -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -892,7 +949,7 @@ void test_transaction_commit_drains_async_queued_send(void) {
     TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
     TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -926,7 +983,7 @@ void test_transaction_abort_drains_async_queued_send(void) {
     TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
     TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -1128,12 +1185,17 @@ void test_transaction_commit_error_requires_abort(void) {
     TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(
         producer, false, 65656, NULL)); /* == 120 truncated to i16 */
 
-    kafka_common_KafkaError_t *err = kafka_producer_Producer_commit_transaction(producer);
+    kafka_common_Error_t *err = kafka_producer_Producer_commit_transaction(producer);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(120, kafka_common_KafkaError_code(err));
-    TEST_ASSERT_TRUE(kafka_common_KafkaError_txn_requires_abort(err));
-    TEST_ASSERT_FALSE(kafka_common_KafkaError_is_fatal(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_EQUAL_INT32(120, kafka_common_Error_code(err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_transaction_abortable_error(err));
+    /* Fatality is deliberately not exported (CLAUDE.md §3: `common.requests` is
+     * not a supported Kafka API). `request_utils::is_fatal_error` is
+     * authentication || authorization || one of five standalone classes, and
+     * TRANSACTION_ABORTABLE is none of them — so assert the exported halves. */
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(err));
+    kafka_common_Error_destroy(err);
 
     /* -1 is UnknownServerError, a perfectly installable code — clearing is a
      * separate flag, not a reserved code. */
@@ -1141,8 +1203,8 @@ void test_transaction_commit_error_requires_abort(void) {
         producer, false, -1, NULL));
     err = kafka_producer_Producer_commit_transaction(producer);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(-1, kafka_common_KafkaError_code(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_common_Error_code(err));
+    kafka_common_Error_destroy(err);
 
     /* Clearing must actually remove the installed error: prove it against
      * commit_transaction itself, which is the call the hook affects. */
@@ -1168,15 +1230,15 @@ void test_transaction_success_does_not_require_abort(void) {
     /* Begin twice: the second call is an ordinary illegal-state failure, which
      * must NOT be reported as requiring an abort. */
     TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
-    kafka_common_KafkaError_t *err = kafka_producer_Producer_begin_transaction(producer);
+    kafka_common_Error_t *err = kafka_producer_Producer_begin_transaction(producer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_FALSE(kafka_common_KafkaError_txn_requires_abort(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "Transaction already started"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_FALSE(kafka_common_Error_is_transaction_abortable_error(err));
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "Transaction already started"));
+    kafka_common_Error_destroy(err);
 
     /* Null handle is defined as false, like the other error accessors. */
-    TEST_ASSERT_FALSE(kafka_common_KafkaError_txn_requires_abort(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_transaction_abortable_error(NULL));
 
     TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
     kafka_producer_Producer_destroy(producer);
@@ -1214,7 +1276,7 @@ void test_transaction_commit_flushes_pending_sends(void) {
     const uint8_t value[] = "v";
     kafka_producer_FutureRecordMetadata_t *futures[3];
     for (int i = 0; i < 3; i++) {
-        kafka_common_KafkaError_t *err = NULL;
+        kafka_common_Error_t *err = NULL;
         futures[i] = kafka_producer_Producer_send(
             producer, "txn-topic", -1, -1, NULL, -1,
             value, (int32_t)sizeof(value) - 1,
@@ -1230,7 +1292,7 @@ void test_transaction_commit_flushes_pending_sends(void) {
 
     for (int i = 0; i < 3; i++) {
         TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
-        kafka_common_KafkaError_t *err = NULL;
+        kafka_common_Error_t *err = NULL;
         kafka_producer_RecordMetadata_t *metadata =
             kafka_producer_FutureRecordMetadata_get(futures[i], &err);
         TEST_ASSERT_NULL(err);
@@ -1245,28 +1307,28 @@ void test_transaction_commit_flushes_pending_sends(void) {
 
 void test_transaction_null_producer(void) {
     /* Null handle: an error handle, never a crash (mirrors the other ops). */
-    kafka_common_KafkaError_t *err = kafka_producer_Producer_init_transactions(NULL);
+    kafka_common_Error_t *err = kafka_producer_Producer_init_transactions(NULL);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     err = kafka_producer_Producer_begin_transaction(NULL);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     err = kafka_producer_Producer_commit_transaction(NULL);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     err = kafka_producer_Producer_abort_transaction(NULL);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     /* A null group_metadata is rejected without touching the producer. */
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
     err = kafka_producer_Producer_send_offsets_to_transaction(
         producer, NULL, NULL, NULL, NULL, NULL, 0, NULL);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_Producer_destroy(producer);
 
     /* The mock hook is a no-op on a null handle, clearing included. */
@@ -1301,16 +1363,16 @@ typedef struct {
     char message[256];
 } async_op_error_result_t;
 
-static void on_operation_capture(kafka_common_KafkaError_t *error, void *user_data) {
+static void on_operation_capture(kafka_common_Error_t *error, void *user_data) {
     async_op_error_result_t *r = (async_op_error_result_t *)user_data;
     if (error != NULL) {
         r->had_error = 1;
         r->was_guard_error = is_txn_guard_error(error);
-        const char *msg = kafka_common_KafkaError_message(error);
+        const char *msg = kafka_common_Error_message(error);
         if (msg != NULL) {
             strncpy(r->message, msg, sizeof(r->message) - 1);
         }
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -1385,7 +1447,7 @@ void test_transaction_async_commit_drains_async_queued_send(void) {
     TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
     TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -1421,7 +1483,7 @@ void test_transaction_async_abort_drains_async_queued_send(void) {
     TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
     TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_send_async(
         producer, "txn-topic", -1, -1, NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -1613,7 +1675,7 @@ void test_send_with_callback_fires_metadata_on_complete_next(void) {
     const uint8_t value[] = "cb-value";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "cb-topic", 4, -1,
         key, (int32_t)sizeof(key) - 1,
@@ -1657,7 +1719,7 @@ void test_send_with_callback_fires_error_on_error_next(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "cb-err-topic", -1, -1,
         NULL, -1, NULL, -1,
@@ -1687,9 +1749,9 @@ void test_send_with_callback_fires_error_on_error_next(void) {
         kafka_producer_FutureRecordMetadata_get(future, &err);
     TEST_ASSERT_NULL(metadata);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(result.error_code, kafka_common_KafkaError_code(err));
+    TEST_ASSERT_EQUAL_INT32(result.error_code, kafka_common_Error_code(err));
 
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_FutureRecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
 }
@@ -1699,7 +1761,7 @@ void test_send_with_callback_future_and_callback_agree(void) {
     const uint8_t value[] = "agree";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "agree-topic", 7, -1,
         NULL, -1,
@@ -1736,7 +1798,7 @@ void test_send_with_callback_runs_on_dispatcher_thread(void) {
     const uint8_t value[] = "v";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
         producer, "cb-thread-topic", -1, -1,
         NULL, -1,
@@ -1759,7 +1821,7 @@ void test_send_with_callback_validation_error_no_callback(void) {
     const uint8_t value[] = "v";
 
     async_record_result_t result = {0};
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     /* NULL topic is a synchronous validation error: no future is returned,
      * out_error is set and the callback is NOT invoked. */
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
@@ -1769,7 +1831,7 @@ void test_send_with_callback_validation_error_no_callback(void) {
         on_record, &result, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     /* A non-null key pointer with a negative length is ignored (no key), but a
      * null key with a non-negative length is a validation error too. */
@@ -1781,7 +1843,7 @@ void test_send_with_callback_validation_error_no_callback(void) {
         on_record, &result, &err);
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     /* Give any (erroneously dispatched) callback a chance to fire, then assert
      * none did. */

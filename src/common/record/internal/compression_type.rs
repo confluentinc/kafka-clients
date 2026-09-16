@@ -16,8 +16,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
 
-use crate::common::KafkaError;
-use crate::common::protocol::Errors;
+use crate::common::Error;
 
 /// The compression type to use.
 ///
@@ -59,6 +58,24 @@ impl CompressionType {
         }
     }
 
+    /// The names of every compression type, in declaration order.
+    ///
+    /// Stands for Java's `Utils.enumOptions(CompressionType.class)`, which maps
+    /// each enum constant through `toString()` — and `CompressionType.toString()`
+    /// returns `name` (`CompressionType.java:192-195`). Used by the
+    /// `compression.type` config validator to build `ConfigDef`'s
+    /// "String must be one of: …" message. Mirrors the existing
+    /// `SecurityProtocol::names()` precedent.
+    pub fn names() -> [&'static str; Self::COUNT] {
+        [
+            Self::None.name(),
+            Self::Gzip.name(),
+            Self::Snappy.name(),
+            Self::Lz4.name(),
+            Self::Zstd.name(),
+        ]
+    }
+
     /// Returns the initial compression ratio for this type.
     pub fn rate(self) -> f32 {
         1.0
@@ -68,19 +85,23 @@ impl CompressionType {
     ///
     /// # Errors
     ///
-    /// Returns a `KafkaError` if the ID is not recognized, matching Java's
+    /// Returns a `Error` if the ID is not recognized, matching Java's
     /// `IllegalArgumentException` thrown by `CompressionType.forId()`.
-    pub fn for_id(id: u8) -> Result<Self, KafkaError> {
+    pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {
             0 => Ok(Self::None),
             1 => Ok(Self::Gzip),
             2 => Ok(Self::Snappy),
             3 => Ok(Self::Lz4),
             4 => Ok(Self::Zstd),
-            _ => Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("Unknown compression type id: {id}"),
-            )),
+            // Java throws `IllegalArgumentException` (`CompressionType.java:157`),
+            // a plain `RuntimeException` OUTSIDE the `KafkaException` hierarchy.
+            // `Error::with_message(Errors::UnknownServerError, ..)` would resolve
+            // the code to `UnknownServerException`, flipping both
+            // `is_kafka_error()` and `is_api_error()` to `true` — which lets the
+            // error be swallowed by the consumer's `catch (KafkaException e)`
+            // guards that Java lets it escape.
+            _ => Err(Error::local_illegal_argument(format!("Unknown compression type id: {id}"))),
         }
     }
 
@@ -88,19 +109,19 @@ impl CompressionType {
     ///
     /// # Errors
     ///
-    /// Returns a `KafkaError` if the name is not recognized, matching Java's
+    /// Returns a `Error` if the name is not recognized, matching Java's
     /// `IllegalArgumentException` thrown by `CompressionType.forName()`.
-    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
+    pub fn for_name(name: &str) -> Result<Self, Error> {
         match name {
             "none" => Ok(Self::None),
             "gzip" => Ok(Self::Gzip),
             "snappy" => Ok(Self::Snappy),
             "lz4" => Ok(Self::Lz4),
             "zstd" => Ok(Self::Zstd),
-            _ => Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("Unknown compression type name: {name}"),
-            )),
+            // Java: `throw new IllegalArgumentException("Unknown compression name: " + name)`
+            // (`CompressionType.java:173`). See `for_id` for why this must not be
+            // an `Errors::UnknownServerError`-coded error.
+            _ => Err(Error::local_illegal_argument(format!("Unknown compression name: {name}"))),
         }
     }
 
@@ -187,7 +208,16 @@ mod tests {
     #[test]
     fn test_for_id_unknown() {
         let err = CompressionType::for_id(5).unwrap_err();
-        assert!(err.message().contains("Unknown compression type id: 5"));
+        assert_eq!(err.message(), "Unknown compression type id: 5");
+        // Java throws `IllegalArgumentException` (`CompressionType.java:157`), which
+        // is neither a `KafkaException` nor an `ApiException`. A code-resolved
+        // `UnknownServerError` would answer `true` to both.
+        assert!(
+            matches!(err, Error::LocalIllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert!(!err.is_kafka_error(), "Java's IllegalArgumentException is not a KafkaException");
+        assert!(!err.is_api_error(), "Java's IllegalArgumentException is not an ApiException");
     }
 
     #[test]
@@ -202,7 +232,15 @@ mod tests {
     #[test]
     fn test_for_name_unknown() {
         let err = CompressionType::for_name("unknown").unwrap_err();
-        assert!(err.message().contains("Unknown compression type name: unknown"));
+        // Java's literal text is "Unknown compression name: " (`CompressionType.java:173`) —
+        // no "type" word, unlike `forId`'s message.
+        assert_eq!(err.message(), "Unknown compression name: unknown");
+        assert!(
+            matches!(err, Error::LocalIllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert!(!err.is_kafka_error(), "Java's IllegalArgumentException is not a KafkaException");
+        assert!(!err.is_api_error(), "Java's IllegalArgumentException is not an ApiException");
     }
 
     #[test]

@@ -20,7 +20,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.serialization.StringSerializer`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::serialization::Serializer;
 
 /// Serializes strings to UTF-8 encoded bytes.
@@ -41,13 +41,13 @@ impl StringSerializer {
 }
 
 impl Serializer<str> for StringSerializer {
-    fn serialize(&self, _topic: &str, data: Option<&str>) -> Result<Option<Vec<u8>>, KafkaError> {
+    fn serialize(&self, _topic: &str, data: Option<&str>) -> Result<Option<Vec<u8>>, Error> {
         Ok(data.map(|s| s.as_bytes().to_vec()))
     }
 }
 
 impl Serializer<String> for StringSerializer {
-    fn serialize(&self, _topic: &str, data: Option<&String>) -> Result<Option<Vec<u8>>, KafkaError> {
+    fn serialize(&self, _topic: &str, data: Option<&String>) -> Result<Option<Vec<u8>>, Error> {
         Ok(data.map(|s| s.as_bytes().to_vec()))
     }
 }
@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn test_serialize_null() {
         let serializer = StringSerializer::new();
-        let result: Result<Option<Vec<u8>>, KafkaError> = Serializer::<str>::serialize(&serializer, "topic", None);
+        let result: Result<Option<Vec<u8>>, Error> = Serializer::<str>::serialize(&serializer, "topic", None);
         assert_eq!(result.unwrap(), None);
     }
 

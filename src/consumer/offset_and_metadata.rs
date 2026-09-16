@@ -19,7 +19,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// The Kafka offset commit API allows users to provide additional metadata
 /// (in the form of a string) when an offset is committed. This can be useful
@@ -44,9 +44,9 @@ impl OffsetAndMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` is negative
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative
     /// (matching Java's `IllegalArgumentException`).
-    pub fn new(offset: i64) -> Result<Self, KafkaError> {
+    pub fn new(offset: i64) -> Result<Self, Error> {
         Self::with_leader_epoch(offset, None, String::new())
     }
 
@@ -56,8 +56,8 @@ impl OffsetAndMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` is negative.
-    pub fn with_metadata(offset: i64, metadata: impl Into<String>) -> Result<Self, KafkaError> {
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
+    pub fn with_metadata(offset: i64, metadata: impl Into<String>) -> Result<Self, Error> {
         Self::with_leader_epoch(offset, None, metadata)
     }
 
@@ -69,14 +69,14 @@ impl OffsetAndMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` is negative.
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
     pub fn with_leader_epoch(
         offset: i64,
         leader_epoch: Option<i32>,
         metadata: impl Into<String>,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
         if offset < 0 {
-            return Err(KafkaError::illegal_argument("Invalid negative offset"));
+            return Err(Error::local_illegal_argument("Invalid negative offset"));
         }
         // Java's constructor normalizes a null metadata string to the empty
         // string ("NO_METADATA"). In Rust, callers can pass `""` directly;

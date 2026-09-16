@@ -98,6 +98,16 @@ mod tests {
         assert_eq!(buffer.lines[0], "hello");
     }
 
+    /// Translated from `CodeBufferTest.testWrite`
+    /// (`kafka/generator/src/test/java/org/apache/kafka/message/CodeBufferTest.java:34`).
+    ///
+    /// The two string literals below are **Java source text** — the fixture Java's
+    /// own test feeds through `CodeBuffer` and then asserts byte-for-byte. The
+    /// word `Exception` in them is the Java `throws` keyword's operand inside that
+    /// fixture, not this crate's error vocabulary; rewording it would break parity
+    /// with the Java test (DoD #3) without removing any Rust-side use of the term.
+    /// CLAUDE.md §2's ban is on the word in *Rust* code, and exempts text about the
+    /// Java client — which a verbatim Java-source fixture is. Do not "fix" it.
     #[test]
     fn test_write() {
         let mut buffer = CodeBuffer::new();

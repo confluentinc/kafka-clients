@@ -1,6 +1,6 @@
 ---
 name: macos-verify-docker-multilang-blocked
-description: macOS multilanguage Docker arms — the DEFAULT `make verify` arms self-skip, but the `*.macos` Dockerfiles + `-macos` make targets ARE a working path that builds everything inside the container
+description: macOS multilanguage Docker arms — the DEFAULT `make verify` arms self-skip, but the `*.macos` Dockerfiles + `-macos` make targets ARE a working path that builds everything inside the container; also pins the `build-python` root cause (host python3=3.9.6 < pyproject requires-python >=3.10)
 metadata:
   type: project
 ---
@@ -18,6 +18,24 @@ other txn scenarios on this arm64 macOS box.
 and print a SKIP, because `Dockerfile.grpc` / `Dockerfile.grpc.async` COPY the
 *host-built* `target/release/libconfluent_kafka.{so,a}` — Mach-O / absent on
 macOS. That guard is honest and unchanged.
+
+**Root cause of the `build-python` denial (verified 2026-09-08):** a plain
+`make verify` fails earlier than the Docker arms — at `build-python`'s
+`pip install -e .` — with `ERROR: Package 'confluent-kafka-rust-python' requires
+a different Python: 3.9.6 not in '>=3.10'`. The host default `python3` is 3.9.6;
+`bindings/python/pyproject.toml` line 9 declares `requires-python = ">=3.10"`;
+and the `build-python` target hardcodes `python3` for the venv, so it ignores the
+`python3.12` that IS on PATH. `make verify` therefore exits 2 at `build`
+(before `format-check`/`lint`/`test`/`check-bindings` run). Everything upstream
+passes clean: `build-rust-all-features` (release) compiles, and `build-c` builds
+all C targets to 100% (`producer_perf_test skipped: librdkafka not found` is an
+optional target, not a failure). To exercise the Rust + C arms without the Python
+blocker, run them directly: the Rust quartet (`cargo build`, `cargo test`,
+`cargo xtask format-check`, `cargo xtask lint`, `cargo xtask check-bindings`) and
+`make test-c` (runs `ctest` over 7 self-contained FFI unit tests — no broker;
+`test-integration-c` self-skips on Darwin). If a future task truly needs the local
+pytest arm, create the venv with `python3.12` by hand rather than editing the
+pinned `requires-python`.
 
 **The working macOS path — `*.macos` Dockerfiles build the lib in-container.**
 `bindings/python/Dockerfile.grpc.macos`, `Dockerfile.grpc.async.macos`, and

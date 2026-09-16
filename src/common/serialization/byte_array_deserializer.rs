@@ -18,7 +18,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.serialization.ByteArrayDeserializer`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::serialization::Deserializer;
 
 /// Deserializes byte arrays by returning the bytes unchanged.
@@ -44,7 +44,7 @@ impl ByteArrayDeserializer {
 }
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }

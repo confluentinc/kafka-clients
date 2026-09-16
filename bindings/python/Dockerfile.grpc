@@ -90,6 +90,10 @@ COPY --from=builder /workspace/bindings/python/admin_service_pb2.py /app/admin_s
 COPY --from=builder /workspace/bindings/python/admin_service_pb2_grpc.py /app/admin_service_pb2_grpc.py
 # grpc_server.py imports the shared translation helpers from grpc_translate.py.
 COPY bindings/python/grpc_translate.py /app/grpc_translate.py
+# _error_code.py is generated from kafka_common_ErrorCode_t by
+# `cargo xtask generate-error-codes`; grpc_translate.py and the servicers
+# import it to stamp real codes on their own synthetic errors.
+COPY bindings/python/_error_code.py /app/_error_code.py
 COPY bindings/python/grpc_server.py /app/grpc_server.py
 
 # The Python extension was linked with rpath pointing at the original
