@@ -515,7 +515,7 @@ mod grpc_backends {
         async fn create(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
             ))
@@ -524,7 +524,7 @@ mod grpc_backends {
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "dotnet").await
         }
 
@@ -567,7 +567,7 @@ mod grpc_backends {
         async fn create(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
             ))
@@ -576,7 +576,7 @@ mod grpc_backends {
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "dotnet_async").await
         }
 
