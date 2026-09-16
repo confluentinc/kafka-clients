@@ -42,10 +42,10 @@
 
 use std::io::{self, Read, Write};
 
+use crate::common::InvalidRecordError;
 use crate::common::header::Header;
 use crate::common::header::internals::RecordHeader;
 use crate::common::protocol::varint;
-use crate::common::record::InvalidRecordError;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::RecordBatch;
 

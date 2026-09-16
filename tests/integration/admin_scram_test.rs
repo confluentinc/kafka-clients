@@ -106,7 +106,7 @@ async fn alter<B: AdminBackend>(admin: &B, user: &str, alteration: UserScramCred
 async fn describe_one<B: AdminBackend>(
     admin: &B,
     user: &str,
-) -> Option<Result<confluent_kafka::admin::UserScramCredentialsDescription, confluent_kafka::common::KafkaError>> {
+) -> Option<Result<confluent_kafka::admin::UserScramCredentialsDescription, confluent_kafka::common::Error>> {
     admin
         .describe_user_scram_credentials(
             std::slice::from_ref(&user.to_string()),

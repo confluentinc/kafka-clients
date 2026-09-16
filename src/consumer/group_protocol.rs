@@ -19,7 +19,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// The group protocol that the consumer uses.
 ///
@@ -49,14 +49,14 @@ impl GroupProtocol {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `name` is not a recognized
+    /// Returns [`Error::LocalIllegalArgument`] if `name` is not a recognized
     /// group protocol (matching Java's `IllegalArgumentException` from
     /// `Enum.valueOf`).
-    pub fn of(name: &str) -> Result<Self, KafkaError> {
+    pub fn of(name: &str) -> Result<Self, Error> {
         match name.to_ascii_uppercase().as_str() {
             "CLASSIC" => Ok(Self::Classic),
             "CONSUMER" => Ok(Self::Consumer),
-            _ => Err(KafkaError::illegal_argument(format!(
+            _ => Err(Error::local_illegal_argument(format!(
                 "No enum constant org.apache.kafka.clients.consumer.GroupProtocol.{name}"
             ))),
         }
@@ -76,7 +76,7 @@ impl fmt::Display for GroupProtocol {
 }
 
 impl FromStr for GroupProtocol {
-    type Err = KafkaError;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::of(s)

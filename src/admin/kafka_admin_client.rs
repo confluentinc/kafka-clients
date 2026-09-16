@@ -43,6 +43,7 @@
 //! controller/least-loaded node selection never needs the
 //! `LeastLoadedBrokerOrActiveKController` provider.
 
+use crate::{kafka_debug, kafka_error};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,6 +64,7 @@ use crate::alter_user_scram_credentials_request_data::{
 use crate::client_utils;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
@@ -86,7 +88,7 @@ use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism a
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{
-    Cluster, GroupState, GroupType, KafkaError, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
+    Cluster, Error, GroupState, GroupType, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
 };
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
@@ -106,7 +108,6 @@ use crate::incremental_alter_configs_request_data::{
     AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequestData,
 };
 use crate::kafka_client::KafkaClient;
-use crate::kafka_debug;
 use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
@@ -237,6 +238,9 @@ struct Shared {
     /// Cache of partition-to-leader mappings shared across driver-backed calls
     /// (`deleteRecords`), mirroring `KafkaAdminClient.partitionLeaderCache`.
     partition_leader_cache: Arc<PartitionLeaderCache>,
+    /// Prefix for log lines emitted on the application side (`close`), mirroring
+    /// `KafkaAdminClient.logContext`.
+    log_context: LogContext,
 }
 
 /// The administrative client for Kafka.
@@ -257,7 +261,25 @@ impl KafkaAdminClient {
     ///
     /// Returns an error if the bootstrap addresses cannot be resolved or the
     /// channel builder cannot be created.
-    pub fn from_config(config: AdminClientConfig) -> Result<Self, KafkaError> {
+    pub fn from_config(config: AdminClientConfig) -> Result<Self, Error> {
+        // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
+        // every failure (`KafkaAdminClient.java:569-573` / `:592-595`):
+        //
+        //     throw new KafkaException("Failed to create new KafkaAdminClient", exc);
+        //
+        // so a caller has one class and one message to guard construction with.
+        // Without it the three failure points surfaced in three different shapes,
+        // none of them Java's.
+        //
+        // The `closeQuietly(metrics, ..)` / `closeQuietly(networkClient, ..)` half of
+        // Java's catch is not needed here: the `Selector` / `NetworkClient` are
+        // RVO'd locals that `Drop` cleans up, and every fallible point precedes
+        // their construction.
+        Self::from_config_inner(config)
+            .map_err(|e| Error::kafka_with_source("Failed to create new KafkaAdminClient", e))
+    }
+
+    fn from_config_inner(config: AdminClientConfig) -> Result<Self, Error> {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
 
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
@@ -289,7 +311,10 @@ impl KafkaAdminClient {
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {e}")))?;
+        // `ConfigException` in Java (`SslFactory.java:104-107`), i.e. inside the
+        // `KafkaException` hierarchy; `illegal_argument` put it outside, where
+        // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::from_config`.
+        .map_err(|e| Error::config(format!("Failed to create channel builder: {e}")))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
             channel_builder,
@@ -316,7 +341,7 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
 
-        let (admin, runnable) = Self::build(client, metadata_manager, &config, time_provider, log_context);
+        let (admin, runnable) = Self::build(client, metadata_manager, &config, time_provider, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
     }
@@ -328,17 +353,23 @@ impl KafkaAdminClient {
         config: &AdminClientConfig,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         log_context: LogContext,
-    ) -> (Self, AdminClientRunnable<C>) {
+    ) -> Result<(Self, AdminClientRunnable<C>), Error> {
         let (admin_tx, admin_rx) = mpsc::unbounded_channel();
         let wakeup = client.wakeup_notify();
         let shutdown = Arc::new(ShutdownSignal::new());
+        // Propagated rather than `expect`ed: Java's constructor-wide
+        // `catch (Throwable exc)` (`KafkaAdminClient.java:569-573`) converts every
+        // construction failure into a `KafkaException`, and `from_config` is where
+        // that wrap happens. `ExponentialBackoff::new` only rejects an
+        // out-of-range jitter, so this is unreachable with the constant above — but
+        // panicking on the admin construction path is precisely what Java does not.
         let retry_backoff = ExponentialBackoff::new(
             config.retry_backoff_ms(),
             RETRY_BACKOFF_EXP_BASE,
             config.retry_backoff_max_ms(),
             RETRY_BACKOFF_JITTER,
         )
-        .expect("ExponentialBackoff::new only fails on invalid jitter");
+        .map_err(Error::config)?;
 
         let runnable = AdminClientRunnable::new(
             client,
@@ -350,7 +381,7 @@ impl KafkaAdminClient {
             config.request_timeout_ms(),
             Arc::clone(&time_provider),
             Arc::clone(&shutdown),
-            log_context,
+            log_context.clone(),
         );
 
         let shared = Shared {
@@ -366,8 +397,9 @@ impl KafkaAdminClient {
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
             partition_leader_cache: Arc::new(PartitionLeaderCache::new()),
+            log_context,
         };
-        (Self { shared: Arc::new(shared) }, runnable)
+        Ok((Self { shared: Arc::new(shared) }, runnable))
     }
 
     /// Spawns the background task.
@@ -383,7 +415,12 @@ impl KafkaAdminClient {
     fn submit(&self, call: Call) {
         if self.shared.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) {
             let mut call = call;
-            call.handle_failure(&KafkaError::illegal_state("The AdminClient is closed."));
+            // `new IllegalStateException("Cannot accept new calls when AdminClient
+            // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
+            // (finding 247a).
+            call.handle_failure(&Error::local_illegal_state(
+                "Cannot accept new calls when AdminClient is closing.",
+            ));
             return;
         }
         // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
@@ -391,15 +428,33 @@ impl KafkaAdminClient {
         if self.shared.metadata_manager.using_bootstrap_controllers() && !call.node_provider.supports_use_controllers()
         {
             let mut call = call;
-            call.handle_failure(&KafkaError::unsupported_version(
-                "This Admin API is not supported when communicating directly with the controller quorum.",
-            ));
+            // `new UnsupportedEndpointTypeException("This Admin API is not yet
+            // supported when communicating directly with the controller quorum.")`
+            // (`KafkaAdminClient.java:1591-1593`). Spelling it
+            // `Error::unsupported_version` gave it code 35, which
+            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
+            // retry instead of failing the call (finding 247b).
+            //
+            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
+            // non-retriable, non-`UnsupportedVersionException` error on a call that
+            // has not yet passed its deadline is `handleFailure(throwable)`
+            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
+            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
+                "This Admin API is not yet supported when communicating directly with the controller quorum.",
+            )));
             return;
         }
         match self.shared.admin_tx.send(call) {
             Ok(()) => self.shared.wakeup.notify_one(),
             Err(mpsc::error::SendError(mut call)) => {
-                call.handle_failure(&KafkaError::illegal_state("The AdminClient thread has exited."));
+                // `new TimeoutException("The AdminClient thread has exited.")`
+                // (`KafkaAdminClient.java:1573-1574`). `handleTimeoutFailure`
+                // short-circuits on `cause instanceof TimeoutException` (`:959-961`),
+                // so the user sees exactly a `TimeoutException` — a
+                // `RetriableException`. `illegal_state` sits outside the
+                // `KafkaException` hierarchy entirely, so it answered `false` to both
+                // `is_retriable_error()` and `is_kafka_error()`.
+                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
             },
         }
     }
@@ -444,22 +499,27 @@ impl KafkaAdminClient {
         states_filter: Vec<String>,
         types_filter: Vec<String>,
         maybe_add: F,
-    ) -> KafkaFuture<Vec<Result<L, KafkaError>>>
+    ) -> KafkaFuture<Vec<Result<L, Error>>>
     where
         L: Clone + Send + Sync + 'static,
         F: Fn(&crate::list_groups_response_data::ListedGroup) -> Option<(String, L)> + Clone + Send + Sync + 'static,
     {
-        let all: KafkaFutureImpl<Vec<Result<L, KafkaError>>> = KafkaFutureImpl::new();
+        let all: KafkaFutureImpl<Vec<Result<L, Error>>> = KafkaFutureImpl::new();
         let public = all.future();
         let ctx = self.driver_context();
 
         let fail_all = all.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            // Mirrors Java: wrap in a KafkaException("Failed to find brokers ...").
-            let wrapped = KafkaError::with_message(
-                error.error(),
-                format!("Failed to find brokers to send {call_name}: {}", error.message()),
-            );
+        let handle_failure = Box::new(move |error: &Error| {
+            // `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
+            // (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
+            // `listConsumerGroups` — Java hardcodes "ListGroups" in both). A *bare*
+            // `KafkaException`: `is_kafka_error()` true, `is_api_error()` /
+            // `is_retriable_error()` / `is_authorization_error()` all false, the cause
+            // reachable through `source()`, and the message fixed — it does not carry
+            // the cause's text. Reusing `error.error()` made the wrapper inherit the
+            // inner class, so a metadata `TimeoutError` came back retriable and
+            // causeless (finding 243).
+            let wrapped = Error::kafka_with_source("Failed to find brokers to send ListGroups", error.clone());
             fail_all.complete(vec![Err(wrapped)]);
         });
 
@@ -471,7 +531,7 @@ impl KafkaAdminClient {
 
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
             };
             let nodes: Vec<Node> = metadata_response.brokers().to_vec();
             if nodes.is_empty() {
@@ -479,7 +539,7 @@ impl KafkaAdminClient {
                 // fetch is retried; there is no dedicated StaleMetadata error code
                 // in Rust, so we surface a retriable metadata error to trigger the
                 // same retry.
-                return HandleResult::Retry(KafkaError::with_message(
+                return HandleResult::Retry(Error::with_message(
                     Errors::LeaderNotAvailable,
                     "Metadata fetch failed due to missing broker list",
                 ));
@@ -507,16 +567,16 @@ impl KafkaAdminClient {
                 let handle_list_response =
                     Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
                         let ConcreteResponse::ListGroups(list_response) = response else {
-                            return HandleResult::Retry(KafkaError::illegal_state("Expected a ListGroups response"));
+                            return HandleResult::Retry(Error::local_illegal_state("Expected a ListGroups response"));
                         };
                         let error = Errors::for_code(list_response.data().error_code);
                         if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
                             // Retriable at the broker level: retry this per-broker call.
-                            return HandleResult::Retry(KafkaError::new(error));
+                            return HandleResult::Retry(Error::new(error));
                         }
                         let mut results = resp_results.lock().unwrap();
                         if error != Errors::None {
-                            results.add_error(&KafkaError::new(error), &resp_node);
+                            results.add_error(&Error::new(error), &resp_node);
                         } else {
                             for group in &list_response.data().groups {
                                 if let Some((group_id, listing)) = resp_add(group) {
@@ -530,7 +590,7 @@ impl KafkaAdminClient {
 
                 let fail_results = Arc::clone(&results);
                 let fail_node = node.clone();
-                let handle_list_failure = Box::new(move |error: &KafkaError| {
+                let handle_list_failure = Box::new(move |error: &Error| {
                     let mut results = fail_results.lock().unwrap();
                     results.add_error(error, &fail_node);
                     results.complete_node(node_id);
@@ -548,7 +608,9 @@ impl KafkaAdminClient {
                 match ctx.tx.send(list_call) {
                     Ok(()) => ctx.wakeup.notify_one(),
                     Err(mpsc::error::SendError(mut call)) => {
-                        call.handle_failure(&KafkaError::illegal_state("The AdminClient task has exited."));
+                        // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`;
+                        // see `Self::submit`.
+                        call.handle_failure(&Error::timeout("The AdminClient task has exited."));
                     },
                 }
             }
@@ -625,7 +687,7 @@ impl KafkaAdminClient {
         let resp_handles = Arc::clone(&handles);
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::IncrementalAlterConfigs(alter_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected an IncrementalAlterConfigs response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an IncrementalAlterConfigs response"));
             };
             if let Some(err) = handle_not_controller_error(&resp_mm, &alter_response.error_counts()) {
                 return HandleResult::Retry(err);
@@ -634,7 +696,7 @@ impl KafkaAdminClient {
             for (resource, future) in resp_handles.iter() {
                 match errors.get(resource) {
                     Some((code, message)) if *code != Errors::None.code() => {
-                        future.complete_exceptionally(api_error(*code, message));
+                        future.complete_with_error(api_error(*code, message));
                     },
                     _ => {
                         future.complete(());
@@ -645,9 +707,9 @@ impl KafkaAdminClient {
         });
 
         let fail_handles = Arc::clone(&handles);
-        let handle_failure = Box::new(move |error: &KafkaError| {
+        let handle_failure = Box::new(move |error: &Error| {
             for future in fail_handles.values() {
-                future.complete_exceptionally(error.clone());
+                future.complete_with_error(error.clone());
             }
         });
 
@@ -695,13 +757,17 @@ where
     K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
     V: Send + 'static,
 {
-    let specs = driver.lock().unwrap().poll();
+    // Also poison-tolerant: `handle_failure` calls this on the post-panic recovery
+    // path, where the driver mutex may already be poisoned (see there).
+    let specs = driver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).poll();
     for spec in specs {
         let call = new_driver_call(Arc::clone(driver), spec, ctx.clone());
         match ctx.tx.send(call) {
             Ok(()) => ctx.wakeup.notify_one(),
             Err(mpsc::error::SendError(mut call)) => {
-                call.handle_failure(&KafkaError::illegal_state("The AdminClient thread has exited."));
+                // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`; see
+                // `KafkaAdminClient::submit`.
+                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
             },
         }
     }
@@ -731,7 +797,7 @@ where
             .lock()
             .unwrap()
             .build_request_for_spec(&cr_scope, &cr_keys)
-            .ok_or_else(|| KafkaError::illegal_state("AdminApiDriver produced no request on retry")),
+            .ok_or_else(|| Error::local_illegal_state("AdminApiDriver produced no request on retry")),
     });
 
     let hr_driver = Arc::clone(&driver);
@@ -748,7 +814,7 @@ where
             // Unreachable: `maybe_drain_pending_call` assigns `cur_node` before
             // the request is sent and only clears it on unassign / failure, so a
             // response always arrives with its node still attached.
-            return HandleResult::Retry(KafkaError::illegal_state(
+            return HandleResult::Retry(Error::local_illegal_state(
                 "AdminApiDriver response arrived with no node assigned to the call",
             ));
         };
@@ -762,9 +828,32 @@ where
     let hf_scope = scope.clone();
     let hf_keys = keys.clone();
     let hf_time = Arc::clone(&ctx.time_provider);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         let now = (hf_time)();
-        hf_driver.lock().unwrap().on_failure(now, &hf_scope, &hf_keys, error);
+        // Poison-tolerant on purpose. This closure is the recovery path: it runs
+        // from `AdminClientRunnable::fail_all_remaining` after `run()` catches a
+        // panic, and that panic may have poisoned this very mutex inside
+        // `handle_response` above. A `.unwrap()` here would panic a second time,
+        // so the cleanup would not finish and every outstanding `KafkaFuture`
+        // would hang — the opposite of what Java's `finally` guarantees.
+        //
+        // The trade-off being accepted: the driver's state is NOT per-call.
+        // `AdminApiDriver` owns the persistent `lookup_map` / `fulfillment_map` /
+        // `request_states` machinery for the whole RPC, and the panic poisoned
+        // this mutex precisely because it interrupted a mutation of those maps,
+        // so the guard taken here may expose half-updated ones. Running
+        // `on_failure` against possibly-inconsistent state is accepted because
+        // the alternative is a second panic that strands every future.
+        //
+        // This reasoning does NOT extend to the normal path: `create_request` and
+        // `handle_response` above, and `maybe_retry`, keep `.unwrap()` and must.
+        // They are not recovery code, so continuing there would drive the
+        // *normal* protocol against half-mutated maps instead of surfacing the
+        // fault.
+        hf_driver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .on_failure(now, &hf_scope, &hf_keys, error);
         maybe_send_requests(&hf_driver, &hf_ctx, now);
     });
 
@@ -817,8 +906,11 @@ where
     let mr_ctx = ctx.clone();
     let mr_scope = scope;
     let mr_keys = keys;
-    call.set_maybe_retry_fn(Box::new(move |error: &KafkaError, now: i64| {
-        if error.error() == Errors::NetworkException {
+    call.set_maybe_retry_fn(Box::new(move |error: &Error, now: i64| {
+        // `throwable instanceof DisconnectException`
+        // (`KafkaAdminClient.java:5127`), raised as `Error::Disconnect` by the
+        // runnable — not `Errors::NetworkError`, which is a broker-reported code.
+        if matches!(error, Error::Disconnect(_)) {
             mr_driver.lock().unwrap().on_failure(now, &mr_scope, &mr_keys, error);
             maybe_send_requests(&mr_driver, &mr_ctx, now);
             MaybeRetryOutcome::Handled
@@ -850,16 +942,16 @@ fn coordinator_keyed_by_id<V: Send + 'static>(
 /// reported. Mirrors `KafkaAdminClient.ListGroupsResults` /
 /// `ListConsumerGroupsResults` (generic over the listing type `L`).
 struct ListGroupsResults<L: Clone + Send + Sync + 'static> {
-    errors: Vec<KafkaError>,
+    errors: Vec<Error>,
     listings: HashMap<String, L>,
     remaining: HashSet<i32>,
-    future: KafkaFutureImpl<Vec<Result<L, KafkaError>>>,
+    future: KafkaFutureImpl<Vec<Result<L, Error>>>,
 }
 
 impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
     /// Creates the accumulator for the given broker node ids, completing the
     /// future immediately if there are no brokers.
-    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<L, KafkaError>>>) -> Arc<Mutex<Self>> {
+    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<L, Error>>>) -> Arc<Mutex<Self>> {
         let results = Arc::new(Mutex::new(Self {
             errors: Vec::new(),
             listings: HashMap::new(),
@@ -872,12 +964,12 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
 
     /// Records an error for a broker, wrapping it with the broker context
     /// (mirrors Java's `ApiError.fromThrowable` + "Error listing groups on N").
-    fn add_error(&mut self, error: &KafkaError, node: &Node) {
+    fn add_error(&mut self, error: &Error, node: &Node) {
         let message = error.message();
         let wrapped = if message.is_empty() {
-            KafkaError::with_message(error.error(), format!("Error listing groups on {node}"))
+            Error::with_message(error.error(), format!("Error listing groups on {node}"))
         } else {
-            KafkaError::with_message(error.error(), format!("Error listing groups on {node}: {message}"))
+            Error::with_message(error.error(), format!("Error listing groups on {node}: {message}"))
         };
         self.errors.push(wrapped);
     }
@@ -895,20 +987,26 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
 
     fn try_complete(&mut self) {
         if self.remaining.is_empty() {
-            let mut results: Vec<Result<L, KafkaError>> = self.listings.values().cloned().map(Ok).collect();
+            let mut results: Vec<Result<L, Error>> = self.listings.values().cloned().map(Ok).collect();
             results.extend(self.errors.iter().cloned().map(Err));
             self.future.complete(results);
         }
     }
 }
 
-/// Builds a `KafkaError` from a wire error code and optional message, mirroring
+/// Builds an [`Error`] from a wire error code and optional message, mirroring
 /// Java's `ApiError.exception()`.
-fn api_error(code: i16, message: &Option<String>) -> KafkaError {
+fn api_error(code: i16, message: &Option<String>) -> Error {
     let error = Errors::for_code(code);
+    // `Errors.exception(String)` (`Errors.java:462-469`) falls back to the code's
+    // default text ONLY when the broker sent `null`; a non-null EMPTY message is
+    // passed through verbatim. The generated decoders keep the two apart
+    // (`len == 0` -> `None`, `len == 1` -> `Some("")`), so treating `Some("")` as
+    // absent substituted the code's default text where Java reports `""`
+    // (finding 245). Same shape as `message_with_fallback` below.
     match message {
-        Some(m) if !m.is_empty() => KafkaError::with_message(error, m.clone()),
-        _ => KafkaError::new(error),
+        Some(m) => Error::with_message(error, m.clone()),
+        None => Error::new(error),
     }
 }
 
@@ -919,7 +1017,7 @@ fn api_error(code: i16, message: &Option<String>) -> KafkaError {
 ///
 /// Returns an error if a finalized/supported version range from the response is
 /// invalid (mirrors Java's constructor throwing `IllegalArgumentException`).
-fn create_feature_metadata(data: &ApiVersionsResponseData) -> Result<FeatureMetadata, KafkaError> {
+fn create_feature_metadata(data: &ApiVersionsResponseData) -> Result<FeatureMetadata, Error> {
     let mut finalized_features = HashMap::new();
     for key in &data.finalized_features {
         finalized_features.insert(
@@ -961,32 +1059,35 @@ fn topic_id_is_unrepresentable(topic_id: Uuid) -> bool {
 
 /// Returns the response error message with a fallback to the error code's
 /// default message. Mirrors Java's `ApiError.messageWithFallback`.
-fn message_with_fallback(code: i16, message: &Option<String>) -> String {
+pub(crate) fn message_with_fallback(code: i16, message: &Option<String>) -> String {
+    // Java `ApiError.messageWithFallback()` falls back to the code's default text
+    // ONLY when the broker sent no message (null); a non-null empty message is
+    // returned verbatim.
     match message {
-        Some(m) if !m.is_empty() => m.clone(),
-        _ => Errors::for_code(code).message().to_string(),
+        Some(m) => m.clone(),
+        None => Errors::for_code(code).message().to_string(),
     }
 }
 
 /// Completes any future that was retried due to a quota-exceeded error with the
-/// carried [`ThrottlingQuotaExceeded`](KafkaError::ThrottlingQuotaExceeded)
+/// carried [`ThrottlingQuotaExceeded`](Error::ThrottlingQuotaExceeded)
 /// error (reduced by the elapsed throttle time) when the request ultimately
 /// timed out. Mirrors `KafkaAdminClient.maybeCompleteQuotaExceededException`.
 fn maybe_complete_quota_exceeded<K, T>(
     should_retry_on_quota_violation: bool,
-    error: &KafkaError,
+    error: &Error,
     futures: &HashMap<K, KafkaFutureImpl<T>>,
-    quota_exceeded_exceptions: &HashMap<K, KafkaError>,
+    quota_exceeded_errors: &HashMap<K, Error>,
     throttle_time_delta: i32,
 ) where
     K: std::hash::Hash + Eq,
     T: Clone + Send + Sync + 'static,
 {
-    if should_retry_on_quota_violation && matches!(error, KafkaError::Timeout(_)) {
-        for (key, quota_error) in quota_exceeded_exceptions {
+    if should_retry_on_quota_violation && matches!(error, Error::Timeout(_)) {
+        for (key, quota_error) in quota_exceeded_errors {
             if let Some(future) = futures.get(key) {
                 let throttle = quota_error.throttle_time_ms().unwrap_or(0);
-                future.complete_exceptionally(KafkaError::throttling_quota_exceeded(
+                future.complete_with_error(Error::throttling_quota_exceeded(
                     (throttle - throttle_time_delta).max(0),
                     quota_error.message().to_string(),
                 ));
@@ -1018,7 +1119,7 @@ fn get_create_acls_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateAcls(create_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateAcls response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreateAcls response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -1030,14 +1131,14 @@ fn get_create_acls_call(
             };
             match iter.next() {
                 None => {
-                    future.complete_exceptionally(KafkaError::with_message(
+                    future.complete_with_error(Error::with_message(
                         Errors::UnknownServerError,
                         format!("The broker reported no creation result for the given ACL: {binding}"),
                     ));
                 },
                 Some(creation) => {
                     if Errors::for_code(creation.error_code) != Errors::None {
-                        future.complete_exceptionally(api_error(creation.error_code, &creation.error_message));
+                        future.complete_with_error(api_error(creation.error_code, &creation.error_message));
                     } else {
                         future.complete(());
                     }
@@ -1048,9 +1149,9 @@ fn get_create_acls_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -1075,10 +1176,10 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeAcls(describe_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeAcls response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeAcls response"));
         };
         if Errors::for_code(describe_response.error_code()) != Errors::None {
-            resp_handle.complete_exceptionally(api_error(
+            resp_handle.complete_with_error(api_error(
                 describe_response.error_code(),
                 &describe_response.error_message().map(str::to_string),
             ));
@@ -1088,7 +1189,7 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
                     resp_handle.complete(bindings);
                 },
                 Err(e) => {
-                    resp_handle.complete_exceptionally(e);
+                    resp_handle.complete_with_error(e);
                 },
             }
         }
@@ -1096,8 +1197,8 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1125,12 +1226,12 @@ fn get_describe_client_quotas_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeClientQuotas(describe_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeClientQuotas response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeClientQuotas response"));
         };
         // Mirrors DescribeClientQuotasResponse.complete: error first, else the
         // decoded entity map.
         if Errors::for_code(describe_response.error_code()) != Errors::None {
-            resp_handle.complete_exceptionally(api_error(
+            resp_handle.complete_with_error(api_error(
                 describe_response.error_code(),
                 &describe_response.error_message().map(str::to_string),
             ));
@@ -1141,8 +1242,8 @@ fn get_describe_client_quotas_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1172,7 +1273,7 @@ fn get_alter_client_quotas_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterClientQuotas(alter_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterClientQuotas response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterClientQuotas response"));
         };
         // Mirrors AlterClientQuotasResponse.complete: complete each entity's
         // future by its result.
@@ -1188,7 +1289,7 @@ fn get_alter_client_quotas_call(
                     future.complete(());
                 },
                 Err(e) => {
-                    future.complete_exceptionally(e);
+                    future.complete_with_error(e);
                 },
             }
         }
@@ -1196,9 +1297,9 @@ fn get_alter_client_quotas_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -1243,14 +1344,14 @@ fn get_describe_user_scram_credentials_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeUserScramCredentials(describe_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeUserScramCredentials response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeUserScramCredentials response"));
         };
         // Mirrors handleResponse: a message-level error fails the whole future,
         // otherwise the raw data is handed to the *Result view helpers.
         let data = describe_response.data();
         let message_level_error_code = data.error_code;
         if message_level_error_code != Errors::None.code() {
-            resp_handle.complete_exceptionally(api_error(message_level_error_code, &data.error_message));
+            resp_handle.complete_with_error(api_error(message_level_error_code, &data.error_message));
         } else {
             resp_handle.complete(data.clone());
         }
@@ -1258,8 +1359,8 @@ fn get_describe_user_scram_credentials_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1278,7 +1379,7 @@ fn get_describe_user_scram_credentials_call(
 fn get_alter_user_scram_credentials_call(
     deletions: Vec<ScramCredentialDeletion>,
     upsertions: Vec<ScramCredentialUpsertion>,
-    illegal: Arc<HashMap<String, KafkaError>>,
+    illegal: Arc<HashMap<String, Error>>,
     futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
     metadata_manager: AdminMetadataManager,
     deadline: i64,
@@ -1294,7 +1395,7 @@ fn get_alter_user_scram_credentials_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterUserScramCredentials(alter_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterUserScramCredentials response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterUserScramCredentials response"));
         };
         // Check for controller change first, so that all errors are consistent
         // in that case (mirrors the NOT_CONTROLLER handling before completion).
@@ -1305,7 +1406,7 @@ fn get_alter_user_scram_credentials_call(
         // have an illegal alteration as identified above.
         for (user, error) in resp_illegal.iter() {
             if let Some(future) = resp_futures.get(user) {
-                future.complete_exceptionally(error.clone());
+                future.complete_with_error(error.clone());
             }
         }
         for result in &alter_response.data().results {
@@ -1316,7 +1417,7 @@ fn get_alter_user_scram_credentials_call(
                 Some(future) => {
                     let error = Errors::for_code(result.error_code);
                     if error != Errors::None {
-                        future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                        future.complete_with_error(api_error(result.error_code, &result.error_message));
                     } else {
                         future.complete(());
                     }
@@ -1327,19 +1428,22 @@ fn get_alter_user_scram_credentials_call(
         // (mirrors completeUnrealizedFutures).
         for (user, future) in resp_futures.iter() {
             if !future.is_done() {
-                future.complete_exceptionally(KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("The broker response did not contain a result for user {user}"),
-                ));
+                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for
+                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                future.complete_with_error(Error::Api(ApiError::new(format!(
+                    "The broker response did not contain a result for user {user}"
+                ))));
             }
         }
         HandleResult::Done
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -1363,9 +1467,7 @@ fn get_alter_user_scram_credentials_call(
 /// Returns an [`Errors::UnsupportedSaslMechanism`] error if the public mechanism
 /// has no internal SCRAM mapping (the Rust analog of Java's
 /// `NoSuchAlgorithmException`).
-fn get_scram_credential_upsertion(
-    upsertion: &UserScramCredentialUpsertion,
-) -> Result<ScramCredentialUpsertion, KafkaError> {
+fn get_scram_credential_upsertion(upsertion: &UserScramCredentialUpsertion) -> Result<ScramCredentialUpsertion, Error> {
     let public_mechanism = upsertion.credential_info().mechanism();
     let internal = InternalScramMechanism::for_mechanism_name(public_mechanism.mechanism_name())
         .ok_or_else(|| unsupported_sasl_mechanism("Unknown SCRAM mechanism"))?;
@@ -1393,13 +1495,13 @@ fn get_scram_credential_deletion(deletion: &UserScramCredentialDeletion) -> Scra
 }
 
 /// Mirrors `new UnacceptableCredentialException(message)`.
-fn unacceptable_credential(message: &str) -> KafkaError {
-    KafkaError::with_message(Errors::UnacceptableCredential, message)
+fn unacceptable_credential(message: &str) -> Error {
+    Error::with_message(Errors::UnacceptableCredential, message)
 }
 
 /// Mirrors `new UnsupportedSaslMechanismException(message)`.
-fn unsupported_sasl_mechanism(message: &str) -> KafkaError {
-    KafkaError::with_message(Errors::UnsupportedSaslMechanism, message)
+fn unsupported_sasl_mechanism(message: &str) -> Error {
+    Error::with_message(Errors::UnsupportedSaslMechanism, message)
 }
 
 /// Builds a `createDelegationToken` [`Call`]. Translated from the anonymous
@@ -1439,13 +1541,13 @@ fn get_create_delegation_token_call(
     let resp_renewers = options.get_renewers().to_vec();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateDelegationToken(create_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreateDelegationToken response"));
         };
         // Mirrors CreateDelegationToken handleResponse: error first, else build
         // the TokenInformation / DelegationToken from the response data using
         // the requested renewers.
         if create_response.has_error() {
-            resp_handle.complete_exceptionally(KafkaError::new(create_response.error()));
+            resp_handle.complete_with_error(Error::new(create_response.error()));
         } else {
             let data = create_response.data();
             let token_info = TokenInformation::with_requester(
@@ -1467,8 +1569,8 @@ fn get_create_delegation_token_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1500,10 +1602,10 @@ fn get_renew_delegation_token_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::RenewDelegationToken(renew_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a RenewDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a RenewDelegationToken response"));
         };
         if renew_response.has_error() {
-            resp_handle.complete_exceptionally(KafkaError::new(renew_response.error()));
+            resp_handle.complete_with_error(Error::new(renew_response.error()));
         } else {
             resp_handle.complete(renew_response.expiry_timestamp());
         }
@@ -1511,8 +1613,8 @@ fn get_renew_delegation_token_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1544,10 +1646,10 @@ fn get_expire_delegation_token_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::ExpireDelegationToken(expire_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected an ExpireDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an ExpireDelegationToken response"));
         };
         if expire_response.has_error() {
-            resp_handle.complete_exceptionally(KafkaError::new(expire_response.error()));
+            resp_handle.complete_with_error(Error::new(expire_response.error()));
         } else {
             resp_handle.complete(expire_response.expiry_timestamp());
         }
@@ -1555,8 +1657,8 @@ fn get_expire_delegation_token_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1584,10 +1686,10 @@ fn get_describe_delegation_token_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeDelegationToken(describe_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeDelegationToken response"));
         };
         if describe_response.has_error() {
-            resp_handle.complete_exceptionally(KafkaError::new(describe_response.error()));
+            resp_handle.complete_with_error(Error::new(describe_response.error()));
         } else {
             resp_handle.complete(describe_response.tokens());
         }
@@ -1595,8 +1697,8 @@ fn get_describe_delegation_token_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -1629,7 +1731,7 @@ fn get_delete_acls_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteAcls(delete_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteAcls response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteAcls response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -1641,25 +1743,24 @@ fn get_delete_acls_call(
             };
             match iter.next() {
                 None => {
-                    future.complete_exceptionally(KafkaError::with_message(
+                    future.complete_with_error(Error::with_message(
                         Errors::UnknownServerError,
                         "The broker reported no deletion result for the given filter.",
                     ));
                 },
                 Some(filter_result) => {
                     if Errors::for_code(filter_result.error_code) != Errors::None {
-                        future
-                            .complete_exceptionally(api_error(filter_result.error_code, &filter_result.error_message));
+                        future.complete_with_error(api_error(filter_result.error_code, &filter_result.error_message));
                     } else {
                         let mut results = Vec::new();
                         for matching_acl in &filter_result.matching_acls {
                             let binding = DeleteAclsResponse::acl_binding(matching_acl).ok();
-                            let exception = if Errors::for_code(matching_acl.error_code) != Errors::None {
+                            let error = if Errors::for_code(matching_acl.error_code) != Errors::None {
                                 Some(api_error(matching_acl.error_code, &matching_acl.error_message))
                             } else {
                                 None
                             };
-                            results.push(FilterResult::new(binding, exception));
+                            results.push(FilterResult::new(binding, error));
                         }
                         future.complete(FilterResults::new(results));
                     }
@@ -1670,9 +1771,9 @@ fn get_delete_acls_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -1690,13 +1791,22 @@ fn get_delete_acls_call(
 /// Checks a create/delete response for a controller-change error, mirroring
 /// `KafkaAdminClient.handleNotControllerError`. Returns the error to retry with
 /// if the controller changed.
-fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap<Errors, i32>) -> Option<KafkaError> {
-    let has_not_controller = error_counts.contains_key(&Errors::NotController)
-        || (mm.using_bootstrap_controllers() && error_counts.contains_key(&Errors::NotLeaderOrFollower));
-    if has_not_controller {
+fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap<Errors, i32>) -> Option<Error> {
+    // Java dispatches on which code was present and rethrows `error.exception()`
+    // for *that* code (`KafkaAdminClient.java:4145-4153`), so a
+    // `NOT_LEADER_OR_FOLLOWER` seen by a `bootstrap.controllers` client surfaces
+    // as `NotLeaderOrFollower`, not `NotController` (finding 247).
+    let matched = if error_counts.contains_key(&Errors::NotController) {
+        Some(Errors::NotController)
+    } else if mm.using_bootstrap_controllers() && error_counts.contains_key(&Errors::NotLeaderOrFollower) {
+        Some(Errors::NotLeaderOrFollower)
+    } else {
+        None
+    };
+    if let Some(error) = matched {
         mm.clear_controller();
         mm.request_update();
-        Some(KafkaError::new(Errors::NotController))
+        Some(Error::new(error))
     } else {
         None
     }
@@ -1763,10 +1873,10 @@ fn get_alter_partition_reassignments_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterPartitionReassignments(alter_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterPartitionReassignments response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterPartitionReassignments response"));
         };
         let data = alter_response.data();
-        let mut errors: HashMap<TopicPartition, Option<KafkaError>> = HashMap::new();
+        let mut errors: HashMap<TopicPartition, Option<Error>> = HashMap::new();
         let mut received_responses_count: usize = 0;
         let top_level_error = Errors::for_code(data.error_code);
         match top_level_error {
@@ -1778,7 +1888,8 @@ fn get_alter_partition_reassignments_call(
                         if partition_error == Errors::None {
                             errors.insert(tp, None);
                         } else {
-                            errors.insert(tp, Some(partition_error.exception(part_response.error_message.as_deref())));
+                            let message = part_response.error_message.as_deref();
+                            errors.insert(tp, Some(partition_error.error_with_optional_message(message)));
                         }
                         received_responses_count += 1;
                     }
@@ -1793,7 +1904,8 @@ fn get_alter_partition_reassignments_call(
                 for topic_response in &data.responses {
                     for part_response in &topic_response.partitions {
                         let tp = TopicPartition::new(topic_response.name.as_str(), part_response.partition_index);
-                        errors.insert(tp, Some(top_level_error.exception(data.error_message.as_deref())));
+                        let message = data.error_message.as_deref();
+                        errors.insert(tp, Some(top_level_error.error_with_optional_message(message)));
                         received_responses_count += 1;
                     }
                 }
@@ -1808,28 +1920,28 @@ fn get_alter_partition_reassignments_call(
             } else {
                 "less"
             };
-            let error = KafkaError::with_message(
+            let error = Error::with_message(
                 Errors::UnknownServerError,
                 format!(
                     "The server returned too {quantifier} results.Expected {expected_responses_count} but received {received_responses_count}"
                 ),
             );
             for future in resp_futures.values() {
-                future.complete_exceptionally(error.clone());
+                future.complete_with_error(error.clone());
             }
             return HandleResult::Done;
         }
 
-        for (tp, exception) in errors {
+        for (tp, error) in errors {
             let Some(future) = resp_futures.get(&tp) else {
                 continue;
             };
-            match exception {
+            match error {
                 None => {
                     future.complete(());
                 },
                 Some(error) => {
-                    future.complete_exceptionally(error);
+                    future.complete_with_error(error);
                 },
             }
         }
@@ -1837,9 +1949,9 @@ fn get_alter_partition_reassignments_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -1886,7 +1998,7 @@ fn get_list_partition_reassignments_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::ListPartitionReassignments(list_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a ListPartitionReassignments response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a ListPartitionReassignments response"));
         };
         let data = list_response.data();
         let error = Errors::for_code(data.error_code);
@@ -1898,7 +2010,7 @@ fn get_list_partition_reassignments_call(
                 }
             },
             _ => {
-                resp_handle.complete_exceptionally(error.exception(data.error_message.as_deref()));
+                resp_handle.complete_with_error(error.error_with_optional_message(data.error_message.as_deref()));
             },
         }
         let mut reassignment_map: HashMap<TopicPartition, PartitionReassignment> = HashMap::new();
@@ -1920,8 +2032,8 @@ fn get_list_partition_reassignments_call(
     });
 
     let fail_handle = handle.clone();
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -2012,7 +2124,7 @@ fn get_describe_configs_call(
     let resp_unified = Arc::clone(&unified);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeConfigs(describe_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeConfigs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeConfigs response"));
         };
         for (config_resource, result) in describe_response.result_map() {
             let Some(future) = resp_unified.get(&config_resource) else {
@@ -2021,7 +2133,7 @@ fn get_describe_configs_call(
                 continue;
             };
             if result.error_code != Errors::None.code() {
-                future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                future.complete_with_error(api_error(result.error_code, &result.error_message));
             } else {
                 future.complete(describe_config_result(result));
             }
@@ -2029,19 +2141,22 @@ fn get_describe_configs_call(
         // Complete any future for which the node did not return a result.
         for (resource, future) in resp_unified.iter() {
             if !future.is_done() {
-                future.complete_exceptionally(KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("The node response did not contain a result for config resource {resource}"),
-                ));
+                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for
+                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                future.complete_with_error(Error::Api(ApiError::new(format!(
+                    "The node response did not contain a result for config resource {resource}"
+                ))));
             }
         }
         HandleResult::Done
     });
 
     let fail_unified = Arc::clone(&unified);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_unified.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -2069,7 +2184,11 @@ fn complete_unrealized<T: Clone + Send + Sync + 'static>(
 ) {
     for (name, future) in futures {
         if !future.is_done() {
-            future.complete_exceptionally(KafkaError::with_message(Errors::UnknownServerError, message(name)));
+            // Java throws `new ApiException(messageFormatter.apply(key))`
+            // (`KafkaAdminClient.java:1748`) — the concrete base class, NOT the
+            // `UnknownServerException` subclass Java uses for the *other* response
+            // sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+            future.complete_with_error(Error::Api(ApiError::new(message(name))));
         }
     }
 }
@@ -2080,9 +2199,9 @@ fn complete_unrealized<T: Clone + Send + Sync + 'static>(
 
 /// Maps a protocol error code to an optional error, mirroring Java's
 /// `Errors.forCode(code).exception()` which returns `null` for `NONE`.
-fn api_exception(error_code: i16) -> Option<KafkaError> {
+fn api_error_for_code(error_code: i16) -> Option<Error> {
     let error = Errors::for_code(error_code);
-    (error != Errors::None).then(|| KafkaError::new(error))
+    (error != Errors::None).then(|| Error::new(error))
 }
 
 /// Builds a map from log-directory path to [`LogDirDescription`] from a
@@ -2102,7 +2221,7 @@ fn log_dir_descriptions(response: &DescribeLogDirsResponse) -> HashMap<String, L
         result.insert(
             log_dir_result.log_dir.clone(),
             LogDirDescription::with_volume_bytes_and_cordoned(
-                api_exception(log_dir_result.error_code),
+                api_error_for_code(log_dir_result.error_code),
                 replica_info_map,
                 log_dir_result.total_bytes,
                 log_dir_result.usable_bytes,
@@ -2130,7 +2249,7 @@ fn get_describe_log_dirs_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeLogDirs response"));
         };
         let descriptions = log_dir_descriptions(resp);
         if !descriptions.is_empty() {
@@ -2143,14 +2262,14 @@ fn get_describe_log_dirs_call(
             } else {
                 Errors::for_code(resp.data().error_code)
             };
-            resp_handle.complete_exceptionally(KafkaError::new(error));
+            resp_handle.complete_with_error(Error::new(error));
         }
         HandleResult::Done
     });
 
     let fail_handle = handle;
-    let handle_failure = Box::new(move |error: &KafkaError| {
-        fail_handle.complete_exceptionally(error.clone());
+    let handle_failure = Box::new(move |error: &Error| {
+        fail_handle.complete_with_error(error.clone());
     });
 
     Call::new(
@@ -2181,7 +2300,7 @@ fn get_alter_replica_log_dirs_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterReplicaLogDirs(resp) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterReplicaLogDirs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterReplicaLogDirs response"));
         };
         for topic_result in &resp.data().results {
             for partition_result in &topic_result.partitions {
@@ -2198,8 +2317,7 @@ fn get_alter_replica_log_dirs_call(
                         if partition_result.error_code == Errors::None.code() {
                             future.complete(());
                         } else {
-                            future
-                                .complete_exceptionally(KafkaError::new(Errors::for_code(partition_result.error_code)));
+                            future.complete_with_error(Error::new(Errors::for_code(partition_result.error_code)));
                         }
                     },
                 }
@@ -2209,21 +2327,24 @@ fn get_alter_replica_log_dirs_call(
         // check anyway (mirrors `completeUnrealizedFutures`).
         for (replica, future) in resp_futures.iter() {
             if replica.broker_id() == broker_id && !future.is_done() {
-                future.complete_exceptionally(KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("The response from broker {broker_id} did not contain a result for replica {replica}"),
-                ));
+                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for
+                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                future.complete_with_error(Error::Api(ApiError::new(format!(
+                    "The response from broker {broker_id} did not contain a result for replica {replica}"
+                ))));
             }
         }
         HandleResult::Done
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         // Only completes the futures of brokerId.
         for (replica, future) in fail_futures.iter() {
             if replica.broker_id() == broker_id {
-                future.complete_exceptionally(error.clone());
+                future.complete_with_error(error.clone());
             }
         }
     });
@@ -2257,7 +2378,7 @@ fn get_describe_replica_log_dirs_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeLogDirs response"));
         };
         for (log_dir, log_dir_info) in log_dir_descriptions(resp) {
             if let Some(error) = log_dir_info.error() {
@@ -2268,12 +2389,12 @@ fn get_describe_replica_log_dirs_call(
                 // Any other error for a log directory is illegal (mirrors Java's
                 // `handleFailure(new IllegalStateException(...))`, which fails
                 // every replica future).
-                let illegal = KafkaError::illegal_state(format!(
+                let illegal = Error::local_illegal_state(format!(
                     "The error {:?} for log directory {log_dir} in the response from broker {broker_id} is illegal",
                     error.error()
                 ));
                 for future in resp_futures.values() {
-                    future.complete_exceptionally(illegal.clone());
+                    future.complete_with_error(illegal.clone());
                 }
             }
 
@@ -2312,9 +2433,9 @@ fn get_describe_replica_log_dirs_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -2377,7 +2498,7 @@ fn get_create_topics_call(
     futures: Arc<HashMap<String, KafkaFutureImpl<TopicMetadataAndConfig>>>,
     topics_by_name: Arc<HashMap<String, CreatableTopic>>,
     names: Vec<String>,
-    quota_exceeded_exceptions: HashMap<String, KafkaError>,
+    quota_exceeded_errors: HashMap<String, Error>,
     validate_only: bool,
     retry_on_quota: bool,
     now: i64,
@@ -2401,14 +2522,14 @@ fn get_create_topics_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateTopics(create_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateTopics response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreateTopics response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
             return HandleResult::Retry(err);
         }
         let throttle_time_ms = create_response.throttle_time_ms();
         let mut retry_names: Vec<String> = Vec::new();
-        let mut retry_quota_exceeded: HashMap<String, KafkaError> = HashMap::new();
+        let mut retry_quota_exceeded: HashMap<String, Error> = HashMap::new();
         for result in &create_response.data().topics {
             let Some(future) = resp_futures.get(&result.name) else {
                 continue;
@@ -2416,7 +2537,7 @@ fn get_create_topics_call(
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
                 if error == Errors::ThrottlingQuotaExceeded {
-                    let quota_error = KafkaError::throttling_quota_exceeded(
+                    let quota_error = Error::throttling_quota_exceeded(
                         throttle_time_ms,
                         message_with_fallback(result.error_code, &result.error_message),
                     );
@@ -2424,17 +2545,17 @@ fn get_create_topics_call(
                         retry_names.push(result.name.clone());
                         retry_quota_exceeded.insert(result.name.clone(), quota_error);
                     } else {
-                        future.complete_exceptionally(quota_error);
+                        future.complete_with_error(quota_error);
                     }
                 } else {
-                    future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                    future.complete_with_error(api_error(result.error_code, &result.error_message));
                 }
             } else if result.topic_config_error_code != Errors::None.code() {
-                future.complete(TopicMetadataAndConfig::with_error(KafkaError::new(Errors::for_code(
+                future.complete(TopicMetadataAndConfig::with_error(Error::new(Errors::for_code(
                     result.topic_config_error_code,
                 ))));
             } else if result.num_partitions == crate::admin::create_topics_result::UNKNOWN {
-                future.complete(TopicMetadataAndConfig::with_error(KafkaError::unsupported_version(
+                future.complete(TopicMetadataAndConfig::with_error(Error::unsupported_version(
                     "Topic metadata and configs in CreateTopics response not supported",
                 )));
             } else {
@@ -2489,7 +2610,7 @@ fn get_create_topics_call(
 
     let fail_futures = Arc::clone(&futures);
     let fail_time = Arc::clone(&time_provider);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         // If there were any topics retried due to a quota exceeded exception,
         // propagate the initial error back to the caller if the request timed
         // out (mirrors maybeCompleteQuotaExceededException).
@@ -2498,11 +2619,11 @@ fn get_create_topics_call(
             retry_on_quota,
             error,
             &fail_futures,
-            &quota_exceeded_exceptions,
+            &quota_exceeded_errors,
             throttle_time_delta,
         );
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -2530,7 +2651,7 @@ fn get_create_partitions_call(
     futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
     topics_by_name: Arc<HashMap<String, CreatePartitionsTopic>>,
     names: Vec<String>,
-    quota_exceeded_exceptions: HashMap<String, KafkaError>,
+    quota_exceeded_errors: HashMap<String, Error>,
     validate_only: bool,
     retry_on_quota: bool,
     now: i64,
@@ -2554,14 +2675,14 @@ fn get_create_partitions_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreatePartitions(create_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a CreatePartitions response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreatePartitions response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
             return HandleResult::Retry(err);
         }
         let throttle_time_ms = create_response.throttle_time_ms();
         let mut retry_names: Vec<String> = Vec::new();
-        let mut retry_quota_exceeded: HashMap<String, KafkaError> = HashMap::new();
+        let mut retry_quota_exceeded: HashMap<String, Error> = HashMap::new();
         for result in &create_response.data().results {
             let Some(future) = resp_futures.get(&result.name) else {
                 continue;
@@ -2569,7 +2690,7 @@ fn get_create_partitions_call(
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
                 if error == Errors::ThrottlingQuotaExceeded {
-                    let quota_error = KafkaError::throttling_quota_exceeded(
+                    let quota_error = Error::throttling_quota_exceeded(
                         throttle_time_ms,
                         message_with_fallback(result.error_code, &result.error_message),
                     );
@@ -2577,10 +2698,10 @@ fn get_create_partitions_call(
                         retry_names.push(result.name.clone());
                         retry_quota_exceeded.insert(result.name.clone(), quota_error);
                     } else {
-                        future.complete_exceptionally(quota_error);
+                        future.complete_with_error(quota_error);
                     }
                 } else {
-                    future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                    future.complete_with_error(api_error(result.error_code, &result.error_message));
                 }
             } else {
                 future.complete(());
@@ -2611,17 +2732,17 @@ fn get_create_partitions_call(
 
     let fail_futures = Arc::clone(&futures);
     let fail_time = Arc::clone(&time_provider);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
             &fail_futures,
-            &quota_exceeded_exceptions,
+            &quota_exceeded_errors,
             throttle_time_delta,
         );
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -2647,7 +2768,7 @@ fn get_delete_topics_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<String, KafkaFutureImpl<()>>>,
     names: Vec<String>,
-    quota_exceeded_exceptions: HashMap<String, KafkaError>,
+    quota_exceeded_errors: HashMap<String, Error>,
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
@@ -2666,14 +2787,14 @@ fn get_delete_topics_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteTopics response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
         }
         let throttle_time_ms = delete_response.throttle_time_ms();
         let mut retry_names: Vec<String> = Vec::new();
-        let mut retry_quota_exceeded: HashMap<String, KafkaError> = HashMap::new();
+        let mut retry_quota_exceeded: HashMap<String, Error> = HashMap::new();
         for result in &delete_response.data().responses {
             let Some(name) = result.name.as_ref() else {
                 continue;
@@ -2684,7 +2805,7 @@ fn get_delete_topics_call(
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
                 if error == Errors::ThrottlingQuotaExceeded {
-                    let quota_error = KafkaError::throttling_quota_exceeded(
+                    let quota_error = Error::throttling_quota_exceeded(
                         throttle_time_ms,
                         message_with_fallback(result.error_code, &result.error_message),
                     );
@@ -2692,10 +2813,10 @@ fn get_delete_topics_call(
                         retry_names.push(name.clone());
                         retry_quota_exceeded.insert(name.clone(), quota_error);
                     } else {
-                        future.complete_exceptionally(quota_error);
+                        future.complete_with_error(quota_error);
                     }
                 } else {
-                    future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                    future.complete_with_error(api_error(result.error_code, &result.error_message));
                 }
             } else {
                 future.complete(());
@@ -2724,17 +2845,17 @@ fn get_delete_topics_call(
 
     let fail_futures = Arc::clone(&futures);
     let fail_time = Arc::clone(&time_provider);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
             &fail_futures,
-            &quota_exceeded_exceptions,
+            &quota_exceeded_errors,
             throttle_time_delta,
         );
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -2756,7 +2877,7 @@ fn get_delete_topics_with_ids_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<Uuid, KafkaFutureImpl<()>>>,
     ids: Vec<Uuid>,
-    quota_exceeded_exceptions: HashMap<Uuid, KafkaError>,
+    quota_exceeded_errors: HashMap<Uuid, Error>,
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
@@ -2783,14 +2904,14 @@ fn get_delete_topics_with_ids_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteTopics response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
         }
         let throttle_time_ms = delete_response.throttle_time_ms();
         let mut retry_ids: Vec<Uuid> = Vec::new();
-        let mut retry_quota_exceeded: HashMap<Uuid, KafkaError> = HashMap::new();
+        let mut retry_quota_exceeded: HashMap<Uuid, Error> = HashMap::new();
         for result in &delete_response.data().responses {
             let Some(future) = resp_futures.get(&result.topic_id) else {
                 continue;
@@ -2798,7 +2919,7 @@ fn get_delete_topics_with_ids_call(
             let error = Errors::for_code(result.error_code);
             if error != Errors::None {
                 if error == Errors::ThrottlingQuotaExceeded {
-                    let quota_error = KafkaError::throttling_quota_exceeded(
+                    let quota_error = Error::throttling_quota_exceeded(
                         throttle_time_ms,
                         message_with_fallback(result.error_code, &result.error_message),
                     );
@@ -2806,10 +2927,10 @@ fn get_delete_topics_with_ids_call(
                         retry_ids.push(result.topic_id);
                         retry_quota_exceeded.insert(result.topic_id, quota_error);
                     } else {
-                        future.complete_exceptionally(quota_error);
+                        future.complete_with_error(quota_error);
                     }
                 } else {
-                    future.complete_exceptionally(api_error(result.error_code, &result.error_message));
+                    future.complete_with_error(api_error(result.error_code, &result.error_message));
                 }
             } else {
                 future.complete(());
@@ -2819,10 +2940,13 @@ fn get_delete_topics_with_ids_call(
         if retry_ids.is_empty() {
             for (id, future) in resp_futures.iter() {
                 if !future.is_done() {
-                    future.complete_exceptionally(KafkaError::with_message(
-                        Errors::UnknownServerError,
-                        format!("The controller response did not contain a result for topic {id}"),
-                    ));
+                    // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                    // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                    // `UnknownServerException` subclass it uses elsewhere for
+                    // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                    future.complete_with_error(Error::Api(ApiError::new(format!(
+                        "The controller response did not contain a result for topic {id}"
+                    ))));
                 }
             }
             HandleResult::Done
@@ -2844,17 +2968,17 @@ fn get_delete_topics_with_ids_call(
 
     let fail_futures = Arc::clone(&futures);
     let fail_time = Arc::clone(&time_provider);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
             &fail_futures,
-            &quota_exceeded_exceptions,
+            &quota_exceeded_errors,
             throttle_time_delta,
         );
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -2881,8 +3005,8 @@ impl Admin for KafkaAdminClient {
             let name = new_topic.name().to_string();
             if topic_name_is_unrepresentable(&name) {
                 let future: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
-                future.complete_exceptionally(KafkaError::with_message(
-                    Errors::InvalidTopicException,
+                future.complete_with_error(Error::with_message(
+                    Errors::InvalidTopicError,
                     format!("The given topic name '{name}' cannot be represented in a request."),
                 ));
                 handles.insert(name, future);
@@ -2923,8 +3047,8 @@ impl Admin for KafkaAdminClient {
                 for name in &names {
                     if topic_name_is_unrepresentable(name) {
                         let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-                        future.complete_exceptionally(KafkaError::with_message(
-                            Errors::InvalidTopicException,
+                        future.complete_with_error(Error::with_message(
+                            Errors::InvalidTopicError,
                             format!("The given topic name '{name}' cannot be represented in a request."),
                         ));
                         handles.insert(name.clone(), future);
@@ -2956,8 +3080,8 @@ impl Admin for KafkaAdminClient {
                 for id in &ids {
                     if topic_id_is_unrepresentable(*id) {
                         let future: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-                        future.complete_exceptionally(KafkaError::with_message(
-                            Errors::InvalidTopicException,
+                        future.complete_with_error(Error::with_message(
+                            Errors::InvalidTopicError,
                             format!("The given topic ID '{id}' cannot be represented in a request."),
                         ));
                         handles.insert(*id, future);
@@ -2999,7 +3123,7 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
             };
             let mut topics: HashMap<String, TopicListing> = HashMap::new();
             for topic in metadata_response.topic_metadata() {
@@ -3019,8 +3143,8 @@ impl Admin for KafkaAdminClient {
         });
 
         let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            fail_handle.complete_exceptionally(error.clone());
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_handle.complete_with_error(error.clone());
         });
 
         let call = Call::new(
@@ -3046,8 +3170,8 @@ impl Admin for KafkaAdminClient {
                 for name in &names {
                     if topic_name_is_unrepresentable(name) {
                         let future: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
-                        future.complete_exceptionally(KafkaError::with_message(
-                            Errors::InvalidTopicException,
+                        future.complete_with_error(Error::with_message(
+                            Errors::InvalidTopicError,
                             format!("The given topic name '{name}' cannot be represented in a request."),
                         ));
                         handles.insert(name.clone(), future);
@@ -3078,8 +3202,8 @@ impl Admin for KafkaAdminClient {
                 for id in &ids {
                     if topic_id_is_unrepresentable(*id) {
                         let future: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
-                        future.complete_exceptionally(KafkaError::with_message(
-                            Errors::InvalidTopicException,
+                        future.complete_with_error(Error::with_message(
+                            Errors::InvalidTopicError,
                             format!("The given topic id '{id}' cannot be represented in a request."),
                         ));
                         handles.insert(*id, future);
@@ -3341,7 +3465,7 @@ impl Admin for KafkaAdminClient {
                 Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
             } else {
                 if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
-                    return Err(KafkaError::illegal_argument(
+                    return Err(Error::local_illegal_argument(
                         "Cannot request fenced brokers from controller endpoint",
                     ));
                 }
@@ -3366,7 +3490,7 @@ impl Admin for KafkaAdminClient {
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             if resp_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
                 let ConcreteResponse::Metadata(metadata_response) = response else {
-                    return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+                    return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
                 };
                 resp_nodes.complete(metadata_response.brokers().to_vec());
                 let controller = metadata_response.controller().filter(|c| c.id() != NO_CONTROLLER_ID).cloned();
@@ -3375,17 +3499,17 @@ impl Admin for KafkaAdminClient {
                 resp_authorized.complete(valid_acl_operations(metadata_response.cluster_authorized_operations()));
             } else {
                 let ConcreteResponse::DescribeCluster(describe_response) = response else {
-                    return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeCluster response"));
+                    return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeCluster response"));
                 };
                 let error = Errors::for_code(describe_response.data().error_code);
                 if error != Errors::None {
                     // Mirrors Java's `handleFailure(error.exception(errorMessage))`:
                     // fail all four futures directly rather than retrying.
                     let err = api_error(describe_response.data().error_code, &describe_response.data().error_message);
-                    resp_nodes.complete_exceptionally(err.clone());
-                    resp_controller.complete_exceptionally(err.clone());
-                    resp_cluster_id.complete_exceptionally(err.clone());
-                    resp_authorized.complete_exceptionally(err);
+                    resp_nodes.complete_with_error(err.clone());
+                    resp_controller.complete_with_error(err.clone());
+                    resp_cluster_id.complete_with_error(err.clone());
+                    resp_authorized.complete_with_error(err);
                     return HandleResult::Done;
                 }
                 let nodes = describe_response.nodes();
@@ -3403,11 +3527,11 @@ impl Admin for KafkaAdminClient {
         let fail_controller = controller_handle.clone();
         let fail_cluster_id = cluster_id_handle.clone();
         let fail_authorized = authorized_ops_handle.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            fail_nodes.complete_exceptionally(error.clone());
-            fail_controller.complete_exceptionally(error.clone());
-            fail_cluster_id.complete_exceptionally(error.clone());
-            fail_authorized.complete_exceptionally(error.clone());
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_nodes.complete_with_error(error.clone());
+            fail_controller.complete_with_error(error.clone());
+            fail_cluster_id.complete_with_error(error.clone());
+            fail_authorized.complete_with_error(error.clone());
         });
 
         let uv_mm = mm.clone();
@@ -3544,11 +3668,11 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a ListConfigResources response"));
             };
             let error = list_response.error();
             if error != Errors::None {
-                resp_handle.complete_exceptionally(KafkaError::new(error));
+                resp_handle.complete_with_error(Error::new(error));
             } else {
                 resp_handle.complete(list_response.config_resources());
             }
@@ -3556,8 +3680,8 @@ impl Admin for KafkaAdminClient {
         });
 
         let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            fail_handle.complete_exceptionally(error.clone());
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_handle.complete_with_error(error.clone());
         });
 
         let call = Call::new(
@@ -3596,11 +3720,11 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a ListConfigResources response"));
             };
             let error = list_response.error();
             if error != Errors::None {
-                resp_handle.complete_exceptionally(KafkaError::new(error));
+                resp_handle.complete_with_error(Error::new(error));
             } else {
                 let listings: Vec<ClientMetricsResourceListing> = list_response
                     .config_resources()
@@ -3614,8 +3738,8 @@ impl Admin for KafkaAdminClient {
         });
 
         let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            fail_handle.complete_exceptionally(error.clone());
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_handle.complete_with_error(error.clone());
         });
 
         let call = Call::new(
@@ -3758,7 +3882,7 @@ impl Admin for KafkaAdminClient {
         partitions: Option<HashSet<TopicPartition>>,
         options: ElectLeadersOptions,
     ) -> ElectLeadersResult {
-        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
         let public = handle.future();
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout(), self.shared.default_api_timeout_ms);
@@ -3779,13 +3903,13 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ElectLeaders(elect_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected an ElectLeaders response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an ElectLeaders response"));
             };
             let result = ElectLeadersResponse::elect_leaders_result(elect_response.data());
             // For version == 0 the errorCode is 0 which maps to Errors.NONE.
             let error = Errors::for_code(elect_response.data().error_code);
             if error != Errors::None {
-                resp_handle.complete_exceptionally(KafkaError::new(error));
+                resp_handle.complete_with_error(Error::new(error));
                 return HandleResult::Done;
             }
             resp_handle.complete(result);
@@ -3793,8 +3917,8 @@ impl Admin for KafkaAdminClient {
         });
 
         let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            fail_handle.complete_exceptionally(error.clone());
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_handle.complete_with_error(error.clone());
         });
 
         let call = Call::new(
@@ -3830,13 +3954,13 @@ impl Admin for KafkaAdminClient {
             handles.insert(topic_partition.clone(), future.clone());
 
             if topic_name_is_unrepresentable(&topic) {
-                future.complete_exceptionally(KafkaError::with_message(
-                    Errors::InvalidTopicException,
+                future.complete_with_error(Error::with_message(
+                    Errors::InvalidTopicError,
                     format!("The given topic name '{topic}' cannot be represented in a request."),
                 ));
             } else if partition < 0 {
-                future.complete_exceptionally(KafkaError::with_message(
-                    Errors::InvalidTopicException,
+                future.complete_with_error(Error::with_message(
+                    Errors::InvalidTopicError,
                     format!("The given partition index {partition} is not valid."),
                 ));
             } else {
@@ -3881,13 +4005,13 @@ impl Admin for KafkaAdminClient {
         if let Some(partitions) = &partitions {
             for tp in partitions {
                 if topic_name_is_unrepresentable(tp.topic()) {
-                    handle.complete_exceptionally(KafkaError::with_message(
-                        Errors::InvalidTopicException,
+                    handle.complete_with_error(Error::with_message(
+                        Errors::InvalidTopicError,
                         format!("The given topic name '{}' cannot be represented in a request.", tp.topic()),
                     ));
                 } else if tp.partition() < 0 {
-                    handle.complete_exceptionally(KafkaError::with_message(
-                        Errors::InvalidTopicException,
+                    handle.complete_with_error(Error::with_message(
+                        Errors::InvalidTopicError,
                         format!("The given partition index {} is not valid.", tp.partition()),
                     ));
                 }
@@ -4196,11 +4320,19 @@ impl Admin for KafkaAdminClient {
             let key_for_cb = key.clone();
             describe_handle.when_complete(move |result| match result {
                 Err(error) => {
-                    admin_future.complete_exceptionally(HashMap::from([(
+                    // `new KafkaException("Encounter exception when trying to get
+                    // members from group: " + groupId, ex)`
+                    // (`KafkaAdminClient.java:4174`) — a bare `KafkaException`
+                    // carrying the cause, NOT the inner class. Inheriting it made a
+                    // `GroupAuthorizationError` cause answer `is_authorization_error()`
+                    // (and so `is_fatal_error()`) where Java answers `false`, and lost
+                    // the cause entirely (finding 243). "exception" is reworded to
+                    // "error" per CLAUDE.md §2; the rest is Java's text verbatim.
+                    admin_future.complete_with_error(HashMap::from([(
                         key_for_cb,
-                        KafkaError::with_message(
-                            error.error(),
-                            format!("Encounter exception when trying to get members from group: {group_id_owned}"),
+                        Error::kafka_with_source(
+                            format!("Encounter error when trying to get members from group: {group_id_owned}"),
+                            error.clone(),
                         ),
                     )]));
                 },
@@ -4228,7 +4360,7 @@ impl Admin for KafkaAdminClient {
                     // now that the describe future has resolved. This mirrors Java's
                     // `memFuture.whenComplete(...)` (`KafkaAdminClient.java:4224-4230`)
                     // calling `invokeDriver(handler, adminFuture, options.timeoutMs())`,
-                    // whose `calcDeadlineMs(time.milliseconds(), timeoutMs)` runs at
+                    // whose `calcDeadlineMs(time.now.load(Ordering::Acquire), timeoutMs)` runs at
                     // this later moment — giving `LeaveGroup` a fresh full timeout
                     // window rather than the (already partially consumed) describe one.
                     let leave_now = (ctx.time_provider)();
@@ -4279,7 +4411,7 @@ impl Admin for KafkaAdminClient {
                         acl_bindings_sent.push(acl.clone());
                     },
                     Some(indefinite) => {
-                        future.complete_exceptionally(KafkaError::with_message(
+                        future.complete_with_error(Error::with_message(
                             Errors::InvalidRequest,
                             format!("Invalid ACL creation: {indefinite}"),
                         ));
@@ -4307,7 +4439,7 @@ impl Admin for KafkaAdminClient {
         // with InvalidRequestException and enqueue no Call.
         if filter.is_unknown() {
             let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::with_message(
+            handle.complete_with_error(Error::with_message(
                 Errors::InvalidRequest,
                 "The AclBindingFilter must not contain UNKNOWN elements.",
             ));
@@ -4420,7 +4552,7 @@ impl Admin for KafkaAdminClient {
         // alterations later; we also pre-build the wire deletions/upsertions for
         // the ones that pass validation. Building an upsertion runs PBKDF2.
         let unknown_scram_mechanism_msg = "Unknown SCRAM mechanism";
-        let mut illegal: HashMap<String, KafkaError> = HashMap::new();
+        let mut illegal: HashMap<String, Error> = HashMap::new();
 
         // Deletions with an empty user or an unknown mechanism are illegal.
         for alteration in alterations {
@@ -4580,23 +4712,23 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ApiVersions(api_versions) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected an ApiVersions response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an ApiVersions response"));
             };
             let data = api_versions.data();
             if data.error_code == Errors::None.code() {
                 match create_feature_metadata(data) {
                     Ok(metadata) => resp_handle.complete(metadata),
-                    Err(e) => resp_handle.complete_exceptionally(e),
+                    Err(e) => resp_handle.complete_with_error(e),
                 };
             } else {
-                resp_handle.complete_exceptionally(KafkaError::new(Errors::for_code(data.error_code)));
+                resp_handle.complete_with_error(Error::new(Errors::for_code(data.error_code)));
             }
             HandleResult::Done
         });
 
         let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &KafkaError| {
-            fail_handle.complete_exceptionally(error.clone());
+        let handle_failure = Box::new(move |error: &Error| {
+            fail_handle.complete_with_error(error.clone());
         });
 
         let call = Call::new(
@@ -4616,15 +4748,15 @@ impl Admin for KafkaAdminClient {
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<UpdateFeaturesResult, KafkaError> {
+    ) -> Result<UpdateFeaturesResult, Error> {
         if feature_updates.is_empty() {
-            return Err(KafkaError::illegal_argument("Feature updates can not be null or empty."));
+            return Err(Error::local_illegal_argument("Feature updates can not be null or empty."));
         }
 
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
         for feature in feature_updates.keys() {
             if feature.is_empty() {
-                return Err(KafkaError::illegal_argument("Provided feature can not be empty."));
+                return Err(Error::local_illegal_argument("Provided feature can not be empty."));
             }
             handles.insert(feature.clone(), KafkaFutureImpl::new());
         }
@@ -4663,7 +4795,7 @@ impl Admin for KafkaAdminClient {
         let resp_handles = Arc::clone(&handles);
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::UpdateFeatures(update_response) = response else {
-                return HandleResult::Retry(KafkaError::illegal_state("Expected an UpdateFeatures response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an UpdateFeatures response"));
             };
             let data = update_response.data();
             let top_level_error = Errors::for_code(data.error_code);
@@ -4686,10 +4818,7 @@ impl Admin for KafkaAdminClient {
                                     if error == Errors::None {
                                         future.complete(());
                                     } else {
-                                        future.complete_exceptionally(api_error(
-                                            result.error_code,
-                                            &result.error_message,
-                                        ));
+                                        future.complete_with_error(api_error(result.error_code, &result.error_message));
                                     }
                                 },
                             }
@@ -4698,10 +4827,13 @@ impl Admin for KafkaAdminClient {
                         // for every feature (mirrors completeUnrealizedFutures).
                         for (feature, future) in resp_handles.iter() {
                             if !future.is_done() {
-                                future.complete_exceptionally(KafkaError::with_message(
-                                    Errors::UnknownServerError,
-                                    format!("The controller response did not contain a result for feature {feature}"),
-                                ));
+                                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                                // `UnknownServerException` subclass it uses elsewhere for
+                                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                                future.complete_with_error(Error::Api(ApiError::new(format!(
+                                    "The controller response did not contain a result for feature {feature}"
+                                ))));
                             }
                         }
                     }
@@ -4712,12 +4844,12 @@ impl Admin for KafkaAdminClient {
                     // retry the call.
                     resp_mm.clear_controller();
                     resp_mm.request_update();
-                    return HandleResult::Retry(KafkaError::new(Errors::NotController));
+                    return HandleResult::Retry(Error::new(Errors::NotController));
                 },
                 _ => {
                     let error = api_error(data.error_code, &data.error_message);
                     for future in resp_handles.values() {
-                        future.complete_exceptionally(error.clone());
+                        future.complete_with_error(error.clone());
                     }
                 },
             }
@@ -4725,9 +4857,9 @@ impl Admin for KafkaAdminClient {
         });
 
         let fail_handles = Arc::clone(&handles);
-        let handle_failure = Box::new(move |error: &KafkaError| {
+        let handle_failure = Box::new(move |error: &Error| {
             for future in fail_handles.values() {
-                future.complete_exceptionally(error.clone());
+                future.complete_with_error(error.clone());
             }
         });
 
@@ -4816,14 +4948,26 @@ impl Admin for KafkaAdminClient {
         // near-immediate return it is in Java.
         let mut handle = self.shared.bg_handle.lock().unwrap().take();
         if let Some(join_handle) = handle.as_mut() {
-            let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle)
-                .await
-                .is_ok();
-            if !joined {
-                // Expired: leave the task running, exactly as Java leaves the
-                // I/O thread running after an expired join, and put the handle
-                // back so a later `close()` can still join it.
-                *self.shared.bg_handle.lock().unwrap() = handle;
+            let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle).await;
+            // Java's counterpart logs when the join does not complete cleanly
+            // (`KafkaAdminClient.java:707-710`, `catch (InterruptedException e)`).
+            // `InterruptedException` has no Tokio analogue, but a `JoinError` — the
+            // task panicked or was aborted — is the same class of "the I/O task did
+            // not shut down normally" signal, and discarding it left `close()`
+            // returning as if nothing had happened.
+            match joined {
+                Ok(Ok(())) => kafka_debug!(self.shared.log_context, "Kafka admin client closed."),
+                Ok(Err(join_error)) => kafka_error!(
+                    self.shared.log_context,
+                    "The Kafka admin client I/O task did not exit cleanly: {}",
+                    join_error
+                ),
+                Err(_elapsed) => {
+                    // Expired: leave the task running, exactly as Java leaves the
+                    // I/O thread running after an expired join, and put the handle
+                    // back so a later `close()` can still join it.
+                    *self.shared.bg_handle.lock().unwrap() = handle;
+                },
             }
         }
     }
@@ -4862,17 +5006,17 @@ fn get_describe_topics_by_names_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
         };
         let cluster = metadata_response.build_cluster();
         let errors = metadata_response.errors();
         for (topic_name, future) in resp_futures.iter() {
             if let Some(topic_error) = errors.get(topic_name) {
-                future.complete_exceptionally(KafkaError::new(*topic_error));
+                future.complete_with_error(Error::new(*topic_error));
                 continue;
             }
             if !cluster.topics().any(|t| t == topic_name.as_str()) {
-                future.complete_exceptionally(KafkaError::with_message(
+                future.complete_with_error(Error::with_message(
                     Errors::UnknownTopicOrPartition,
                     format!("Topic {topic_name} not found."),
                 ));
@@ -4893,9 +5037,9 @@ fn get_describe_topics_by_names_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -4937,13 +5081,13 @@ fn get_describe_topics_by_ids_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
-            return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
         };
         let cluster = metadata_response.build_cluster();
         let errors = metadata_response.errors_by_topic_id();
         for (topic_id, future) in resp_futures.iter() {
             let Some(topic_name) = cluster.topic_name(topic_id) else {
-                future.complete_exceptionally(KafkaError::with_message(
+                future.complete_with_error(Error::with_message(
                     Errors::UnknownTopicId,
                     format!("TopicId {topic_id} not found."),
                 ));
@@ -4951,7 +5095,7 @@ fn get_describe_topics_by_ids_call(
             };
             let topic_name = topic_name.to_string();
             if let Some(topic_error) = errors.get(topic_id) {
-                future.complete_exceptionally(KafkaError::new(*topic_error));
+                future.complete_with_error(Error::new(*topic_error));
                 continue;
             }
             let authorized_operations = metadata_response
@@ -4968,9 +5112,9 @@ fn get_describe_topics_by_ids_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let handle_failure = Box::new(move |error: &KafkaError| {
+    let handle_failure = Box::new(move |error: &Error| {
         for future in fail_futures.values() {
-            future.complete_exceptionally(error.clone());
+            future.complete_with_error(error.clone());
         }
     });
 
@@ -5006,7 +5150,10 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         metadata_manager.update(cluster, (time_provider)());
+        // Test-only: a bad `RETRY_BACKOFF_JITTER` constant is a build error in the
+        // fixture, so panicking here is the right test behaviour.
         Self::build(client, metadata_manager, config, time_provider, log_context)
+            .expect("the admin retry backoff constants are valid")
     }
 }
 
@@ -5032,6 +5179,58 @@ mod tests {
     };
     use crate::delete_topics_response_data::{DeletableTopicResult, DeleteTopicsResponseData};
     use crate::mock_client::MockClient;
+
+    /// Mirrors Java `ApiError.messageWithFallback()`: the code's default text is
+    /// used ONLY when the broker sent no message (null / `None`); a non-null
+    /// empty message is returned verbatim, and any other message as-is.
+    #[test]
+    fn message_with_fallback_matches_java_apierror() {
+        let code = Errors::InvalidTopicError.code();
+        assert_eq!(
+            message_with_fallback(code, &None),
+            Errors::InvalidTopicError.message(),
+            "null message falls back to the code's default text"
+        );
+        assert_eq!(
+            message_with_fallback(code, &Some(String::new())),
+            "",
+            "a non-null empty message is returned verbatim, NOT the default"
+        );
+        assert_eq!(
+            message_with_fallback(code, &Some("boom".to_string())),
+            "boom",
+            "a non-empty message is returned verbatim"
+        );
+    }
+
+    /// Mirrors Java `Errors.exception(String)` (`Errors.java:462-469`), which
+    /// `ApiError.exception()` delegates to: the code's default text is used ONLY
+    /// when the broker sent `null`; a non-null empty message is used verbatim.
+    #[test]
+    fn api_error_matches_java_errors_message_fallback() {
+        let code = Errors::NotController.code();
+        let default_message = Errors::NotController.message();
+
+        let absent = api_error(code, &None);
+        assert_eq!(absent.error(), Errors::NotController);
+        assert_eq!(
+            absent.message(),
+            default_message,
+            "a null message falls back to the code's default text"
+        );
+
+        let empty = api_error(code, &Some(String::new()));
+        assert_eq!(empty.error(), Errors::NotController, "the code survives an empty message");
+        assert_eq!(
+            empty.message(),
+            "",
+            "a non-null empty message is used verbatim, NOT the default"
+        );
+
+        let present = api_error(code, &Some("boom".to_string()));
+        assert_eq!(present.error(), Errors::NotController);
+        assert_eq!(present.message(), "boom");
+    }
 
     /// A mutable mock clock so retry/backoff tests can advance time.
     struct MockTime {
@@ -5485,9 +5684,9 @@ mod tests {
         let results = admin.delete_acls(&[filter1(), filter2()], DeleteAclsOptions::new());
         pump(&mut runnable, 5).await;
         let filter1_results = results.values()[&filter1()].get().await.unwrap();
-        assert!(filter1_results.values()[0].exception().is_none());
+        assert!(filter1_results.values()[0].error().is_none());
         assert_eq!(filter1_results.values()[0].binding(), Some(&acl1()));
-        assert!(filter1_results.values()[1].exception().is_none());
+        assert!(filter1_results.values()[1].error().is_none());
         assert_eq!(filter1_results.values()[1].binding(), Some(&acl2()));
         assert_eq!(
             results.values()[&filter2()].get().await.unwrap_err().error(),
@@ -5816,7 +6015,7 @@ mod tests {
             assert!(result_data.contains_key(user));
             assert!(
                 result_data[user].get().await.is_err(),
-                "expected request for user {user} to complete exceptionally"
+                "expected request for user {user} to complete with an error"
             );
         }
         assert!(result_data.contains_key(user2_name));
@@ -5948,12 +6147,12 @@ mod tests {
         let result = admin.create_topics(&[NewTopic::new("bad", 1, 1)], CreateTopicsOptions::new());
         runnable.client_mut().prepare_response(create_response(vec![create_result(
             "bad",
-            Errors::InvalidTopicException,
+            Errors::InvalidTopicError,
             Some("Topic name is invalid"),
         )]));
         pump(&mut runnable, 5).await;
         let err = result.values()["bad"].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(err.message(), "Topic name is invalid");
     }
 
@@ -6036,7 +6235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_topics_handle_not_controller_exception() {
+    async fn test_create_topics_handle_not_controller_error() {
         let (admin, mut runnable, time, nodes) = env();
         // First attempt hits the wrong controller; then a metadata refresh
         // updates the controller; then the retry succeeds.
@@ -6070,7 +6269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_topics_retry_throttling_exception_when_enabled() {
+    async fn test_create_topics_retry_throttling_error_when_enabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         // topic1 succeeds, topic2 is throttled (retried until success), topic3 already exists.
         runnable.client_mut().prepare_response(create_response_throttled(
@@ -6105,7 +6304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_topics_dont_retry_throttling_exception_when_disabled() {
+    async fn test_create_topics_dont_retry_throttling_error_when_disabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(create_response_throttled(
             1000,
@@ -6133,7 +6332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_topics_retry_throttling_exception_when_enabled_until_request_timeout() {
+    async fn test_create_topics_retry_throttling_error_when_enabled_until_request_timeout() {
         let default_api_timeout: i64 = 60000;
         let (admin, mut runnable, time, _nodes) =
             env_with_props(&[("default.api.timeout.ms", &default_api_timeout.to_string())]);
@@ -6261,7 +6460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_topics_retry_throttling_exception_when_enabled() {
+    async fn test_delete_topics_retry_throttling_error_when_enabled() {
         // By name.
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(delete_response_throttled(
@@ -6321,7 +6520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_topics_dont_retry_throttling_exception_when_disabled() {
+    async fn test_delete_topics_dont_retry_throttling_error_when_disabled() {
         // By name.
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(delete_response_throttled(
@@ -6371,7 +6570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_topics_retry_throttling_exception_when_enabled_until_request_timeout() {
+    async fn test_delete_topics_retry_throttling_error_when_enabled_until_request_timeout() {
         let default_api_timeout: i64 = 60000;
         // By name.
         let (admin, mut runnable, time, _nodes) =
@@ -6439,6 +6638,297 @@ mod tests {
         assert_eq!(err.throttle_time_ms(), Some(0));
         let err3 = result.topic_id_values().unwrap()[&id3].get().await.unwrap_err();
         assert_eq!(err3.error(), Errors::UnknownTopicId);
+    }
+
+    /// `KafkaAdminClient.java:1573-1574` fails a call submitted after the I/O
+    /// thread is gone with `new TimeoutException("The AdminClient thread has
+    /// exited.")`, and `handleTimeoutFailure` short-circuits on
+    /// `cause instanceof TimeoutException` (`:959-961`) so the user sees exactly a
+    /// `TimeoutException` — i.e. a `RetriableException`.
+    ///
+    /// This used to be `Error::local_illegal_state`, whose `ErrorHierarchy` is empty, so
+    /// **both** `is_retriable_error()` and `is_kafka_error()` answered `false`: a
+    /// caller writing `if err.is_retriable_error() { retry }` behaved differently
+    /// against the two clients for the identical condition.
+    #[tokio::test]
+    async fn a_call_submitted_after_the_io_task_exits_fails_with_a_timeout() {
+        let (admin, runnable, _time, _nodes) = env();
+        // Dropping the runnable drops the receiving end of the call channel, which
+        // is what `submit`'s `SendError` arm observes.
+        drop(runnable);
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        let error = result.names().get().await.expect_err("the call cannot be delivered");
+
+        assert_eq!(error.message(), "The AdminClient thread has exited.");
+        assert!(error.is_timeout_error(), "got {error:?}");
+        assert!(error.is_retriable_error(), "a timeout error is retriable: {error:?}");
+        assert!(
+            error.is_kafka_error(),
+            "... which is an API error, which is a Kafka error: {error:?}"
+        );
+    }
+
+    /// `KafkaAdminClient.java:1377-1379` cancels a call whose node disconnected with
+    /// `new DisconnectException(...)`. It used to be built as
+    /// `Errors::NetworkError`, so the user got protocol code 13 for a purely
+    /// client-side event and a caller matching `Error::Disconnect(_)` never fired.
+    ///
+    /// The driver's `t instanceof DisconnectException` retry-lookup branch
+    /// (`AdminApiDriver.java:265`) keys off the same class, so the wrong class was
+    /// load-bearing — hence this asserts the class, not just the message.
+    ///
+    /// It also pins `Call.handleTimeoutFailure` (`KafkaAdminClient.java:959-964`),
+    /// which is what the retry-exhausted disconnect reaches:
+    ///
+    /// ```java
+    /// handleFailure(new TimeoutException(this + " timed out at " + now
+    ///     + " after " + tries + " attempt(s)", cause));
+    /// ```
+    ///
+    /// The Rust message used to gain an invented `"Aborted due to timeout: "`
+    /// prefix, drop the `Call(...)` rendering of `this` (`:1001-1004`), and append
+    /// the cause as text — leaving `Error::source()` empty where Java's
+    /// `getCause()` is populated.
+    #[tokio::test]
+    async fn a_disconnect_fails_the_call_with_a_disconnect_error() {
+        // One retry attempt only, so the call fails terminally rather than looping.
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retries", "0")]);
+        runnable.client_mut().prepare_response_disconnected(
+            ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+            true,
+        );
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        for _ in 0..30 {
+            if result.names().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        let error = result.names().get().await.expect_err("the disconnect must fail the call");
+
+        // With `retries=0` the call is out of retries immediately, so Java's
+        // `handleTimeoutFailure` wraps the cause in a `TimeoutException`.
+        assert!(error.is_timeout_error(), "got {error:?}");
+        assert!(
+            !error.message().starts_with("Aborted due to timeout"),
+            "the invented prefix has no counterpart in the Kafka tree: {}",
+            error.message()
+        );
+        assert!(
+            error.message().starts_with("Call(callName=listTopics, deadlineMs="),
+            "the message must open with Java's `Call.toString()` rendering: {}",
+            error.message()
+        );
+        assert!(
+            error.message().ends_with(" attempt(s)"),
+            "and end exactly where Java's does, with the cause carried separately: {}",
+            error.message()
+        );
+
+        // The cause is the `DisconnectException` Java builds at
+        // `KafkaAdminClient.java:1377-1379`, attached rather than stringified.
+        let cause = error.source().expect("handleTimeoutFailure passes the cause through");
+        assert!(
+            matches!(cause, Error::Disconnect(_)),
+            "expected a disconnect error; got {cause:?}"
+        );
+        assert!(
+            cause.message().contains("being disconnected"),
+            "the message keeps Java's text: {}",
+            cause.message()
+        );
+        // `DisconnectException extends RetriableException`, so retriability is
+        // unchanged relative to the old `NetworkError` — the class is the fix.
+        assert!(cause.is_retriable_error(), "got {cause:?}");
+    }
+
+    /// Java wraps the admin-client constructor in `catch (Throwable exc)` and
+    /// rethrows `new KafkaException("Failed to create new KafkaAdminClient", exc)`
+    /// (`KafkaAdminClient.java:569-573` / `:592-595`), so a caller has one class and
+    /// one message for "admin client construction failed".
+    ///
+    /// The three failure points used to surface in three different shapes, none of
+    /// them Java's: a leaked underlying error, an `illegal_argument`
+    /// (`is_kafka_error()` → `false`) with an invented message, and a panic.
+    #[test]
+    fn construction_failures_are_wrapped_as_a_kafka_error() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "not-a-host-port".to_string());
+        let config = AdminClientConfig::from_properties(&props).expect("the config itself parses");
+
+        let error = KafkaAdminClient::from_config(config)
+            .err()
+            .expect("an unparseable bootstrap.servers entry must fail construction");
+
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        // Java's replacement is a bare `KafkaException`.
+        assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
+        assert!(!error.is_api_error(), "a bare Kafka error is not an API error: {error:?}");
+        assert!(error.source().is_some(), "the underlying failure must be the wrapper's cause");
+    }
+
+    /// `AdminClientRunnable.run`'s `finally` (`KafkaAdminClient.java:1459-1476`)
+    /// fails every pending call with
+    /// `TimeoutException("The AdminClient thread has exited. Call: <name>")`,
+    /// **however** `processRequests` terminated.
+    ///
+    /// Translated as straight-line code after the loop it was not a `finally` at
+    /// all: any panic inside `run_once` skipped both `fail_all_remaining` and
+    /// `client.close()`, so no outstanding `KafkaFuture` was ever completed and no
+    /// socket was closed — a silent permanent hang.
+    #[tokio::test]
+    async fn a_panicking_io_task_still_runs_its_finally() {
+        let (admin, mut runnable, time, _nodes) = env();
+
+        // Inject a panic inside the loop body, standing in for the
+        // `ClassCastException`s Java's `catch (Throwable t)` covers (the Issue-66
+        // sites). An already-expired deadline makes `run_once`'s step 2
+        // (`handle_timeouts` -> `fail_call` -> `handle_timeout_failure`) invoke this
+        // call's failure hook on the very first iteration, so the injection is
+        // deterministic. It panics only once, so the `finally`'s own re-failing of
+        // the queue can be observed instead of panicking again.
+        let failures = Arc::new(AtomicI64::new(0));
+        let counter = Arc::clone(&failures);
+        let now = time.now.load(Ordering::Acquire);
+        admin.submit(Call::new(
+            "panicOnPurpose",
+            now - 1,
+            NodeProvider::LeastLoaded,
+            Box::new(|_timeout_ms| unreachable!("the call expires before it is ever sent")),
+            Box::new(|_response, _now, _cur_node| HandleResult::Done),
+            Box::new(move |_error| {
+                if counter.fetch_add(1, Ordering::AcqRel) == 0 {
+                    panic!("injected panic inside run_once");
+                }
+            }),
+            Box::new(|| false),
+        ));
+
+        // `run()` must return: the panic ends `process_requests`, and the `finally`
+        // then runs. Bounded so a regression shows up as a failure, not a hang.
+        tokio::time::timeout(std::time::Duration::from_secs(10), runnable.run())
+            .await
+            .expect("run() must reach its finally after a panic, not spin or abort");
+
+        assert_eq!(
+            failures.load(Ordering::Acquire),
+            1,
+            "the injected panic must actually have fired"
+        );
+        // `client.close()` is the tail of Java's `finally`; it only runs if the
+        // whole block was reached. Straight-line code after the loop skipped it.
+        assert!(
+            !runnable.client_mut().active(),
+            "the finally must close the client even when the loop body panicked"
+        );
+    }
+
+    /// `KafkaAdminClient.java:1292-1298` wraps a `createRequest` failure as
+    ///
+    /// ```java
+    /// new KafkaException(String.format("Internal error sending %s to %s.", call.callName, node), t)
+    /// ```
+    ///
+    /// — a bare `KafkaException` carrying the original as its cause. It used to be
+    /// an `Error::local_illegal_state` (`is_kafka_error()` → `false`) whose message had
+    /// the cause text appended, so `Error::source()` was empty.
+    #[tokio::test]
+    async fn a_create_request_failure_is_wrapped_as_a_kafka_error() {
+        let (admin, mut runnable, time, _nodes) = env_with_props(&[("retries", "0")]);
+
+        let failure: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&failure);
+        let now = time.now.load(Ordering::Acquire);
+        admin.submit(Call::new(
+            "createRequestBoom",
+            now + 60_000,
+            NodeProvider::LeastLoaded,
+            Box::new(|_timeout_ms| Err(Error::new(Errors::InvalidRequest))),
+            Box::new(|_response, _now, _cur_node| HandleResult::Done),
+            Box::new(move |error| {
+                *sink.lock().unwrap() = Some(error.clone());
+            }),
+            Box::new(|| false),
+        ));
+
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if failure.lock().unwrap().is_some() {
+                break;
+            }
+        }
+
+        let error = failure.lock().unwrap().take().expect("the call must be failed");
+        assert_eq!(
+            error.message(),
+            "Internal error sending createRequestBoom to localhost:9092 (id: 0 rack: None isFenced: false)."
+        );
+        // Java's replacement is a bare `KafkaException`.
+        assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
+        assert!(!error.is_api_error(), "a bare Kafka error is not an API error: {error:?}");
+        assert_eq!(
+            error.source().expect("the createRequest error is the cause").error(),
+            Errors::InvalidRequest,
+            "the cause is attached, not stringified into the message"
+        );
+    }
+
+    /// `makeBrokerMetadataCall.handleResponse` does
+    /// `(MetadataResponse) abstractResponse` unguarded
+    /// (`KafkaAdminClient.java:1668`) and relies on the `:1387`
+    /// `catch (Throwable t)` → `call.fail(now, t)` → non-retriable →
+    /// `handleFailure` → `metadataManager.updateFailed(e)`.
+    ///
+    /// Swallowing the mismatch ran neither `update()` nor `update_failed()` while
+    /// `run_once` had already called `transition_to_update_pending`, and
+    /// `metadata_fetch_delay_ms` returns `i64::MAX` in `UPDATE_PENDING` — so the
+    /// client never refreshed metadata again for its whole lifetime, and
+    /// `HandleResult::Done` on an internal call also re-queued the pending calls
+    /// against permanently stale metadata.
+    #[tokio::test]
+    async fn a_wrong_typed_metadata_response_does_not_pin_the_manager_in_update_pending() {
+        let (_admin, mut runnable, time, _nodes) = env_with_props(&[("retries", "0")]);
+
+        // Force the internal metadata refresh, then answer it with the wrong type.
+        runnable.metadata_manager().request_update();
+        runnable.client_mut().prepare_response(ConcreteResponse::ListGroups(
+            crate::common::requests::ListGroupsResponse::new(
+                crate::list_groups_response_data::ListGroupsResponseData::new(),
+            ),
+        ));
+
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if runnable.client_mut().num_awaiting_responses() == 0 {
+                break;
+            }
+        }
+        // The refresh must actually have gone out and consumed the wrong-typed
+        // response, or this test would pass vacuously.
+        assert_eq!(
+            runnable.client_mut().num_awaiting_responses(),
+            0,
+            "the internal metadata call must have been issued and answered"
+        );
+
+        assert_ne!(
+            runnable
+                .metadata_manager()
+                .metadata_fetch_delay_ms(time.now.load(Ordering::Acquire)),
+            i64::MAX,
+            "the manager must leave UPDATE_PENDING and retry under backoff, as Java's \
+             updateFailed(e) makes it"
+        );
     }
 
     // --- listTopics ----------------------------------------------------------
@@ -6576,7 +7066,7 @@ mod tests {
             DescribeTopicsOptions::new(),
         );
         let err = result.all_topic_ids().unwrap().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(
             err.message(),
             "The given topic id 'AAAAAAAAAAAAAAAAAAAAAA' cannot be represented in a request."
@@ -6614,7 +7104,7 @@ mod tests {
         let (admin, _runnable, _time, _nodes) = env();
         let result = admin.create_topics(&[NewTopic::new("", 1, 1)], CreateTopicsOptions::new());
         let err = result.values()[""].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
     }
 
@@ -6624,7 +7114,7 @@ mod tests {
         let result =
             admin.delete_topics(TopicCollection::of_topic_names(vec![String::new()]), DeleteTopicsOptions::new());
         let err = result.topic_name_values().unwrap()[""].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
     }
 
@@ -6664,23 +7154,19 @@ mod tests {
             1000,
             vec![
                 create_partitions_result_item("my_topic", Errors::None, None),
-                create_partitions_result_item(
-                    "other_topic",
-                    Errors::InvalidTopicException,
-                    Some("some detailed reason"),
-                ),
+                create_partitions_result_item("other_topic", Errors::InvalidTopicError, Some("some detailed reason")),
             ],
         ));
         pump(&mut runnable, 5).await;
         result.values()["my_topic"].get().await.unwrap();
         let err = result.values()["other_topic"].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(err.message(), "some detailed reason");
     }
 
     /// Mirrors `KafkaAdminClientTest.testCreatePartitionsRetryThrottlingExceptionWhenEnabled`.
     #[tokio::test]
-    async fn test_create_partitions_retry_throttling_exception_when_enabled() {
+    async fn test_create_partitions_retry_throttling_error_when_enabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(create_partitions_response(
             1000,
@@ -6718,7 +7204,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testCreatePartitionsDontRetryThrottlingExceptionWhenDisabled`.
     #[tokio::test]
-    async fn test_create_partitions_dont_retry_throttling_exception_when_disabled() {
+    async fn test_create_partitions_dont_retry_throttling_error_when_disabled() {
         let (admin, mut runnable, _time, _nodes) = env();
         runnable.client_mut().prepare_response(create_partitions_response(
             1000,
@@ -6745,7 +7231,7 @@ mod tests {
 
     /// Mirrors `KafkaAdminClientTest.testCreatePartitionsRetryThrottlingExceptionWhenEnabledUntilRequestTimeOut`.
     #[tokio::test]
-    async fn test_create_partitions_retry_throttling_exception_when_enabled_until_request_timeout() {
+    async fn test_create_partitions_retry_throttling_error_when_enabled_until_request_timeout() {
         let default_api_timeout: i64 = 60000;
         let (admin, mut runnable, time, _nodes) =
             env_with_props(&[("default.api.timeout.ms", &default_api_timeout.to_string())]);
@@ -7081,7 +7567,7 @@ mod tests {
 
             time.sleep(request_timeout_ms as i64 + 1);
             drive_until(&mut runnable, &time, 40, || all.is_done()).await;
-            assert!(matches!(all.get().await.unwrap_err(), KafkaError::Timeout(_)));
+            assert!(matches!(all.get().await.unwrap_err(), Error::Timeout(_)));
         }
     }
 
@@ -8048,7 +8534,10 @@ mod tests {
         };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
 
-        let outcome = call.maybe_retry(&KafkaError::new(Errors::NetworkException), now);
+        let outcome = call.maybe_retry(
+            &Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected")),
+            now,
+        );
         assert!(matches!(outcome, MaybeRetryOutcome::Handled));
 
         // `foo` was unmapped and a fresh lookup call was enqueued (targeting a
@@ -8084,7 +8573,7 @@ mod tests {
         };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
 
-        let outcome = call.maybe_retry(&KafkaError::new(Errors::UnknownServerError), now);
+        let outcome = call.maybe_retry(&Error::new(Errors::UnknownServerError), now);
         assert!(matches!(outcome, MaybeRetryOutcome::Requeue));
         assert_eq!(driver.lock().unwrap().key_to_broker_id(&"foo".to_string()), Some(0));
         assert!(rx.try_recv().is_err());
@@ -8441,10 +8930,7 @@ mod tests {
             result.descriptions()[&0].is_done() && result.descriptions()[&1].is_done()
         })
         .await;
-        assert!(matches!(
-            result.descriptions()[&0].get().await.unwrap_err(),
-            KafkaError::Timeout(_)
-        ));
+        assert!(matches!(result.descriptions()[&0].get().await.unwrap_err(), Error::Timeout(_)));
         assert!(result.descriptions()[&1].get().await.is_ok());
     }
 
@@ -8688,10 +9174,7 @@ mod tests {
             result.values()[&tpr1].is_done() && result.values()[&tpr2].is_done()
         })
         .await;
-        assert!(matches!(
-            result.values()[&tpr1].get().await.unwrap_err(),
-            KafkaError::Timeout(_)
-        ));
+        assert!(matches!(result.values()[&tpr1].get().await.unwrap_err(), Error::Timeout(_)));
         result.values()[&tpr2].get().await.unwrap();
     }
 
@@ -8908,7 +9391,7 @@ mod tests {
             time.sleep(200);
             pump_until(&mut runnable, 30, |_r| result.partitions().is_done()).await;
             let err = result.partitions().get().await.unwrap_err();
-            assert!(matches!(err, KafkaError::Timeout(_)));
+            assert!(matches!(err, Error::Timeout(_)));
         }
     }
 
@@ -9084,7 +9567,7 @@ mod tests {
     /// Drives `KafkaAdminClientTest.testUpdateFeaturesHandleNotControllerException`
     /// — a `@ParameterizedTest` over `@ValueSource(shorts = {1, 2})`.
     #[tokio::test]
-    async fn test_update_features_handle_not_controller_exception() {
+    async fn test_update_features_handle_not_controller_error() {
         for version in [1i16, 2] {
             let (admin, mut runnable, time, nodes) = env();
             // First attempt hits the wrong controller.
@@ -9374,11 +9857,11 @@ mod tests {
         pump(&mut runnable, 5).await;
         assert_eq!(
             result.values()[&invalid_topic].get().await.unwrap_err().error(),
-            Errors::InvalidTopicException
+            Errors::InvalidTopicError
         );
         assert_eq!(
             result.values()[&invalid_partition].get().await.unwrap_err().error(),
-            Errors::InvalidTopicException
+            Errors::InvalidTopicError
         );
         result.values()[&valid].get().await.unwrap();
     }
@@ -10356,11 +10839,14 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        assert!(
-            err.message().contains("Failed to find brokers to send listConsumerGroups"),
-            "got: {}",
-            err.message()
-        );
+        // Java hardcodes "ListGroups" in the message at both call sites
+        // (`KafkaAdminClient.java:3565` and `:3723`), and
+        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // assert only `KafkaException.class`. The Rust message used to substitute
+        // the lower-cased Rust call name and append the cause's text (finding 243).
+        assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
+        assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
         let _ = &nodes;
     }
 
@@ -10381,11 +10867,14 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        assert!(
-            err.message().contains("Failed to find brokers to send listGroups"),
-            "got: {}",
-            err.message()
-        );
+        // Java hardcodes "ListGroups" in the message at both call sites
+        // (`KafkaAdminClient.java:3565` and `:3723`), and
+        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // assert only `KafkaException.class`. The Rust message used to substitute
+        // the lower-cased Rust call name and append the cause's text (finding 243).
+        assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
+        assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
     }
 
     /// `describe_consumer_groups` finds the coordinator then describes the group
@@ -11147,7 +11636,7 @@ mod tests {
         // A partition not in the request fails with IllegalArgument.
         assert!(matches!(
             result.partition_result(&tp3).get().await.unwrap_err(),
-            KafkaError::IllegalArgument(_)
+            Error::LocalIllegalArgument(_)
         ));
     }
 
@@ -11277,7 +11766,7 @@ mod tests {
             Errors::GroupSubscribedToTopic
         );
         // A partition not in the request fails synchronously with IllegalArgument.
-        assert!(matches!(result.partition_result(&tp3), Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(result.partition_result(&tp3), Err(Error::LocalIllegalArgument(_))));
     }
 
     /// Translated from `testDeleteConsumerGroupOffsetsNonRetriableErrors`.
@@ -11473,7 +11962,7 @@ mod tests {
         pump_until(&mut runnable, 40, |r| !r.client_mut().has_pending_responses()).await;
         time.sleep(default_api_timeout + 1);
         drive_until(&mut runnable, &time, 40, || all.is_done()).await;
-        assert!(matches!(all.get().await.unwrap_err(), KafkaError::Timeout(_)));
+        assert!(matches!(all.get().await.unwrap_err(), Error::Timeout(_)));
     }
 
     /// Translated from `testDeleteConsumerGroupsWithOlderBroker`: retriable
@@ -11561,7 +12050,7 @@ mod tests {
         pump_until(&mut runnable, 40, |r| !r.client_mut().has_pending_responses()).await;
         time.sleep(default_api_timeout + 1);
         drive_until(&mut runnable, &time, 40, || all.is_done()).await;
-        assert!(matches!(all.get().await.unwrap_err(), KafkaError::Timeout(_)));
+        assert!(matches!(all.get().await.unwrap_err(), Error::Timeout(_)));
     }
 
     /// Translated from `testRemoveMembersFromGroupRetriableErrors`.
@@ -11677,7 +12166,7 @@ mod tests {
             admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
         let missing_all = missing_member_result.all();
         drive_until(&mut runnable, &time, 60, || missing_all.is_done()).await;
-        assert!(matches!(missing_all.get().await.unwrap_err(), KafkaError::IllegalArgument(_)));
+        assert!(matches!(missing_all.get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
         assert!(matches!(
             missing_member_result
                 .member_result(&member_one)
@@ -11685,7 +12174,7 @@ mod tests {
                 .get()
                 .await
                 .unwrap_err(),
-            KafkaError::IllegalArgument(_)
+            Error::LocalIllegalArgument(_)
         ));
         assert_eq!(
             missing_member_result.member_result(&member_two).unwrap().get().await.unwrap(),
@@ -11800,7 +12289,7 @@ mod tests {
     /// Java computes the `LeaveGroup` driver's deadline INSIDE
     /// `memFuture.whenComplete(...)`, after the describe future resolves
     /// (`KafkaAdminClient.java:4224-4230` → `invokeDriver(..., options.timeoutMs())`
-    /// → `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a
+    /// → `calcDeadlineMs(time.now.load(Ordering::Acquire), ...)`), so `LeaveGroup` gets a
     /// fresh full timeout window starting when describe completes. Here the mock
     /// clock is advanced past the ORIGINAL (call-time) `options.timeout` window
     /// before describe completes: the fix recomputes the LeaveGroup deadline from
@@ -11932,6 +12421,433 @@ mod tests {
     async fn test_remove_members_from_group_default_reason() {
         assert_remove_members_reason(None, DEFAULT_LEAVE_GROUP_REASON).await;
         assert_remove_members_reason(Some(""), DEFAULT_LEAVE_GROUP_REASON).await;
+    }
+
+    /// A [`MockClient`] whose `authentication_error` reports a failure, mirroring
+    /// Java's `MockClient.authenticationException(node)` being non-null after
+    /// `createPendingAuthenticationError`. `MockClient` (outside this module)
+    /// always answers `None`, and the trait method is the only way the admin
+    /// runnable learns about an authentication failure
+    /// (`KafkaAdminClient.java:1373`).
+    struct AuthFailingClient {
+        inner: MockClient,
+        error: Option<Error>,
+    }
+
+    impl AuthFailingClient {
+        /// `error` is the object the channel would have raised, so the test can
+        /// pick the *subclass* — which is the whole point of the regression it
+        /// backs.
+        fn new(inner: MockClient, error: Error) -> Self {
+            Self { inner, error: Some(error) }
+        }
+    }
+
+    impl KafkaClient for AuthFailingClient {
+        fn authentication_error(&self, _node: &Node) -> Option<Error> {
+            self.error.clone()
+        }
+
+        fn is_ready(&self, node: &Node, now: i64) -> bool {
+            self.inner.is_ready(node, now)
+        }
+
+        fn ready(&mut self, node: &Node, now: i64) -> impl std::future::Future<Output = bool> + Send {
+            self.inner.ready(node, now)
+        }
+
+        fn connection_delay(&self, node: &Node, now: i64) -> i64 {
+            self.inner.connection_delay(node, now)
+        }
+
+        fn poll_delay_ms(&self, node: &Node, now: i64) -> i64 {
+            self.inner.poll_delay_ms(node, now)
+        }
+
+        fn connection_failed(&self, node: &Node) -> bool {
+            self.inner.connection_failed(node)
+        }
+
+        fn send(&mut self, request: crate::ClientRequest, now: i64) {
+            self.inner.send(request, now)
+        }
+
+        fn poll(
+            &mut self,
+            timeout: i64,
+            now: i64,
+        ) -> impl std::future::Future<Output = Vec<crate::ClientResponse>> + Send {
+            self.inner.poll(timeout, now)
+        }
+
+        fn disconnect(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send {
+            self.inner.disconnect(node_id)
+        }
+
+        fn close_connection(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send {
+            self.inner.close_connection(node_id)
+        }
+
+        fn least_loaded_node(&self, now: i64) -> crate::least_loaded_node::LeastLoadedNode {
+            self.inner.least_loaded_node(now)
+        }
+
+        fn in_flight_request_count(&self) -> i32 {
+            self.inner.in_flight_request_count()
+        }
+
+        fn has_in_flight_requests(&self) -> bool {
+            self.inner.has_in_flight_requests()
+        }
+
+        fn in_flight_request_count_for_node(&self, node_id: &str) -> usize {
+            self.inner.in_flight_request_count_for_node(node_id)
+        }
+
+        fn has_in_flight_requests_for_node(&self, node_id: &str) -> bool {
+            self.inner.has_in_flight_requests_for_node(node_id)
+        }
+
+        fn has_ready_nodes(&self, now: i64) -> bool {
+            self.inner.has_ready_nodes(now)
+        }
+
+        fn wakeup(&self) {
+            self.inner.wakeup()
+        }
+
+        fn wakeup_handle(&self) -> Arc<Notify> {
+            self.inner.wakeup_handle()
+        }
+
+        fn wakeup_notify(&self) -> Arc<Notify> {
+            self.inner.wakeup_notify()
+        }
+
+        fn new_client_request(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn crate::common::requests::RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+        ) -> crate::ClientRequest {
+            self.inner
+                .new_client_request(node_id, request_builder, created_time_ms, expect_response)
+        }
+
+        fn new_client_request_with_timeout(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn crate::common::requests::RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+            request_timeout_ms: i32,
+            callback: Option<crate::RequestCompletionHandler>,
+        ) -> crate::ClientRequest {
+            self.inner.new_client_request_with_timeout(
+                node_id,
+                request_builder,
+                created_time_ms,
+                expect_response,
+                request_timeout_ms,
+                callback,
+            )
+        }
+
+        fn initiate_close(&self) {
+            self.inner.initiate_close()
+        }
+
+        fn active(&self) -> bool {
+            self.inner.active()
+        }
+
+        fn close(&mut self) -> impl std::future::Future<Output = ()> + Send {
+            self.inner.close()
+        }
+    }
+
+    /// Regression for finding 242. Java propagates the exception **object** —
+    /// `AuthenticationException authException = client.authenticationException(call.curNode());
+    /// if (authException != null) call.fail(now, authException);`
+    /// (`KafkaAdminClient.java:1373-1376`) — so whichever `AuthenticationException`
+    /// subclass the channel raised is what the admin future fails with. Rust
+    /// hardcoded `Errors::SaslAuthenticationFailed`, reporting code 58 for a TLS
+    /// certificate rejection (`KafkaChannel.java:463-467`'s
+    /// `catch (SslAuthenticationException e)`), on a connection that never
+    /// performed a SASL exchange.
+    ///
+    /// It also pins finding 231's other half: the reason must be the
+    /// authenticator's own text, with no second class prefix baked into
+    /// `message()`.
+    #[tokio::test]
+    async fn an_admin_authentication_failure_is_not_reported_as_sasl() {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let inner = MockClient::new(nodes.clone(), time.provider());
+        let client = AuthFailingClient::new(
+            inner,
+            Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
+                "SSL handshake failed: certificate rejected",
+            )),
+        );
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("retries".to_string(), "0".to_string());
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+
+        runnable
+            .client_mut()
+            .inner
+            .prepare_response_disconnected(metadata_resp(&nodes, Vec::new()), true);
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        let names = result.names();
+        for _ in 0..40 {
+            if names.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        let error = names.get().await.expect_err("the authentication failure must fail the call");
+
+        // `retries=0` means the call is out of retries, so Java's
+        // `handleTimeoutFailure` wraps the cause; the authentication error is the
+        // cause. Unwrap it if present, otherwise the error itself is it.
+        let auth = error.source().unwrap_or(&error);
+        assert!(auth.is_authentication_error(), "must classify as authentication: {auth:?}");
+        assert_ne!(
+            auth.error(),
+            Errors::SaslAuthenticationFailed,
+            "an SSL rejection must not be reported as SASL_AUTHENTICATION_FAILED: {auth:?}"
+        );
+        // The class itself, not just the code: Java hands the object through, so a
+        // caller matching on the subclass — which is how it tells a certificate
+        // rejection from a rejected credential — still fires.
+        assert!(
+            matches!(auth, Error::SslAuthentication(_)),
+            "the subclass the channel raised must survive: {auth:?}"
+        );
+        assert_eq!(
+            auth.message(),
+            "SSL handshake failed: certificate rejected",
+            "the authenticator's bare text: no second class prefix (finding 231)"
+        );
+        assert!(
+            crate::common::requests::request_utils::is_fatal_error(auth),
+            "RequestUtils.isFatalException answers true for an AuthenticationException: {auth:?}"
+        );
+    }
+
+    /// Regression for finding 243(a). `handleFailure` on the `findAllBrokers`
+    /// metadata call builds
+    /// `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
+    /// (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
+    /// `listConsumerGroups`) — a **bare** `KafkaException`, which is a *sibling* of
+    /// `ApiException`, not a subclass. So:
+    ///
+    ///   * `is_kafka_error()` is `true`, `is_api_error()` / `is_retriable_error()`
+    ///     are `false`;
+    ///   * the cause is reachable through `getCause()`;
+    ///   * the message is fixed — it does NOT carry the cause's text, and Java
+    ///     hardcodes "ListGroups" even for `listConsumerGroups`.
+    ///
+    /// Reusing the inner error's code made the wrapper *inherit* the inner class,
+    /// so a metadata timeout came back retriable and causeless.
+    #[tokio::test]
+    async fn list_groups_metadata_failure_is_a_bare_kafka_error() {
+        // retries=0 so the disconnected metadata call fails terminally instead of
+        // looping.
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retries", "0")]);
+        runnable
+            .client_mut()
+            .prepare_response_disconnected(metadata_resp(&nodes, Vec::new()), true);
+
+        let result = admin.list_groups(ListGroupsOptions::new());
+        let errors = result.errors();
+        drive_until(&mut runnable, &time, 60, || errors.is_done()).await;
+
+        let reported = errors.get().await.expect("the metadata failure is reported through errors()");
+        assert_eq!(reported.len(), 1, "one wrapped error, got {reported:?}");
+        let error = &reported[0];
+
+        assert_eq!(
+            error.message(),
+            "Failed to find brokers to send ListGroups",
+            "Java's message is fixed: no lower-cased call name, no appended cause text"
+        );
+        assert!(error.is_kafka_error(), "a bare KafkaException is a Kafka error: {error:?}");
+        assert!(
+            !error.is_api_error(),
+            "a bare KafkaException is a SIBLING of ApiException, not a subclass: {error:?}"
+        );
+        assert!(
+            !error.is_retriable_error(),
+            "the wrapper must not inherit the inner TimeoutException's retriability: {error:?}"
+        );
+        assert_eq!(
+            error.error(),
+            Errors::UnknownServerError,
+            "a client-built KafkaException has no wire code"
+        );
+        let cause = error.source().expect("Java passes the throwable as the cause");
+        assert!(
+            cause.is_timeout_error(),
+            "expected the metadata timeout as the cause; got {cause:?}"
+        );
+    }
+
+    /// Regression for finding 243(b). `getMembersFromGroup`'s `whenComplete`
+    /// builds `new KafkaException("Encounter exception when trying to get members
+    /// from group: " + groupId, ex)` (`KafkaAdminClient.java:4174`) — again a bare
+    /// `KafkaException` carrying the cause, NOT the inner class. Inheriting the
+    /// inner class turned a `GroupAuthorizationException` cause into an
+    /// `is_authorization_error()` (and therefore `is_fatal_error()`) wrapper where
+    /// Java answers `false` to both, and dropped the cause.
+    ///
+    /// ("exception" is reworded to "error" in the Rust message per CLAUDE.md §2.)
+    #[tokio::test]
+    async fn remove_all_describe_failure_is_a_bare_kafka_error() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(consumer_group_describe_error_resp(
+            GROUP_ID,
+            Errors::GroupAuthorizationFailed,
+            None,
+        ));
+
+        let result =
+            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 80, || all.is_done()).await;
+        let error = all.get().await.expect_err("the describe step must fail the removeAll");
+
+        assert_eq!(
+            error.message(),
+            format!("Encounter error when trying to get members from group: {GROUP_ID}")
+        );
+        assert!(error.is_kafka_error(), "got {error:?}");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+        assert!(
+            !error.is_authorization_error(),
+            "the wrapper must not inherit GroupAuthorizationException: {error:?}"
+        );
+        assert!(
+            !crate::common::requests::request_utils::is_fatal_error(&error),
+            "and therefore must not be fatal: {error:?}"
+        );
+        let cause = error.source().expect("Java passes `ex` as the cause");
+        assert_eq!(cause.error(), Errors::GroupAuthorizationFailed, "got {cause:?}");
+        assert!(cause.is_authorization_error(), "the cause keeps its own class: {cause:?}");
+    }
+
+    /// Regression for finding 246. `completeUnrealizedFutures` throws
+    /// `new ApiException(messageFormatter.apply(key))`
+    /// (`KafkaAdminClient.java:1744-1749`) — the concrete base class. It was
+    /// spelled `Errors::UnknownServerError`, which resolves to the
+    /// `UnknownServerException` *subclass*, so `Display` read
+    /// `"UnknownServerError: .."` and `matches!(e, Error::Api(_))` never matched.
+    ///
+    /// Java uses `new UnknownServerException(..)` for its *other* response sanity
+    /// checks (`:2631`, `:2684`, `:4020`), so this is not a blanket sweep.
+    #[tokio::test]
+    async fn an_unrealized_future_fails_with_a_bare_api_error() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        // The broker answers with no per-topic result at all, so the requested
+        // topic's future is left unrealized (`completeUnrealizedFutures`).
+        runnable.client_mut().prepare_response(create_response(vec![]));
+        for _ in 0..20 {
+            if result.values()["myTopic"].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+        }
+
+        let error = result.values()["myTopic"]
+            .get()
+            .await
+            .expect_err("an unrealized future must fail");
+        assert!(
+            matches!(error, Error::Api(_)),
+            "Java throws the concrete `ApiException`, not a subclass: {error:?}"
+        );
+        assert_eq!(
+            error.message(),
+            "The controller response did not contain a result for topic myTopic"
+        );
+        assert_eq!(
+            error.to_string(),
+            "ApiError: The controller response did not contain a result for topic myTopic",
+            "Display names the class Java threw"
+        );
+        assert!(error.is_api_error(), "got {error:?}");
+        assert!(error.is_kafka_error(), "an ApiException is a KafkaException: {error:?}");
+        assert!(
+            !error.is_retriable_error(),
+            "the concrete ApiException is not retriable: {error:?}"
+        );
+    }
+
+    /// Regression for finding 247(a). Java rejects a call submitted once the
+    /// client is closing with
+    /// `new IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")` (`KafkaAdminClient.java:1589`). The Rust text had drifted to
+    /// "The AdminClient is closed.", which is not the sanctioned
+    /// "exception"->"error" rewording.
+    #[tokio::test]
+    async fn a_call_submitted_while_closing_uses_javas_message() {
+        let (admin, _runnable, _time, _nodes) = env();
+        admin.close(Duration::from_millis(0)).await;
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        let error = result
+            .names()
+            .get()
+            .await
+            .expect_err("a call submitted while closing must fail");
+
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        // Java throws an `IllegalStateException`, which is outside the
+        // `KafkaException` hierarchy entirely.
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert!(!error.is_kafka_error(), "got {error:?}");
+    }
+
+    /// Regression for finding 247. `handleNotControllerError` rethrows
+    /// `error.exception()` for the code it matched
+    /// (`KafkaAdminClient.java:4145-4153`), so a `NOT_LEADER_OR_FOLLOWER` seen by a
+    /// `bootstrap.controllers` client surfaces as `NotLeaderOrFollower`. Rust
+    /// always reported `NotController`.
+    #[test]
+    fn handle_not_controller_error_reports_the_matched_code() {
+        let with_controllers = AdminMetadataManager::new(100, 1000, true, LogContext::empty());
+        let without_controllers = AdminMetadataManager::new(100, 1000, false, LogContext::empty());
+
+        let not_controller = HashMap::from([(Errors::NotController, 1)]);
+        let not_leader = HashMap::from([(Errors::NotLeaderOrFollower, 1)]);
+
+        assert_eq!(
+            handle_not_controller_error(&without_controllers, &not_controller).map(|e| e.error()),
+            Some(Errors::NotController)
+        );
+        assert_eq!(
+            handle_not_controller_error(&with_controllers, &not_controller).map(|e| e.error()),
+            Some(Errors::NotController)
+        );
+        assert_eq!(
+            handle_not_controller_error(&with_controllers, &not_leader).map(|e| e.error()),
+            Some(Errors::NotLeaderOrFollower),
+            "Java rethrows the error built for the code it matched (`KafkaAdminClient.java:4152`)"
+        );
+        assert!(
+            handle_not_controller_error(&without_controllers, &not_leader).is_none(),
+            "the NOT_LEADER_OR_FOLLOWER arm is gated on usingBootstrapControllers"
+        );
     }
 
     // --- shutdown ------------------------------------------------------------
@@ -12070,7 +12986,7 @@ mod tests {
         fn connection_failed(&self, node: &Node) -> bool {
             self.inner.connection_failed(node)
         }
-        fn authentication_error(&self, node: &Node) -> Option<String> {
+        fn authentication_error(&self, node: &Node) -> Option<Error> {
             self.inner.authentication_error(node)
         }
         fn send(&mut self, request: crate::ClientRequest, now: i64) {

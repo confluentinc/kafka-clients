@@ -566,7 +566,7 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
             let err = all_of(&outcomes)
                 .expect_err(&format!("{backend} backend: createTopics must not succeed with no broker"));
             assert!(
-                err.is_retriable() || matches!(err.error(), Errors::RequestTimedOut),
+                err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
                 "{backend} backend: expected a timeout, got {err:?}"
             );
         },

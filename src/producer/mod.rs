@@ -17,16 +17,24 @@
 pub mod callback;
 pub(crate) mod internals;
 pub mod kafka_producer;
+#[cfg(test)]
+pub(crate) mod mock_partitioner;
 pub mod mock_producer;
+pub mod partitioner;
+pub mod producer_buffer_exhausted_error;
 pub mod producer_config;
 pub mod producer_record;
 pub mod producer_trait;
 pub mod record_metadata;
+pub mod round_robin_partitioner;
 
 pub use callback::Callback;
 pub use kafka_producer::KafkaProducer;
 pub use mock_producer::MockProducer;
+pub use partitioner::Partitioner;
+pub use producer_buffer_exhausted_error::ProducerBufferExhaustedError;
 pub use producer_config::ProducerConfig;
 pub use producer_record::ProducerRecord;
 pub use producer_trait::Producer;
 pub use record_metadata::RecordMetadata;
+pub use round_robin_partitioner::RoundRobinPartitioner;

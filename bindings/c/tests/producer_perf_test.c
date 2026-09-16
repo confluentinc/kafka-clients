@@ -247,7 +247,7 @@ static bool verify_record_metadata(kafka_producer_RecordMetadata_t* metadata) {
 // send returns a FutureRecordMetadata whose _get blocks for the result.
 static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_producer_Producer_t *p = (kafka_producer_Producer_t *)producer;
-    kafka_common_KafkaError_t *error = NULL;
+    kafka_common_Error_t *error = NULL;
     kafka_producer_FutureRecordMetadata_t *future = NULL;
     const uint8_t *key = KEY_SIZE > 0 ? message->key : NULL;
     int32_t key_len = KEY_SIZE > 0 ? (int32_t)KEY_SIZE : -1;
@@ -260,9 +260,9 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
             &error);
 
         if (error) {
-            const char* msg = kafka_common_KafkaError_message(error);
+            const char* msg = kafka_common_Error_message(error);
             fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
-            kafka_common_KafkaError_destroy(error);
+            kafka_common_Error_destroy(error);
         }
     } while (error && !interrupted);
     return future;
@@ -271,14 +271,14 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
 static bool test_v3_verify_future(test_Future_t future) {
     kafka_producer_FutureRecordMetadata_t *f =
         (kafka_producer_FutureRecordMetadata_t *)future;
-    kafka_common_KafkaError_t* error = NULL;
+    kafka_common_Error_t* error = NULL;
     kafka_producer_RecordMetadata_t* metadata =
         kafka_producer_FutureRecordMetadata_get(f, &error);
 
     if (error) {
-        const char* msg = kafka_common_KafkaError_message(error);
+        const char* msg = kafka_common_Error_message(error);
         fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
         kafka_producer_FutureRecordMetadata_destroy(f);
         return false;
     }
@@ -1173,14 +1173,14 @@ static void run_test() {
             kafka_producer_ProducerProperties_put(properties, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT);
         }
 
-        kafka_common_KafkaError_t* error = NULL;
+        kafka_common_Error_t* error = NULL;
         producer = kafka_producer_KafkaProducer_new(properties, &error);
         kafka_producer_ProducerProperties_destroy(properties);
 
         if (error) {
-            const char* msg = kafka_common_KafkaError_message(error);
+            const char* msg = kafka_common_Error_message(error);
             fprintf(stderr, "Error: %s\n", msg ? msg : "Unknown error");
-            kafka_common_KafkaError_destroy(error);
+            kafka_common_Error_destroy(error);
             producer = NULL;
         }
     } else {
@@ -1395,10 +1395,10 @@ static void run_test() {
     queue_destroy(&produce_calls);
 end:
     if (CLIENT_VERSION == 3) {
-        kafka_common_KafkaError_t *error = NULL;
+        kafka_common_Error_t *error = NULL;
         kafka_producer_Producer_close(producer, &error);
         if (error) {
-            kafka_common_KafkaError_destroy(error);
+            kafka_common_Error_destroy(error);
         }
         kafka_producer_Producer_destroy(producer);
     } else {

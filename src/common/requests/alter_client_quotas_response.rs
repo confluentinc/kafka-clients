@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::alter_client_quotas_response_data::{AlterClientQuotasResponseData, EntityData, EntryData};
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::quota::ClientQuotaEntity;
 
@@ -71,10 +71,10 @@ impl AlterClientQuotasResponse {
     ///
     /// Mirrors the iteration in `AlterClientQuotasResponse.complete`: each entry
     /// is mapped to its [`ClientQuotaEntity`] plus either `Ok(())` on success or
-    /// an `Err(KafkaError)` carrying the entry's error code/message. The caller
+    /// an `Err(Error)` carrying the entry's error code/message. The caller
     /// completes the corresponding per-entity future (and, like Java, is
     /// responsible for rejecting an entity the request did not include).
-    pub fn results(&self) -> Vec<(ClientQuotaEntity, Result<(), KafkaError>)> {
+    pub fn results(&self) -> Vec<(ClientQuotaEntity, Result<(), Error>)> {
         let mut results = Vec::with_capacity(self.data.entries.len());
         for entry_data in &self.data.entries {
             let mut entity_entries = HashMap::with_capacity(entry_data.entity.len());
@@ -88,9 +88,15 @@ impl AlterClientQuotasResponse {
             let outcome = if error == Errors::None {
                 Ok(())
             } else {
+                // Java: `error.exception(entryData.errorMessage())`
+                // (`AlterClientQuotasResponse.java:60`). `Errors.exception(String)`
+                // falls back to the code's default text only when the message is
+                // **null** (`Errors.java:462-469`); a non-null empty string is passed
+                // through. Treating `Some("")` as absent would substitute the default
+                // where the broker deliberately sent none.
                 Err(match &entry_data.error_message {
-                    Some(m) if !m.is_empty() => KafkaError::with_message(error, m.clone()),
-                    _ => KafkaError::new(error),
+                    Some(m) => Error::with_message(error, m.clone()),
+                    None => Error::new(error),
                 })
             };
             results.push((entity, outcome));
