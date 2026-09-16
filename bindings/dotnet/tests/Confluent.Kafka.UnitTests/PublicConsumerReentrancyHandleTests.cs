@@ -55,7 +55,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     // an umlaut, an accent, and a Greek capital omega.
     private const string NonAsciiTopic = "grüße-café-Ω-topic";
 
-    // kafka_common_KafkaError code for UnsupportedVersion, measured against the shipped core.
+    // kafka_common_Error code for UnsupportedVersion, measured against the shipped core.
     private const int UnsupportedVersionCode = 35;
 
     // The core's verbatim message for an async op on a mock-derived handle. Asserted in full
@@ -102,7 +102,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     /// <para>
     /// The consumer's rejection is <b>captured, not thrown</b>, so the rebalance still
     /// completes — a listener that throws would have its exception converted into a
-    /// <c>KafkaError*</c> and propagated out of <c>Rebalance</c>, which would tell us nothing
+    /// <c>Error*</c> and propagated out of <c>Rebalance</c>, which would tell us nothing
     /// about the handle.
     /// </para>
     /// <para>
@@ -110,7 +110,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     /// stating precisely, because the next person reasoning about non-vacuity will trust
     /// it. Swapping the handle call for a second <c>consumer.Assignment()</c> makes the
     /// listener throw (that call is deliberately <em>outside</em> the <c>try</c>), the
-    /// trampoline converts the throw into a <c>KafkaError*</c>, and the test dies at the
+    /// trampoline converts the throw into an <c>Error*</c>, and the test dies at the
     /// <c>Rebalance</c> call with <c>KafkaException : KafkaConsumer is not safe for
     /// multi-threaded access</c> — the assertions below are never reached. Detection is
     /// genuine (this test is the sole detector), but it is <b>not</b> "viaHandle stays
@@ -360,7 +360,6 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(MockAsyncUnsupportedMessage, failure.Message);
         Assert.False(failure.IsRetriable, name);
-        Assert.False(failure.IsFatal, name);
     }
 
     // ---- Test 2 · disposal: idempotent, and use-after-dispose throws ----

@@ -35,9 +35,10 @@ public sealed class PublicConsumerRoundTripTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
 
-    // Broker-free error codes are all indistinct (UnknownServerError == -1); assert on
-    // TYPE + Message, never on a distinctive Code (M3/P3 finding #8).
-    private const int UnknownServerErrorCode = -1;
+    // SetPollError's injected failure is built via Error::local_illegal_state (a8205c5c),
+    // which is a specific, meaningful code (LOCAL_ILLEGAL_STATE == -4) — not one of the
+    // indistinct broker-free codes the M3/P3 finding #8 comment originally warned about.
+    private const int LocalIllegalStateErrorCode = -4;
 
     private const string Topic = "public-topic";
     private const int Partition = 0;
@@ -183,12 +184,11 @@ public sealed class PublicConsumerRoundTripTests
         // path also fails fast rather than hanging the run.
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
 
-        // Assert TYPE + Message content (part of the contract, DoD §3) + flags — never
-        // the indistinct broker-free Code (-1).
-        Assert.Equal(UnknownServerErrorCode, ex.Code);
+        // Assert TYPE + Code (LOCAL_ILLEGAL_STATE == -4) + Message content (part of the
+        // contract, DoD §3) + the retriable flag.
+        Assert.Equal(LocalIllegalStateErrorCode, ex.Code);
         Assert.Contains("boom", ex.Message, StringComparison.Ordinal);
         Assert.False(ex.IsRetriable);
-        Assert.False(ex.IsFatal);
     }
 
     [Fact]

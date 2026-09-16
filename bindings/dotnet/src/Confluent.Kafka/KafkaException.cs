@@ -25,23 +25,33 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This maps the ABI's <c>kafka_common_KafkaError_t</c> handle onto a managed
-/// exception: <see cref="Code"/>, <see cref="IsRetriable"/>, and
-/// <see cref="IsFatal"/> carry the error's classification, and
-/// <see cref="Exception.Message"/> carries its message. It is raised only for
-/// errors that <em>originate in the core</em>; programmer errors (a null or
-/// out-of-range argument, use after disposal) are validated in the binding
-/// before the native call and raise the standard .NET exceptions
-/// (<see cref="ArgumentNullException"/>, <see cref="ArgumentException"/>,
-/// <see cref="ObjectDisposedException"/>, …) instead — never this type.
+/// This maps the ABI's <c>kafka_common_Error_t</c> handle onto a managed
+/// exception: <see cref="Code"/> and <see cref="IsRetriable"/> carry the
+/// error's classification, and <see cref="Exception.Message"/> carries its
+/// message. It is raised only for errors that <em>originate in the core</em>;
+/// programmer errors (a null or out-of-range argument, use after disposal)
+/// are validated in the binding before the native call and raise the
+/// standard .NET exceptions (<see cref="ArgumentNullException"/>,
+/// <see cref="ArgumentException"/>, <see cref="ObjectDisposedException"/>, …)
+/// instead — never this type.
 /// </para>
 /// <para>
 /// The type is intentionally <b>flat</b>: the ABI exposes only a code plus the
-/// retriable / fatal flags, so a single exception carrying those is the faithful
+/// retriable flag, so a single exception carrying those is the faithful
 /// shape today. A Java-style hierarchy of typed subclasses <em>may</em> be
 /// introduced later, deriving from this same base — so <c>catch (KafkaException)</c>
 /// keeps working unchanged. That is a purely additive, non-breaking evolution;
 /// no timeline is implied.
+/// </para>
+/// <para>
+/// There is no <c>IsFatal</c> flag: the Rust core's error redesign
+/// (<c>a8205c5c</c>, "Error redesign") deliberately does not expose fatality
+/// on the ABI's error handle — fatality is contextual (the same error class is
+/// fatal in one call path and recoverable in another), not a property of the
+/// error's type, so the core keeps it as a free function with a single
+/// internal caller (CLAUDE.md §10.4) rather than a queryable flag. The
+/// binding cannot recover a faithful value here and does not attempt to fake
+/// one.
 /// </para>
 /// </remarks>
 public class KafkaException : Exception
@@ -49,7 +59,7 @@ public class KafkaException : Exception
     /// <summary>
     /// Initializes a new instance of the <see cref="KafkaException"/> class with a
     /// default message and no error classification (<see cref="Code"/> is 0,
-    /// <see cref="IsRetriable"/> and <see cref="IsFatal"/> are <see langword="false"/>).
+    /// <see cref="IsRetriable"/> is <see langword="false"/>).
     /// </summary>
     public KafkaException()
     {
@@ -58,7 +68,7 @@ public class KafkaException : Exception
     /// <summary>
     /// Initializes a new instance of the <see cref="KafkaException"/> class with the
     /// specified message and no error classification (<see cref="Code"/> is 0,
-    /// <see cref="IsRetriable"/> and <see cref="IsFatal"/> are <see langword="false"/>).
+    /// <see cref="IsRetriable"/> is <see langword="false"/>).
     /// </summary>
     /// <param name="message">The message that describes the error.</param>
     public KafkaException(string? message)
@@ -83,38 +93,31 @@ public class KafkaException : Exception
 
     /// <summary>
     /// Initializes a new instance from the values copied out of a
-    /// <c>kafka_common_KafkaError_t</c> handle. Used by
+    /// <c>kafka_common_Error_t</c> handle. Used by
     /// <see cref="FromHandle(IntPtr)"/> — the only place a classified
     /// <see cref="KafkaException"/> is constructed.
     /// </summary>
-    internal KafkaException(int code, string? message, bool isRetriable, bool isFatal)
+    internal KafkaException(int code, string? message, bool isRetriable)
         : base(message)
     {
         Code = code;
         IsRetriable = isRetriable;
-        IsFatal = isFatal;
     }
 
     /// <summary>
     /// The numeric error code, mirroring the Kafka protocol error code carried by
-    /// the core error (<c>kafka_common_KafkaError_code</c>).
+    /// the core error (<c>kafka_common_Error_code</c>).
     /// </summary>
     public int Code { get; }
 
     /// <summary>
     /// Whether the failed operation may succeed if retried
-    /// (<c>kafka_common_KafkaError_is_retriable</c>).
+    /// (<c>kafka_common_Error_is_retriable_error</c>).
     /// </summary>
     public bool IsRetriable { get; }
 
     /// <summary>
-    /// Whether the error is fatal — unrecoverable at the client level
-    /// (<c>kafka_common_KafkaError_is_fatal</c>).
-    /// </summary>
-    public bool IsFatal { get; }
-
-    /// <summary>
-    /// Builds a <see cref="KafkaException"/> from a <c>kafka_common_KafkaError_t</c>
+    /// Builds a <see cref="KafkaException"/> from a <c>kafka_common_Error_t</c>
     /// handle returned by the ABI, then <b>frees the handle exactly once</b>.
     /// </summary>
     /// <param name="error">
@@ -147,9 +150,8 @@ public class KafkaException : Exception
             int code = NativeMethods.Code(error);
             string? message = Utf8Marshal.PtrToString(NativeMethods.Message(error));
             bool isRetriable = NativeMethods.IsRetriable(error);
-            bool isFatal = NativeMethods.IsFatal(error);
 
-            return new KafkaException(code, message, isRetriable, isFatal);
+            return new KafkaException(code, message, isRetriable);
         }
         finally
         {

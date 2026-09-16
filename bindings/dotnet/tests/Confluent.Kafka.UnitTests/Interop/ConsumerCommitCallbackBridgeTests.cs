@@ -41,7 +41,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// commit failure has no broker-free vehicle. The only way to exercise the delivered-error
 /// channel and the no-throw boundary is to call the trampoline the way the core would, with a
 /// genuine owned <c>OffsetMap_t</c> (obtained from <c>Consumer_committed</c>) and a genuine
-/// owned <c>KafkaError_t</c> (from <c>KafkaError_new</c>) — so the callback-owns-both-handles
+/// owned <c>Error_t</c> (from <c>Error_new</c>) — so the callback-owns-both-handles
 /// contract is exercised for real rather than simulated. P6's listener bridge tests do the
 /// same, as does the Rust side in its own <c>#[cfg(test)]</c> coverage.
 /// </para>
@@ -256,7 +256,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         // Error channel #2: the COMMIT'S OWN outcome, distinct from the initiation failure
         // above. Unreachable on a mock (the core always delivers a null error there), so the
         // trampoline is driven the way the core would drive it, with a genuine owned
-        // KafkaError_t. Asserting the code AND the exact message is definition-of-done.md §3.
+        // Error_t. Asserting the code AND the exact message is definition-of-done.md §3.
         const int Code = 27;                       // REBALANCE_IN_PROGRESS
         const string Message = "commit failed — 例外";
         using NativeConsumer consumer = NativeConsumer.CreateMock();
