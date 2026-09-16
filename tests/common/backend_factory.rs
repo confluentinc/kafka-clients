@@ -505,14 +505,14 @@ mod grpc_backends {
     impl ProducerBackendFactory for DotnetGrpcFactory {
         type Producer = MultilanguageProducer;
 
-        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             MultilanguageProducer::new(self.channel.clone(), config, "dotnet").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+        ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
             producer_with_log(&self.channel, config, "dotnet").await
         }
 
@@ -529,7 +529,7 @@ mod grpc_backends {
         async fn create(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
             ))
@@ -538,7 +538,7 @@ mod grpc_backends {
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "dotnet").await
         }
 
@@ -573,14 +573,14 @@ mod grpc_backends {
     impl ProducerBackendFactory for DotnetAsyncGrpcFactory {
         type Producer = MultilanguageProducer;
 
-        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             MultilanguageProducer::new(self.channel.clone(), config, "dotnet_async").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+        ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
             producer_with_log(&self.channel, config, "dotnet_async").await
         }
 
@@ -597,7 +597,7 @@ mod grpc_backends {
         async fn create(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
             ))
@@ -606,7 +606,7 @@ mod grpc_backends {
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
-        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
             consumer_with_log(&self.channel, config, "dotnet_async").await
         }
 
