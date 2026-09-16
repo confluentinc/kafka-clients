@@ -389,6 +389,22 @@ impl ProducerConfig {
                     config.max_block_ms = Self::parse_i64(key, value)?;
                 },
                 Self::ACKS_CONFIG => {
+                    // Java declares `acks` with `in("all", "-1", "0", "1")`
+                    // (`ProducerConfig.java:391-394`), so
+                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1114`)
+                    // rejects any other value with a `ConfigException` before
+                    // `parseAcks` runs. The validator receives the parsed value,
+                    // which `ConfigDef.parseType(STRING)` has already trimmed, so
+                    // the trimmed form is what the error prints (` all ` is
+                    // accepted, `ALL`/`2` are not — the check is exact-match).
+                    let trimmed = value.trim();
+                    if !matches!(trimmed, "all" | "-1" | "0" | "1") {
+                        return Err(Error::config_value_message(
+                            key,
+                            trimmed,
+                            "String must be one of: all, -1, 0, 1",
+                        ));
+                    }
                     config.acks = Self::parse_acks(value)?;
                 },
                 Self::RETRIES_CONFIG => {
@@ -679,6 +695,12 @@ impl ProducerConfig {
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
+    ///
+    /// [`from_properties`](Self::from_properties) applies the
+    /// `in("all", "-1", "0", "1")` validator first (as Java's `ConfigDef` runs
+    /// `ConfigDef.ValidString` before `parseAcks`), so the numeric-parse error
+    /// branch below is unreachable through that path — it fires only when
+    /// `parse_acks` is called directly, exactly as in Java.
     pub fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
         if trimmed.eq_ignore_ascii_case("all") {
@@ -897,21 +919,59 @@ mod tests {
         assert!(error.is_kafka_error());
     }
 
+    /// `acks` accepts exactly `all`, `-1`, `0`, `1` (after trimming) and rejects
+    /// anything else, mirroring Java's `ConfigDef.ValidString.in("all", "-1",
+    /// "0", "1")` (`ProducerConfig.java:391-394`, `ConfigDef.java:1114`). The
+    /// error names the trimmed value because the validator runs on the parsed
+    /// (trimmed) value; the check is exact-match, so `ALL` and `2` are rejected
+    /// while a padded ` all ` is accepted.
+    #[test]
+    fn test_acks_validator_matches_java_valid_string() {
+        // Accepted values, and the `acks` each parses to.
+        for (raw, expected) in [("all", -1i16), ("-1", -1), ("0", 0), ("1", 1)] {
+            let config = ProducerConfig::from_properties(&props_with(&[("acks", raw)]))
+                .unwrap_or_else(|e| panic!("acks={raw} should be valid: {e:?}"));
+            assert_eq!(config.acks, expected, "for acks={raw}");
+        }
+
+        // A padded value is trimmed before validation and accepted.
+        let config = ProducerConfig::from_properties(&props_with(&[("acks", " all ")])).expect("` all ` is valid");
+        assert_eq!(config.acks, -1);
+
+        // Rejected: out-of-range numbers and wrong case. Each is a
+        // `ConfigException` (a Kafka error) naming the value.
+        for raw in ["2", "-2", "100", "ALL"] {
+            let error = ProducerConfig::from_properties(&props_with(&[("acks", raw)]))
+                .expect_err("acks outside {all,-1,0,1} must be rejected");
+            assert_eq!(
+                error.message(),
+                format!("Invalid value {raw} for configuration acks: String must be one of: all, -1, 0, 1"),
+                "for acks={raw}"
+            );
+            assert!(
+                matches!(error, Error::Config(_)),
+                "for acks={raw}: expected Error::Config, got {error:?}"
+            );
+            assert!(error.is_kafka_error(), "for acks={raw}: a config error is a Kafka error");
+        }
+    }
+
     /// Every `ConfigException` this config raises must answer `true` to
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
-    /// The six sites are Java's `parseAcks` (`ProducerConfig.java:657`) and the
-    /// five throws in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`,
-    /// `:621`, `:635`, `:645`). They all used to be `IllegalArgumentException`,
-    /// which sits *beside* `KafkaException` rather than below it, so
-    /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
-    /// that a bad `linger.ms` did not.
+    /// The six sites are the `acks` `ConfigDef.ValidString` validator
+    /// (`ProducerConfig.java:391-394` → `ConfigDef.java:1114`) and the five throws
+    /// in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`, `:621`,
+    /// `:635`, `:645`). They all used to be `IllegalArgumentException`, which sits
+    /// *beside* `KafkaException` rather than below it, so `is_kafka_error()`
+    /// answered `false` and a bad `acks` slipped past a caller that a bad
+    /// `linger.ms` did not.
     #[test]
     fn config_errors_are_inside_the_kafka_error_hierarchy() {
         let cases: [(&[(&str, &str)], &str); 6] = [
             (
                 &[("acks", "not-a-number")],
-                "Invalid configuration value for 'acks': not-a-number",
+                "Invalid value not-a-number for configuration acks: String must be one of: all, -1, 0, 1",
             ),
             (
                 &[("enable.idempotence", "true"), ("retries", "0")],
