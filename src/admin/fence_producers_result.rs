@@ -47,6 +47,7 @@ impl FenceProducersResult {
     /// needs the whole `ProducerIdAndEpoch` value per key — exactly the field
     /// those projections are built from — so it reads the map directly rather
     /// than joining two scalar projections back together.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
     pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<ProducerIdAndEpoch>> {
         &self.futures
     }
