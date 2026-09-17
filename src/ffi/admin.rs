@@ -19871,6 +19871,29 @@ fn submit_describe_producers(
     Ok(KafkaFuture::join_map_results(entries))
 }
 
+/// Submits `describeProducers`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_describe_producers`]; the requested (distinct) partitions drive the
+/// join, since `DescribeProducersResult` exposes its futures via
+/// `partitionResult(tp)` rather than as a map — the `describeConfigs` shape, but
+/// with a fallible accessor.
+fn submit_describe_producers_entries(
+    admin: &dyn Admin,
+    partitions: &[TopicPartition],
+    options: DescribeProducersOptions,
+) -> Result<Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)>, Error> {
+    let result = admin.describe_producers(partitions, options);
+    let mut entries: Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)> = Vec::with_capacity(partitions.len());
+    let mut seen: HashSet<&TopicPartition> = HashSet::with_capacity(partitions.len());
+    for tp in partitions {
+        if !seen.insert(tp) {
+            continue;
+        }
+        entries.push((tp.clone(), result.partition_result(tp)?));
+    }
+    Ok(entries)
+}
+
 /// Submits `describeTransactions` and returns the collect-all future over its
 /// per-transactional-id futures.
 ///
@@ -19891,6 +19914,27 @@ fn submit_describe_transactions(
         entries.push((id.clone(), result.description(id)?));
     }
     Ok(KafkaFuture::join_map_results(entries))
+}
+
+/// Submits `describeTransactions`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery. Same `Admin` call as
+/// [`submit_describe_transactions`]; the requested (distinct) ids drive the
+/// join, since the result exposes `description(id)` rather than a map.
+fn submit_describe_transactions_entries(
+    admin: &dyn Admin,
+    transactional_ids: &[String],
+    options: DescribeTransactionsOptions,
+) -> Result<Vec<(String, KafkaFuture<TransactionDescription>)>, Error> {
+    let result = admin.describe_transactions(transactional_ids, options);
+    let mut entries: Vec<(String, KafkaFuture<TransactionDescription>)> = Vec::with_capacity(transactional_ids.len());
+    let mut seen: HashSet<&String> = HashSet::with_capacity(transactional_ids.len());
+    for id in transactional_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        entries.push((id.clone(), result.description(id)?));
+    }
+    Ok(entries)
 }
 
 /// Submits `abortTransaction` and returns its single `all()` future.
@@ -19966,6 +20010,26 @@ fn submit_fence_producers(
         }
         Ok(out)
     })
+}
+
+/// Submits `fenceProducers`, unjoined, for [`admin_async_per_key_op`]'s
+/// independent-per-key delivery.
+///
+/// Unlike [`submit_fence_producers`] — which joins two `thenApply` projections
+/// (`producerId`/`epochId`) back into one `ProducerIdAndEpoch` for the flattened
+/// result — this reads the *underlying* per-id future directly (see
+/// [`FenceProducersResult::futures`]), because that future already yields the
+/// whole `ProducerIdAndEpoch` and per-key delivery needs one future per key, not
+/// two scalar projections to zip. The result's future map is keyed by the
+/// distinct transactional ids, matching the deduped `keys` the caller passes to
+/// [`admin_async_per_key_op`].
+fn submit_fence_producers_entries(
+    admin: &dyn Admin,
+    transactional_ids: &[String],
+    options: FenceProducersOptions,
+) -> Vec<(String, KafkaFuture<ProducerIdAndEpoch>)> {
+    let result = admin.fence_producers(transactional_ids, options);
+    result.futures().iter().map(|(id, f)| (id.clone(), f.clone())).collect()
 }
 
 /// Submits `listTransactions` and returns a future over its per-broker
@@ -21009,15 +21073,32 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(result: *mut
 // describeProducers
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_producers_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_producers_async`], fired **once per
+/// partition, as that partition's own future resolves** — independently of
+/// every other partition in the same call, matching Java's
+/// `Map<TopicPartition, KafkaFuture<PartitionProducerState>>`
+/// (`admin-client.md` §5), rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeProducersResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
-/// `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_producers_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeProducersResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// The key crosses as `topic` + `partition`, borrowed and valid only for the
+/// duration of this call — copy it if you need to retain it. Exactly one of
+/// `value` / `error` is non-null; `value` is a
+/// [`kafka_admin_DescribeProducersResult_t`] carrying exactly this one partition
+/// (readable at index 0) and is owned by the callback — free it with
+/// [`kafka_admin_DescribeProducersResult_destroy`]. Unlike `describeConfigs`
+/// (whose per-key value is a dedicated `kafka_admin_Config_t`), the flattened
+/// result handle is reused as the single-key value here, because `describe_producers`
+/// has no standalone value handle in the synchronous path to reuse and
+/// `PartitionProducerState` is a Java nested class with no C handle of its own;
+/// both provenances are owned and freed exactly once by the same `_destroy`.
+/// `error` is freed with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_producers_callback_t = unsafe extern "C" fn(
+    *const c_char, /* topic */
+    i32,           /* partition */
+    *mut kafka_admin_DescribeProducersResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Describes the active producers of the given partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -21073,18 +21154,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
 /// Describes the active producers of the given partitions asynchronously. See
 /// [`kafka_admin_AdminClient_describe_producers`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// Unlike the synchronous entry point, the callback fires **once per partition,
+/// as that partition's future resolves**, not once for the whole batch — a fast
+/// or already-resolved partition is not held up by a slow or failing one. It is
+/// called exactly once per **distinct** requested partition (entries with a NULL
+/// topic skipped, and duplicate `(topic, partition)` pairs collapsed to one —
+/// Java keys the result on `TopicPartition`), but not always on the same thread.
+/// Per key, it normally runs on the handle's dispatcher thread. It runs
+/// **synchronously on the calling thread, before this function returns, for
+/// every key**, when the RPC cannot be submitted at all (a NULL `admin`
+/// handle). And it runs on a **tokio worker thread** if the dispatcher's
+/// completion queue can no longer be reached when a given partition's result
+/// arrives. Destroying the handle does not cause that — an outstanding operation
+/// holds its own sender, so it cannot disconnect the queue; what remains is a
+/// dispatcher thread that terminated abnormally, i.e. a panic inside an earlier
+/// callback. So callbacks for different keys are not guaranteed to be serialised
+/// on one thread, nor in request order. If the request resolves to zero distinct
+/// partitions (an empty or all-NULL-topic input), the callback is never invoked.
+/// Do not hold a lock across this call and re-acquire it in the callback, and
+/// publish everything the callback needs (including `user_data`) before calling
+/// rather than after.
 ///
 /// # Safety
 ///
@@ -21104,18 +21193,44 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     user_data: *mut c_void,
 ) {
     let requested = unsafe { read_topic_partitions(topics, partitions, count) };
+    // Deduplicated to DISTINCT partitions (first-occurrence order): Java's
+    // `describeProducers` result map is keyed by `TopicPartition`
+    // (`Map<TopicPartition, KafkaFuture<..>>`), so a repeated partition collapses
+    // to ONE outcome future — the shape `submit_describe_producers_entries`
+    // returns. A raw `keys` with duplicates would make the second occurrence find
+    // no unclaimed entry and fire `admin_async_per_key_op`'s synthetic "not
+    // present" error, racing ahead of and winning the caller's real per-partition
+    // outcome. The Python binding pre-dedups its `(topic, partition)` rows so the
+    // C incref count matches this distinct count.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        requested
+            .iter()
+            .filter(|tp| seen.insert((*tp).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_producers(a, &requested, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_producers_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_producers_entries(a, &requested, options),
+            move |tp: TopicPartition, outcome, ud| {
+                let topic_c = to_cstring(tp.topic());
+                let partition = tp.partition();
+                let (value, error) = match outcome {
+                    Ok(state) => {
+                        // Reuse the flattened result handle as the single-key
+                        // value: one entry in, one row out (at index 0).
+                        let mut single: DescribeProducersOutcomes = HashMap::with_capacity(1);
+                        single.insert(tp, Ok(state));
+                        (box_describe_producers_result(single), std::ptr::null_mut())
+                    },
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(topic_c.as_ptr(), partition, value, error, ud);
             },
         )
     };
@@ -21125,15 +21240,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
 // describeTransactions
 // ---------------------------------------------------------------------------
 
-/// Completion callback for
-/// [`kafka_admin_AdminClient_describe_transactions_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_describe_transactions_async`], fired **once per
+/// transactional id, as that id's own future resolves** — independently of
+/// every other id in the same call, matching Java's
+/// `Map<String, KafkaFuture<TransactionDescription>>` (`admin-client.md` §5),
+/// rather than waiting for the whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_DescribeTransactionsResult_destroy`] or `error`
-/// with `kafka_common_Error_destroy`. A per-transactional-id failure
-/// arrives inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_transactions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeTransactionsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `transactional_id` is borrowed and valid only for the duration of this call
+/// — copy it if you need to retain it. Exactly one of `value` / `error` is
+/// non-null; `value` is a [`kafka_admin_DescribeTransactionsResult_t`] carrying
+/// exactly this one id (readable at index 0) and is owned by the callback — free
+/// it with [`kafka_admin_DescribeTransactionsResult_destroy`] (the flattened
+/// result handle reused as the single-key value, since `describe_transactions`
+/// has no standalone value handle and `TransactionDescription` has no C handle
+/// of its own; both provenances are owned and freed once). `error` is freed with
+/// `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_describe_transactions_callback_t = unsafe extern "C" fn(
+    *const c_char, /* transactional id */
+    *mut kafka_admin_DescribeTransactionsResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Describes the given transactions, blocking until every per-id future has
 /// resolved (synchronous).
@@ -21178,16 +21306,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
 /// Describes the given transactions asynchronously. See
 /// [`kafka_admin_AdminClient_describe_transactions`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
+/// Unlike the synchronous entry point, the callback fires **once per
+/// transactional id, as that id's future resolves**, not once for the whole
+/// batch — a fast or already-resolved id is not held up by a slow or failing
+/// one. It is called exactly once per **distinct** requested id (NULL entries
+/// skipped, and duplicate ids collapsed to one — Java keys the result on the
+/// transactional id), but not always on the same thread. Per key, it normally
+/// runs on the handle's dispatcher thread. It runs **synchronously on the
+/// calling thread, before this function returns, for every key**, when the RPC
+/// cannot be submitted at all (a NULL `admin` handle). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be reached
+/// when a given id's result arrives. Destroying the handle does not cause that —
+/// an outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order. If the
+/// request resolves to zero distinct ids (an empty or all-NULL input), the
+/// callback is never invoked. Do not hold a lock across this call and re-acquire
 /// it in the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
@@ -21205,18 +21340,34 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     user_data: *mut c_void,
 ) {
     let ids = unsafe { read_strings(transactional_ids, count) };
+    // Deduplicated to DISTINCT ids (first-occurrence order): Java's
+    // `describeTransactions` result map is keyed by the transactional id, so a
+    // repeated id collapses to ONE outcome future. A raw `keys` with duplicates
+    // would make the second occurrence fire `admin_async_per_key_op`'s synthetic
+    // "not present" error, racing ahead of the real outcome. The Python binding
+    // pre-dedups its id list so the C incref count matches this distinct count.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect::<Vec<_>>()
+    };
     let options = describe_transactions_options(timeout_ms);
     unsafe {
-        admin_async_value_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_describe_transactions(a, &ids, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_describe_transactions_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| submit_describe_transactions_entries(a, &ids, options),
+            move |id: String, outcome, ud| {
+                let id_c = to_cstring(&id);
+                let (value, error) = match outcome {
+                    Ok(description) => {
+                        let mut single: DescribeTransactionsOutcomes = HashMap::with_capacity(1);
+                        single.insert(id, Ok(description));
+                        (box_describe_transactions_result(single), std::ptr::null_mut())
+                    },
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -21431,14 +21582,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_asy
 // fenceProducers
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_fence_producers_async`].
+/// Per-key completion callback for
+/// [`kafka_admin_AdminClient_fence_producers_async`], fired **once per
+/// transactional id, as that id's own future resolves** — independently of
+/// every other id in the same call, matching Java's per-id `KafkaFuture`
+/// (`admin-client.md` §5; Java's `FenceProducersResult` projects that future
+/// three ways, but there is one future per id), rather than waiting for the
+/// whole batch.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_FenceProducersResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-transactional-id failure arrives
-/// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_fence_producers_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_FenceProducersResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// `transactional_id` is borrowed and valid only for the duration of this call
+/// — copy it if you need to retain it. Exactly one of `value` / `error` is
+/// non-null; `value` is a [`kafka_admin_FenceProducersResult_t`] carrying
+/// exactly this one id (its producer id and epoch, readable at index 0) and is
+/// owned by the callback — free it with
+/// [`kafka_admin_FenceProducersResult_destroy`] (the flattened result handle
+/// reused as the single-key value; both provenances are owned and freed once).
+/// `error` is freed with `kafka_common_Error_destroy`.
+pub type kafka_admin_AdminClient_fence_producers_callback_t = unsafe extern "C" fn(
+    *const c_char, /* transactional id */
+    *mut kafka_admin_FenceProducersResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Fences out every active producer using the given transactional ids, blocking
 /// until every per-id future has resolved (synchronous).
@@ -21481,16 +21646,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
 /// Fences out active producers asynchronously. See
 /// [`kafka_admin_AdminClient_fence_producers`].
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
+/// Unlike the synchronous entry point, the callback fires **once per
+/// transactional id, as that id's future resolves**, not once for the whole
+/// batch — a fast or already-resolved id is not held up by a slow or failing
+/// one. It is called exactly once per **distinct** requested id (NULL entries
+/// skipped, and duplicate ids collapsed to one — Java keys the result on the
+/// transactional id), but not always on the same thread. Per key, it normally
+/// runs on the handle's dispatcher thread. It runs **synchronously on the
+/// calling thread, before this function returns, for every key**, when the RPC
+/// cannot be submitted at all (a NULL `admin` handle). And it runs on a **tokio
+/// worker thread** if the dispatcher's completion queue can no longer be reached
+/// when a given id's result arrives. Destroying the handle does not cause that —
+/// an outstanding operation holds its own sender, so it cannot disconnect the
 /// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
+/// panic inside an earlier callback. So callbacks for different keys are not
+/// guaranteed to be serialised on one thread, nor in request order. If the
+/// request resolves to zero distinct ids (an empty or all-NULL input), the
+/// callback is never invoked. Do not hold a lock across this call and re-acquire
 /// it in the callback, and publish everything the callback needs (including
 /// `user_data`) before calling rather than after.
 ///
@@ -21508,18 +21680,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     user_data: *mut c_void,
 ) {
     let ids = unsafe { read_strings(transactional_ids, count) };
+    // Deduplicated to DISTINCT ids (first-occurrence order): Java's
+    // `fenceProducers` result keys the per-producer futures by the transactional
+    // id, so a repeated id collapses to ONE outcome future. A raw `keys` with
+    // duplicates would make the second occurrence fire `admin_async_per_key_op`'s
+    // synthetic "not present" error, racing ahead of the real outcome. The Python
+    // binding pre-dedups its id list so the C incref count matches this distinct
+    // count.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect::<Vec<_>>()
+    };
     let options = fence_producers_options(timeout_ms);
     unsafe {
-        admin_async_future_op(
+        admin_async_per_key_op(
             admin,
             user_data,
-            move |a| submit_fence_producers(a, &ids, options),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_fence_producers_result(outcomes), std::ptr::null_mut()),
+            keys,
+            move |a| Ok(submit_fence_producers_entries(a, &ids, options)),
+            move |id: String, outcome, ud| {
+                let id_c = to_cstring(&id);
+                let (value, error) = match outcome {
+                    Ok(producer) => {
+                        let mut single: FenceProducersOutcomes = HashMap::with_capacity(1);
+                        single.insert(id, Ok(producer));
+                        (box_fence_producers_result(single), std::ptr::null_mut())
+                    },
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
-                callback(result, error, ud);
+                callback(id_c.as_ptr(), value, error, ud);
             },
         )
     };
@@ -28415,6 +28604,342 @@ mod tests {
             error_a.contains("resourceType must not be ANY"),
             "the error must be the real ResourcePattern validation message, got: {error_a}"
         );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G — describeProducers / describeTransactions / fenceProducers
+    // per-key callback delivery. Reuses Phase A-F's `admin_async_per_key_op`
+    // mechanism verbatim; the per-key VALUE reuses the flattened result handle
+    // carrying a single key (index 0), since these three RPCs have no
+    // standalone value handle in the synchronous path (unlike describeConfigs'
+    // `Config`) and their Java value types have no C handle of their own.
+    // `listTransactions` is deliberately NOT converted: Java's
+    // `ListTransactionsResult` is a single `KafkaFuture<Map<Integer,
+    // KafkaFuture<..>>>` fanned across brokers, with no per-transactional-id
+    // future map — like `listTopics`/`listGroups`, it stays joined.
+    // -----------------------------------------------------------------------
+
+    // The same temporal-independence property as the Phase A/B tests
+    // (`admin_async_per_key_op_delivers_a_resolved_key_without_waiting_on_a_pending_one`
+    // and `describe_configs_async_delivers_a_resolved_resource_without_waiting_on_a_pending_one`),
+    // exercised through `describeProducers`' actual key (`TopicPartition`) and
+    // value (`PartitionProducerState`) types — so a type-specific mistake (e.g.
+    // a `PartitionProducerState` that is not `Send + Sync`, or relying on a
+    // `Hash`/`Eq` for `TopicPartition` that a raw C caller could not provide)
+    // shows up here even though the generic test compiles. The callback also
+    // boxes the resolved value into the single-key result handle exactly as the
+    // public entry point does, then reads it back — proving that reuse round-trips
+    // a real success value, which no `MockAdminClient`-backed test can (Java's
+    // mock throws `UnsupportedOperationException` per partition).
+    #[test]
+    fn describe_producers_async_delivers_a_resolved_partition_without_waiting_on_a_pending_one() {
+        let tp_fast = TopicPartition::new("topic-a".to_string(), 0);
+        let tp_slow = TopicPartition::new("topic-a".to_string(), 1);
+
+        let fast: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
+        fast.complete(PartitionProducerState::new(vec![ProducerState::new(
+            1_001,
+            5,
+            17,
+            1_700_000_000_000,
+            Some(9),
+            Some(4_242),
+        )]));
+        let slow: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
+        let slow_future = slow.future();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(TopicPartition, Result<i64, Error>)>();
+        let entries = vec![(tp_fast.clone(), fast.future()), (tp_slow.clone(), slow_future)];
+        unsafe {
+            admin_async_per_key_op(
+                admin,
+                std::ptr::null_mut(),
+                vec![tp_fast.clone(), tp_slow.clone()],
+                move |_a: &dyn Admin| Ok(entries),
+                move |tp: TopicPartition, outcome: Result<PartitionProducerState, Error>, _ud: *mut c_void| {
+                    // Box into the single-key result handle exactly as the
+                    // public entry point does, then read the producer id back at
+                    // index 0.
+                    let outcome = match outcome {
+                        Ok(state) => {
+                            let mut single: DescribeProducersOutcomes = HashMap::with_capacity(1);
+                            single.insert(tp.clone(), Ok(state));
+                            let result = box_describe_producers_result(single);
+                            let producer_id = kafka_admin_DescribeProducersResult_get_producer_id(result, 0, 0);
+                            kafka_admin_DescribeProducersResult_destroy(result);
+                            Ok(producer_id)
+                        },
+                        Err(e) => Err(e),
+                    };
+                    tx.send((tp, outcome)).unwrap();
+                },
+            );
+        }
+
+        let (tp, outcome) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the already-resolved partition must be delivered without waiting on the pending one");
+        assert_eq!(tp, tp_fast);
+        assert_eq!(
+            outcome.unwrap(),
+            1_001,
+            "the single-key value handle must expose the resolved producer id"
+        );
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the pending partition must not fire early"
+        );
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        drop(slow);
+    }
+
+    /// `describeProducers`: two distinct partitions each independently receive
+    /// Java's real `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:1368-1370`), proving
+    /// `submit_describe_producers_entries` always inserts a real per-key future
+    /// rather than relying on `admin_async_per_key_op`'s synthetic fallback, and
+    /// that neither partition hangs.
+    #[test]
+    fn describe_producers_async_reports_the_real_unsupported_error_per_partition() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_topics_owned, topic_ptrs) = c_array(&["topic-a", "topic-a"]);
+        let partitions = [0i32, 1];
+        let (tx, rx) = std::sync::mpsc::channel::<((String, i32), Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<((String, i32), Option<String>)>);
+        extern "C" fn on_describe(
+            topic: *const c_char,
+            partition: i32,
+            value: *mut kafka_admin_DescribeProducersResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let topic = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds describeProducers");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_DescribeProducersResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send(((topic, partition), Some(message))).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_producers_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                2,
+                false,
+                0,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (key, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both partitions must get exactly one callback, not hang");
+            seen.insert(key, message);
+        }
+        assert_eq!(seen.len(), 2, "both partitions must have delivered exactly once");
+        assert_eq!(seen[&("topic-a".to_string(), 0)].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen[&("topic-a".to_string(), 1)].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describeTransactions`: two distinct ids each independently receive
+    /// Java's real `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:1373-1375`).
+    #[test]
+    fn describe_transactions_async_reports_the_real_unsupported_error_per_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["txn-a", "txn-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_describe(
+            id: *const c_char,
+            value: *mut kafka_admin_DescribeTransactionsResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(id) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds describeTransactions");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_DescribeTransactionsResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send((id, Some(message))).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_transactions_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both ids must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both ids must have delivered exactly once");
+        assert_eq!(seen["txn-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["txn-b"].as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describeTransactions` dedup: two occurrences of the same id collapse to
+    /// exactly ONE callback carrying the real `UnsupportedOperationException`
+    /// message — NOT `admin_async_per_key_op`'s synthetic "not present" error
+    /// that a raw (undeduped) `keys` would produce for the second occurrence
+    /// (the scram-bug class the Phase A-F remediation closed).
+    #[test]
+    fn describe_transactions_async_collapses_a_duplicate_id_to_one_real_callback() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["dup", "dup"]);
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_describe(
+            _id: *const c_char,
+            value: *mut kafka_admin_DescribeTransactionsResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                Some(
+                    unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            };
+            unsafe { kafka_admin_DescribeTransactionsResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_transactions_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the single distinct id must get exactly one callback");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the duplicate must collapse to one real outcome, never the synthetic \"not present\" fallback"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a duplicate id must fire exactly once, not twice"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `fenceProducers`: two distinct ids each independently receive Java's real
+    /// `UnsupportedOperationException("Not implemented yet")`
+    /// (`MockAdminClient.java:1393-1395`).
+    #[test]
+    fn fence_producers_async_reports_the_real_unsupported_error_per_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let (_ids_owned, id_ptrs) = c_array(&["txn-a", "txn-b"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_fence(
+            id: *const c_char,
+            value: *mut kafka_admin_FenceProducersResult_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(id) }.to_string_lossy().into_owned();
+            assert!(value.is_null(), "MockAdminClient never succeeds fenceProducers");
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { kafka_admin_FenceProducersResult_destroy(value) };
+            unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            ctx.0.send((id, Some(message))).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_fence_producers_async(
+                admin,
+                id_ptrs.as_ptr(),
+                2,
+                -1,
+                on_fence,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let mut seen = HashMap::new();
+        for _ in 0..2 {
+            let (id, message) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("both ids must get exactly one callback, not hang");
+            seen.insert(id, message);
+        }
+        assert_eq!(seen.len(), 2, "both ids must have delivered exactly once");
+        assert_eq!(seen["txn-a"].as_deref(), Some("Not implemented yet"));
+        assert_eq!(seen["txn-b"].as_deref(), Some("Not implemented yet"));
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));
