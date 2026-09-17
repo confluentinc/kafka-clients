@@ -1,4 +1,4 @@
-name: example-confluent-kafka-rust
+name: kafka-clients
 lang: unknown
 lang_version: unknown
 git:
