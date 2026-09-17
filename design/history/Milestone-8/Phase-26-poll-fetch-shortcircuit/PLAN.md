@@ -1,15 +1,5 @@
 # Phase 26 — Poll-loop CPU: don't return on send-only + skip fetch-prep when all nodes pending
 
-**Milestone-8 / Phase-26** · Agent number **N = 26**
-
-Two CPU micro-optimizations ported from the GraalVM Java-consumer spike
-(`example-confluent-kafka-native-java` branch `test_consumer_benchmark_c_sync`,
-the `*NoUse` reference files). Both restore/port **stock Apache Kafka** behavior the
-Rust port either diverged from or omitted. **Neither changes latency** (that is
-broker-side `fetch.min.bytes` accumulation, separately measured); both reduce
-wasted CPU in the steady-state poll loop. Implement as **two independent commits**
-so each can be reviewed / reverted alone.
-
 ## Fix #1 — `Selector::poll` must not return on a send-only round
 
 **Where:** `src/common/network/selector.rs`, the `made_progress` break in `poll`:

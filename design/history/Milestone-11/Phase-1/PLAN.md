@@ -26,9 +26,6 @@ whose *shape* Phases 3–6 depend on (especially §3.3
 
 ## 2. Java files to read
 
-Read these in full before writing anything. Paths relative to
-`/Users/kaushikraina/projects/example-confluent-kafka-rust/kafka/`.
-
 **Primary (translate):**
 
 | File | Lines | Note |

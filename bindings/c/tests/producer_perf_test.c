@@ -14,10 +14,6 @@
 
 // Producer performance test for the C bindings.
 //
-// Ported from the librdkafka/GraalVM comparison test; the GraalVM
-// (native-java) backend has been removed and replaced by the Confluent Kafka
-// Rust client's C FFI (`confluent_kafka.h`). Two backends remain, selected via
-// the CLIENT_VERSION environment variable:
 //
 //   * CLIENT_VERSION=2 -> librdkafka (reference baseline)
 //   * CLIENT_VERSION=3 -> Rust client C bindings (default; client under test)
