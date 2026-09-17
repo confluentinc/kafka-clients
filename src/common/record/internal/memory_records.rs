@@ -28,6 +28,7 @@ use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::DefaultRecordBatch;
+use crate::common::record::internal::EndTransactionMarker;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
@@ -636,6 +637,118 @@ impl MemoryRecords {
 
         builder.build()
     }
+
+    /// Create a `MemoryRecords` containing a single end transaction marker
+    /// (`COMMIT`/`ABORT`) for the given producer, timestamped now.
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.withEndTransactionMarker(long producerId, short producerEpoch, EndTransactionMarker marker)`.
+    pub fn with_end_transaction_marker_for_producer(
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> MemoryRecords {
+        Self::with_end_transaction_marker(
+            0,
+            current_time_millis(),
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            producer_id,
+            producer_epoch,
+            marker,
+        )
+    }
+
+    /// Create a `MemoryRecords` containing a single end transaction marker
+    /// (`COMMIT`/`ABORT`) for the given producer at the given timestamp.
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.withEndTransactionMarker(long timestamp, long producerId, short producerEpoch, EndTransactionMarker marker)`.
+    pub fn with_end_transaction_marker_with_timestamp(
+        timestamp: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> MemoryRecords {
+        Self::with_end_transaction_marker(
+            0,
+            timestamp,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            producer_id,
+            producer_epoch,
+            marker,
+        )
+    }
+
+    /// Create a `MemoryRecords` containing a single end transaction marker
+    /// (`COMMIT`/`ABORT`).
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.withEndTransactionMarker(long initialOffset, long timestamp, int partitionLeaderEpoch, long producerId, short producerEpoch, EndTransactionMarker marker)`.
+    pub fn with_end_transaction_marker(
+        initial_offset: i64,
+        timestamp: i64,
+        partition_leader_epoch: i32,
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> MemoryRecords {
+        // Java: `DefaultRecordBatch.RECORD_BATCH_OVERHEAD` (defined on
+        // `RecordBatch` in Rust) + `marker.endTxnMarkerValueSize()`.
+        let size = RecordBatch::RECORD_BATCH_OVERHEAD + marker.end_txn_marker_value_size() as usize;
+        let buffer = Vec::with_capacity(size);
+        // Infallible here: this builds a transactional control batch with a valid
+        // producer id, so neither `append_end_txn_marker` guard can fire.
+        Self::write_end_transactional_marker(
+            buffer,
+            initial_offset,
+            timestamp,
+            partition_leader_epoch,
+            producer_id,
+            producer_epoch,
+            marker,
+        )
+        .expect("writing an end txn marker into a freshly built transactional control batch is infallible")
+    }
+
+    /// Write a single end transaction marker (`COMMIT`/`ABORT`) into the given
+    /// buffer and return the resulting `MemoryRecords`.
+    ///
+    /// Corresponds to Java's
+    /// `MemoryRecords.writeEndTransactionalMarker(ByteBuffer buffer, ...)`, which
+    /// is `void` and writes into a caller-supplied `ByteBuffer`. Because the Rust
+    /// [`MemoryRecordsBuilder`] owns its buffer, this consumes `buffer` and
+    /// returns the built [`MemoryRecords`] — equivalent to Java's caller doing
+    /// `buffer.flip(); readableRecords(buffer)`.
+    pub fn write_end_transactional_marker(
+        buffer: Vec<u8>,
+        initial_offset: i64,
+        timestamp: i64,
+        partition_leader_epoch: i32,
+        producer_id: i64,
+        producer_epoch: i16,
+        marker: &EndTransactionMarker,
+    ) -> Result<MemoryRecords, Error> {
+        let is_transactional = true;
+        let write_limit = buffer.capacity();
+        let mut builder = MemoryRecordsBuilder::new_default(
+            buffer,
+            0,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            initial_offset,
+            timestamp,
+            producer_id,
+            producer_epoch,
+            RecordBatch::NO_SEQUENCE,
+            is_transactional,
+            true, // is_control_batch
+            partition_leader_epoch,
+            write_limit,
+        );
+        builder.append_end_txn_marker(timestamp, marker)?;
+        Ok(builder.build())
+    }
 }
 
 impl PartialEq for MemoryRecords {
@@ -704,6 +817,7 @@ fn current_time_millis() -> i64 {
 mod tests {
     use super::*;
     use crate::common::header::internals::RecordHeader as HeaderImpl;
+    use crate::common::record::internal::ControlRecordType;
     use crate::common::record::internal::DefaultRecordBatch;
     use crate::common::record::internal::Record;
 
@@ -1108,9 +1222,61 @@ mod tests {
     // skipped because filterTo is not implemented in the Rust version. The filterTo method is
     // a server-side operation used for log compaction and not needed for the producer path.
 
-    // Note: testBuildEndTxnMarker and testBuildLeaderChangeMessage are skipped because
-    // EndTransactionMarker, ControlRecordType, and LeaderChangeMessage/ControlRecordUtils
-    // are not yet implemented.
+    /// Corresponds to Java's `MemoryRecordsTest.testBuildEndTxnMarker`.
+    ///
+    /// Builds an end-transaction (COMMIT) control batch through the
+    /// `with_end_transaction_marker` factory, verifies the buffer allocation was
+    /// precise, checks the batch metadata (control flag, producer id/epoch, base
+    /// offset, partition leader epoch, validity), then deserializes the single
+    /// record back into a marker carrying the same control type and epoch.
+    #[test]
+    fn test_build_end_txn_marker() {
+        let producer_id = 73_i64;
+        let producer_epoch = 13_i16;
+        let initial_offset = 983_i64;
+        let coordinator_epoch = 347_i32;
+        let partition_leader_epoch = 29_i32;
+
+        let marker = EndTransactionMarker::new(ControlRecordType::Commit, coordinator_epoch)
+            .expect("COMMIT is a valid end transaction marker control type");
+        let records = MemoryRecords::with_end_transaction_marker(
+            initial_offset,
+            1_700_000_000_000_i64,
+            partition_leader_epoch,
+            producer_id,
+            producer_epoch,
+            &marker,
+        );
+        // verify that buffer allocation was precise
+        assert_eq!(
+            records.buffer().len(),
+            RecordBatch::RECORD_BATCH_OVERHEAD + marker.end_txn_marker_value_size() as usize
+        );
+
+        let batches: Vec<DefaultRecordBatch> = records.batches().collect();
+        assert_eq!(1, batches.len());
+
+        let batch = &batches[0];
+        assert!(batch.is_control_batch());
+        assert_eq!(producer_id, batch.producer_id());
+        assert_eq!(producer_epoch, batch.producer_epoch());
+        assert_eq!(initial_offset, batch.base_offset());
+        assert_eq!(partition_leader_epoch, batch.partition_leader_epoch());
+        assert!(batch.is_valid());
+
+        let created_records = batch.iter_records().expect("the control batch's records parse");
+        assert_eq!(1, created_records.len());
+
+        let record = &created_records[0];
+        record.ensure_valid().expect("the control record is valid");
+        let deserialized_marker =
+            EndTransactionMarker::deserialize(record).expect("the control record deserializes into an end txn marker");
+        assert_eq!(ControlRecordType::Commit, deserialized_marker.control_type());
+        assert_eq!(coordinator_epoch, deserialized_marker.coordinator_epoch());
+    }
+
+    // Note: testBuildLeaderChangeMessage is skipped because LeaderChangeMessage and
+    // ControlRecordUtils are not yet translated.
 
     // Note: testUnsupportedCompress is skipped because it tests magic v0/v1 which
     // we do not support in the Rust producer path.

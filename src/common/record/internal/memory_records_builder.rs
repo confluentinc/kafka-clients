@@ -21,12 +21,15 @@
 
 use std::io::{self, Write};
 
+use crate::common::Error;
 use crate::common::compress::{CompressingWriter, Compression};
 use crate::common::header::internals::RecordHeader;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::ControlRecordType;
 use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::DefaultRecordBatch;
+use crate::common::record::internal::EndTransactionMarker;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
@@ -649,6 +652,59 @@ impl MemoryRecordsBuilder {
             record.value(),
             record.headers(),
         );
+    }
+
+    /// Append a control record at the next sequential offset.
+    ///
+    /// Corresponds to Java's `MemoryRecordsBuilder.appendControlRecord`.
+    pub(crate) fn append_control_record(
+        &mut self,
+        timestamp: i64,
+        control_type: ControlRecordType,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        // Java performs this check inside the shared `appendWithOffset` (as
+        // `isControlRecord != isControlBatch`). Because a control record always
+        // sets `isControlRecord = true`, the check reduces to `!isControlBatch`
+        // here. The Rust `append_with_offset_internal` treats the mismatch as an
+        // unrecoverable precondition (`panic!`) on the normal record path, so we
+        // surface the recoverable case as an `Error` before delegating (CLAUDE.md
+        // §10.2) — the message matches Java's exactly.
+        if !self.is_control_batch {
+            return Err(Error::local_illegal_argument(
+                "Control records can only be appended to control batches",
+            ));
+        }
+        let key = control_type.record_key()?;
+        let offset = self.next_sequential_offset();
+        self.append_with_offset_internal(
+            offset,
+            true,
+            timestamp,
+            Some(key.as_slice()),
+            Some(value),
+            RecordBatch::EMPTY_HEADERS,
+        );
+        Ok(())
+    }
+
+    /// Append an end transaction marker (`COMMIT`/`ABORT`) at the next
+    /// sequential offset.
+    ///
+    /// Corresponds to Java's `MemoryRecordsBuilder.appendEndTxnMarker`.
+    pub(crate) fn append_end_txn_marker(&mut self, timestamp: i64, marker: &EndTransactionMarker) -> Result<(), Error> {
+        if self.producer_id == RecordBatch::NO_PRODUCER_ID {
+            return Err(Error::local_illegal_argument(
+                "End transaction marker requires a valid producerId",
+            ));
+        }
+        if !self.is_transactional {
+            return Err(Error::local_illegal_argument(
+                "End transaction marker depends on batch transactional flag being enabled",
+            ));
+        }
+        let value = marker.serialize_value();
+        self.append_control_record(timestamp, marker.control_type(), value)
     }
 
     /// Append a record without offset/magic validation (for testing).
@@ -1554,8 +1610,103 @@ mod tests {
     // Note: testUnsupportedCompress, testLegacyCompressionRate are skipped because
     // they test magic v0/v1 which we do not support in the Rust producer path.
 
-    // Note: testWriteEndTxnMarkerNonTransactionalBatch, testWriteEndTxnMarkerNonControlBatch,
-    // testWriteLeaderChangeControlBatchWithoutLeaderEpoch, testWriteLeaderChangeControlBatch
-    // are skipped because they require EndTransactionMarker, ControlRecordType, and
-    // LeaderChangeMessage which are not yet implemented.
+    /// Corresponds to Java's
+    /// `MemoryRecordsBuilderTest.testWriteEndTxnMarkerNonTransactionalBatch`.
+    ///
+    /// Java is a `@ParameterizedTest` over `MemoryRecordsBuilderArgumentsProvider`
+    /// (buffer offset x compression x magic). Following this file's established
+    /// convention for that provider (see `test_write_transactional_record_set`),
+    /// we loop the compression dimension at `MAGIC_VALUE_V2` only: the Rust
+    /// producer path does not support magic v0/v1, and `MemoryRecordsBuilder::new`
+    /// panics on a control/transactional batch below v2 rather than offering a
+    /// returnable error — so Java's `magic < MAGIC_VALUE_V2` branch (which asserts
+    /// the *constructor* throws) has no v2-path analog here. The buffer offset
+    /// does not affect the guard under test.
+    ///
+    /// Java uses `assertThrows(IllegalArgumentException.class, ...)`. Because
+    /// `appendEndTxnMarker`'s transactional guard is a recoverable throw, the Rust
+    /// `append_end_txn_marker` returns `Err` (CLAUDE.md §10.2); DoD #3 additionally
+    /// pins the message text.
+    #[test]
+    fn test_write_end_txn_marker_non_transactional_batch() {
+        let pid = 9809_i64;
+        let epoch = 15_i16;
+        let sequence = RecordBatch::NO_SEQUENCE;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                pid,
+                epoch,
+                sequence,
+                false, // is_transactional
+                true,  // is_control_batch
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            let marker =
+                EndTransactionMarker::new(ControlRecordType::Abort, 0).expect("ABORT is a valid end txn marker type");
+            let error = builder
+                .append_end_txn_marker(RecordBatch::NO_TIMESTAMP, &marker)
+                .expect_err("appending an end txn marker to a non-transactional batch must fail");
+            assert_eq!(
+                error.message(),
+                "End transaction marker depends on batch transactional flag being enabled",
+                "Failed for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's
+    /// `MemoryRecordsBuilderTest.testWriteEndTxnMarkerNonControlBatch`. See
+    /// `test_write_end_txn_marker_non_transactional_batch` for why only the
+    /// `MAGIC_VALUE_V2` compression dimension is exercised and why the guard
+    /// surfaces as an `Err` rather than a panic.
+    #[test]
+    fn test_write_end_txn_marker_non_control_batch() {
+        let pid = 9809_i64;
+        let epoch = 15_i16;
+        let sequence = RecordBatch::NO_SEQUENCE;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                pid,
+                epoch,
+                sequence,
+                true,  // is_transactional
+                false, // is_control_batch
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            let marker =
+                EndTransactionMarker::new(ControlRecordType::Abort, 0).expect("ABORT is a valid end txn marker type");
+            let error = builder
+                .append_end_txn_marker(RecordBatch::NO_TIMESTAMP, &marker)
+                .expect_err("appending a control record to a non-control batch must fail");
+            assert_eq!(
+                error.message(),
+                "Control records can only be appended to control batches",
+                "Failed for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    // Note: testWriteLeaderChangeControlBatchWithoutLeaderEpoch and
+    // testWriteLeaderChangeControlBatch are skipped because they require
+    // LeaderChangeMessage and ControlRecordUtils, which are not yet translated.
 }

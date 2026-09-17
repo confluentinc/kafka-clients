@@ -990,7 +990,10 @@ fn write_i16(buf: &mut [u8], offset: usize, value: i16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::record::internal::ControlRecordType;
+    use crate::common::record::internal::EndTransactionMarker;
     use crate::common::record::internal::MemoryRecords;
+    use crate::common::record::internal::MemoryRecordsBuilder;
     use crate::common::record::internal::Record;
     use crate::common::record::internal::SimpleRecord;
 
@@ -1565,8 +1568,57 @@ mod tests {
         }
     }
 
-    // Note: testReadAndWriteControlBatch is skipped because it requires EndTransactionMarker
-    // and ControlRecordType which are not yet implemented.
+    /// Corresponds to Java's `DefaultRecordBatchTest.testReadAndWriteControlBatch`.
+    ///
+    /// Builds a transactional control batch holding a single end-transaction
+    /// (COMMIT) marker, reads it back, and checks the batch is flagged as a
+    /// control batch and its one record deserializes to the same marker.
+    #[test]
+    fn test_read_and_write_control_batch() {
+        let producer_id = 1_i64;
+        let producer_epoch = 0_i16;
+        let coordinator_epoch = 15_i32;
+
+        let mut builder = MemoryRecordsBuilder::new_default(
+            Vec::with_capacity(128),
+            0,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            producer_id,
+            producer_epoch,
+            RecordBatch::NO_SEQUENCE,
+            true, // is_transactional
+            true, // is_control_batch
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            128,
+        );
+
+        let marker = EndTransactionMarker::new(ControlRecordType::Commit, coordinator_epoch)
+            .expect("COMMIT is a valid end transaction marker control type");
+        builder
+            .append_end_txn_marker(1_700_000_000_000_i64, &marker)
+            .expect("appending an end txn marker to a transactional control batch succeeds");
+        let records = builder.build();
+
+        let batches: Vec<_> = records.batches().collect();
+        assert_eq!(1, batches.len());
+
+        let batch = &batches[0];
+        assert!(batch.is_control_batch());
+
+        let log_records: Vec<_> = records.records().collect();
+        assert_eq!(1, log_records.len());
+
+        let commit_record = &log_records[0];
+        assert_eq!(
+            marker,
+            EndTransactionMarker::deserialize(commit_record)
+                .expect("the commit control record deserializes into an end txn marker")
+        );
+    }
 
     // Note: testSkipKeyValueIteratorCorrectness, testBufferReuseInSkipKeyValueIterator,
     // and testZstdJniForSkipKeyValueIterator are skipped because they test internal
