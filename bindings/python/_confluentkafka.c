@@ -7411,7 +7411,7 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
 // above.
 
 // ---------------------------------------------------------------------------
-// B6 — producers and transactions
+// B6 — producers and transactions (Phase G: per-key delivery)
 //
 // Java's MockAdminClient throws for all six (MockAdminClient.java:1368-1395),
 // so the *success* branch of every drain below is unreachable from the test
@@ -7421,18 +7421,57 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
 // error branch of each: the mocks that throw per key still echo the requested
 // key set, so key columns and per-key errors flow end to end.
 //
+// describeProducers / describeTransactions / fenceProducers now fire once PER
+// KEY (Java's per-key KafkaFuture): the per-key value is the flattened result
+// handle carrying a single key, drained at index 0 by the same *_drain +
+// `_to_*` unpacker admin.py already had, then destroyed. listTransactions stays
+// JOINED (one fire_handle_cb): Java's ListTransactionsResult is a single
+// KafkaFuture<Map<broker, KafkaFuture>> with no per-transactional-id future
+// map, like listTopics/listGroups.
+//
 // `abortTransaction` and `forceTerminateTransaction` have no result handle at
 // all (Java's AbortTransactionResult exposes only all(), and
 // TerminateTransactionResult only result()), so they reuse `admin_op_trampoline`
 // and the `_resolve_void` / `_free_void` pair that `close_async` already uses.
 // ---------------------------------------------------------------------------
 
-static void admin_describe_producers_trampoline(kafka_admin_DescribeProducersResult_t* r,
-                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_transactions_trampoline(kafka_admin_DescribeTransactionsResult_t* r,
-                                                   kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_fence_producers_trampoline(kafka_admin_FenceProducersResult_t* r,
-                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+// describeProducers / describeTransactions / fenceProducers fire once PER KEY
+// (Java's per-key KafkaFuture), independently as that key's future resolves --
+// unlike list_transactions below, which stays joined (Java's
+// ListTransactionsResult has no per-transactional-id future map). `value` is an
+// owned single-key result handle Python drains at index 0 via the matching
+// *_drain function; the Python wrappers Py_INCREF(cb) once per distinct key
+// (admin_incref_n) to match the one Py_DECREF(cb) each invocation does here.
+static void admin_describe_producers_trampoline(const char* topic, int32_t partition,
+    kafka_admin_DescribeProducersResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siKK", topic, partition,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+static void admin_describe_transactions_trampoline(const char* key,
+    kafka_admin_DescribeTransactionsResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+static void admin_fence_producers_trampoline(const char* key,
+    kafka_admin_FenceProducersResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 static void admin_list_transactions_trampoline(kafka_admin_ListTransactionsResult_t* r,
                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
@@ -7460,7 +7499,10 @@ static PyObject* py_Admin_describe_producers_async(PyObject* self, PyObject* arg
         if (!ok) { PyMem_Free((void*)topics); PyMem_Free(partitions); return NULL; }
         topics[i] = t; partitions[i] = p;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT partition. admin.py pre-dedups its
+    // (topic, partition) rows (like describe_configs / remove_members), so raw
+    // `n` already equals the distinct count the Rust FFI will fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_producers_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, (int32_t)n,
         has_broker_id ? true : false, (int32_t)broker_id, timeout_ms,
@@ -7476,7 +7518,9 @@ static PyObject* py_Admin_describe_transactions_async(PyObject* self, PyObject* 
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(ids_obj, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT id. admin.py pre-dedups its id list,
+    // so raw `n` already equals the distinct count the Rust FFI will fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_transactions_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         admin_describe_transactions_trampoline, cb);
@@ -7491,7 +7535,9 @@ static PyObject* py_Admin_fence_producers_async(PyObject* self, PyObject* args) 
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(ids_obj, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT id. admin.py pre-dedups its id list,
+    // so raw `n` already equals the distinct count the Rust FFI will fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_fence_producers_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         admin_fence_producers_trampoline, cb);
@@ -8069,13 +8115,13 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"DescribeFeaturesResult_drain", py_DescribeFeaturesResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeFeaturesResult handle into (finalized, epoch, supported)"},
     {"Admin_describe_producers_async", py_Admin_describe_producers_async, METH_VARARGS,
-     "Async describeProducers; cb(result_int, error_int)"},
+     "Async describeProducers; per-key cb(topic, partition, value_int, error_int), once per partition"},
     {"Admin_describe_transactions_async", py_Admin_describe_transactions_async, METH_VARARGS,
-     "Async describeTransactions; cb(result_int, error_int)"},
+     "Async describeTransactions; per-key cb(id, value_int, error_int), once per transactional id"},
     {"Admin_fence_producers_async", py_Admin_fence_producers_async, METH_VARARGS,
-     "Async fenceProducers; cb(result_int, error_int)"},
+     "Async fenceProducers; per-key cb(id, value_int, error_int), once per transactional id"},
     {"Admin_list_transactions_async", py_Admin_list_transactions_async, METH_VARARGS,
-     "Async listTransactions; cb(result_int, error_int)"},
+     "Async listTransactions; joined cb(result_int, error_int) (no per-key future map)"},
     {"Admin_abort_transaction_async", py_Admin_abort_transaction_async, METH_VARARGS,
      "Async abortTransaction; cb(error_int) -- Java's result carries no value"},
     {"Admin_force_terminate_transaction_async", py_Admin_force_terminate_transaction_async,

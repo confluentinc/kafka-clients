@@ -6983,39 +6983,65 @@ static void test_mock_admin_abort_and_terminate_transaction_report_unsupported(v
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void on_describe_producers(kafka_admin_DescribeProducersResult_t *result,
+/* Per-key async result (Phase G): describe_producers / describe_transactions /
+ * fence_producers now fire once per key, independently, rather than once for the
+ * whole batch - see `admin_async_per_key_op` and the matching per-key callback
+ * typedefs. `value` is the single-key result handle owned by the callback,
+ * freed with the matching *_destroy (the same flattened result handle reused as
+ * the single-key value). MockAdminClient throws per key, so every firing carries
+ * the real UnsupportedOperationException, never the generic fallback. */
+typedef struct {
+    atomic_int fired;
+    atomic_int error_count;
+    int32_t last_error_code;
+} b6_keyed_async_result_t;
+
+static void on_describe_producers(const char *topic, int32_t partition,
+                                  kafka_admin_DescribeProducersResult_t *value,
                                   kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_DescribeProducersResult_count(result);
-        kafka_admin_DescribeProducersResult_destroy(result);
+    b6_keyed_async_result_t *r = (b6_keyed_async_result_t *)user_data;
+    (void)topic;
+    (void)partition;
+    if (value != NULL) {
+        kafka_admin_DescribeProducersResult_destroy(value);
     }
-    record_async_error(r, error);
+    if (error != NULL) {
+        r->last_error_code = kafka_common_Error_code(error);
+        atomic_fetch_add(&r->error_count, 1);
+        kafka_common_Error_destroy(error);
+    }
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void on_describe_transactions(kafka_admin_DescribeTransactionsResult_t *result,
+static void on_describe_transactions(const char *id,
+                                     kafka_admin_DescribeTransactionsResult_t *value,
                                      kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_DescribeTransactionsResult_count(result);
-        kafka_admin_DescribeTransactionsResult_destroy(result);
+    b6_keyed_async_result_t *r = (b6_keyed_async_result_t *)user_data;
+    (void)id;
+    if (value != NULL) {
+        kafka_admin_DescribeTransactionsResult_destroy(value);
     }
-    record_async_error(r, error);
+    if (error != NULL) {
+        r->last_error_code = kafka_common_Error_code(error);
+        atomic_fetch_add(&r->error_count, 1);
+        kafka_common_Error_destroy(error);
+    }
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void on_fence_producers(kafka_admin_FenceProducersResult_t *result,
+static void on_fence_producers(const char *id,
+                               kafka_admin_FenceProducersResult_t *value,
                                kafka_common_Error_t *error, void *user_data) {
-    acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_FenceProducersResult_count(result);
-        kafka_admin_FenceProducersResult_destroy(result);
+    b6_keyed_async_result_t *r = (b6_keyed_async_result_t *)user_data;
+    (void)id;
+    if (value != NULL) {
+        kafka_admin_FenceProducersResult_destroy(value);
     }
-    record_async_error(r, error);
+    if (error != NULL) {
+        r->last_error_code = kafka_common_Error_code(error);
+        atomic_fetch_add(&r->error_count, 1);
+        kafka_common_Error_destroy(error);
+    }
     atomic_fetch_add(&r->fired, 1);
 }
 
@@ -7040,34 +7066,57 @@ static void on_void_transaction_op(kafka_common_Error_t *error, void *user_data)
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void test_mock_admin_b6_async_fires_once(void) {
+static void test_mock_admin_b6_async_fires_per_key(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
 
+    /* describe_producers / describe_transactions / fence_producers now fire once
+     * PER KEY (Phase G): two keys -> two firings, each carrying the mock's real
+     * UnsupportedOperationException, never the generic "not present" fallback. */
     const char *topics[2] = {"alpha", "beta"};
     const int32_t partitions[2] = {0, 1};
-    acl_async_result_t p = {0};
+    b6_keyed_async_result_t p = {0};
     atomic_init(&p.fired, 0);
+    atomic_init(&p.error_count, 0);
     kafka_admin_AdminClient_describe_producers_async(admin, topics, partitions, 2, false, 0, -1,
                                                     on_describe_producers, &p);
-    TEST_ASSERT_TRUE(wait_for(&p.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, p.had_result);
-    TEST_ASSERT_EQUAL_INT32(2, p.count);
+    TEST_ASSERT_TRUE(wait_for(&p.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&p.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&p.error_count));
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, p.last_error_code);
 
     const char *ids[2] = {"txn-a", "txn-b"};
-    acl_async_result_t d = {0};
+    b6_keyed_async_result_t d = {0};
     atomic_init(&d.fired, 0);
+    atomic_init(&d.error_count, 0);
     kafka_admin_AdminClient_describe_transactions_async(admin, ids, 2, -1, on_describe_transactions,
                                                        &d);
-    TEST_ASSERT_TRUE(wait_for(&d.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, d.had_result);
-    TEST_ASSERT_EQUAL_INT32(2, d.count);
+    TEST_ASSERT_TRUE(wait_for(&d.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&d.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&d.error_count));
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, d.last_error_code);
 
-    acl_async_result_t f = {0};
+    b6_keyed_async_result_t f = {0};
     atomic_init(&f.fired, 0);
+    atomic_init(&f.error_count, 0);
     kafka_admin_AdminClient_fence_producers_async(admin, ids, 2, -1, on_fence_producers, &f);
-    TEST_ASSERT_TRUE(wait_for(&f.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, f.had_result);
-    TEST_ASSERT_EQUAL_INT32(2, f.count);
+    TEST_ASSERT_TRUE(wait_for(&f.fired, 2));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&f.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&f.error_count));
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, f.last_error_code);
+
+    /* A duplicate key collapses to ONE firing (Java keys the result on a
+     * Map/Set), carrying the real error - never the synthetic "not present"
+     * fallback the second raw occurrence would have produced. */
+    const char *dup_ids[2] = {"dup", "dup"};
+    b6_keyed_async_result_t dedup = {0};
+    atomic_init(&dedup.fired, 0);
+    atomic_init(&dedup.error_count, 0);
+    kafka_admin_AdminClient_describe_transactions_async(admin, dup_ids, 2, -1,
+                                                        on_describe_transactions, &dedup);
+    TEST_ASSERT_TRUE(wait_for(&dedup.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&dedup.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&dedup.error_count));
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, dedup.last_error_code);
 
     /* listTransactions fails wholesale on the mock, so the callback gets the
      * error rather than a result. */
@@ -7099,27 +7148,58 @@ static void test_mock_admin_b6_async_fires_once(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
-static void test_mock_admin_b6_async_null_handle_and_marshaling_failure(void) {
-    /* A NULL handle still honours the callback obligation, inline. */
-    acl_async_result_t p = {0};
+/* describe_producers dedups a repeated (topic, partition): two identical rows
+ * collapse to exactly ONE firing carrying the real error, never the synthetic
+ * "not present" fallback the second raw occurrence would otherwise win (the
+ * scram-bug class the Phase A-F remediation closed). */
+static void test_mock_admin_b6_describe_producers_async_dedups_a_repeated_partition(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    const char *topics[2] = {"alpha", "alpha"};
+    const int32_t partitions[2] = {0, 0};
+    b6_keyed_async_result_t p = {0};
     atomic_init(&p.fired, 0);
-    kafka_admin_AdminClient_describe_producers_async(NULL, NULL, NULL, 0, false, 0, -1,
+    atomic_init(&p.error_count, 0);
+    kafka_admin_AdminClient_describe_producers_async(admin, topics, partitions, 2, false, 0, -1,
+                                                    on_describe_producers, &p);
+    TEST_ASSERT_TRUE(wait_for(&p.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&p.fired));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&p.error_count));
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, p.last_error_code);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_b6_async_null_handle_and_marshaling_failure(void) {
+    /* A NULL handle still honours the callback obligation, once per requested
+     * key (the per-key fan-out iterates the keys regardless of admin validity,
+     * so an EMPTY key set would fire zero times - the input here is non-empty to
+     * observe the fan-out). */
+    const char *topics[1] = {"alpha"};
+    const int32_t partitions[1] = {0};
+    b6_keyed_async_result_t p = {0};
+    atomic_init(&p.fired, 0);
+    atomic_init(&p.error_count, 0);
+    kafka_admin_AdminClient_describe_producers_async(NULL, topics, partitions, 1, false, 0, -1,
                                                     on_describe_producers, &p);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&p.fired));
-    TEST_ASSERT_EQUAL_INT(1, p.had_error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&p.error_count));
 
-    acl_async_result_t d = {0};
+    const char *one_id[1] = {"txn-a"};
+    b6_keyed_async_result_t d = {0};
     atomic_init(&d.fired, 0);
-    kafka_admin_AdminClient_describe_transactions_async(NULL, NULL, 0, -1, on_describe_transactions,
+    atomic_init(&d.error_count, 0);
+    kafka_admin_AdminClient_describe_transactions_async(NULL, one_id, 1, -1, on_describe_transactions,
                                                        &d);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&d.fired));
-    TEST_ASSERT_EQUAL_INT(1, d.had_error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&d.error_count));
 
-    acl_async_result_t f = {0};
+    b6_keyed_async_result_t f = {0};
     atomic_init(&f.fired, 0);
-    kafka_admin_AdminClient_fence_producers_async(NULL, NULL, 0, -1, on_fence_producers, &f);
+    atomic_init(&f.error_count, 0);
+    kafka_admin_AdminClient_fence_producers_async(NULL, one_id, 1, -1, on_fence_producers, &f);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&f.fired));
-    TEST_ASSERT_EQUAL_INT(1, f.had_error);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&f.error_count));
 
     acl_async_result_t l = {0};
     atomic_init(&l.fired, 0);
@@ -7377,7 +7457,8 @@ int main(void) {
     RUN_TEST(test_mock_admin_fence_producers_reports_unsupported_per_id);
     RUN_TEST(test_mock_admin_list_transactions_fails_the_whole_call);
     RUN_TEST(test_mock_admin_abort_and_terminate_transaction_report_unsupported);
-    RUN_TEST(test_mock_admin_b6_async_fires_once);
+    RUN_TEST(test_mock_admin_b6_async_fires_per_key);
+    RUN_TEST(test_mock_admin_b6_describe_producers_async_dedups_a_repeated_partition);
     RUN_TEST(test_mock_admin_b6_async_null_handle_and_marshaling_failure);
     RUN_TEST(test_mock_admin_b6_null_out_result);
     return UNITY_END();
