@@ -3110,41 +3110,74 @@ async def test_async_b5b_rpcs():
 # ---------------------------------------------------------------------------
 
 def test_describe_producers_reports_unsupported_per_partition():
+    # Phase G: describe_producers returns a {key: Future} dict; each partition's
+    # Future resolves independently as that partition completes.
     with MockAdminClient(1) as admin:
         # Ragged on purpose: two partitions of one topic and one of another, so a
         # topic/partition column swap changes the key set.
-        out = admin.describe_producers([("alpha", 0), ("alpha", 4), ("beta", 2)])
-        assert set(out) == {("alpha", 0), ("alpha", 4), ("beta", 2)}
-        for key in out:
-            assert isinstance(out[key], KafkaError)
-            assert str(out[key]) == "Not implemented yet"
+        futures = admin.describe_producers([("alpha", 0), ("alpha", 4), ("beta", 2)])
+        assert set(futures) == {("alpha", 0), ("alpha", 4), ("beta", 2)}
+        for fut in futures.values():
+            error = fut.exception(timeout=5.0)
+            assert isinstance(error, KafkaError)
+            assert str(error) == "Not implemented yet"
 
-        # A duplicate partition collapses to one row, as Java's Map-keyed result
-        # does; broker_id=0 is a legal value, not "absent".
-        assert set(admin.describe_producers([("alpha", 0), ("alpha", 0)], broker_id=0)) == {
-            ("alpha", 0)}
-        # No partitions: nothing to join, so an empty result rather than a raise.
+        # A duplicate partition collapses to one Future, as Java's Map-keyed
+        # result does -- and it carries the real error, never the synthetic "not
+        # present" fallback. broker_id=0 is a legal value, not "absent".
+        dup = admin.describe_producers([("alpha", 0), ("alpha", 0)], broker_id=0)
+        assert set(dup) == {("alpha", 0)}
+        assert str(dup[("alpha", 0)].exception(timeout=5.0)) == "Not implemented yet"
+        # No partitions: zero keys, so an empty dict and the callback never fires.
         assert admin.describe_producers([]) == {}
 
 
 def test_describe_transactions_reports_unsupported_per_id():
     with MockAdminClient(1) as admin:
-        out = admin.describe_transactions(["txn-b", "txn-a"])
-        assert sorted(out) == ["txn-a", "txn-b"]
-        for tid in out:
-            assert isinstance(out[tid], KafkaError)
-            assert str(out[tid]) == "Not implemented yet"
+        futures = admin.describe_transactions(["txn-b", "txn-a"])
+        assert sorted(futures) == ["txn-a", "txn-b"]
+        for fut in futures.values():
+            error = fut.exception(timeout=5.0)
+            assert isinstance(error, KafkaError)
+            assert str(error) == "Not implemented yet"
+        # A duplicate id collapses to one Future carrying the real error.
+        dup = admin.describe_transactions(["dup", "dup"])
+        assert set(dup) == {"dup"}
+        assert str(dup["dup"].exception(timeout=5.0)) == "Not implemented yet"
         assert admin.describe_transactions([]) == {}
 
 
 def test_fence_producers_reports_unsupported_per_id():
     with MockAdminClient(1) as admin:
-        out = admin.fence_producers(["txn-y", "txn-x"])
-        assert sorted(out) == ["txn-x", "txn-y"]
-        for tid in out:
-            assert isinstance(out[tid], KafkaError)
-            assert str(out[tid]) == "Not implemented yet"
+        futures = admin.fence_producers(["txn-y", "txn-x"])
+        assert sorted(futures) == ["txn-x", "txn-y"]
+        for fut in futures.values():
+            error = fut.exception(timeout=5.0)
+            assert isinstance(error, KafkaError)
+            assert str(error) == "Not implemented yet"
         assert admin.fence_producers([]) == {}
+
+
+def test_describe_producers_partitions_resolve_independently():
+    # Structural per-key independence: two partitions each get their own Future,
+    # resolvable in any order (the mock resolves both, so this proves the
+    # dict-of-Futures shape rather than temporal independence, which the Rust
+    # FFI test proves against a hand-driven pending future).
+    with MockAdminClient(1) as admin:
+        futures = admin.describe_producers([("alpha", 0), ("beta", 1)])
+        assert set(futures) == {("alpha", 0), ("beta", 1)}
+        # Resolve out of request order.
+        assert str(futures[("beta", 1)].exception(timeout=5.0)) == "Not implemented yet"
+        assert str(futures[("alpha", 0)].exception(timeout=5.0)) == "Not implemented yet"
+
+
+def test_fence_producers_dedups_a_repeated_id():
+    # A duplicate transactional id collapses to exactly one Future carrying the
+    # real error -- never the synthetic "not present" fallback (scram-bug class).
+    with MockAdminClient(1) as admin:
+        futures = admin.fence_producers(["dup", "dup"])
+        assert set(futures) == {"dup"}
+        assert str(futures["dup"].exception(timeout=5.0)) == "Not implemented yet"
 
 
 def test_list_transactions_fails_the_whole_call():
@@ -3212,6 +3245,11 @@ def test_list_transactions_filters_keep_each_column_apart():
 def test_describe_producers_rows_pin_the_two_columns():
     assert MockAdminClient._describe_producers_rows([("alpha", 4), ("beta", 0)]) == [
         ("alpha", 4), ("beta", 0)]
+    # Deduped first-occurrence (Java keys the result on TopicPartition): a
+    # repeated (topic, partition) collapses to one row so the per-key callback
+    # fires once and the C incref count matches the distinct count.
+    assert MockAdminClient._describe_producers_rows(
+        [("alpha", 0), ("beta", 1), ("alpha", 0)]) == [("alpha", 0), ("beta", 1)]
 
 
 def test_to_describe_producers_builds_states_and_keeps_the_optionals_apart():
@@ -3284,16 +3322,23 @@ def test_to_list_transactions_keeps_a_per_broker_error_beside_a_partial_listing(
 @pytest.mark.asyncio
 async def test_async_b6_rpcs():
     async with AsyncMockAdminClient(1) as admin:
-        out = await admin.describe_producers([("alpha", 0), ("beta", 1)])
-        assert set(out) == {("alpha", 0), ("beta", 1)}
-        assert isinstance(out[("alpha", 0)], KafkaError)
+        # Phase G: the three converted RPCs return {key: asyncio.Future}; each
+        # key's Future is awaited independently and raises the per-key error.
+        futures = await admin.describe_producers([("alpha", 0), ("beta", 1)])
+        assert set(futures) == {("alpha", 0), ("beta", 1)}
+        for fut in futures.values():
+            with pytest.raises(KafkaError, match="Not implemented yet"):
+                await fut
 
-        out = await admin.describe_transactions(["txn-a"])
-        assert isinstance(out["txn-a"], KafkaError)
+        futures = await admin.describe_transactions(["txn-a"])
+        with pytest.raises(KafkaError, match="Not implemented yet"):
+            await futures["txn-a"]
 
-        out = await admin.fence_producers(["txn-a"])
-        assert isinstance(out["txn-a"], KafkaError)
+        futures = await admin.fence_producers(["txn-a"])
+        with pytest.raises(KafkaError, match="Not implemented yet"):
+            await futures["txn-a"]
 
+        # list_transactions stays joined: awaiting the coroutine raises directly.
         with pytest.raises(KafkaError):
             await admin.list_transactions()
 

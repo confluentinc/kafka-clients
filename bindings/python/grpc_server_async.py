@@ -1389,8 +1389,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
 
     # -- Producers & transactions (slice G6) ----------------------------------
     #
-    # Four of the six are ordinary per-key results (describe_producers,
-    # describe_transactions, fence_producers, list_transactions). The other two,
+    # describe_producers / describe_transactions / fence_producers now return a
+    # {key: Future} dict (Phase G per-key reversal), awaited here via
+    # `_resolve_admin_futures_async` before the shared response translators run.
+    # list_transactions stays JOINED (no per-transactional-id future map), so it
+    # already returns a resolved dict and needs no await. The other two,
     # abort_transaction and force_terminate_transaction, answer with the shared
     # StatusResponse because Java's AbortTransactionResult / TerminateTransaction
     # Result carry no data and no reachable per-key granularity — admin.py
@@ -1412,7 +1415,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 [(tp.topic, tp.partition) for tp in request.partitions],
                 broker_id=broker_id,
                 timeout=_admin_timeout(request))
-            return _admin_describe_producers_response(outcomes)
+            return _admin_describe_producers_response(await _resolve_admin_futures_async(outcomes))
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_producers raised")
             return apb.DescribeProducersResponse(error=_kafka_error_to_proto(e))
@@ -1424,7 +1427,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = await client.describe_transactions(
                 list(request.transactional_ids), timeout=_admin_timeout(request))
-            return _admin_describe_transactions_response(outcomes)
+            return _admin_describe_transactions_response(await _resolve_admin_futures_async(outcomes))
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_transactions raised")
             return apb.DescribeTransactionsResponse(error=_kafka_error_to_proto(e))
@@ -1476,7 +1479,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = await client.fence_producers(
                 list(request.transactional_ids), timeout=_admin_timeout(request))
-            return _admin_fence_producers_response(outcomes)
+            return _admin_fence_producers_response(await _resolve_admin_futures_async(outcomes))
         except Exception as e:  # noqa: BLE001
             LOG.exception("fence_producers raised")
             return apb.FenceProducersResponse(error=_kafka_error_to_proto(e))

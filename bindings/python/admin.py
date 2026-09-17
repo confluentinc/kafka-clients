@@ -2293,6 +2293,35 @@ def _to_fence_producers(raw):
     return out
 
 
+# ---- Phase G per-key value drains -----------------------------------------
+#
+# describe_producers / describe_transactions / fence_producers deliver their
+# per-key value as the flattened result handle carrying a single key (index 0):
+# these RPCs have no standalone value handle (unlike describe_configs' Config),
+# so the async callback reuses the whole result handle for one key. Each drain
+# below owns+destroys that single-key handle (via the same *_drain the sync
+# path used) and returns its one value. It runs only on the success path -- a
+# per-key failure arrives as the callback's own `error`, resolved before the
+# drain is called -- so the single row never carries a KafkaError here.
+
+def _drain_partition_producer_state(handle):
+    """Single-key ``DescribeProducersResult`` handle -> its one
+    ``PartitionProducerState``."""
+    return next(iter(_to_describe_producers(_lib.DescribeProducersResult_drain(handle)).values()))
+
+
+def _drain_transaction_description(handle):
+    """Single-key ``DescribeTransactionsResult`` handle -> its one
+    ``TransactionDescription``."""
+    return next(iter(_to_describe_transactions(_lib.DescribeTransactionsResult_drain(handle)).values()))
+
+
+def _drain_producer_id_and_epoch(handle):
+    """Single-key ``FenceProducersResult`` handle -> its one
+    ``ProducerIdAndEpoch``."""
+    return next(iter(_to_fence_producers(_lib.FenceProducersResult_drain(handle)).values()))
+
+
 def _to_list_transactions(raw):
     """``{broker_id: (error, [(transactional_id, producer_id, state)])}``
     -> ``{broker_id: [TransactionListing] | KafkaError}``.
@@ -3353,42 +3382,29 @@ class _AdminBase:
     # ---- B6: producers and transactions ------------------------------------
     @staticmethod
     def _describe_producers_rows(partitions):
-        """``[(topic, partition)]`` -> the ``(topic, partition)`` rows the C
-        extension unpacks.
+        """``[(topic, partition)]`` -> the DISTINCT ``(topic, partition)`` rows
+        the C extension unpacks, in first-occurrence order.
+
+        Deduped because Java keys ``describeProducers``' result on
+        ``TopicPartition`` (`Map<TopicPartition, KafkaFuture<..>>`): the per-key
+        callback fires once per distinct partition, and the C incref count is
+        this row count, so a duplicate would over-incref (leak) and its second
+        occurrence would win the (distinct) Future with the synthetic "not
+        present" error. These rows are both the C rows and the futures-dict
+        keys, so the two cannot drift.
 
         Java's ``MockAdminClient.describeProducers`` throws per partition
         (``MockAdminClient.java:1368-1370``), so it echoes the key set back but
         nothing else.
         """
-        return [(str(topic), int(partition)) for topic, partition in partitions]
-
-    def _describe_producers_spec(self, partitions, broker_id, timeout):
-        # `broker_id is None` is Java's empty OptionalInt: query each partition's
-        # leader. Broker id 0 is legal, so the flag carries absence.
-        rows = self._describe_producers_rows(partitions)
-        ms = _ms(timeout)
-        drain = _lib.DescribeProducersResult_drain
-        return (lambda cb: _lib.Admin_describe_producers_async(
-                    self._h, rows, broker_id is not None,
-                    0 if broker_id is None else int(broker_id), ms, cb),
-                self._resolve_value(drain, _to_describe_producers),
-                self._free_value(drain))
-
-    def _describe_transactions_spec(self, transactional_ids, timeout):
-        ids = [str(i) for i in transactional_ids]
-        ms = _ms(timeout)
-        drain = _lib.DescribeTransactionsResult_drain
-        return (lambda cb: _lib.Admin_describe_transactions_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_describe_transactions),
-                self._free_value(drain))
-
-    def _fence_producers_spec(self, transactional_ids, timeout):
-        ids = [str(i) for i in transactional_ids]
-        ms = _ms(timeout)
-        drain = _lib.FenceProducersResult_drain
-        return (lambda cb: _lib.Admin_fence_producers_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_fence_producers),
-                self._free_value(drain))
+        seen = set()
+        rows = []
+        for topic, partition in partitions:
+            key = (str(topic), int(partition))
+            if key not in seen:
+                seen.add(key)
+                rows.append(key)
+        return rows
 
     @staticmethod
     def _list_transactions_filters(states, producer_ids, duration_ms, transactional_id_pattern):
@@ -4183,31 +4199,57 @@ class Admin(_AdminBase):
     def describe_producers(self, partitions, broker_id=None, timeout=None):
         """Describe the active producers of ``partitions`` (an iterable of
         ``(topic, partition)``). Returns
-        ``{(topic, partition): PartitionProducerState | KafkaError}``.
+        ``{(topic, partition): Future[PartitionProducerState]}`` immediately;
+        each partition's ``Future`` resolves independently as that partition
+        completes -- a slow or failed one does not hold up the others (Java's
+        per-key ``KafkaFuture``).
 
         ``broker_id`` of ``None`` queries each partition's leader, mirroring
         Java's empty ``OptionalInt``; broker id 0 is a legal value, so absence
         is carried by ``None`` rather than a sentinel. A per-partition failure
-        is a value in the returned dict, not a raise.
+        surfaces as that partition's ``Future`` raising, not a call failure.
         """
         self._check_closed()
-        return self._run_sync(*self._describe_producers_spec(partitions, broker_id, timeout))
+        rows = self._describe_producers_rows(partitions)
+        futures = {key: Future() for key in rows}
+        ms = _ms(timeout)
+        # `broker_id is None` is Java's empty OptionalInt: query each partition's
+        # leader. Broker id 0 is legal, so the flag carries absence.
+        _lib.Admin_describe_producers_async(
+            self._h, rows, broker_id is not None,
+            0 if broker_id is None else int(broker_id), ms,
+            self._keyed_topic_partition_value_cb(futures, _drain_partition_producer_state))
+        return futures
 
     def describe_transactions(self, transactional_ids, timeout=None):
         """Describe the given transactional ids. Returns
-        ``{transactional_id: TransactionDescription | KafkaError}``.
+        ``{transactional_id: Future[TransactionDescription]}`` immediately; each
+        id's ``Future`` resolves independently.
         """
         self._check_closed()
-        return self._run_sync(*self._describe_transactions_spec(transactional_ids, timeout))
+        ids = list(dict.fromkeys(str(i) for i in transactional_ids))
+        futures = {tid: Future() for tid in ids}
+        ms = _ms(timeout)
+        _lib.Admin_describe_transactions_async(
+            self._h, ids, ms,
+            self._keyed_value_cb(futures, _drain_transaction_description))
+        return futures
 
     def fence_producers(self, transactional_ids, timeout=None):
         """Fence out every active producer using the given transactional ids.
-        Returns ``{transactional_id: ProducerIdAndEpoch | KafkaError}`` -- the
-        id and epoch assigned while re-initializing that transaction, which is
-        what Java's ``producerId(id)`` / ``epochId(id)`` project.
+        Returns ``{transactional_id: Future[ProducerIdAndEpoch]}`` immediately;
+        each id's ``Future`` resolves independently to the id and epoch assigned
+        while re-initializing that transaction, which is what Java's
+        ``producerId(id)`` / ``epochId(id)`` project.
         """
         self._check_closed()
-        return self._run_sync(*self._fence_producers_spec(transactional_ids, timeout))
+        ids = list(dict.fromkeys(str(i) for i in transactional_ids))
+        futures = {tid: Future() for tid in ids}
+        ms = _ms(timeout)
+        _lib.Admin_fence_producers_async(
+            self._h, ids, ms,
+            self._keyed_value_cb(futures, _drain_producer_id_and_epoch))
+        return futures
 
     def list_transactions(self, states=None, producer_ids=None, duration_ms=-1,
                           transactional_id_pattern=None, timeout=None):
@@ -4769,16 +4811,37 @@ class AsyncAdmin(_AdminBase):
 
     async def describe_producers(self, partitions, broker_id=None, timeout=None):
         self._check_closed()
-        return await self._run_async(
-            *self._describe_producers_spec(partitions, broker_id, timeout))
+        loop = asyncio.get_running_loop()
+        rows = self._describe_producers_rows(partitions)
+        futures = {key: loop.create_future() for key in rows}
+        ms = _ms(timeout)
+        _lib.Admin_describe_producers_async(
+            self._h, rows, broker_id is not None,
+            0 if broker_id is None else int(broker_id), ms,
+            self._keyed_topic_partition_value_cb(futures, _drain_partition_producer_state, loop))
+        return futures
 
     async def describe_transactions(self, transactional_ids, timeout=None):
         self._check_closed()
-        return await self._run_async(*self._describe_transactions_spec(transactional_ids, timeout))
+        loop = asyncio.get_running_loop()
+        ids = list(dict.fromkeys(str(i) for i in transactional_ids))
+        futures = {tid: loop.create_future() for tid in ids}
+        ms = _ms(timeout)
+        _lib.Admin_describe_transactions_async(
+            self._h, ids, ms,
+            self._keyed_value_cb(futures, _drain_transaction_description, loop))
+        return futures
 
     async def fence_producers(self, transactional_ids, timeout=None):
         self._check_closed()
-        return await self._run_async(*self._fence_producers_spec(transactional_ids, timeout))
+        loop = asyncio.get_running_loop()
+        ids = list(dict.fromkeys(str(i) for i in transactional_ids))
+        futures = {tid: loop.create_future() for tid in ids}
+        ms = _ms(timeout)
+        _lib.Admin_fence_producers_async(
+            self._h, ids, ms,
+            self._keyed_value_cb(futures, _drain_producer_id_and_epoch, loop))
+        return futures
 
     async def list_transactions(self, states=None, producer_ids=None, duration_ms=-1,
                                 transactional_id_pattern=None, timeout=None):
