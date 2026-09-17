@@ -2109,8 +2109,10 @@ impl RecordAccumulator {
         // `split_and_reenqueue` consumes the big batch, so the second statement has to
         // happen here: without it the big batch stays in `incomplete` — so
         // `has_incomplete()` never falls back to false — and its pooled buffer is never
-        // returned. Unreachable in production until PLAN §9.18 is fixed (the split
-        // itself panics), but the fix needs this. Critic 44 note 1.
+        // returned. Written while PLAN §9.18 still made this path unreachable (the split
+        // itself panicked); that is fixed, so it now runs on every
+        // `MESSAGE_TOO_LARGE` — see `sender.rs::test_too_large_batches_are_safely_removed`
+        // and `test_idempotent_split_batch_and_send`. Critic 44 note 1.
         self.complete_and_deallocate_batch(&mut big_batch);
 
         while let Some(batch) = sub_batches.pop_back() {
