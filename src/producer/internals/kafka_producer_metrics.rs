@@ -15,13 +15,14 @@
 //! Producer-level latency timing metrics
 //! (`org.apache.kafka.clients.producer.internals.KafkaProducerMetrics`).
 
-// The six transactional latency sensors/methods (`record_init`,
-// `record_begin_txn`, `record_send_offsets`, `record_commit_txn`,
-// `record_abort_txn`, `record_prepare_txn`) are registered — exactly as Java's
-// `KafkaProducerMetrics` registers all 8 regardless — but have no call site yet:
-// the transactional API is not present on the `Producer` trait. They are
-// exercised by the tests and wired to record sites when transactions land.
-#![allow(dead_code)]
+// All 8 latency sensors are registered, exactly as Java's `KafkaProducerMetrics`
+// registers them regardless of use. Seven are recorded from `KafkaProducer`:
+// `record_flush` and `record_metadata_wait` on the flush / metadata-wait paths,
+// and `record_init` / `record_begin_txn` / `record_send_offsets` /
+// `record_commit_txn` / `record_abort_txn` from the transaction-control methods.
+// Only `record_prepare_txn` has no call site — Java registers `txn-prepare` but
+// never calls `recordPrepareTxn` either — so its `dead_code` allowance is narrowed
+// to that single method (below) rather than blanketing the file.
 
 use std::sync::Arc;
 
@@ -49,10 +50,9 @@ const METADATA_WAIT: &str = "metadata-wait";
 ///
 /// Owned by the [`KafkaProducer`](crate::producer::KafkaProducer). Each
 /// `record_*` method is invoked per top-level producer API call (flush,
-/// metadata-wait, and — once the transactional API lands — the txn lifecycle
-/// methods), never per record. Every one of the 8 latency sensors carries a
-/// single [`CumulativeSum`] metric named `<x>-time-ns-total`, exactly as Java
-/// registers them.
+/// metadata-wait, and the txn lifecycle methods), never per record. Every one of
+/// the 8 latency sensors carries a single [`CumulativeSum`] metric named
+/// `<x>-time-ns-total`, exactly as Java registers them.
 pub(crate) struct KafkaProducerMetrics {
     metrics: Arc<Metrics>,
     init_time_sensor: Arc<Sensor>,
@@ -128,46 +128,46 @@ impl KafkaProducerMetrics {
 
     /// Java: `recordInit(long duration)`.
     ///
-    /// No call site yet: the transactional API is not present on the
-    /// [`Producer`](crate::producer::Producer) trait. Retained for parity —
-    /// Java registers the sensor regardless — and wired when transactions land.
+    /// Recorded by [`KafkaProducer::init_transactions`](crate::producer::KafkaProducer::init_transactions).
     pub(crate) fn record_init(&self, duration: i64) {
         self.init_time_sensor.record(duration as f64);
     }
 
     /// Java: `recordBeginTxn(long duration)`.
     ///
-    /// No call site yet (see [`record_init`](Self::record_init)).
+    /// Recorded by [`KafkaProducer::begin_transaction`](crate::producer::KafkaProducer::begin_transaction).
     pub(crate) fn record_begin_txn(&self, duration: i64) {
         self.begin_txn_time_sensor.record(duration as f64);
     }
 
     /// Java: `recordSendOffsets(long duration)`.
     ///
-    /// No call site yet (see [`record_init`](Self::record_init)).
+    /// Recorded by [`KafkaProducer::send_offsets_to_transaction`](crate::producer::KafkaProducer::send_offsets_to_transaction).
     pub(crate) fn record_send_offsets(&self, duration: i64) {
         self.send_offsets_sensor.record(duration as f64);
     }
 
     /// Java: `recordCommitTxn(long duration)`.
     ///
-    /// No call site yet (see [`record_init`](Self::record_init)).
+    /// Recorded by [`KafkaProducer::commit_transaction`](crate::producer::KafkaProducer::commit_transaction).
     pub(crate) fn record_commit_txn(&self, duration: i64) {
         self.commit_txn_sensor.record(duration as f64);
     }
 
     /// Java: `recordAbortTxn(long duration)`.
     ///
-    /// No call site yet (see [`record_init`](Self::record_init)).
+    /// Recorded by [`KafkaProducer::abort_transaction`](crate::producer::KafkaProducer::abort_transaction).
     pub(crate) fn record_abort_txn(&self, duration: i64) {
         self.abort_txn_sensor.record(duration as f64);
     }
 
     /// Java: `recordPrepareTxn(long duration)`.
     ///
-    /// No call site yet, and — mirroring Java — never recorded even once the
-    /// transactional API lands (Java registers `txn-prepare` but has no
-    /// `recordPrepareTxn` call site of its own either). Retained for parity.
+    /// Deliberately never recorded, mirroring Java: `KafkaProducerMetrics`
+    /// registers the `txn-prepare` sensor but has no `recordPrepareTxn` call site
+    /// of its own, so the sensor is registered for parity and stays at zero. The
+    /// `dead_code` allowance is scoped to this one method.
+    #[allow(dead_code)]
     pub(crate) fn record_prepare_txn(&self, duration: i64) {
         self.prepare_txn_sensor.record(duration as f64);
     }

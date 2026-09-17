@@ -12,6 +12,18 @@ _log = logging.getLogger(__name__)
 # It stores kafka_producer_ProducerRecord_t internally for optimized performance
 
 
+# Wire code of Errors.TRANSACTION_ABORTABLE (Errors.java:408) -- the only code
+# for which Rust's `Error::is_transaction_abortable_error()`
+# (kafka_error.rs:1666-1668, `matches!(self, Self::TransactionAbortable(_))`) is
+# true. The FFI error codes are injective over the error classes, so the code
+# comparison below is exactly that predicate. Duplicated from the generated
+# `_error_code.py` (`kafka_common_ErrorCode_t`, src/ffi/common.rs) because that
+# module is test/gRPC plumbing and is NOT in pyproject's `py-modules`, so it is
+# not shipped and importing it at runtime would break the installed package; a
+# unit test (`test_admin.py`) pins the two values together to catch drift.
+_TRANSACTION_ABORTABLE = 120
+
+
 class KafkaError(Exception):
     """Kafka error with code, message, and retriable/fatal flags."""
 
@@ -39,12 +51,21 @@ class KafkaError(Exception):
         Used for *borrowed* per-key errors inside an admin result handle: those
         die with their parent handle, so the C layer copies their fields out
         before destroying it and there is nothing left to ``KafkaError_destroy``.
+
+        Unlike :meth:`_from_c`, there is no live error handle here on which to
+        call the Rust FFI predicate ``kafka_common_Error_is_transaction_abortable_error``
+        (the C layer copies only the four fields ``(code, message, is_retriable,
+        is_fatal)`` out of the borrowed handle before it is destroyed). So
+        ``txn_requires_abort`` is derived from the code instead: it is ``True``
+        exactly for ``TRANSACTION_ABORTABLE`` (:data:`_TRANSACTION_ABORTABLE`),
+        the single code for which the Rust predicate is true.
         """
         ret = KafkaError.__new__(KafkaError)
         ret._code = code
         ret._message = message
         ret._is_retriable = bool(is_retriable)
         ret._is_fatal = bool(is_fatal)
+        ret._txn_requires_abort = (code == _TRANSACTION_ABORTABLE)
         return ret
 
     @property

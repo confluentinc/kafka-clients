@@ -2032,6 +2032,24 @@ impl TransactionManager {
         result
     }
 
+    /// Drops the [`TxnPartitionMap`] entry for `topic_partition`, so that a
+    /// subsequent `complete_batch` for a batch still in flight on that partition
+    /// fails inside [`Self::handle_completed_batch`]: both
+    /// [`Self::update_last_acked_offset`] and [`TxnPartitionMap::remove_in_flight_batch`]
+    /// call [`TxnPartitionMap::get_mut`], which returns an error when the entry is
+    /// absent.
+    ///
+    /// This is the fault injection for Site 1 of issues.md Issue 4 — the genuine,
+    /// deferred `complete_batch` error that
+    /// [`Sender::handle_produce_response`](super::sender) must surface without
+    /// dropping the batches the same request carried. It reuses the production
+    /// [`Self::reset_sequence_for_partition`] path (`resetSequenceForPartition`,
+    /// Java 627), which is otherwise private.
+    #[cfg(test)]
+    pub(crate) fn remove_partition_entry_for_test(&mut self, topic_partition: &TopicPartition) {
+        self.reset_sequence_for_partition(topic_partition);
+    }
+
     /// Moves to [`State::FatalError`].
     ///
     /// Corresponds to `transitionToFatalError(RuntimeException)` (Java 541).

@@ -206,6 +206,49 @@ impl NodeLatencyStats {
 /// `clippy::type_complexity`.
 type PartitionDequeRef<'a> = dashmap::mapref::one::Ref<'a, i32, Mutex<VecDeque<ProducerBatch>>>;
 
+/// RAII restorer for the Sender-side in-flight batches that
+/// [`RecordAccumulator::with_in_flight_batch_pool`] temporarily removes from
+/// `Sender::in_flight_batches` to look them up per partition.
+///
+/// # Why this type has no Java counterpart
+///
+/// Java's `TxnPartitionEntry` (`TxnPartitionEntry.java:62-65`) holds *references*
+/// to the in-flight batches, so no batch ever leaves its owner and Java's
+/// `TxnPartitionMap` looks a partition up directly
+/// (`TxnPartitionMap.java:36/43/114`). Rust cannot store those references in the
+/// entry (`.claude/rules/producer-transactions.md` §7), so the pool is assembled
+/// by borrowing the batches straight out of their owners. To match Java's O(1)
+/// lookup — rather than scanning the whole Sender map — each requested partition's
+/// `Vec` is *removed* from `sender_batches`, borrowed into the pool, and put back
+/// afterwards.
+///
+/// The put-back is a `Drop`, not a plain statement after the closure, because the
+/// Sender survives panics: `Sender::run_once_logging_errors`
+/// (`sender.rs:1010-1022`) wraps `run_once` in `catch_unwind` to mirror Java's
+/// "Uncaught error in kafka producer I/O thread" loop. If the pool closure
+/// unwinds, a plain re-insert after it would be skipped and the removed batches
+/// dropped while the Sender keeps running — their `send().await` futures would
+/// then hang forever, exactly the failure `catch_unwind` exists to prevent.
+/// `Drop` runs on the unwind path too, so the batches are always restored.
+///
+/// A Rust-only helper with no Java analogue, recorded as a justified deviation
+/// per `definition-of-done.md` §7.
+struct SenderInFlightRestore<'a> {
+    /// The Sender's in-flight map the removed entries are returned to on drop.
+    sender_batches: &'a mut HashMap<TopicPartition, Vec<ProducerBatch>>,
+    /// The `(partition, batches)` entries removed from `sender_batches`, held by
+    /// value until drop re-inserts them.
+    entries: Vec<(TopicPartition, Vec<ProducerBatch>)>,
+}
+
+impl Drop for SenderInFlightRestore<'_> {
+    fn drop(&mut self) {
+        for (topic_partition, batches) in self.entries.drain(..) {
+            self.sender_batches.insert(topic_partition, batches);
+        }
+    }
+}
+
 /// Per topic info.
 ///
 /// Translated from `RecordAccumulator.TopicInfo`.
@@ -990,8 +1033,11 @@ impl RecordAccumulator {
     /// # Errors
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
-    /// Java's `IllegalStateException` escapes to `Sender.run`'s catch-and-log.
-    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), Error> {
+    /// Java's `IllegalStateException` escapes to `Sender.run`'s catch-and-log. The
+    /// batch is handed **back** in the `Err` payload (not dropped) so the caller can
+    /// fail it explicitly — see [`Self::insert_in_sequence_order`] for why this
+    /// method's sole ownership makes dropping unsafe.
+    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), Box<(Error, ProducerBatch)>> {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
         let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
@@ -1034,12 +1080,30 @@ impl RecordAccumulator {
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
     /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:685`.
-    fn insert_in_sequence_order(&self, deque: &mut VecDeque<ProducerBatch>, batch: ProducerBatch) -> Result<(), Error> {
+    ///
+    /// The batch is consumed by value, so on either error it is handed **back** to
+    /// the caller as the `Err` payload rather than dropped: Java's
+    /// `IllegalStateException` unwinds out of `insertInSequenceOrder`, but in Java the
+    /// batch is still owned by the completion callback's `batches` map, whereas here
+    /// this method is its only owner. Dropping it would silently hang every `send()`
+    /// future it holds, leak its pooled buffer, and keep `has_incomplete()` true
+    /// forever. The caller (`RecordAccumulator::reenqueue` →
+    /// `Sender::handle_produce_response_for`) fails it explicitly instead.
+    ///
+    /// The `(Error, ProducerBatch)` payload is boxed because a `ProducerBatch` is far
+    /// over clippy's `result_large_err` threshold; this follows the crate convention
+    /// for large `Err` variants (e.g. `FetchFail = Box<(CompletedFetch, Error)>`).
+    fn insert_in_sequence_order(
+        &self,
+        deque: &mut VecDeque<ProducerBatch>,
+        batch: ProducerBatch,
+    ) -> Result<(), Box<(Error, ProducerBatch)>> {
         // When we are re-enqueueing and have enabled idempotence, the re-enqueued batch must always have a sequence.
         if batch.base_sequence() == RecordBatch::NO_SEQUENCE {
-            return Err(Error::local_illegal_state(
+            let error = Error::local_illegal_state(
                 "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled.",
-            ));
+            );
+            return Err(Box::new((error, batch)));
         }
 
         let has_inflight_batches = match &self.transaction_manager {
@@ -1050,12 +1114,13 @@ impl RecordAccumulator {
             None => false,
         };
         if !has_inflight_batches {
-            return Err(Error::local_illegal_state(format!(
+            let error = Error::local_illegal_state(format!(
                 "We are re-enqueueing a batch which is not tracked as part of the in flight requests. \
                  batch.topicPartition: {}; batch.baseSequence: {}",
                 batch.topic_partition,
                 batch.base_sequence()
-            )));
+            ));
+            return Err(Box::new((error, batch)));
         }
 
         let should_reorder = deque
@@ -2043,22 +2108,37 @@ impl RecordAccumulator {
         // takes).
         let mut guards: Vec<(&TopicPartition, std::sync::MutexGuard<'_, VecDeque<ProducerBatch>>)> =
             deques.iter().map(|(tp, deque)| (*tp, deque.value().lock().unwrap())).collect();
-        // Pass 4: hand out `&mut` references into the locked deques, then merge the
-        // Sender's own in-flight batches for the same partitions (rules §7:
+        // Remove each requested partition's Sender-side batches into an RAII guard
+        // that re-inserts them on drop (see [`SenderInFlightRestore`]). Declared
+        // BEFORE `pool` so it drops *after* it — locals drop in reverse declaration
+        // order, and the pool's `&mut` borrows into `restore.entries` must be dead
+        // before the guard re-inserts.
+        //
+        // A direct `remove` per requested partition matches Java, which never scans:
+        // `TxnPartitionMap.java:43` `get(tp)` and `:114` `adjustSequencesDueToFailedBatch`
+        // both look the partition up directly in the `HashMap` at `:36`, and
+        // `TransactionManager.java:612/673/1066` call `startSequencesAtBeginning(tp, ..)`
+        // once per partition while `:836` calls `adjustSequencesDueToFailedBatch(batch)`.
+        // Cost is O(|partitions|), not O(|sender map| × |partitions|).
+        let mut restore = SenderInFlightRestore { sender_batches, entries: Vec::new() };
+        for tp in partitions {
+            // A requested partition absent from the map yields `None`, so it gains no
+            // entry here and none on re-insert — preserving "absent partition ≡ empty"
+            // (a duplicate partition is likewise harmless: its second `remove` is a
+            // `None`).
+            if let Some(batches) = restore.sender_batches.remove(tp) {
+                restore.entries.push((tp.clone(), batches));
+            }
+        }
+        // Pass 4: hand out `&mut` references into the locked deques first, then merge
+        // the Sender's own in-flight batches for the same partitions (rules §7:
         // ownership alternates, so the pool must draw from both).
         let mut pool: InFlightBatchPool<'_> = HashMap::with_capacity(guards.len());
         for (tp, guard) in guards.iter_mut() {
             pool.insert((*tp).clone(), guard.iter_mut().collect());
         }
-        // Driven by one `iter_mut` over the Sender's map rather than a `get_mut` per
-        // requested partition: repeated `get_mut` calls in a loop cannot be proven
-        // disjoint while the references escape into `pool`. `partitions` is the
-        // epoch-bump set, i.e. only partitions in an error state, so the membership
-        // test is over a handful of entries.
-        for (topic_partition, batches) in sender_batches.iter_mut() {
-            if partitions.contains(topic_partition) {
-                pool.entry(topic_partition.clone()).or_default().extend(batches.iter_mut());
-            }
+        for (topic_partition, batches) in restore.entries.iter_mut() {
+            pool.entry(topic_partition.clone()).or_default().extend(batches.iter_mut());
         }
         // Merge the optional caller-owned batch last (rules §7). It reaches us with a
         // lifetime that outlives the guards', so covariance reduces it to the pool's
@@ -2076,7 +2156,14 @@ impl RecordAccumulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
+    /// Returns the first error raised while re-tracking a sub-batch when idempotence
+    /// is enabled (`add_in_flight_batch` / [`Self::insert_in_sequence_order`]). A
+    /// sub-batch that cannot be inserted is **failed** (its records completed with the
+    /// error and its buffer released) rather than dropped, and the remaining
+    /// sub-batches are still inserted or failed — never dropped — because each
+    /// sub-batch now solely owns its records' `send()` futures (the big batch's
+    /// records were moved into the sub-batches by `ProducerBatch::split`). The big
+    /// batch itself is always consumed and deallocated regardless of the outcome.
     pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, Error> {
         // Reset the estimated compression ratio to the initial value or the big batch compression
         // ratio, whichever is bigger. There are several different ways to do the reset. We chose
@@ -2102,7 +2189,6 @@ impl RecordAccumulator {
             .batches
             .entry(tp.partition())
             .or_insert_with(|| Mutex::new(VecDeque::new()));
-        let mut deque = dq_entry.value().lock().unwrap();
 
         // Java's caller does `accumulator.splitAndReenqueue(batch)` and then
         // `maybeRemoveAndDeallocateBatch(batch)` (`Sender.java:686-688`). Rust's
@@ -2113,22 +2199,68 @@ impl RecordAccumulator {
         // itself panics), but the fix needs this. Critic 44 note 1.
         self.complete_and_deallocate_batch(&mut big_batch);
 
-        while let Some(batch) = sub_batches.pop_back() {
-            self.incomplete.add(Arc::clone(&batch.produce_future));
-            // We treat the newly split batches as if they are not even tried
-            // (Java 528-537).
-            if let Some(transaction_manager) = &self.transaction_manager {
-                // We should track the newly created batches since they already have
-                // assigned sequences: `ProducerBatch::split` carries the producer
-                // state over to each sub-batch.
-                transaction_manager.lock().unwrap().add_in_flight_batch(&batch)?;
-                self.insert_in_sequence_order(&mut deque, batch)?;
-            } else {
-                deque.push_front(batch);
+        // A sub-batch whose re-tracking fails is collected here and failed after the
+        // deque lock is released, so its record callbacks never run while this
+        // partition's deque is locked (a callback could re-enter the send path).
+        let mut failed: Vec<(ProducerBatch, Error)> = Vec::new();
+        {
+            let mut deque = dq_entry.value().lock().unwrap();
+            while let Some(batch) = sub_batches.pop_back() {
+                self.incomplete.add(Arc::clone(&batch.produce_future));
+                // We treat the newly split batches as if they are not even tried
+                // (Java 528-537).
+                if let Some(transaction_manager) = &self.transaction_manager {
+                    // We should track the newly created batches since they already have
+                    // assigned sequences: `ProducerBatch::split` carries the producer
+                    // state over to each sub-batch. On failure the sub-batch must be
+                    // failed rather than dropped — it now solely owns its records'
+                    // futures — so it is set aside instead of propagated with `?`.
+                    let tracked = transaction_manager.lock().unwrap().add_in_flight_batch(&batch);
+                    match tracked {
+                        Ok(()) => {
+                            if let Err(boxed) = self.insert_in_sequence_order(&mut deque, batch) {
+                                let (error, batch) = *boxed;
+                                failed.push((batch, error));
+                            }
+                        },
+                        Err(error) => failed.push((batch, error)),
+                    }
+                } else {
+                    deque.push_front(batch);
+                }
             }
         }
 
-        Ok(num_split_batches)
+        let mut first_error: Option<Error> = None;
+        for (batch, error) in failed {
+            self.fail_split_sub_batch(batch, &error);
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(num_split_batches),
+        }
+    }
+
+    /// Fail a split sub-batch that could not be re-tracked, so none of its records'
+    /// `send()` futures hang.
+    ///
+    /// Completes the sub-batch's produce future with `error` (firing every record's
+    /// callback), then removes it from `incomplete` and returns any pooled buffer.
+    /// Split sub-batches are allocated outside the [`BufferPool`] (`is_split_batch`),
+    /// so [`Self::deallocate`] is a no-op for them; the call is kept for symmetry and
+    /// idempotency. There is no Java analogue: Java's `splitAndReenqueue` only
+    /// re-enqueues and lets the sub-batches' own produce responses fire the callbacks
+    /// later — but a sub-batch that can never be enqueued would never get a response,
+    /// so per CLAUDE.md §5 its records are failed here rather than left to hang.
+    fn fail_split_sub_batch(&self, mut batch: ProducerBatch, error: &Error) {
+        let error_clone = error.clone();
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(move |_| Some(error_clone.clone()));
+        batch.complete_with_error(error.clone(), record_errors);
+        self.complete_and_deallocate_batch(&mut batch);
     }
 }
 
@@ -4282,12 +4414,19 @@ mod tests {
             deque.value().lock().unwrap().pop_front().expect("one batch")
         };
         deque_batch.close();
-        let error = accum
+        // The batch is handed back in the `Err` payload (not dropped), so the caller
+        // can fail it explicitly instead of hanging its records.
+        let (error, returned) = *accum
             .reenqueue(deque_batch, now)
             .expect_err("an idempotent re-enqueue requires a sequence");
         assert_eq!(
             error.message(),
             "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled."
+        );
+        assert_eq!(
+            returned.base_sequence(),
+            RecordBatch::NO_SEQUENCE,
+            "the batch is returned, not dropped"
         );
 
         // Sequenced but untracked: this is the assertion rules §7 cites as Java's
@@ -4302,7 +4441,7 @@ mod tests {
             .remove_in_flight_batch(&batch)
             .expect("tracked");
         let base_sequence = batch.base_sequence();
-        let error = accum
+        let (error, returned) = *accum
             .reenqueue(batch, now)
             .expect_err("an untracked batch must not be re-enqueued");
         assert_eq!(
@@ -4314,6 +4453,7 @@ mod tests {
                 base_sequence
             )
         );
+        assert_eq!(returned.base_sequence(), base_sequence, "the batch is returned, not dropped");
     }
 
     /// `RecordAccumulator.java:562-591`: a re-enqueued batch is inserted behind every
@@ -4426,6 +4566,112 @@ mod tests {
         assert!(deque.iter().all(|b| b.has_sequence()));
         drop(deque);
         assert!(transaction_manager.lock().unwrap().has_inflight_batches(&tp1()));
+    }
+
+    /// Site 3 of issues.md Issue 4: a split sub-batch that cannot be re-tracked as in
+    /// flight must be **failed** — its records' `send()` futures completed with the
+    /// error and its buffer released — never dropped.
+    ///
+    /// Before the fix [`RecordAccumulator::split_and_reenqueue`] propagated the
+    /// `add_in_flight_batch` / `insert_in_sequence_order` error with `?`, which dropped
+    /// the offending sub-batch and every sub-batch still waiting in the split queue.
+    /// Because `ProducerBatch` has no `Drop`, those batches' produce futures were never
+    /// completed: their records' `send()` futures hung forever, and the batches stayed
+    /// in the `incomplete` set, so `has_incomplete()` never fell back to false —
+    /// wedging any transactional `EndTxn` / `flush` that waits on it.
+    ///
+    /// The fault is injected by dropping the partition's `TxnPartitionMap` entry before
+    /// the split, so `add_in_flight_batch` fails at `get_mut` for every sub-batch — the
+    /// exact `?` site the old code returned through.
+    #[tokio::test]
+    async fn test_split_and_reenqueue_fails_sub_batches_it_cannot_track_instead_of_dropping() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let now = 0i64;
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 10, Arc::clone(&transaction_manager));
+
+        // The same splittable big batch as `test_split_and_reenqueue_tracks_the_sub_batches`,
+        // except the record futures are captured. `split` moves each record into a
+        // sub-batch and chains these futures onto the sub-batch's produce future
+        // (`ProducerBatch::try_append_for_split`), so awaiting them proves the records do
+        // not hang when the sub-batch fails to re-track.
+        let builder = MemoryRecords::builder_with_buffer(
+            vec![0u8; 4096],
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut big_batch = ProducerBatch::new_with_split(tp1(), builder, now, true);
+        let payload = vec![0u8; 1024];
+        let mut record_futures = Vec::new();
+        for _ in 0..2 {
+            // `try_append`'s `Err` payload is the (non-`Debug`) callback handed back, so
+            // it is turned into an `Option` before `expect`.
+            let future = big_batch
+                .try_append(now, None, Some(&payload), &[], None, now)
+                .ok()
+                .expect("the buffer has room");
+            record_futures.push(future);
+        }
+        big_batch.set_producer_state(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH, 0, false);
+        big_batch.close();
+        {
+            let mut manager = transaction_manager.lock().unwrap();
+            // Track the big batch exactly as the drain does, so the setup differs from
+            // the success test by the single injected fault below.
+            assert_eq!(manager.sequence_number(&tp1()), 0);
+            manager
+                .increment_sequence_number(&tp1(), big_batch.record_count)
+                .expect("the entry exists");
+            manager.add_in_flight_batch(&big_batch).expect("the sequence is set");
+        }
+        accum.register_incomplete_for_test(&big_batch);
+
+        // Inject the fault: drop the partition's `TxnPartitionMap` entry. `Sender`
+        // normally removes only the big batch here (`Sender.java:685-686`); dropping the
+        // whole entry makes `add_in_flight_batch(&sub_batch)` fail at `get_mut` for every
+        // sub-batch, driving the `?` site that used to drop them. The sub-batches still
+        // carry sequences (`split` copies the producer state over), so the failure is the
+        // missing-entry error, not the "sequence is not set" one.
+        transaction_manager.lock().unwrap().remove_partition_entry_for_test(&tp1());
+
+        let error = accum
+            .split_and_reenqueue(big_batch)
+            .expect_err("every sub-batch fails to re-track, so the call reports the first error");
+        assert!(
+            error.to_string().contains("was never set for this partition"),
+            "expected the missing-entry tracking error, got: {error}"
+        );
+
+        // The failed sub-batches (and the always-deallocated big batch) must not linger
+        // in the incomplete set — otherwise `has_incomplete()` stays true and a
+        // transactional `EndTxn` / `flush` waits forever.
+        assert!(
+            !accum.has_incomplete(),
+            "failed sub-batches and the deallocated big batch must leave the incomplete set"
+        );
+
+        // No sub-batch may be left enqueued when all of them failed to re-track.
+        let topic_info = accum.topic_info_map.get(TOPIC).expect("topic present");
+        let topic_info = Arc::clone(topic_info.value());
+        if let Some(deque) = topic_info.batches.get(&0) {
+            assert!(
+                deque.value().lock().unwrap().is_empty(),
+                "a sub-batch that failed to re-track must not stay in the deque"
+            );
+        }
+
+        // Every record's `send()` future resolves with the tracking error rather than
+        // hanging. Before the fix these futures never completed, so this await would
+        // time out with a local-timeout error instead of the tracking error.
+        for future in record_futures {
+            let result = future.get_timeout(std::time::Duration::from_secs(5)).await;
+            let error = result.expect_err("the record must fail, not succeed or hang");
+            assert!(
+                error.to_string().contains("was never set for this partition"),
+                "record future must carry the tracking error, got: {error}"
+            );
+        }
     }
 
     /// `definition-of-done.md` §10 / CLAUDE.md §11: the producer-state assignment the
@@ -4885,5 +5131,255 @@ mod tests {
             accum.free.available_memory(),
             "the unused buffer must be deallocated, not dropped"
         );
+    }
+
+    // --- `with_in_flight_batch_pool` (issues.md Issue P2) ------------------
+    //
+    // No Java test exercises this helper: it has no Java counterpart (Java's
+    // `TxnPartitionEntry` holds batch references, so no batch ever leaves its
+    // owner — `.claude/rules/producer-transactions.md` §7). These verify the
+    // per-partition lookup and the RAII restore of `Sender::in_flight_batches`.
+
+    /// Address of a batch, used as a stable per-instance identity in the pool
+    /// tests. The helper removes each requested partition's `Vec` from the
+    /// Sender map and puts it back on drop, but a `Vec` move relocates only its
+    /// header, never its heap elements — so a batch keeps the same address
+    /// across the call and reliably identifies which batch landed where.
+    fn batch_addr(batch: &ProducerBatch) -> usize {
+        std::ptr::from_ref(batch) as usize
+    }
+
+    /// The pointer identities of the batches the pool holds for `tp`, in pool
+    /// order.
+    fn pool_addrs(pool: &InFlightBatchPool<'_>, tp: &TopicPartition) -> Vec<usize> {
+        pool.get(tp)
+            .map(|batches| {
+                batches
+                    .iter()
+                    .map(|b| {
+                        let batch: &ProducerBatch = b;
+                        batch_addr(batch)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A snapshot of every batch in the Sender map by pointer identity, keyed by
+    /// partition and in per-partition `Vec` order — compared before/after a call
+    /// to prove the map is restored exactly.
+    fn sender_map_addrs(map: &HashMap<TopicPartition, Vec<ProducerBatch>>) -> HashMap<TopicPartition, Vec<usize>> {
+        map.iter()
+            .map(|(tp, batches)| (tp.clone(), batches.iter().map(batch_addr).collect()))
+            .collect()
+    }
+
+    /// Appends one record to `partition` and drains it, returning the single
+    /// resulting batch. Each partition is drained on its own so its batch gets a
+    /// distinct sequence, exactly as
+    /// `test_drain_stops_for_a_retried_batch_out_of_sequence_order` does.
+    async fn append_and_drain_one(
+        accum: &RecordAccumulator,
+        metadata: &MetadataSnapshot,
+        partition: i32,
+        now: i64,
+    ) -> ProducerBatch {
+        accum
+            .append(
+                TOPIC,
+                partition,
+                now,
+                Some(&key()),
+                Some(&value()),
+                &[],
+                None,
+                0,
+                now,
+                metadata.cluster(),
+            )
+            .await
+            .expect("append should succeed");
+        let result = accum.ready(metadata, now);
+        let mut drained = accum.drain(metadata, &result.ready_nodes, i32::MAX, now).expect("drain");
+        let mut batches = drained.remove(&node1().id()).expect("node1 drained");
+        assert_eq!(batches.len(), 1, "one append to a fresh partition drains exactly one batch");
+        batches.pop().expect("the single drained batch")
+    }
+
+    /// (a) The pool holds a requested partition's batches from BOTH owners — the
+    /// accumulator's deque and the Sender map — and an un-requested partition
+    /// present in the Sender map is absent from the pool.
+    #[tokio::test]
+    async fn with_in_flight_batch_pool_holds_both_owners_and_excludes_unrequested_partitions() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let now = 0i64;
+        let tp1 = tp1();
+        let tp2 = TopicPartition::new(TOPIC.to_string(), 1);
+
+        // tp1: one batch owned by the Sender map, plus a separate batch still
+        // sitting in the accumulator's deque (appended, not drained).
+        let tp1_sender = append_and_drain_one(&accum, &metadata, 0, now).await;
+        // tp2: an in-flight batch for an UN-requested partition.
+        let tp2_sender = append_and_drain_one(&accum, &metadata, 1, now).await;
+        // The deque batch: append to tp1 without draining, so it stays in the deque.
+        append_one(&accum, metadata.cluster(), now).await;
+        assert_eq!(accum.deque_size(&tp1), 1, "one undrained batch is parked in tp1's deque");
+
+        let mut sender_batches: HashMap<TopicPartition, Vec<ProducerBatch>> = HashMap::new();
+        sender_batches.insert(tp1.clone(), vec![tp1_sender]);
+        sender_batches.insert(tp2.clone(), vec![tp2_sender]);
+        // Identities are read from where the batches actually live during the
+        // call — inside the map's `Vec`s — not from the pre-move locals.
+        let tp1_sender_addr = batch_addr(&sender_batches[&tp1][0]);
+        let tp2_sender_addr = batch_addr(&sender_batches[&tp2][0]);
+
+        let (tp1_pool, has_tp2) =
+            accum.with_in_flight_batch_pool(std::slice::from_ref(&tp1), &mut sender_batches, None, |pool| {
+                (pool_addrs(pool, &tp1), pool.contains_key(&tp2))
+            });
+
+        assert!(!has_tp2, "an un-requested Sender-map partition must be absent from the pool");
+        assert_eq!(tp1_pool.len(), 2, "the deque batch and the Sender-map batch");
+        assert_eq!(tp1_pool[1], tp1_sender_addr, "the Sender-side batch follows the deque batch");
+        assert_ne!(
+            tp1_pool[0], tp1_sender_addr,
+            "the front entry is the deque batch, not the Sender one"
+        );
+        assert_ne!(
+            tp1_pool[0], tp2_sender_addr,
+            "no batch from the un-requested partition leaks in"
+        );
+    }
+
+    /// (b) After the call, the Sender map has the same keys and, per key, the
+    /// same number and order of batches as before.
+    #[tokio::test]
+    async fn with_in_flight_batch_pool_restores_the_sender_map_keys_counts_and_order() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let now = 0i64;
+        let tp1 = tp1();
+        let tp2 = TopicPartition::new(TOPIC.to_string(), 1);
+
+        // tp1 holds two batches so the per-key order is observable; tp2 is left
+        // un-requested to prove the call touches only the requested partitions.
+        let tp1_a = append_and_drain_one(&accum, &metadata, 0, now).await;
+        let tp1_b = append_and_drain_one(&accum, &metadata, 0, now).await;
+        let tp2_a = append_and_drain_one(&accum, &metadata, 1, now).await;
+        let mut sender_batches: HashMap<TopicPartition, Vec<ProducerBatch>> = HashMap::new();
+        sender_batches.insert(tp1.clone(), vec![tp1_a, tp1_b]);
+        sender_batches.insert(tp2.clone(), vec![tp2_a]);
+
+        let before = sender_map_addrs(&sender_batches);
+        accum.with_in_flight_batch_pool(std::slice::from_ref(&tp1), &mut sender_batches, None, |_pool| {});
+        let after = sender_map_addrs(&sender_batches);
+
+        assert_eq!(before, after, "every key, batch count and per-key order is restored exactly");
+    }
+
+    /// (c) A requested partition absent from the Sender map does not gain an
+    /// empty entry (the "absent partition ≡ empty" contract).
+    #[tokio::test]
+    async fn with_in_flight_batch_pool_absent_requested_partition_gains_no_entry() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let now = 0i64;
+        let tp1 = tp1();
+        let tp2 = TopicPartition::new(TOPIC.to_string(), 1);
+
+        // Only tp2 is populated; tp1 is requested but absent from both owners
+        // (no partition-0 deque was ever created, no Sender-map entry).
+        let tp2_a = append_and_drain_one(&accum, &metadata, 1, now).await;
+        let mut sender_batches: HashMap<TopicPartition, Vec<ProducerBatch>> = HashMap::new();
+        sender_batches.insert(tp2.clone(), vec![tp2_a]);
+
+        let tp1_in_pool =
+            accum.with_in_flight_batch_pool(std::slice::from_ref(&tp1), &mut sender_batches, None, |pool| {
+                pool.contains_key(&tp1)
+            });
+
+        assert!(
+            !tp1_in_pool,
+            "a requested partition with no batches in either owner is absent from the pool"
+        );
+        assert!(
+            !sender_batches.contains_key(&tp1),
+            "the absent requested partition gained no empty Sender-map entry"
+        );
+        assert_eq!(sender_batches.len(), 1, "only the pre-existing un-requested key remains");
+        assert!(sender_batches.contains_key(&tp2), "the un-requested key is untouched");
+    }
+
+    /// (d) `extra_batch` appears in the pool for its partition, after the
+    /// Sender-side batches.
+    #[tokio::test]
+    async fn with_in_flight_batch_pool_merges_extra_batch_after_the_sender_side_batches() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0))]);
+        let now = 0i64;
+        let tp1 = tp1();
+
+        let tp1_sender = append_and_drain_one(&accum, &metadata, 0, now).await;
+        // The extra batch is tracked in the txn map but lives in neither owner —
+        // the failing batch reaching `Sender::can_retry` is the sole such case.
+        let mut tp1_extra = append_and_drain_one(&accum, &metadata, 0, now).await;
+        let tp1_extra_addr = batch_addr(&tp1_extra);
+
+        let mut sender_batches: HashMap<TopicPartition, Vec<ProducerBatch>> = HashMap::new();
+        sender_batches.insert(tp1.clone(), vec![tp1_sender]);
+        let tp1_sender_addr = batch_addr(&sender_batches[&tp1][0]);
+
+        let tp1_pool = accum.with_in_flight_batch_pool(
+            std::slice::from_ref(&tp1),
+            &mut sender_batches,
+            Some((tp1.clone(), &mut tp1_extra)),
+            |pool| pool_addrs(pool, &tp1),
+        );
+
+        assert_eq!(
+            tp1_pool,
+            vec![tp1_sender_addr, tp1_extra_addr],
+            "the Sender-side batch comes first and the extra batch is merged last"
+        );
+    }
+
+    /// (e) Panic safety: if the closure unwinds, the RAII guard still returns
+    /// every removed batch to the Sender map — matching the Sender surviving a
+    /// panic under `catch_unwind` (`sender.rs:1010-1022`). The accumulator's
+    /// deque mutexes are poisoned by the unwinding guards, so it is not touched
+    /// after the panic; the assertions are on the map alone.
+    #[tokio::test]
+    async fn with_in_flight_batch_pool_restores_the_sender_map_when_the_closure_panics() {
+        let transaction_manager = idempotent_transaction_manager(IDEMPOTENT_PRODUCER_ID, IDEMPOTENT_EPOCH);
+        let accum = create_idempotent_test_accumulator(1024, 10 * 1024, 0, Arc::clone(&transaction_manager));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let now = 0i64;
+        let tp1 = tp1();
+        let tp2 = TopicPartition::new(TOPIC.to_string(), 1);
+
+        let tp1_a = append_and_drain_one(&accum, &metadata, 0, now).await;
+        let tp2_a = append_and_drain_one(&accum, &metadata, 1, now).await;
+        let mut sender_batches: HashMap<TopicPartition, Vec<ProducerBatch>> = HashMap::new();
+        sender_batches.insert(tp1.clone(), vec![tp1_a]);
+        sender_batches.insert(tp2.clone(), vec![tp2_a]);
+
+        let before = sender_map_addrs(&sender_batches);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            accum.with_in_flight_batch_pool(std::slice::from_ref(&tp1), &mut sender_batches, None, |_pool| {
+                panic!("simulated failure inside the pool closure");
+            });
+        }));
+        assert!(
+            result.is_err(),
+            "the closure's panic propagates out, as it would under the Sender's catch_unwind"
+        );
+
+        let after = sender_map_addrs(&sender_batches);
+        assert_eq!(before, after, "every removed batch is restored to the Sender map on unwind");
     }
 }

@@ -964,7 +964,9 @@ mod round_trip {
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
+    use crate::common::record::internal::{
+        ControlRecordType, EndTransactionMarker, MemoryRecords, RecordBatch, SimpleRecord,
+    };
     use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
     use crate::common::requests::fetch_request::FetchRequest;
     use crate::common::requests::fetch_response::{FetchResponse, INVALID_PREFERRED_REPLICA_ID};
@@ -1215,6 +1217,64 @@ mod round_trip {
             builder.append_with_offset_bytes(off, 0, Some(b"key"), Some(value.as_bytes()));
         }
         builder.build().buffer().to_vec()
+    }
+
+    /// A transactional (non-control) v2 data batch, mirroring Java's
+    /// `appendTransactionalRecords(buffer, pid, baseOffset, records...)`
+    /// (`FetchRequestManagerTest.java:2868-2882`): magic v2, CREATE_TIME,
+    /// `producer_epoch = 0`, `base_sequence = (int) base_offset`,
+    /// `is_transactional = true`, `NO_PARTITION_LEADER_EPOCH`. Each `(key, value)`
+    /// pair is appended at consecutive offsets from `base_offset`; a `None` value
+    /// mirrors Java's null-valued `SimpleRecord`.
+    fn append_transactional_records(base_offset: i64, pid: i64, records: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_full(
+            1024,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+            -1,
+            pid,
+            0,
+            base_offset as i32,
+            true,  // is_transactional
+            false, // is_control_batch
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            1024,
+        );
+        for (i, (key, value)) in records.iter().enumerate() {
+            builder.append_with_offset_bytes(base_offset + i as i64, 0, Some(*key), *value);
+        }
+        builder.build().buffer().to_vec()
+    }
+
+    /// A `COMMIT` end-transaction-marker control batch at `base_offset` for
+    /// `producer_id`, mirroring Java's `commitTransaction(buffer, producerId,
+    /// baseOffset)` (`FetchRequestManagerTest.java:2884-2889`).
+    fn commit_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
+        end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Commit)
+    }
+
+    /// An `ABORT` end-transaction-marker control batch, mirroring Java's
+    /// `abortTransaction(buffer, producerId, baseOffset)`
+    /// (`FetchRequestManagerTest.java:2891-2897`). The marker consumes one offset
+    /// (Java returns 1), so callers tracking a running offset advance it by one.
+    fn abort_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
+        end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Abort)
+    }
+
+    /// Shared body of `commit_transaction` / `abort_transaction`, mirroring Java's
+    /// `MemoryRecords.writeEndTransactionalMarker(buffer, baseOffset,
+    /// time.milliseconds(), partitionLeaderEpoch = 0, producerId,
+    /// producerEpoch = 0, new EndTransactionMarker(controlType, 0))`. The marker's
+    /// first record key is a real control-type key, which is what
+    /// `CompletedFetch::contains_abort_marker` parses to decide abort vs. commit.
+    fn end_txn_marker_batch(base_offset: i64, producer_id: i64, control_type: ControlRecordType) -> Vec<u8> {
+        let marker = EndTransactionMarker::new(control_type, 0)
+            .expect("COMMIT/ABORT is a valid end-transaction-marker control type");
+        MemoryRecords::with_end_transaction_marker(base_offset, 0, 0, producer_id, 0, &marker)
+            .buffer()
+            .to_vec()
     }
 
     // ─── rich FetchResponse builder (mirrors Java fullFetchResponse family) ───
@@ -2914,67 +2974,196 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`:
-    /// under READ_COMMITTED an all-aborted batch returns NO records but the
-    /// consumer position still advances past it.
+    /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`
+    /// (`FetchRequestManagerTest.java:2705-2739`): under READ_COMMITTED an
+    /// all-aborted transactional data batch plus its ABORT marker returns NO
+    /// records, but the consumer position still advances past both.
     #[test]
     fn test_consumer_position_updated_when_skipping_aborted_transactions() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
         rt.assign_and_seek(&[tp(0)]);
 
-        // Aborted transactional batch from pid 1 (offsets 0,1). Aborted list
-        // begins at offset 0.
-        //
-        // NOTE: Java's test also appends an ABORT control marker at offset 2
-        // and asserts the position advances to 3. This port omits the marker and
-        // asserts the position advances past the aborted DATA batch (to 2).
-        //
-        // Until Milestone 11 Phase 8 that omission was forced: a READ_COMMITTED
-        // control batch from an aborted producer returned
-        // `Error::unsupported_version`. **That blocker is gone** —
-        // `ControlRecordType` is translated and `CompletedFetch::contains_abort_marker`
-        // implements Java's branch — so the omission is now only *unwritten*, and
-        // this test plus the three named below are tracked as a follow-up in
-        // PLAN §9.26. The core contract this test asserts — aborted records are
-        // skipped while the position still advances — is unaffected either way.
-        let buf = build_batch_full(0, 2, 1, true, false);
-        let pd = partition_with_aborted_txns(0, buf, vec![(1, 0)], 100, 100);
+        let pid = 1_i64;
+        let val: &[u8] = b"value";
+        let mut buf = Vec::new();
+        // Aborted transactional data batch from pid 1 (offsets 0,1).
+        buf.extend_from_slice(&append_transactional_records(
+            0,
+            pid,
+            &[(b"abort1-1", Some(val)), (b"abort1-2", Some(val))],
+        ));
+        // ABORT control marker at offset 2.
+        buf.extend_from_slice(&abort_transaction(2, pid));
+
+        // The aborted list begins at offset 0.
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid, 0)], 100, 100);
         deliver_single(&mut rt, topic_id, pd);
 
         let recs = rt.collect_records();
+        // We don't return any of the aborted records, but the position still
+        // advances past the aborted data batch AND the ABORT marker (to 3).
         assert!(recs.records_for_partition(&tp(0)).is_empty(), "all aborted -> no records");
-        // Position advanced past the aborted data batch (to 2).
-        assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
+        assert_eq!(
+            Some(3),
+            rt.position(&tp(0)),
+            "position advances past skipped aborted txn and marker"
+        );
     }
 
-    // ── abort-marker transaction tests — OWED, no longer blocked ────────────
-    //
-    // `testMultipleAbortMarkers` (FetchRequestManagerTest.java:2443),
-    // `testReadCommittedAbortMarkerWithNoData` (java:2492), and
-    // `testReadCommittedWithCommittedAndAbortedTransactions` (java:2367) are
-    // still NOT translated. All three require resolving an ABORT/COMMIT control
-    // marker under READ_COMMITTED (Java's `containsAbortMarker` →
-    // `abortedProducerIds.remove(producerId)`, `CompletedFetch.java:210-211`).
-    //
-    // **The production blocker is gone as of Milestone 11 Phase 8.**
-    // `ControlRecordType` is translated (`common/record/control_record_type.rs`)
-    // and `CompletedFetch::contains_abort_marker` implements Java's branch, so a
-    // READ_COMMITTED control batch no longer errors. What is missing is the test
-    // *fixture*: these three need a builder that appends a real control batch
-    // whose first record's key is a marker, which this file's `build_batch_full`
-    // does not produce.
-    //
-    // So the disposition changes from "blocked on missing production surface" to
-    // "owed", and is tracked as PLAN §9.26 with the consumer's own test-parity
-    // work rather than inside a producer-transactions phase. The aborted-DATA-batch
-    // skip path IS implemented and covered by
-    // `test_read_committed_with_compacted_topic` and
-    // `test_consumer_position_updated_when_skipping_aborted_transactions`; the
-    // marker path now has broker-level cover in
-    // `tests/integration/producer_transactions_test.rs`
-    // (`test_aborted_transaction_records_are_discarded`), which is what surfaced
-    // the production gap in the first place.
+    /// Translated from
+    /// `FetchRequestManagerTest.testReadCommittedWithCommittedAndAbortedTransactions`
+    /// (`FetchRequestManagerTest.java:2367-2440`): two interleaved producers whose
+    /// transactions commit and abort in turn under READ_COMMITTED; only the three
+    /// committed records survive the filtering.
+    #[test]
+    fn test_read_committed_with_committed_and_aborted_transactions() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let pid1 = 1_i64;
+        let pid2 = 2_i64;
+        let val: &[u8] = b"value";
+        let mut buf = Vec::new();
+        // Producer 1 (eventually committed): offsets 0,1.
+        buf.extend_from_slice(&append_transactional_records(
+            0,
+            pid1,
+            &[(b"commit1-1", Some(val)), (b"commit1-2", Some(val))],
+        ));
+        // Producer 2 (eventually aborted): offset 2.
+        buf.extend_from_slice(&append_transactional_records(2, pid2, &[(b"abort2-1", Some(val))]));
+        // Commit producer 1: marker at offset 3.
+        buf.extend_from_slice(&commit_transaction(3, pid1));
+        // More for producer 2 (eventually aborted): offset 4.
+        buf.extend_from_slice(&append_transactional_records(4, pid2, &[(b"abort2-2", Some(val))]));
+        // Abort producer 2: marker at offset 5 (its transaction began at offset 2).
+        buf.extend_from_slice(&abort_transaction(5, pid2));
+        // New transaction for producer 1 (eventually aborted): offset 6.
+        buf.extend_from_slice(&append_transactional_records(6, pid1, &[(b"abort1-1", Some(val))]));
+        // New transaction for producer 2 (eventually committed): offset 7.
+        buf.extend_from_slice(&append_transactional_records(7, pid2, &[(b"commit2-1", Some(val))]));
+        // More for producer 1 (eventually aborted): offset 8.
+        buf.extend_from_slice(&append_transactional_records(8, pid1, &[(b"abort1-2", Some(val))]));
+        // Abort producer 1: marker at offset 9 (its transaction began at offset 6).
+        buf.extend_from_slice(&abort_transaction(9, pid1));
+        // Commit producer 2: marker at offset 10.
+        buf.extend_from_slice(&commit_transaction(10, pid2));
+
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid2, 2), (pid1, 6)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_for_partition(&tp(0));
+        let fetched_keys: HashSet<String> = r
+            .iter()
+            .map(|rec| {
+                let key = rec.key().expect("committed record has a key");
+                String::from_utf8(key.clone()).expect("record key is valid UTF-8")
+            })
+            .collect();
+        assert_eq!(
+            HashSet::from([
+                "commit1-1".to_string(),
+                "commit1-2".to_string(),
+                "commit2-1".to_string(),
+            ]),
+            fetched_keys,
+            "only the committed records survive READ_COMMITTED filtering"
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testMultipleAbortMarkers`
+    /// (`FetchRequestManagerTest.java:2442-2489`): an aborted transaction followed
+    /// by a DUPLICATE abort marker (which must be ignored) and then a committed
+    /// transaction; only the two committed records are returned.
+    #[test]
+    fn test_multiple_abort_markers() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let pid = 1_i64;
+        let val: &[u8] = b"value";
+        let mut current_offset: i64 = 0;
+        let mut buf = Vec::new();
+        // Aborted transaction: offsets 0,1.
+        buf.extend_from_slice(&append_transactional_records(
+            current_offset,
+            pid,
+            &[(b"abort1-1", Some(val)), (b"abort1-2", Some(val))],
+        ));
+        current_offset += 2;
+        // Abort marker: offset 2.
+        buf.extend_from_slice(&abort_transaction(current_offset, pid));
+        current_offset += 1;
+        // Duplicate abort marker (must be ignored): offset 3.
+        buf.extend_from_slice(&abort_transaction(current_offset, pid));
+        current_offset += 1;
+        // Committed transaction: offsets 4,5.
+        buf.extend_from_slice(&append_transactional_records(
+            current_offset,
+            pid,
+            &[(b"commit1-1", Some(val)), (b"commit1-2", Some(val))],
+        ));
+        current_offset += 2;
+        // Commit marker: offset 6.
+        buf.extend_from_slice(&commit_transaction(current_offset, pid));
+
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_for_partition(&tp(0));
+        assert_eq!(2, r.len(), "only the two committed records are returned");
+        let actually_committed: HashSet<String> = r
+            .iter()
+            .map(|rec| {
+                let key = rec.key().expect("committed record has a key");
+                String::from_utf8(key.clone()).expect("record key is valid UTF-8")
+            })
+            .collect();
+        assert_eq!(
+            HashSet::from(["commit1-1".to_string(), "commit1-2".to_string()]),
+            actually_committed
+        );
+    }
+
+    /// Translated from `FetchRequestManagerTest.testReadCommittedAbortMarkerWithNoData`
+    /// (`FetchRequestManagerTest.java:2491-2529`): an ABORT marker whose
+    /// transactional data is no longer in the log, followed by a committed batch of
+    /// null-valued records; the committed records are returned and the marker with
+    /// no data is skipped.
+    #[test]
+    fn test_read_committed_abort_marker_with_no_data() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
+        rt.assign_and_seek(&[tp(0)]);
+
+        let pid = 1_i64;
+        let mut buf = Vec::new();
+        // Abort marker whose transaction's data is no longer in the log: offset 5.
+        buf.extend_from_slice(&abort_transaction(5, pid));
+        // Committed records with null values at offsets 6,7,8.
+        buf.extend_from_slice(&append_transactional_records(
+            6,
+            pid,
+            &[(b"6", None), (b"7", None), (b"8", None)],
+        ));
+        // Commit marker: offset 9.
+        buf.extend_from_slice(&commit_transaction(9, pid));
+
+        // The aborted transactions begin at offset 0, which is no longer in the log.
+        let pd = partition_with_aborted_txns(0, buf, vec![(pid, 0)], 100, 100);
+        deliver_single(&mut rt, topic_id, pd);
+
+        let recs = rt.collect_records();
+        let r = recs.records_for_partition(&tp(0));
+        assert_eq!(3, r.len(), "the three committed records are returned");
+        let offsets: Vec<i64> = r.iter().map(|x| x.offset()).collect();
+        assert_eq!(vec![6, 7, 8], offsets);
+    }
 
     /// Translated from `FetchRequestManagerTest.testReadCommittedWithCompactedTopic`:
     /// interleaved committed/aborted transactional batches under READ_COMMITTED
