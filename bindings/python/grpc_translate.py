@@ -560,6 +560,45 @@ def _admin_partition_key(topic, partition):
     return apb.ResultKey(partition=cpb.TopicPartition(topic=topic, partition=partition))
 
 
+def _resolve_admin_futures(futures):
+    """``{key: concurrent.futures.Future}`` -> ``{key: value | KafkaError}``.
+
+    admin.py's per-key RPCs (Phase A: create_topics, delete_topics[_by_ids],
+    describe_topics[_by_ids], create_partitions, delete_records; Phase B:
+    describe_configs, incremental_alter_configs; Phase C: describe_log_dirs,
+    alter_replica_log_dirs, describe_replica_log_dirs; Phase D:
+    alter_partition_reassignments, list_offsets) return a dict of ``Future``s
+    immediately, one per key, resolving independently - rather than the
+    already-resolved ``{key: value | KafkaError}`` dict every *_response
+    translator below still expects (built for the RPCs that never changed,
+    plus these twelve before their respective phases). Blocking on every key's
+    Future here — the gRPC harness is a synchronous, single-call-at-a-time
+    test driver, not a low-latency production client — keeps those
+    translators unchanged rather than teaching each one to await/resolve a
+    Future itself.
+    """
+    out = {}
+    for key, fut in futures.items():
+        try:
+            out[key] = fut.result()
+        except kp.KafkaError as e:
+            out[key] = e
+    return out
+
+
+async def _resolve_admin_futures_async(futures):
+    """``{key: asyncio.Future}`` -> ``{key: value | KafkaError}``, the async
+    counterpart of :func:`_resolve_admin_futures` for ``AsyncAdminClient`` and
+    ``AsyncMockAdminClient``, awaiting each per-key ``Future`` in turn."""
+    out = {}
+    for key, fut in futures.items():
+        try:
+            out[key] = await fut
+        except kp.KafkaError as e:
+            out[key] = e
+    return out
+
+
 def _admin_void_response(outcomes, key_fn):
     """`{key: None | KafkaError}` -> VoidKeyedResponse. An absent per-key error
     is the success signal, there being no value for a KafkaFuture<Void>."""

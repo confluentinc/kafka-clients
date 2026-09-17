@@ -516,12 +516,20 @@ client repeatedly and a restart must not discard the soak's history.
 `--recreate-topic` deletes and re-creates it, for a deliberate fresh start
 only.
 
-Topic creation goes through **librdkafka's** `AdminClient` (hence
-`confluent-kafka` in `requirements.txt`) because this binding exposes no admin
-API to Python. It is not on the produce or consume path — the soak drives the
-Rust client for both. `librdkafka_admin_config()` translates the Java-style
-config into librdkafka's namespace, unpacking the JAAS credentials into
-`sasl.username`/`sasl.password` and dropping keys librdkafka would reject.
+Topic creation goes through **this repo's Rust-backed** `AdminClient`
+(`bindings/python/admin.py`) — the soak now drives the Rust client for admin,
+produce and consume alike. The admin client takes the **same Java-style config
+namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
+`sasl.mechanism`, `sasl.jaas.config`, `ssl.*`), so the soak passes its admin
+config through verbatim: no `sasl.jaas.config` → `sasl.username`/`sasl.password`
+translation, and no `confluent-kafka` dependency. The security-protocol support
+on the client makes this work against SASL/SSL clusters (Confluent Cloud). Each
+RPC returns one `concurrent.futures.Future` per key (`create_topics()` and
+`delete_topics()` both yield `{name: Future}`), matching Java's per-key
+`KafkaFuture` and librdkafka's dict-of-futures: `fut.result()` blocks until the
+key resolves, returning its value on success and raising a `KafkaError` (with a
+numeric `.code`) on a per-key failure — so the soak's existing
+`for _t, fut in ....items(): fut.result()` loop carries over unchanged.
 
 ## Threading
 
