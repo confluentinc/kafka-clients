@@ -29,7 +29,7 @@ use crate::common_client_configs;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
     client_id: String,

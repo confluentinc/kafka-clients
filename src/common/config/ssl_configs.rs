@@ -117,7 +117,7 @@ pub const SSL_ENGINE_FACTORY_CLASS_CONFIG: &str = "ssl.engine.factory.class";
 /// so `truststore_type` and `keystore_type` default to `"PEM"`.
 ///
 /// Translated from `org.apache.kafka.common.config.SslConfigs`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SslConfig {
     /// Path to the trust store file (CA certificates).
     /// Corresponds to `ssl.truststore.location`.
