@@ -742,6 +742,61 @@ Java as possible."* That resolves D1–D3.
       docstring in `admin.py`), not an oversight.
   The **synchronous** entry points for all five RPCs are unaffected, per the
   same rule as every prior addendum in this section.
+
+  **Addendum (2026-09-17, Phase G — final phase; completes the 28-RPC
+  rollout) — superseded for the producers/transactions-family `_async` entry
+  points.** `kafka_admin_AdminClient_describe_producers_async`,
+  `_describe_transactions_async` and `_fence_producers_async` now fire their
+  callback once per key, independently, via the same `admin_async_per_key_op`
+  mechanism. All three of their Java `*Result` types are genuine
+  `Map<K, KafkaFuture<V>>` (keyed by `TopicPartition` for describeProducers, by
+  the transactional id — Java's `CoordinatorKey` — for the other two), so there
+  is no single-key-many-view wrinkle. Two things are new to this phase:
+    - **The per-key value reuses the flattened result handle carrying a single
+      key**, rather than a dedicated value handle. Every prior rich-value phase
+      (Config in B, LogDirDescriptionMap in C, ConsumerGroupDescription in E,
+      DeleteAclsFilterResults in F) had — or minted — a *standalone* value
+      handle that the synchronous flattened result also exposed via
+      `_get_value`. These three RPCs are the only converted ones whose sync
+      result flattens the value directly into indexed getters with **no**
+      standalone value handle, and whose Java value types
+      (`PartitionProducerState`, `TransactionDescription`, `ProducerIdAndEpoch`)
+      have no C handle of their own. Rather than add new C types (DoD #7) or
+      destabilise the stable, tested synchronous getter API by refactoring it
+      onto a new value handle, the per-key callback boxes a single-key
+      `DescribeProducersResult_t` / `DescribeTransactionsResult_t` /
+      `FenceProducersResult_t` (one entry, readable at index 0) as the value,
+      freed by the *same* `_destroy` the synchronous path uses. This is
+      dual-provenance-safe like `kafka_admin_ListOffsetsResultInfo_t` (Phase D),
+      but with both provenances **owned** (sync multi-row, async single-row) and
+      one fresh box per firing — no borrowed aliasing at all. The Python drains
+      (`_drain_partition_producer_state` etc.) reuse the sync path's own
+      `DescribeProducersResult_drain` + `_to_describe_producers` unpacker, taking
+      the single value out of the resulting one-entry dict.
+    - **`fenceProducers`' per-key future needed a crate-internal accessor.**
+      Java exposes the per-id future only through its `producerId(id)` /
+      `epochId(id)` / `fencedProducers()` projections; the flattened sync path
+      joins the first two back into one `ProducerIdAndEpoch`. Per-key delivery
+      needs the whole `ProducerIdAndEpoch` as one future, so
+      `FenceProducersResult` gains a `pub(crate) fn futures()` accessor (the FFI
+      reads the underlying map those projections are built from — not a new
+      public API, and not visible to Java-mirroring callers).
+    - **`listTransactions` is deliberately LEFT JOINED** — the one RPC in the
+      B6 slice not converted, and the final joined exception of the whole
+      rollout. Java's `ListTransactionsResult` is a single
+      `KafkaFuture<Map<Integer, KafkaFuture<Collection<TransactionListing>>>>`
+      fanned across brokers via `byBrokerId()`/`all()`/`allByBrokerId()`, with
+      **no** per-transactional-id future map — the same category as `listTopics`
+      / `listGroups`, which §D2's original wording and Phase A left joined. It
+      keeps its whole-call `fire_handle_cb` callback and its `_run_sync` /
+      `_run_async` Python path; converting it would mean inventing a per-key
+      shape Java's result does not have.
+  The **synchronous** entry points for all three converted RPCs are unaffected,
+  per the same rule as every prior addendum. This completes the per-key reversal:
+  every admin RPC whose Java `*Result` is a genuine per-key `KafkaFuture` map is
+  now delivered per key; the RPCs that remain joined (the `list*` /
+  `describeCluster` family and `listTransactions`) are exactly those whose Java
+  `*Result` exposes a single whole-call future rather than a per-key map.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
