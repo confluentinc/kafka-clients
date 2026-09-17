@@ -89,7 +89,7 @@ impl DescribeTopicsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::kafka_future::KafkaFutureImpl;
 
     fn description(name: &str) -> TopicDescription {
@@ -121,7 +121,7 @@ mod tests {
         map.insert(Uuid::new(1, 1), h1.future());
         let result = DescribeTopicsResult::of_topic_ids(map);
         assert!(result.all_topic_names().is_none());
-        h1.complete_exceptionally(KafkaError::IllegalState("x".to_string()));
+        h1.complete_with_error(Error::local_illegal_state("x".to_string()));
         assert!(result.all_topic_ids().unwrap().get().await.is_err());
     }
 }

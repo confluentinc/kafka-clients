@@ -220,7 +220,12 @@ async fn fencing_in_flight_case(bootstrap: &str, suffix: &str) -> Result<bool, S
             ok &= report(
                 true,
                 "the zombie's commit is refused",
-                format!("{} (fatal={})", first_line(&error.to_string()), error.is_fatal()),
+                format!(
+                    "{} (fatal={})",
+                    first_line(error.message()),
+                    // Java's `RequestUtils.isFatalException` static.
+                    confluent_kafka::common::requests::request_utils::is_fatal_error(&error)
+                ),
             );
         },
         Ok(()) => ok &= report(false, "the zombie's commit is refused", "it unexpectedly succeeded".to_string()),

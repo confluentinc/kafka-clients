@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::elect_leaders_response_data::{ElectLeadersResponseData, ReplicaElectionResult};
 
 use super::abstract_response::update_error_counts;
@@ -119,7 +119,7 @@ impl ElectLeadersResponse {
     /// error otherwise.
     ///
     /// Mirrors `ElectLeadersResponse.electLeadersResult(ElectLeadersResponseData)`.
-    pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<KafkaError>> {
+    pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<Error>> {
         let mut map = HashMap::new();
         for topic_results in &data.replica_election_results {
             for partition_result in &topic_results.partition_result {
@@ -127,10 +127,10 @@ impl ElectLeadersResponse {
                 let value = if error == Errors::None {
                     None
                 } else {
-                    Some(KafkaError::with_message(
-                        error,
-                        partition_result.error_message.clone().unwrap_or_default(),
-                    ))
+                    // Java: `error.exception(partitionResult.errorMessage())`. A null
+                    // message must leave the code's own text in place, which
+                    // `unwrap_or_default()` would shadow with an empty string.
+                    Some(error.error_with_optional_message(partition_result.error_message.as_deref()))
                 };
                 map.insert(
                     TopicPartition::new(topic_results.topic.clone(), partition_result.partition_id),
@@ -183,6 +183,27 @@ mod tests {
         assert!(map.get(&TopicPartition::new("t", 0)).unwrap().is_none());
         let err = map.get(&TopicPartition::new("t", 1)).unwrap().as_ref().unwrap();
         assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
+        assert_eq!(err.message(), "nope");
+    }
+
+    /// Java is `error.exception(partitionResult.errorMessage())`, which falls back
+    /// to the code's own text when the message is null. Building the error with
+    /// `unwrap_or_default()` instead would shadow that text with an empty string.
+    #[test]
+    fn elect_leaders_result_keeps_the_default_text_when_the_message_is_null() {
+        let mut data = ElectLeadersResponseData::new();
+        data.set_replica_election_results(vec![result("t", 0, Errors::ClusterAuthorizationFailed, None)]);
+        let map = ElectLeadersResponse::elect_leaders_result(&data);
+        let err = map.get(&TopicPartition::new("t", 0)).unwrap().as_ref().unwrap();
+        assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
+        assert_eq!(err.message(), Errors::ClusterAuthorizationFailed.message());
+        assert!(!err.message().is_empty());
+
+        // An empty but present message is kept verbatim, as Java's null-only test does.
+        let mut data = ElectLeadersResponseData::new();
+        data.set_replica_election_results(vec![result("t", 0, Errors::ClusterAuthorizationFailed, Some(""))]);
+        let map = ElectLeadersResponse::elect_leaders_result(&data);
+        assert_eq!(map.get(&TopicPartition::new("t", 0)).unwrap().as_ref().unwrap().message(), "");
     }
 
     #[test]

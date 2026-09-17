@@ -43,7 +43,9 @@ use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
+use crate::common::requests::correlation_id_mismatch_error::correlation_id_mismatch;
 use crate::common::requests::{ConcreteRequest, RequestBuilder, RequestHeader};
+use crate::common::security::authenticator::sasl_client_authenticator;
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -56,8 +58,87 @@ use super::MetadataRecoveryStrategy;
 use super::MetadataUpdater;
 use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
 use super::{InFlightRequest, InFlightRequests};
-use crate::common::KafkaError;
+use crate::common::Error;
+use crate::common::errors::AuthenticationError;
 use crate::common::utils::LogContext;
+
+/// Parses a response, translating the two failures `AbstractResponse` raises
+/// into the classes the rest of the client dispatches on.
+///
+/// Translated from the public static `NetworkClient.parseResponse(ByteBuffer,
+/// RequestHeader)` (`NetworkClient.java:824-840`), whose whole body is two
+/// `catch` clauses around `AbstractResponse.parseResponse`:
+///
+///  - `BufferUnderflowException` -> `SchemaException("Buffer underflow while
+///    parsing response for request with header " + requestHeader, e)`.
+///  - `CorrelationIdMismatchException` -> a `SchemaException` **only when** the
+///    request used a SASL-reserved correlation id and the response did not;
+///    otherwise the mismatch is rethrown unchanged.
+///
+/// The second clause is why `SaslClientAuthenticator` reserves a correlation-id
+/// range at all: during re-authentication a response to an *earlier*, unrelated
+/// Kafka request can arrive on the channel, and a `SchemaException` is what tells
+/// `SaslClientAuthenticator.receiveKafkaResponse` to set it aside rather than
+/// fail authentication (`SaslClientAuthenticator.java:118-126,581-597`).
+/// A genuine mismatch between two *reserved* ids is a client bug and keeps
+/// escaping as the `IllegalStateException` subclass Java rethrows.
+///
+/// # Divergence from Java
+///
+/// Java's readers signal a short buffer with `BufferUnderflowException`, which
+/// the first clause catches by type. This crate's readers report every read
+/// failure through [`std::io::Error`], using
+/// [`ErrorKind::UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) for a short
+/// buffer (`ByteBufferAccessor::check_remaining`), so the kind is what stands in
+/// for the type there. The cause slot is left empty:
+/// `java.nio.BufferUnderflowException` is a `java.lang` runtime exception with
+/// no class in the Kafka client and therefore no translation in this crate, and
+/// inventing one to fill the slot would misreport the hierarchy. The reader's own
+/// byte-count diagnostic is logged by the caller instead.
+///
+/// Any *other* read failure is not a clause Java has, so it keeps the reader's
+/// diagnostic. It is reported as [`Error::schema`] because that is the class every
+/// consumer of the distinction already treats it as: Java's own
+/// `SaslClientAuthenticator` catch clause lists `BufferUnderflowException |
+/// SchemaException | IllegalArgumentException` together
+/// (`SaslClientAuthenticator.java:581`), and `Schema`/`ArrayOf`/`Struct` raise
+/// `SchemaException` for exactly these malformed-buffer cases
+/// (`protocol/types/ArrayOf.java:73,76`).
+pub fn parse_response(
+    buffer: &mut dyn crate::common::protocol::Readable,
+    request_header: &RequestHeader,
+) -> Result<ConcreteResponse, Error> {
+    let error = match ConcreteResponse::parse_response(buffer, request_header) {
+        Ok(response) => return Ok(response),
+        Err(error) => error,
+    };
+
+    // Java 829-838: `catch (CorrelationIdMismatchException e)`.
+    if let Some(mismatch) = correlation_id_mismatch(&error) {
+        if sasl_client_authenticator::is_reserved(request_header.correlation_id())
+            && !sasl_client_authenticator::is_reserved(mismatch.response_correlation_id())
+        {
+            return Err(Error::schema(format!(
+                "The response is unrelated to Sasl request since its correlation id is {} and the reserved range for Sasl request is [ {},{}]",
+                mismatch.response_correlation_id(),
+                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
+            )));
+        }
+        // Java 836-837: `else { throw e; }` — the mismatch propagates as the
+        // `IllegalStateException` subclass it is, NOT as a `SchemaException`.
+        return Err(Error::CorrelationIdMismatch(mismatch.clone()));
+    }
+
+    // Java 826-828: `catch (BufferUnderflowException e)`.
+    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        return Err(Error::schema(format!(
+            "Buffer underflow while parsing response for request with header {request_header}"
+        )));
+    }
+
+    Err(Error::schema(error.to_string()))
+}
 
 /// Returns current wall-clock time in milliseconds since the Unix epoch.
 /// This is the default time provider, equivalent to Java's `SystemTime`.
@@ -152,6 +233,13 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     in_progress: Option<InProgressData>,
     /// The time in wall-clock milliseconds when we started attempts to fetch metadata.
     metadata_attempt_start_ms: Option<i64>,
+
+    /// Optional sensor that records the throttle time of every response the
+    /// client receives. Java passes this at construction (the producer's
+    /// `produce-throttle-time` sensor / the consumer's `fetch-throttle-time`
+    /// sensor). `None` unless a caller wires one in via
+    /// [`set_throttle_time_sensor`](Self::set_throttle_time_sensor).
+    throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
 }
 
 impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
@@ -229,6 +317,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             external_metadata_updater: None,
             in_progress: None,
             metadata_attempt_start_ms: None,
+            throttle_time_sensor: None,
         }
     }
 
@@ -304,6 +393,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
             metadata_attempt_start_ms: None,
+            throttle_time_sensor: None,
         }
     }
 
@@ -312,6 +402,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// in tests).
     pub fn set_time_provider(&mut self, provider: Arc<dyn Fn() -> i64 + Send + Sync>) {
         self.time_provider = provider;
+    }
+
+    /// Wires in the sensor that records every response's throttle time. Java
+    /// passes this to the `NetworkClient` constructor; we set it after
+    /// construction to avoid threading a new parameter through every call site.
+    pub fn set_throttle_time_sensor(&mut self, sensor: Arc<crate::common::metrics::Sensor>) {
+        self.throttle_time_sensor = Some(sensor);
     }
 
     /// Replaces the time provider with a mock that returns the `now` value
@@ -450,7 +547,15 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let version = if let Some(result) = usable_version {
             match result {
                 Ok(v) => v,
-                Err(_e) => {
+                Err(e) => {
+                    // Java propagates the `UnsupportedVersionException` object into
+                    // both the `ClientResponse` and `handleFailedRequest`
+                    // (`NetworkClient.java:588-595`), so the caller sees
+                    // `NodeApiVersions.latestUsableVersion`'s diagnostic — which API,
+                    // which range was asked for, what the broker supports. The bare
+                    // `message()` is carried (not `Display`, which prefixes the class
+                    // name and would double up when the consumer rebuilds the error).
+                    let version_mismatch = e.message().to_string();
                     kafka_debug!(
                         self.log_context,
                         "Version mismatch when attempting to send {} with correlation id {} to {}",
@@ -468,17 +573,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         now,
                         now,
                         false,
-                        Some("UnsupportedVersionError".to_string()),
+                        Some(version_mismatch),
                         None,
                         None,
                     );
                     if !is_internal_request {
                         self.aborted_sends.push(client_response);
                     } else if *client_request.api_key() == ApiKeys::METADATA {
-                        self.handle_failed_request(
-                            now,
-                            Some(KafkaError::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
-                        );
+                        self.handle_failed_request(now, Some(e));
                     }
                     return;
                 },
@@ -489,7 +591,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 kafka_trace!(
                     self.log_context,
                     "No version information found when sending {} with correlation id {} to node {}. Assuming version {}.",
-                    client_request.api_key().name(),
+                    client_request.api_key(),
                     client_request.correlation_id(),
                     node_id,
                     latest
@@ -553,7 +655,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         now: i64,
         error: &std::io::Error,
     ) {
-        let error_msg = format!("UnsupportedVersionError: {}", error);
+        // Java propagates the `UnsupportedVersionException` the builder
+        // threw (`NetworkClient.java:588-595`), so the builder's own
+        // diagnostic is what the caller reads. `RequestBuilder::build`
+        // reports through `io::Error`, whose `Display` is that bare text;
+        // prefixing it with the class name here rendered
+        // "UnsupportedVersionError: UnsupportedVersionError: .." once
+        // `Error`'s `Display` added its own (finding 232).
+        let error_msg = error.to_string();
         // Java builds the response header at `builder.latestAllowedVersion()`, not at
         // the version that failed (`NetworkClient.java:589`).
         let header = client_request
@@ -573,7 +682,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         if !is_internal_request {
             self.aborted_sends.push(client_response);
         } else if *client_request.api_key() == ApiKeys::METADATA {
-            self.handle_failed_request(now, Some(KafkaError::fatal(Errors::UnsupportedVersion, &error_msg)));
+            self.handle_failed_request(now, Some(Error::unsupported_version(error_msg)));
         }
     }
 
@@ -593,7 +702,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             kafka_debug!(
                 self.log_context,
                 "Sending {} request with header {} and timeout {} to node {}: {}",
-                client_request.api_key().name(),
+                client_request.api_key(),
                 header,
                 client_request.request_timeout_ms(),
                 destination,
@@ -607,7 +716,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let send = request.to_send(&header)?;
 
         // The selector gets the serialized send for actual I/O.
-        let selector_send = NetworkSend::new(&destination, Box::new(send));
+        let mut selector_send = NetworkSend::new(&destination, Box::new(send));
+        // Fire-and-forget requests (producer `acks=0`) never get a response, so
+        // the selector must treat the send completing as the terminal event and
+        // break its poll loop — otherwise the synthesized completion (see
+        // `handle_completed_sends`) is delayed until the poll deadline. All
+        // response-expecting requests leave this `false` (unchanged behavior).
+        selector_send.set_fire_and_forget(!client_request.expect_response());
 
         // InFlightRequest stores a placeholder send — the real send is owned
         // by the selector. The `send` field is not read after construction.
@@ -670,8 +785,19 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 // of the payload instead of being copied (§27, Phase 1).
                 // `Bytes::from(Vec<u8>)` adopts the existing allocation — no copy.
                 let mut buf = crate::common::protocol::BytesReader::new(bytes::Bytes::from(payload_bytes));
-                match ConcreteResponse::parse_response(&mut buf, &req.header) {
+                // Java calls the static `parseResponse` here, not
+                // `AbstractResponse.parseResponse` directly
+                // (`NetworkClient.java:999`), so the two `catch` clauses apply.
+                match parse_response(&mut buf, &req.header) {
                     Ok(response) => {
+                        // Record the throttle time of EVERY response (Java
+                        // `NetworkClient.handleCompletedReceives` →
+                        // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
+                        // before deciding whether to actually throttle.
+                        if let Some(sensor) = &self.throttle_time_sensor {
+                            sensor.record_at(response.throttle_time_ms() as f64, now);
+                        }
+
                         // Handle throttle
                         self.maybe_throttle(&response, req.header.api_version(), &source, now);
 
@@ -695,6 +821,15 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         }
                     },
                     Err(e) => {
+                        // Java lets the exception escape `poll()`
+                        // (`handleCompletedReceives` has no `catch`), which this
+                        // crate's `poll` -> `Vec<ClientResponse>` signature cannot
+                        // do; the connection is failed locally instead. `Display`
+                        // is used deliberately, not `message()`: it is Java's
+                        // `toString()` form, so the log now names the class
+                        // `parse_response` decided on — `SchemaError` for an
+                        // underflow or an unrelated-to-SASL response,
+                        // `CorrelationIdMismatchError` for a genuine mismatch.
                         kafka_error!(self.log_context, "Error parsing response from node {}: {}", source, e);
                         // Treat as disconnection
                         responses.push(req.disconnected(now));
@@ -926,15 +1061,30 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         match disconnect_state.state() {
             channel_state::State::AuthenticationFailed => {
-                let auth_err = disconnect_state.error().unwrap_or("unknown").to_string();
-                self.connection_states.authentication_failed(node_id, now, auth_err.clone());
+                // Java: `AuthenticationException exception = disconnectState.exception();
+                // connectionStates.authenticationFailed(nodeId, now, exception)`
+                // (`NetworkClient.java:887-888`) — the object, so the subclass the
+                // channel raised (`SaslAuthenticationException` vs
+                // `SslAuthenticationException`) survives all the way to
+                // `client.authenticationException(node)`. `ChannelState` only
+                // carries an error in this state, so the `None` arm is the
+                // unreachable-in-Java case (`exception()` would be null and Java
+                // would store null); the base class stands in for it.
+                let auth_err = disconnect_state
+                    .error()
+                    .cloned()
+                    .unwrap_or_else(|| Error::Authentication(AuthenticationError::new("unknown")));
+                // `message()`, not `Display`: the latter is the payload's
+                // `toString()` and would prefix the class name a second time
+                // (finding 231).
                 kafka_error!(
                     self.log_context,
                     "Connection to node {} ({}) failed authentication due to: {}",
                     node_id,
                     disconnect_state.remote_address().unwrap_or("unknown"),
-                    auth_err
+                    auth_err.message()
                 );
+                self.connection_states.authentication_failed(node_id, now, auth_err);
             },
             channel_state::State::Authenticate => {
                 kafka_warn!(
@@ -961,9 +1111,17 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.handle_server_disconnect(
             now,
             node_id,
-            disconnect_state
-                .error()
-                .map(|e| KafkaError::fatal(Errors::UnknownServerError, e.to_string())),
+            // Java passes `disconnectState.exception()` — the object itself, typed
+            // `AuthenticationException` and non-null only in the
+            // AUTHENTICATION_FAILED state (`NetworkClient.java:906`,
+            // `ChannelState.java:76`), which `DefaultMetadataUpdater` plants with
+            // `metadata.fatalError(e)` and `maybeThrowAnyException()` rethrows.
+            // `ChannelState` carries that typed error, so it is forwarded
+            // unchanged: rebuilding it as `UnknownServerError` here made
+            // `is_authentication_error()` and `request_utils::is_fatal_error`
+            // answer `false` on a broker that had definitively rejected our
+            // credentials (finding 230).
+            disconnect_state.error().cloned(),
         );
     }
 
@@ -994,7 +1152,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
                      (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
                      throttle time: {}ms, request timeout: {}ms): {:?}",
-                    request.header.api_key().name(),
+                    request.header.api_key(),
                     request.header.correlation_id(),
                     node_id,
                     request.time_elapsed_since_create_ms(now),
@@ -1009,7 +1167,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
                      (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
                      throttle time: {}ms, request timeout: {}ms)",
-                    request.header.api_key().name(),
+                    request.header.api_key(),
                     request.header.correlation_id(),
                     node_id,
                     request.time_elapsed_since_create_ms(now),
@@ -1202,7 +1360,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle a failed metadata request (DefaultMetadataUpdater).
-    fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<KafkaError>) {
+    fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<Error>) {
         if let Some(ref metadata) = self.metadata {
             if let Some(err) = maybe_fatal_error {
                 metadata.fatal_error(err);
@@ -1215,7 +1373,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle server disconnect (DefaultMetadataUpdater).
-    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<KafkaError>) {
+    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<Error>) {
         if let Some(metadata) = self.metadata.clone() {
             let cluster = metadata.fetch();
             if cluster.is_bootstrap_configured()
@@ -1300,10 +1458,11 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.connection_states.is_disconnected(node.id_string())
     }
 
-    fn authentication_error(&self, node: &crate::common::Node) -> Option<String> {
-        self.connection_states
-            .authentication_error(node.id_string())
-            .map(|s| s.to_string())
+    fn authentication_error(&self, node: &crate::common::Node) -> Option<Error> {
+        // Java: `return connectionStates.authenticationException(node.idString())`
+        // (`NetworkClient.java:506-507`) — the object, so the subclass reaches the
+        // caller.
+        self.connection_states.authentication_error(node.id_string()).cloned()
     }
 
     fn send(&mut self, request: ClientRequest, now: i64) {
@@ -1461,6 +1620,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.in_flight_requests.count()
     }
 
+    fn in_flight_count_handle(&self) -> Arc<std::sync::atomic::AtomicI32> {
+        self.in_flight_requests.count_handle()
+    }
+
     fn has_in_flight_requests(&self) -> bool {
         !self.in_flight_requests.is_empty()
     }
@@ -1569,7 +1732,7 @@ mod tests {
 
     use crate::api_message_type::ListenerType;
     use crate::api_versions_response_data::ApiVersionsResponseData;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::Node;
     use crate::common::network::NetworkReceive;
     use crate::common::network::{DelayedReceive, MockSelector};
@@ -1578,6 +1741,7 @@ mod tests {
     use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
     use crate::common::requests::ApiVersionsResponse;
     use crate::common::requests::MetadataRequestBuilder;
+    use crate::common::requests::ProduceRequestBuilder;
     use crate::common::requests::ResponseHeader;
     use crate::host_resolver::HostResolver;
     use crate::kafka_client::KafkaClient;
@@ -1642,9 +1806,9 @@ mod tests {
             i64::MAX
         }
 
-        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<KafkaError>) {}
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<Error>) {}
 
-        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<KafkaError>) {}
+        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<Error>) {}
 
         fn handle_successful_response(
             &mut self,
@@ -1665,7 +1829,7 @@ mod tests {
     struct TestMetadataUpdater {
         nodes: Vec<Node>,
         #[allow(dead_code)]
-        failure: Option<KafkaError>,
+        failure: Option<Error>,
     }
 
     impl TestMetadataUpdater {
@@ -1675,7 +1839,7 @@ mod tests {
 
         /// Returns and clears the last failure.
         #[allow(dead_code)]
-        fn get_and_clear_failure(&mut self) -> Option<KafkaError> {
+        fn get_and_clear_failure(&mut self) -> Option<Error> {
             self.failure.take()
         }
     }
@@ -1693,13 +1857,13 @@ mod tests {
             i64::MAX
         }
 
-        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<KafkaError>) {
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
             if let Some(err) = maybe_auth_error {
                 self.failure = Some(err);
             }
         }
 
-        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<KafkaError>) {
+        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<Error>) {
             if let Some(err) = maybe_fatal_error {
                 self.failure = Some(err);
             }
@@ -3356,6 +3520,227 @@ mod tests {
         );
     }
 
+    /// Regression for finding 230: Java hands the `AuthenticationException`
+    /// **object** from the channel to the metadata layer —
+    /// `processDisconnection` calls
+    /// `metadataUpdater.handleServerDisconnect(now, nodeId, Optional.ofNullable(disconnectState.exception()))`
+    /// (`NetworkClient.java:906`, parameter typed
+    /// `Optional<AuthenticationException>` at `:1245`), the updater plants it with
+    /// `metadata.fatalError(e)`, and `Metadata.maybeThrowAnyException()` rethrows
+    /// that same object. So the application catches a real
+    /// `AuthenticationException`.
+    ///
+    /// Rebuilding it as an `UnknownServerException` made
+    /// `is_authentication_error()` and `request_utils::is_fatal_error` both answer
+    /// `false`, so a client whose credentials the broker had definitively rejected
+    /// kept reconnecting.
+    #[tokio::test]
+    async fn test_authentication_failure_plants_typed_error_in_metadata() {
+        let metadata = Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        let metadata_response =
+            crate::common::requests::request_test_utils::metadata_update_with(1, &std::collections::HashMap::new());
+        metadata.update_with_current_request_version(&metadata_response, false, 0);
+        let node = metadata.fetch().nodes()[0].clone();
+
+        let mut client = create_network_client_with_real_metadata(metadata.clone());
+        let now = 0_i64;
+
+        assert!(!client.ready(&node, now).await);
+        client.selector_mut().server_authentication_failed(node.id_string());
+        client.poll(0, now).await;
+
+        let err = metadata
+            .maybe_return_any_error()
+            .expect_err("the authentication failure must be planted as a fatal metadata error");
+        assert!(
+            err.is_authentication_error(),
+            "Java rethrows an AuthenticationException, so this must classify as one: {err:?}"
+        );
+        assert!(
+            crate::common::requests::request_utils::is_fatal_error(&err),
+            "RequestUtils.isFatalException answers true for an AuthenticationException: {err:?}"
+        );
+        // The reason text is the authenticator's own, with no class prefix: the
+        // channel stores `AuthenticationError::message()`, not its `Display`
+        // (finding 231). `MockSelector::server_authentication_failed` seeds
+        // "Authentication failed".
+        assert_eq!(err.message(), "Authentication failed");
+        assert_eq!(
+            err.to_string(),
+            "AuthenticationError: Authentication failed",
+            "exactly one class prefix, applied by Display"
+        );
+        // `AuthenticationException` has no `Errors` entry of its own, but
+        // `Errors.forException` walks the superclass chain
+        // (`protocol/Errors.java:520-531`) and finds
+        // `InvalidConfigurationException` at `INVALID_CONFIG(40)`
+        // (`Errors.java:264`), so 40 is Java's answer here.
+        assert_eq!(err.error(), Errors::InvalidConfig);
+        assert_eq!(err.code(), 40);
+    }
+
+    /// `KafkaClient.authenticationException(Node)` returns the exception
+    /// **object** (`KafkaClient.java:88`), so the caller can tell a TLS
+    /// certificate rejection from a rejected SASL credential — `KafkaChannel.prepare`
+    /// catches the two subclasses separately (`KafkaChannel.java:463-472`) and
+    /// `ClusterConnectionStates.authenticationFailed` stores whichever it caught
+    /// (`ClusterConnectionStates.java:272-274`).
+    ///
+    /// The carrier used to flatten to a `String` in `ClusterConnectionStates`, so
+    /// every caller rebuilt the base class and both failures read identically.
+    #[tokio::test]
+    async fn test_authentication_error_keeps_the_subclass_the_channel_raised() {
+        // A SASL credential rejection.
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let sasl_node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+        assert!(!client.ready(&sasl_node, now).await);
+        client.selector_mut().server_authentication_failed_with(
+            sasl_node.id_string(),
+            Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::new(
+                "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256",
+            )),
+        );
+        client.poll(0, now).await;
+
+        let sasl = client
+            .authentication_error(&sasl_node)
+            .expect("the SASL failure must be recorded");
+        assert!(
+            matches!(sasl, Error::SaslAuthentication(_)),
+            "the SASL subclass must survive: {sasl:?}"
+        );
+        assert_eq!(sasl.error(), Errors::SaslAuthenticationFailed);
+        assert_eq!(
+            sasl.message(),
+            "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256"
+        );
+
+        // A TLS certificate rejection, on a connection that never performed a SASL
+        // exchange.
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let ssl_node = Node::new(0, "localhost".to_string(), 9092);
+        assert!(!client.ready(&ssl_node, now).await);
+        client.selector_mut().server_authentication_failed_with(
+            ssl_node.id_string(),
+            Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
+                "SSL handshake failed: certificate rejected",
+            )),
+        );
+        client.poll(0, now).await;
+
+        let ssl = client
+            .authentication_error(&ssl_node)
+            .expect("the SSL failure must be recorded");
+        assert!(
+            matches!(ssl, Error::SslAuthentication(_)),
+            "the SSL subclass must survive: {ssl:?}"
+        );
+        assert_ne!(
+            ssl.error(),
+            Errors::SaslAuthenticationFailed,
+            "a TLS rejection must not report the SASL wire code: {ssl:?}"
+        );
+        assert_eq!(ssl.message(), "SSL handshake failed: certificate rejected");
+
+        // Both are `AuthenticationException`s and both are fatal — the properties
+        // Java's callers branch on — while remaining distinguishable by class.
+        for error in [&sasl, &ssl] {
+            assert!(error.is_authentication_error(), "{error:?}");
+            assert!(crate::common::requests::request_utils::is_fatal_error(error), "{error:?}");
+        }
+    }
+
+    /// Regression for finding 232: Java propagates the
+    /// `UnsupportedVersionException` object built by
+    /// `NodeApiVersions.latestUsableVersion` (`NodeApiVersions.java:162-164`)
+    /// into the `ClientResponse` and into `handleFailedRequest`
+    /// (`NetworkClient.java:588-595`), so the caller learns which API, which
+    /// range was asked for, and what the broker supports. The literal string
+    /// `"UnsupportedVersionError"` was substituted instead.
+    #[tokio::test]
+    async fn test_version_mismatch_carries_the_java_diagnostic() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node).await;
+
+        // The node advertises METADATA through `default_api_versions_response`;
+        // ask for a range strictly above it so no usable version exists.
+        let api_versions_response = default_api_versions_response();
+        let supported = api_versions_response
+            .api_version(ApiKeys::METADATA.id())
+            .cloned()
+            .expect("METADATA must be advertised");
+
+        let unreachable = supported.max_version + 1;
+        let builder =
+            MetadataRequestBuilder::new_with_version_range(Some(&["topic_1"]), true, unreachable, unreachable);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        let responses = client.poll(0, now).await;
+
+        // Java interpolates the `ApiKeys` enum value itself
+        // (`NodeApiVersions.java:151`) and `ApiKeys` overrides no `toString()`, so
+        // the message carries the enum constant name (`METADATA`). `Display` is
+        // what renders that; `name()` is the spec's `name` field (`Metadata`) and
+        // is the wrong spelling here.
+        let expected = format!(
+            "The node does not support {} with version in range [{unreachable},{unreachable}]. \
+             The supported range is [{},{}].",
+            ApiKeys::METADATA,
+            supported.min_version,
+            supported.max_version
+        );
+        let response = responses
+            .iter()
+            .find(|r| r.version_mismatch().is_some())
+            .expect("the send must be aborted with a version mismatch");
+        assert_eq!(
+            response.version_mismatch(),
+            Some(expected.as_str()),
+            "the caller must get Java's diagnostic verbatim, not the literal \"UnsupportedVersionError\""
+        );
+    }
+
+    /// Regression for finding 232, second arm: the request builder's own
+    /// diagnostic must reach the caller unprefixed. Java propagates the
+    /// `UnsupportedVersionException` the builder threw
+    /// (`NetworkClient.java:588-595`); prefixing it with the class name here
+    /// rendered `"UnsupportedVersionError: UnsupportedVersionError: .."` once
+    /// `Error`'s `Display` added its own.
+    #[tokio::test]
+    async fn test_request_build_failure_carries_the_builder_message() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node).await;
+
+        // v3 is a usable version, but disabling auto topic creation below v4 is
+        // not representable, so `build_version` fails.
+        let builder = MetadataRequestBuilder::new_with_version(Some(&["topic_1"]), false, 3);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        let responses = client.poll(0, now).await;
+
+        let response = responses
+            .iter()
+            .find(|r| r.version_mismatch().is_some())
+            .expect("the send must be aborted with a version mismatch");
+        assert_eq!(
+            response.version_mismatch(),
+            Some("MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field"),
+            "no class-name prefix of our own: Display adds exactly one"
+        );
+    }
+
     /// Translated from `NetworkClientTest.testAuthenticationFailureWithInFlightMetadataRequest`.
     ///
     /// Tests that an authentication failure on one node does not interfere with
@@ -3953,5 +4338,291 @@ mod tests {
             RECONNECT_BACKOFF_MS_TEST, delay2,
             "Expected same backoff with no exponential growth"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // `parseResponse`'s two catch clauses (`NetworkClient.java:824-840`).
+    // ---------------------------------------------------------------------------
+
+    /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
+    fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
+        crate::common::requests::RequestHeader::new(&ApiKeys::METADATA, 12, "client-id", correlation_id)
+            .expect("request header")
+    }
+
+    /// A serialized METADATA v12 response carrying the given correlation id.
+    fn metadata_response_bytes(correlation_id: i32) -> Vec<u8> {
+        let mut data = MetadataResponseData::new();
+        serialize_response_with_header(&ApiKeys::METADATA, 12, &mut data, correlation_id)
+    }
+
+    /// The happy path: matching correlation ids parse straight through, so
+    /// neither `catch` clause is reachable.
+    #[test]
+    fn parse_response_returns_the_body_when_the_correlation_ids_match() {
+        let header = metadata_request_header(11);
+        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(11));
+        let response = parse_response(&mut buffer, &header).expect("must parse");
+        assert!(matches!(response, ConcreteResponse::Metadata(_)));
+    }
+
+    /// Java 836-837: for a non-SASL request the mismatch is rethrown as the
+    /// `CorrelationIdMismatchException` it already is — an
+    /// `IllegalStateException`, so `is_kafka_error()` is `false` and it must NOT
+    /// be converted to a `SchemaException`.
+    #[test]
+    fn parse_response_rethrows_a_mismatch_on_a_non_sasl_request() {
+        let header = metadata_request_header(11);
+        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(12));
+        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+
+        let mismatch = match &error {
+            Error::CorrelationIdMismatch(mismatch) => mismatch,
+            other => panic!("must stay a correlation-id mismatch, got {other:?}"),
+        };
+        assert_eq!(mismatch.request_correlation_id(), 11);
+        assert_eq!(mismatch.response_correlation_id(), 12);
+        assert_eq!(
+            error.message(),
+            format!("Correlation id for response (12) does not match request (11), request header: {header}")
+        );
+        assert!(!error.is_kafka_error(), "IllegalStateException is outside the hierarchy");
+    }
+
+    /// Java 830-835: the request used a SASL-reserved correlation id and the
+    /// response did not, so the response belongs to an earlier, unrelated Kafka
+    /// request and is reported as a `SchemaException` — the class
+    /// `SaslClientAuthenticator.receiveKafkaResponse` catches in order to set the
+    /// receive aside instead of failing authentication.
+    #[test]
+    fn parse_response_converts_a_mismatch_unrelated_to_a_sasl_request_to_a_schema_error() {
+        let reserved = sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
+        let header = metadata_request_header(reserved);
+        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(5));
+        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+
+        assert!(matches!(error, Error::Schema(_)), "must be a SchemaException, got {error:?}");
+        assert_eq!(
+            error.message(),
+            format!(
+                "The response is unrelated to Sasl request since its correlation id is 5 and the reserved range for Sasl request is [ {},{}]",
+                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+                sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
+            )
+        );
+        assert!(error.is_kafka_error(), "SchemaException extends KafkaException");
+        assert!(!error.is_api_error(), "but it bypasses ApiException");
+    }
+
+    /// The `&&` in Java 830-831 is load-bearing in both directions: when BOTH ids
+    /// are reserved the response *is* related to the SASL exchange, so the `else`
+    /// branch rethrows rather than converting. Without the second conjunct this
+    /// row would be a `SchemaException` too.
+    #[test]
+    fn parse_response_rethrows_a_mismatch_between_two_reserved_correlation_ids() {
+        let reserved = sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
+        let header = metadata_request_header(reserved);
+        let mut buffer = ByteBufferAccessor::from_bytes(metadata_response_bytes(reserved + 1));
+        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+
+        let mismatch = match &error {
+            Error::CorrelationIdMismatch(mismatch) => mismatch,
+            other => panic!("both ids reserved must take Java's else branch, got {other:?}"),
+        };
+        assert_eq!(mismatch.request_correlation_id(), reserved);
+        assert_eq!(mismatch.response_correlation_id(), reserved + 1);
+    }
+
+    /// Translated from
+    /// `SaslAuthenticatorTest.testConvertListOffsetResponseToSaslHandshakeResponse`,
+    /// the Java test that pins both arms of the second `catch` clause: a
+    /// `ListOffsets` response carrying correlation id 0 is a `SchemaException` when
+    /// the pending request used a SASL-reserved id, and an `IllegalStateException`
+    /// when it did not.
+    #[test]
+    fn test_convert_list_offset_response_to_sasl_handshake_response() {
+        use crate::common::requests::ListOffsetsResponse;
+        use crate::list_offsets_response_data::{
+            ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
+        };
+
+        let mut partition = ListOffsetsPartitionResponse::new();
+        partition.set_error_code(Errors::None.code());
+        partition.set_leader_epoch(crate::common::requests::list_offsets_response::UNKNOWN_EPOCH);
+        partition.set_partition_index(0);
+        partition.set_offset(0);
+        partition.set_timestamp(0);
+        let mut topic = ListOffsetsTopicResponse::new();
+        topic.set_name("topic".to_string());
+        topic.set_partitions(vec![partition]);
+        let mut data = ListOffsetsResponseData::new();
+        data.set_throttle_time_ms(0);
+        data.set_topics(vec![topic]);
+        let version = ApiKeys::LIST_OFFSETS.latest_version();
+        let mut response = ListOffsetsResponse::new(data);
+        let bytes = serialize_response_with_header(&ApiKeys::LIST_OFFSETS, version, response.data_mut(), 0);
+
+        // `assertThrows(SchemaException.class, ...)` — the request is SASL, the
+        // response is not.
+        let header0 = crate::common::requests::RequestHeader::new(
+            &ApiKeys::LIST_OFFSETS,
+            version,
+            "id",
+            sasl_client_authenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+        )
+        .expect("request header");
+        let mut buffer = ByteBufferAccessor::from_bytes(bytes.clone());
+        let error = parse_response(&mut buffer, &header0).expect_err("must not parse");
+        assert!(matches!(error, Error::Schema(_)), "must be a SchemaException, got {error:?}");
+
+        // `assertThrows(IllegalStateException.class, ...)` — a plain Kafka request,
+        // so the mismatch is rethrown. `CorrelationIdMismatchException` *is* the
+        // `IllegalStateException` Java's assertion accepts, which is why every
+        // hierarchy predicate must answer `false` for it.
+        let header1 = crate::common::requests::RequestHeader::new(&ApiKeys::LIST_OFFSETS, version, "id", 1)
+            .expect("request header");
+        let mut buffer = ByteBufferAccessor::from_bytes(bytes);
+        let error = parse_response(&mut buffer, &header1).expect_err("must not parse");
+        assert!(
+            matches!(error, Error::CorrelationIdMismatch(_)),
+            "must be the IllegalStateException subclass, got {error:?}"
+        );
+        assert!(!error.is_kafka_error(), "IllegalStateException is outside the hierarchy");
+    }
+
+    /// Java 826-828: a short buffer becomes a `SchemaException` naming the
+    /// request header. This crate's readers report the short read as
+    /// `ErrorKind::UnexpectedEof` (see the divergence note on `parse_response`).
+    #[test]
+    fn parse_response_reports_a_buffer_underflow_as_a_schema_error() {
+        let header = metadata_request_header(11);
+        let mut bytes = metadata_response_bytes(11);
+        // Keep the response header (correlation id + tagged fields) intact so the
+        // failure is a body underflow, not a mismatch.
+        let header_len = ApiKeys::METADATA.response_header_version(12);
+        assert_eq!(header_len, 1, "METADATA v12 uses the flexible response header");
+        bytes.truncate(5);
+        let mut buffer = ByteBufferAccessor::from_bytes(bytes);
+        let error = parse_response(&mut buffer, &header).expect_err("must not parse");
+
+        assert!(matches!(error, Error::Schema(_)), "must be a SchemaException, got {error:?}");
+        assert_eq!(
+            error.message(),
+            format!("Buffer underflow while parsing response for request with header {header}")
+        );
+    }
+
+    /// Translated from `SenderTest.testQuotaMetrics`.
+    ///
+    /// Sends multiple requests and verifies the client-side quota metrics
+    /// (`produce-throttle-time-avg` / `-max`) have the right values. The sensor
+    /// is created by `Sender.throttleTimeSensor(registry)` and wired into the
+    /// `NetworkClient`, which records EVERY response's throttle time. This lives
+    /// in the network-client test module (not the sender module) because the
+    /// `MockSelector` request/response harness it needs lives here.
+    ///
+    /// Throttle times are: ApiVersions = 400, Produce = (100, 200, 300); so
+    /// avg = (400 + 100 + 200 + 300) / 4 = 250 and max = 400.
+    #[tokio::test]
+    async fn test_quota_metrics() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::time::Time;
+        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::metrics::{MetricConfig, Metrics};
+        use crate::produce_request_data::ProduceRequestData;
+        use crate::produce_response_data::ProduceResponseData;
+        use crate::producer::internals::SenderMetricsRegistry;
+        use crate::producer::internals::sender::throttle_time_sensor;
+
+        const EPS: f64 = 0.0001;
+
+        // The metrics registry must share the same (mock) clock the network
+        // client is driven with: the throttle sensor records at the client's
+        // `now`, and the windowed Avg/Max stats are measured at the metrics'
+        // clock. In Java both are the single `MockTime`. If they diverge (e.g.
+        // a wall-clock metrics clock), the recorded samples fall outside the
+        // measured window and the stats read NaN.
+        let mock_time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_config_reporters_time(
+            Arc::new(MetricConfig::new()),
+            Vec::new(),
+            Arc::clone(&mock_time) as Arc<dyn Time>,
+        ));
+        let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let throttle_sensor = throttle_time_sensor(&sender_metrics_registry).expect("throttle sensor");
+
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        client.set_throttle_time_sensor(throttle_sensor);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+
+        // Bring the node ready, delivering an ApiVersions response with a
+        // throttle time of 400ms (so it is recorded by the throttle sensor).
+        let mut api_versions_response = default_api_versions_response();
+        api_versions_response.data_mut().set_throttle_time_ms(400);
+        let api_versions_version = api_versions_response
+            .api_version(ApiKeys::API_VERSIONS.id())
+            .map(|v| v.max_version)
+            .unwrap_or_else(|| ApiKeys::API_VERSIONS.latest_version());
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node,
+            0,
+            api_versions_version,
+            &mut api_versions_response,
+        );
+
+        let mut tries = 0;
+        while !client.ready(&node, mock_time.milliseconds()).await {
+            client.poll(1, mock_time.milliseconds()).await;
+            // If a throttled response is received, advance the time to ensure progress.
+            mock_time.sleep(client.throttle_delay_ms(&node, mock_time.milliseconds()));
+            tries += 1;
+            assert!(tries <= 100, "node did not become ready");
+        }
+        client.selector_mut().clear();
+
+        for i in 1..=3 {
+            let throttle_time_ms = 100 * i;
+
+            let mut data = ProduceRequestData::new();
+            data.set_acks(1);
+            data.set_timeout_ms(1000);
+            data.set_topic_data(Vec::new());
+            let builder = ProduceRequestBuilder::new(data);
+
+            let request =
+                client.new_client_request(node.id_string(), Box::new(builder), mock_time.milliseconds(), true);
+            let correlation_id = request.correlation_id();
+            client.send(request, mock_time.milliseconds());
+            client.poll(1, mock_time.milliseconds()).await;
+
+            let mut response_data = ProduceResponseData::new();
+            response_data.set_throttle_time_ms(throttle_time_ms);
+            let bytes = serialize_response_with_header(
+                &ApiKeys::PRODUCE,
+                ApiKeys::PRODUCE.latest_version(),
+                &mut response_data,
+                correlation_id,
+            );
+            let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+            client.selector_mut().complete_receive(receive);
+            client.poll(1, mock_time.milliseconds()).await;
+            // If a throttled response is received, advance the time to ensure progress.
+            mock_time.sleep(client.throttle_delay_ms(&node, mock_time.milliseconds()));
+            client.selector_mut().clear();
+        }
+
+        let all_metrics = metrics.metrics();
+        let double_value = |name: &crate::common::MetricName| -> f64 {
+            match all_metrics.get(name).expect("metric present").metric_value() {
+                crate::common::metrics::MetricValue::Double(v) => v,
+                other => panic!("expected a double metric value, got {other:?}"),
+            }
+        };
+        let avg = double_value(&sender_metrics_registry.produce_throttle_time_avg);
+        let max = double_value(&sender_metrics_registry.produce_throttle_time_max);
+        assert!((avg - 250.0).abs() < EPS, "avg = {avg}");
+        assert!((max - 400.0).abs() < EPS, "max = {max}");
+        client.close().await;
     }
 }

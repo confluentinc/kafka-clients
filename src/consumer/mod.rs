@@ -19,14 +19,18 @@
 
 pub mod async_kafka_consumer;
 pub mod close_options;
+pub mod consumer_commit_failed_error;
 pub mod consumer_config;
 pub mod consumer_group_metadata;
+pub mod consumer_log_truncation_error;
+pub mod consumer_no_offset_for_partition_error;
+pub mod consumer_offset_out_of_range_error;
 pub mod consumer_partition_assignor;
 pub mod consumer_rebalance_listener;
 pub mod consumer_rebalance_listener_method_name;
 pub mod consumer_record;
 pub mod consumer_records;
-pub mod errors;
+pub mod consumer_retriable_commit_failed_error;
 pub mod group_protocol;
 pub mod interceptor;
 pub mod mock_consumer;
@@ -38,7 +42,7 @@ pub mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub use async_kafka_consumer::WakeupHandle;
+pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -46,7 +50,6 @@ pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 pub use consumer_record::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
 pub use consumer_records::ConsumerRecords;
-pub use errors::ConsumerError;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
 pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
@@ -74,7 +77,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::common::{KafkaError, PartitionInfo, TopicPartition};
+use crate::common::{Error, PartitionInfo, TopicPartition};
+
+// Re-export the metric read types returned by [`Consumer::metrics`]. Java's
+// `Consumer.metrics()` returns `Map<MetricName, ? extends Metric>`; these are
+// the Rust counterparts. [`MetricName`] is the metric key, [`Metric`] the read
+// interface, [`KafkaMetric`] the concrete registry entry (which `impl Metric`),
+// and [`MetricValue`] the type-erased reading. Re-exported here so
+// consumer-side users can name the `metrics()` return type without reaching
+// into `crate::common`. These mirror Java's public metric types being
+// accessible from the consumer package.
+pub use crate::common::metrics::KafkaMetric;
+pub use crate::common::{Metric, MetricName, MetricValue};
 
 /// The single dispatch trait that `MockConsumer` (Phase 3) and
 /// `AsyncKafkaConsumer` (Phase 11) both implement. Translates Java's
@@ -122,12 +136,15 @@ use crate::common::{KafkaError, PartitionInfo, TopicPartition};
 ///
 /// # Methods NOT translated
 ///
-/// - `metrics()`, `registerMetricForSubscription`,
-///   `unregisterMetricFromSubscription`, `clientInstanceId(Duration)`:
-///   require a metrics framework that does not exist in this milestone.
-///   When the metrics framework lands as its own milestone, the
-///   [`crate::producer::Producer`]-style traits and `Consumer` gain these
-///   methods together.
+/// - `registerMetricForSubscription`, `unregisterMetricFromSubscription`,
+///   `clientInstanceId(Duration)`: KIP-714 broker-push telemetry, deferred
+///   to its own milestone (see Milestone-9 metrics plan, "Out of scope").
+///   They are omitted from the trait (no stub); when KIP-714 telemetry
+///   lands, the [`crate::producer::Producer`]-style traits and `Consumer`
+///   gain these methods together.
+/// - `metrics()` IS translated (Phase M7) — it is in Java's `Consumer`
+///   interface and snapshots the registry that the metrics managers
+///   populate. See [`Consumer::metrics`].
 /// - `subscribe(Pattern, [ConsumerRebalanceListener])` (Java regex):
 ///   superseded by the [`SubscriptionPattern`] variants which match
 ///   server-side regex semantics.
@@ -161,13 +178,33 @@ where
     /// Returns `Option<i64>` — the natural Rust analog.
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
 
+    /// Translates Java's `Map<MetricName, ? extends Metric> metrics()`.
+    ///
+    /// Returns a snapshot of all metrics maintained by the consumer, keyed by
+    /// [`MetricName`]. The value type is `Arc<KafkaMetric>` — [`KafkaMetric`]
+    /// implements the [`Metric`] read interface, mirroring Java's
+    /// `? extends Metric` wildcard. Read each metric's name via
+    /// [`Metric::metric_name`] and its current value via
+    /// [`Metric::metric_value`].
+    ///
+    /// Sync — Java's `metrics()` does not block. The returned map is a
+    /// point-in-time snapshot taken under the registry lock (a cold,
+    /// monitoring-frequency call), not a live view.
+    ///
+    /// This trait method has **no default**: it is in Java's `Consumer`
+    /// interface, so every implementation provides it, and adding it without
+    /// a default is acceptable for this pre-1.0 dispatch trait
+    /// (consumer-threading.md §2). It MATCHES Java's public surface — it is
+    /// not a Rust-only addition.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+
     // ── Subscription / assignment (async per §1 — may interact with bg task) ──
 
     /// Translates Java's `void subscribe(Collection<String> topics)`.
     ///
     /// Takes `Vec<String>` because the impl moves the elements into
     /// `SubscriptionState`.
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError>;
+    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(Collection<String> topics, ConsumerRebalanceListener)`.
@@ -175,10 +212,10 @@ where
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// Translates Java's `void subscribe(SubscriptionPattern pattern)`.
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), KafkaError>;
+    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener)`.
@@ -186,7 +223,7 @@ where
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// Translates Java's `void assign(Collection<TopicPartition>)`.
     ///
@@ -194,30 +231,27 @@ where
     /// `applicationEventHandler.addAndGet(new AssignmentChangeEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1819`). The Rust translation
     /// `.await`s the event handle.
-    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError>;
+    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error>;
 
     /// Translates Java's `void unsubscribe()`.
-    async fn unsubscribe(&mut self) -> Result<(), KafkaError>;
+    async fn unsubscribe(&mut self) -> Result<(), Error>;
 
     // ── Poll ──
 
     /// Translates Java's `ConsumerRecords<K, V> poll(Duration timeout)`.
-    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, KafkaError>;
+    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
 
     // ── Commit ──
 
     /// Translates Java's `void commitSync()`.
-    async fn commit_sync(&mut self) -> Result<(), KafkaError>;
+    async fn commit_sync(&mut self) -> Result<(), Error>;
 
     /// Translates Java's `void commitSync(Duration timeout)`.
-    async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), KafkaError>;
+    async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets)`.
-    async fn commit_sync_offsets(
-        &mut self,
-        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), KafkaError>;
+    async fn commit_sync_offsets(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets,
@@ -226,13 +260,13 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// Translates Java's `void commitAsync()`.
-    async fn commit_async(&mut self) -> Result<(), KafkaError>;
+    async fn commit_async(&mut self) -> Result<(), Error>;
 
     /// Translates Java's `void commitAsync(OffsetCommitCallback)`.
-    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), KafkaError>;
+    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void commitAsync(Map<TopicPartition, OffsetAndMetadata>,
@@ -241,7 +275,7 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     // ── Seek (async — Java: addAndGet on SeekUnvalidatedEvent / ResetOffsetEvent) ──
 
@@ -251,7 +285,7 @@ where
     /// `IllegalStateException` on invalid input. Async because Java's seek
     /// calls `applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1068`).
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError>;
+    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void seek(TopicPartition partition, OffsetAndMetadata)`.
@@ -259,28 +293,28 @@ where
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// Translates Java's `void seekToBeginning(Collection<TopicPartition>)`.
-    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     /// Translates Java's `void seekToEnd(Collection<TopicPartition>)`.
-    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     // ── Position / committed (async — may fetch from broker) ──
 
     /// Translates Java's `long position(TopicPartition)`.
-    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError>;
+    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
 
     /// Translates Java's `long position(TopicPartition, Duration)`.
-    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError>;
+    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>,
@@ -289,31 +323,24 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
 
     // ── Metadata (async — may fetch from broker) ──
 
     /// Translates Java's `List<PartitionInfo> partitionsFor(String topic)`.
-    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
 
     /// Translates Java's
     /// `List<PartitionInfo> partitionsFor(String topic, Duration)`.
-    async fn partitions_for_timeout(
-        &mut self,
-        topic: &str,
-        timeout: Duration,
-    ) -> Result<Vec<PartitionInfo>, KafkaError>;
+    async fn partitions_for_timeout(&mut self, topic: &str, timeout: Duration) -> Result<Vec<PartitionInfo>, Error>;
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics()`.
-    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, KafkaError>;
+    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics(Duration)`.
-    async fn list_topics_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<HashMap<String, Vec<PartitionInfo>>, KafkaError>;
+    async fn list_topics_timeout(&mut self, timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
@@ -331,7 +358,7 @@ where
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(
@@ -344,14 +371,12 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>)`.
-    async fn beginning_offsets(
-        &mut self,
-        partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
+    async fn beginning_offsets(&mut self, partitions: &[TopicPartition])
+    -> Result<HashMap<TopicPartition, i64>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>,
@@ -360,11 +385,11 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, i64>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>)`.
-    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
+    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error>;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>,
@@ -373,7 +398,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, i64>, Error>;
 
     // ── Pause / resume (async — Java: addAndGet on PausePartitions / ResumePartitions) ──
 
@@ -382,14 +407,14 @@ where
     /// Async because Java's pause calls
     /// `applicationEventHandler.addAndGet(new PausePartitionsEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1279`).
-    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     /// Translates Java's `void resume(Collection<TopicPartition>)`.
     ///
     /// Async because Java's resume calls
     /// `applicationEventHandler.addAndGet(new ResumePartitionsEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1292`).
-    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     // ── Lifecycle ──
 
@@ -400,31 +425,36 @@ where
     /// Java's javadoc says this method is classic-protocol-only; under
     /// the KIP-848 protocol it returns an unsupported-version error.
     /// Match Java behavior.
-    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), KafkaError>;
+    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), Error>;
 
     /// Translates Java's `void close()`. Closes the consumer with default
     /// timeout.
-    async fn close(&mut self) -> Result<(), KafkaError>;
+    async fn close(&mut self) -> Result<(), Error>;
 
     /// Translates Java's `void close(CloseOptions option)`.
-    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), KafkaError>;
+    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
 
     /// Translates Java's `void wakeup()`. Sync — callable from any task,
     /// including signal handlers.
     fn wakeup(&self);
 
-    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
-    /// [`Consumer::wakeup`] from a task / thread other than the one that
-    /// owns the consumer.
+    /// Returns a `Clone + Send + Sync` [`ConsumerHandle`] exposing
+    /// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+    /// callable from a task / thread other than the one that owns the
+    /// consumer.
     ///
-    /// No Java method counterpart: Java's `Consumer` reference is itself
-    /// shareable across threads, so `consumer.wakeup()` can be called from
-    /// another thread while the owning thread blocks in `poll()` /
-    /// `position()`. Rust borrows the consumer as `&mut self` for the
-    /// duration of a blocking call, so a reference cannot cross the task
-    /// boundary; obtain a [`WakeupHandle`] beforehand instead. See
-    /// [`WakeupHandle`].
-    fn wakeup_handle(&self) -> WakeupHandle;
+    /// No Java method counterpart — it recovers a Java capability. Java's
+    /// `Consumer` reference is itself shareable across threads, so (1)
+    /// `consumer.wakeup()` can be called from another thread while the
+    /// owning thread blocks in `poll()` / `position()`, and (2) a
+    /// `ConsumerRebalanceListener` can call back into the consumer
+    /// (`assign`/`seek`/`pause`/`position`/...) from inside a callback by
+    /// capturing the `consumer` variable. Rust borrows the consumer as
+    /// `&mut self` for the duration of a blocking call and
+    /// `Box<dyn Consumer>` is not `Clone`, so neither is expressible with a
+    /// bare reference; capture a [`ConsumerHandle`] instead. See
+    /// [`ConsumerHandle`].
+    fn handle(&self) -> ConsumerHandle;
 }
 
 /// Constructs a new [`Consumer`] from a configuration and explicit
@@ -435,7 +465,7 @@ where
 /// built end-to-end with `SubscriptionState`, `ConsumerMetadata`,
 /// `NetworkClient`, every `RequestManager`, and a single bg task
 /// (`ConsumerNetworkThread`). For `group.protocol=classic`, returns
-/// [`KafkaError::unsupported_version`] per `consumer-threading.md` §20
+/// [`Error::unsupported_version`] per `consumer-threading.md` §20
 /// (classic protocol deferred to a later milestone).
 ///
 /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
@@ -450,7 +480,7 @@ pub fn new_consumer<K, V>(
     config: ConsumerConfig,
     key_deserializer: Box<dyn Deserializer<K>>,
     value_deserializer: Box<dyn Deserializer<V>>,
-) -> Result<Box<dyn Consumer<K, V>>, KafkaError>
+) -> Result<Box<dyn Consumer<K, V>>, Error>
 where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
@@ -478,9 +508,16 @@ where
             key_deserializer,
             value_deserializer,
         )?)),
-        GroupProtocol::Classic => Err(KafkaError::unsupported_version(
+        GroupProtocol::Classic => Err(Error::unsupported_version(
             "Classic group protocol is not yet supported in this client; \
              set group.protocol=consumer (KIP-848).",
         )),
     }
 }
+pub use consumer_commit_failed_error::{CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE, ConsumerCommitFailedError};
+pub use consumer_log_truncation_error::ConsumerLogTruncationError;
+pub use consumer_no_offset_for_partition_error::ConsumerNoOffsetForPartitionError;
+pub use consumer_offset_out_of_range_error::ConsumerOffsetOutOfRangeError;
+pub use consumer_retriable_commit_failed_error::{
+    CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE, ConsumerRetriableCommitFailedError,
+};

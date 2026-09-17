@@ -1512,7 +1512,7 @@ fn test_produce_response_versions() {
     let topic_name = "topic";
     let topic_id = Uuid::new(0x9659_38da_b6ab_4a0b, 0xa826_2b09_7cc0_2c4d); // "klZ9sa2rSvig6QpgGXzALT"
     let partition_index: i32 = 0;
-    let error_code: i16 = Errors::InvalidTopicException.code();
+    let error_code: i16 = Errors::InvalidTopicError.code();
     let base_offset: i64 = 12;
     let throttle_time_ms: i32 = 1234;
     let log_append_time_ms: i64 = 1234;

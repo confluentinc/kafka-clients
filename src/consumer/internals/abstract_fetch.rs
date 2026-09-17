@@ -73,6 +73,8 @@ use crate::consumer::internals::completed_fetch::CompletedFetch;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_config::FetchConfig;
+use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 use crate::fetch_session_handler::{FetchSessionHandler, FetchSessionRequestData};
 
@@ -133,6 +135,12 @@ pub(crate) struct AbstractFetch {
     /// dropped this parameter; Phase 37 re-introduces it because the
     /// leadership-change branch of `handle_fetch_success` needs it.
     api_versions: Arc<crate::api_versions::ApiVersions>,
+
+    /// Records fetch / lag / lead / latency metrics. Shared (`Arc`) so the
+    /// per-response [`FetchMetricsAggregator`] can record bytes/records into the
+    /// same sensors once a fetch's partitions are all drained. Phase M3
+    /// re-introduces the `FetchMetricsManager` parameter Phase 7a dropped.
+    pub(crate) metrics_manager: Arc<FetchMetricsManager>,
 }
 
 impl AbstractFetch {
@@ -141,10 +149,10 @@ impl AbstractFetch {
     /// Translates Java's
     /// `AbstractFetch(LogContext, ConsumerMetadata, SubscriptionState,
     ///   FetchConfig, FetchBuffer, FetchMetricsManager, Time, ApiVersions,
-    ///   BufferSupplier)`. Drops the `LogContext` (we use the `log` crate),
-    /// `FetchMetricsManager` (no Rust metrics framework), and `Time`
-    /// (Phase 7b will plumb a clock if needed for read-replica leasing).
-    /// `ApiVersions` IS kept (Phase 37): the KIP-951 leadership-change
+    ///   BufferSupplier)`. Drops the `LogContext` (we use the `log` crate) and
+    /// `Time` (Phase 7b will plumb a clock if needed for read-replica leasing).
+    /// `FetchMetricsManager` is plumbed in Phase M3 (it was dropped by Phase
+    /// 7a). `ApiVersions` IS kept (Phase 37): the KIP-951 leadership-change
     /// branch of `handle_fetch_success` needs it to decide whether the new
     /// leader supports a usable `OffsetsForLeaderEpoch` version before
     /// validating the position.
@@ -161,6 +169,7 @@ impl AbstractFetch {
         fetch_buffer: Arc<FetchBuffer>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
         api_versions: Arc<crate::api_versions::ApiVersions>,
+        metrics_manager: Arc<FetchMetricsManager>,
     ) -> Self {
         Self {
             metadata,
@@ -173,6 +182,7 @@ impl AbstractFetch {
             session_handlers: FxHashMap::default(),
             fetch_sent_at: FxHashMap::default(),
             api_versions,
+            metrics_manager,
         }
     }
 
@@ -333,18 +343,27 @@ impl AbstractFetch {
         request_data: &FetchSessionRequestData,
         response: FetchResponse,
         request_version: i16,
+        request_latency_ms: i64,
     ) {
         let session_id = request_data.metadata.session_id();
-        let handler = match self.session_handlers.get_mut(&fetch_target.id()) {
-            Some(h) => h,
-            None => {
-                log::error!(
-                    "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
-                    fetch_target.id()
-                );
-                return;
-            },
-        };
+        // Java's `handler == null` `return` sits INSIDE the `try`, so the
+        // `finally { removePendingFetchRequest(...) }` (`AbstractFetch.java:253-255`)
+        // still runs. Leaking the node id here would be permanent, not a
+        // delay: `prepare_fetch_requests` skips every node in
+        // `nodes_with_pending_fetch_requests`, so that broker's partitions
+        // would never be fetched again.
+        if !self.session_handlers.contains_key(&fetch_target.id()) {
+            log::error!(
+                "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
+                fetch_target.id()
+            );
+            self.remove_pending_fetch_request(fetch_target, session_id);
+            return;
+        }
+        let handler = self
+            .session_handlers
+            .get_mut(&fetch_target.id())
+            .expect("presence checked above");
 
         if !handler.handle_response(&response, request_version) {
             // FETCH_SESSION_TOPIC_ID_ERROR drives a metadata refresh per
@@ -396,6 +415,13 @@ impl AbstractFetch {
             );
         }
 
+        // The set of partitions in this response. Translates Java's
+        // `Set<TopicPartition> partitions = new HashSet<>(responseData.keySet())`.
+        // The per-response aggregator records bytes/records ONCE, after every
+        // partition's `CompletedFetch` is drained — never per-record.
+        let partitions: HashSet<TopicPartition> = response_data.keys().cloned().collect();
+        let metric_aggregator = Arc::new(FetchMetricsAggregator::new(Arc::clone(&self.metrics_manager), partitions));
+
         let mut needs_wakeup = true;
 
         // KIP-951: accumulate per-partition new-leader info reported on a
@@ -417,16 +443,47 @@ impl AbstractFetch {
             }) {
                 Some(p) => p,
                 None => {
-                    // "Received fetch response for missing session partition" —
-                    // Java throws IllegalStateException. We log and drop
-                    // the partition entry; the response handler returning
-                    // true would have caught this earlier in well-formed
-                    // sessions.
-                    log::error!(
-                        "Response for missing session request partition: partition={} metadata={}",
-                        partition,
-                        request_data.metadata
-                    );
+                    // "Received fetch response for missing session partition".
+                    //
+                    // DELIBERATE DIVERGENCE, recorded rather than assumed
+                    // (definition-of-done.md §7). Java throws
+                    // `IllegalStateException` (`AbstractFetch.java:184-199`),
+                    // which aborts the whole response: no `CompletedFetch` is
+                    // added for this partition OR any partition after it, and
+                    // `fetchBuffer.wakeup()` (`:232`) is skipped because it
+                    // sits outside the `finally`. So one malformed entry
+                    // discards every well-formed entry beside it and leaves a
+                    // `poll()` blocking until its timeout. Rust skips only the
+                    // offending partition, keeping the rest of the response and
+                    // the wakeup. The condition means the broker echoed a
+                    // partition the client never asked for, which is a
+                    // protocol-level fault this client cannot act on either
+                    // way, so the narrower blast radius is preferred.
+                    //
+                    // The two message variants follow Java's, including the
+                    // `data.metadata().isFull()` split, so the diagnostic a
+                    // user reports is comparable with the Java client's.
+                    // `toSend` is rendered as its partition keys rather than
+                    // the whole map: Java's `PartitionData.toString()` adds
+                    // fetch offsets and sizes that are noise for this fault,
+                    // and the keys are what identifies the mismatch.
+                    if request_data.metadata.is_full() {
+                        log::error!(
+                            "Response for missing full request partition: partition={}; metadata={}",
+                            partition,
+                            request_data.metadata
+                        );
+                    } else {
+                        log::error!(
+                            "Response for missing session request partition: partition={}; metadata={}; \
+                             toSend={:?}; toForget={:?}; toReplace={:?}",
+                            partition,
+                            request_data.metadata,
+                            request_data.to_send.keys().collect::<Vec<_>>(),
+                            request_data.to_forget,
+                            request_data.to_replace
+                        );
+                    }
                     continue;
                 },
             };
@@ -467,6 +524,7 @@ impl AbstractFetch {
                 self.decompression_buffer_supplier.clone(),
                 partition,
                 partition_data,
+                Arc::clone(&metric_aggregator),
                 fetch_offset,
             );
             self.fetch_buffer.add(cf);
@@ -510,6 +568,12 @@ impl AbstractFetch {
             }
         }
 
+        // Record the fetch request latency. Java uses
+        // `resp.destination()` (the broker node id as a string); we pass the
+        // node id likewise so the per-node `node-{id}.latency` sensor matches.
+        self.metrics_manager
+            .record_latency(&fetch_target.id().to_string(), request_latency_ms);
+
         self.remove_pending_fetch_request(fetch_target, session_id);
     }
 
@@ -537,12 +601,12 @@ impl AbstractFetch {
     /// Translates `public void handleCloseFetchSessionFailure(Node,
     /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
     /// from the pending-fetch set and logs at debug (Java logs the
-    /// throwable; we log the `KafkaError` message).
+    /// throwable; we log the `Error` message).
     pub(crate) fn handle_close_fetch_session_failure(
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         self.remove_pending_fetch_request(fetch_target, session_id);
@@ -562,7 +626,7 @@ impl AbstractFetch {
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         if let Some(handler) = self.session_handlers.get_mut(&fetch_target.id()) {
@@ -632,8 +696,14 @@ impl AbstractFetch {
         &mut self,
         current_time_ms: i64,
         is_unavailable: impl Fn(&Node) -> bool,
-        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
-    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
+        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::Error>,
+    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::Error> {
+        // Update metrics in case there was an assignment change. Java does this
+        // first thing in `prepareFetchRequests`. The manager is `Arc`-shared
+        // (per-response aggregators hold clones), so its assignment-tracking
+        // state uses interior mutability; this call is bg-task-only.
+        self.metrics_manager.maybe_update_assignment(&self.subscriptions);
+
         let cluster = self.metadata.metadata_arc().fetch();
 
         // Phase 26 (Fix #2): port stock Java's first early-return
@@ -976,6 +1046,7 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         )
     }
 
@@ -1092,7 +1163,7 @@ mod tests {
         let request_data = handler.build_request(builder);
 
         let node = Node::new(6, "host".to_string(), 9092);
-        let err = crate::common::KafkaError::illegal_state("simulated");
+        let err = crate::common::Error::local_illegal_state("simulated");
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
     }
@@ -1157,14 +1228,19 @@ mod tests {
 
     /// Fix #2 — when EVERY cluster node is already in
     /// `nodes_with_pending_fetch_requests`, the up-front short-circuit returns an
-    /// empty map WITHOUT touching `SubscriptionState`.
+    /// empty map WITHOUT running the expensive fetchable scan.
     ///
-    /// We prove SubscriptionState is not touched by POISONING its mutex first: if
-    /// the short-circuit ran before the lock (as intended) the call returns
-    /// `Ok(empty)`; if any code path tried to lock the poisoned SubscriptionState
-    /// the test's `.expect(...)` inside `prepare_fetch_requests` would panic.
+    /// NOTE (Phase M3): this test previously POISONED the SubscriptionState mutex
+    /// to prove the short-circuit ran before any subscription lock. That premise
+    /// no longer holds: faithful to Java's `prepareFetchRequests`
+    /// (`AbstractFetch.java:423`), the FIRST statement is now
+    /// `metricsManager.maybeUpdateAssignment(subscriptions)`, which reads
+    /// `subscription.assignmentId()` (a lock). The Phase-26 short-circuit still
+    /// avoids the EXPENSIVE per-partition fetchable scan — it just no longer
+    /// skips the cheap assignment-id read. We therefore assert the functional
+    /// short-circuit (empty map, pending-set untouched) instead of lock-skipping.
     #[test]
-    fn test_prepare_fetch_requests_all_nodes_pending_skips_subscription_lock() {
+    fn test_prepare_fetch_requests_all_nodes_pending_skips_fetchable_scan() {
         let subs = make_subscriptions();
         let metadata = make_consumer_metadata(subs.clone());
         bootstrap_nodes(&metadata, "topic-a", 1, 1);
@@ -1175,26 +1251,18 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
         // The only node (id 0) has an in-flight fetch.
         af.nodes_with_pending_fetch_requests.insert(0);
 
-        // Poison the SubscriptionState mutex: any attempt to lock it inside
-        // prepare_fetch_requests would panic via `.expect("...poisoned")`.
-        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = subs.lock().unwrap();
-            panic!("intentionally poison the SubscriptionState mutex");
-        }));
-        assert!(poison.is_err());
-        assert!(subs.lock().is_err(), "SubscriptionState mutex must be poisoned for this test");
-
         let always_available = |_: &Node| false;
         let no_auth_err = |_: &Node| Ok(());
-        // Must NOT panic (no SubscriptionState lock) and must return empty.
+        // All nodes pending: short-circuit to an empty map.
         let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
         assert!(
             result.unwrap().is_empty(),
-            "all nodes pending must short-circuit to an empty map without touching SubscriptionState"
+            "all nodes pending must short-circuit to an empty map"
         );
         // Pending-set untouched.
         assert!(af.pending_fetch_node_ids().contains(&0));
@@ -1215,6 +1283,7 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
         // No node is pending, but every node is unavailable.
         let all_unavailable = |_: &Node| true;
@@ -1242,6 +1311,7 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
 
         // Assign + seek the partition with a validated position whose leader is
@@ -1297,7 +1367,8 @@ mod tests {
     // ── Phase 20 Fix #2b: handle_fetch_success moves records, no copy ───────
 
     use crate::common::compress::Compression;
-    use crate::common::record::{MemoryRecords, SimpleRecord, TimestampType};
+    use crate::common::record::TimestampType;
+    use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::deserializers::Deserializers;
@@ -1307,7 +1378,7 @@ mod tests {
     /// Minimal UTF-8 string deserializer for this test module.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
             Ok(String::from_utf8_lossy(data).into_owned())
         }
     }
@@ -1344,6 +1415,7 @@ mod tests {
             fetch_buffer.clone(),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
 
         let partition = TopicPartition::new("topic-a", 0);
@@ -1394,7 +1466,7 @@ mod tests {
         );
 
         // Pass the FetchResponse BY VALUE — its records must move (no copy).
-        af.handle_fetch_success(&node, &request_data, response, 12);
+        af.handle_fetch_success(&node, &request_data, response, 12, 0);
 
         // A CompletedFetch landed in the buffer; the pending request cleared.
         assert!(af.has_completed_fetches(), "expected a CompletedFetch in the buffer");
@@ -1409,6 +1481,7 @@ mod tests {
             subs,
             make_fetch_config(),
             deserializers,
+            FetchMetricsManager::for_test(),
             Arc::new(SystemFetchCollectorTime),
         );
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
@@ -1449,6 +1522,7 @@ mod tests {
             fetch_buffer,
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
 
         let node = Node::new(1, "host".to_string(), 9092);
@@ -1505,17 +1579,27 @@ mod tests {
         // partitions; a re-added per-partition payload Vec<u8> clone (the
         // pre-Phase-20 `response_data` instead of `into_response_data`) adds
         // exactly one heap allocation per partition (the cloned records
-        // buffer) — measured at ~64 for 8 partitions. The budget is set tight
-        // enough that the clone breaks it but the move passes, and crucially
-        // does NOT scale with the payload SIZE (proving no byte copy).
-        const PER_PARTITION_BUDGET: usize = 7;
-        const OVERHEAD_BUDGET: usize = 2;
+        // buffer). The budget is set tight enough that the clone breaks it but
+        // the move passes, and crucially does NOT scale with the payload SIZE
+        // (proving no byte copy).
+        //
+        // Phase M3: the per-response `FetchMetricsAggregator` adds a small,
+        // FIXED-per-fetch cost — the `partitions` HashSet clones each
+        // TopicPartition once (Java: `new HashSet<>(responseData.keySet())`),
+        // plus one aggregator allocation. This is per-fetch / per-partition,
+        // NOT per-record (the 4 records/partition do not each allocate — the
+        // per-record loop is pure `records_read += 1`). The per-partition
+        // budget rises by 1 to cover the aggregator's tracked TopicPartition
+        // clone; a payload byte-clone would still add a SECOND alloc/partition
+        // and break the budget.
+        const PER_PARTITION_BUDGET: usize = 8;
+        const OVERHEAD_BUDGET: usize = 3;
 
         let alloc_count;
         {
             let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
             crate::test_alloc_tracker::AllocTrackingGuard::reset();
-            af.handle_fetch_success(&node, &request_data, response, 12);
+            af.handle_fetch_success(&node, &request_data, response, 12, 0);
             alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
         }
 

@@ -63,8 +63,9 @@ use tokio::task::JoinHandle;
 
 use regex::Regex;
 
+use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::LogContext;
-use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
@@ -72,6 +73,7 @@ use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::consumer_network_thread::ThreadTime;
@@ -85,6 +87,10 @@ use crate::consumer::internals::events::completable_event::{calculate_deadline_m
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_collector::FetchCollector;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
+use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
+use crate::consumer::internals::kafka_consumer_metrics::KafkaConsumerMetrics;
+use crate::consumer::internals::member_state::MemberState;
 use crate::consumer::internals::member_state_listener::MemberStateListener;
 use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
@@ -119,68 +125,830 @@ enum BgJoin {
     },
 }
 
-/// A `Send + 'static` handle that can fire [`Consumer::wakeup`] from a
-/// task or thread other than the one holding the consumer.
+/// A `Clone + Send + Sync` handle to a consumer that exposes
+/// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+/// callable from a task or thread other than the one owning the consumer.
 ///
-/// **No Java class counterpart.** Java's `Consumer` reference is itself
-/// freely shareable across threads, so `consumer.wakeup()` can be called
-/// from another thread while the owning thread blocks in
-/// `poll()` / `position()` (e.g.
-/// `CompletableFuture.runAsync(() -> consumer.wakeup())`,
-/// `PlaintextConsumerTest.java:1501`). In Rust the consumer is owned via
-/// `&mut self` for the duration of a blocking call, so a bare reference
-/// cannot cross the task boundary. This handle captures only the
-/// internally-synchronized, `Arc`-backed wakeup state (the rotating
-/// [`WakeupTrigger`] watch channel and the bg-task notify closure) so the
-/// same cross-task wakeup pattern is expressible **without `unsafe`**.
+/// **No Java class counterpart — it recovers a Java capability.** Java's
+/// `Consumer` reference is itself a freely-shareable, thread-safe
+/// reference. Application code relies on this in two ways that a bare
+/// Rust `&mut self` consumer cannot express:
 ///
-/// Obtain one via [`Consumer::wakeup_handle`] **before** starting a
-/// blocking call, move it into the other task, and call
-/// [`WakeupHandle::wakeup`].
+///   1. **Cross-task `wakeup()`** — `consumer.wakeup()` is called from
+///      another thread while the owning thread blocks in `poll()` /
+///      `position()` (e.g.
+///      `CompletableFuture.runAsync(() -> consumer.wakeup())`,
+///      `PlaintextConsumerTest.java:1501`).
+///   2. **In-callback reentrancy** — a `ConsumerRebalanceListener` calls
+///      `consumer.assign/seek/pause/resume/position/committed/
+///      beginningOffsets/commit` from *inside*
+///      `onPartitionsAssigned` / `onPartitionsRevoked` by capturing the
+///      `consumer` variable in the (anonymous-inner-class) listener
+///      (`PlaintextConsumerCallbackTest.java`).
 ///
-/// Cheap to clone — clones share the same underlying wakeup state.
+/// In Rust the consumer is owned via `&mut self` for the duration of a
+/// blocking call, and `Box<dyn Consumer>` is not `Clone`, so neither
+/// pattern is expressible with a bare reference. This handle captures
+/// only the already-`Arc`-shared, internally-synchronized consumer state,
+/// so both patterns are expressible **without `unsafe`**. The user
+/// captures the handle into their listener struct — the Rust equivalent
+/// of Java capturing the `consumer` variable.
+///
+/// Obtain one via [`Consumer::handle`]. Cheap to clone — clones share the
+/// same underlying state.
+///
+/// # Operations
+///
+/// Sync: [`wakeup`](Self::wakeup), [`assignment`](Self::assignment),
+/// [`subscription`](Self::subscription), [`paused`](Self::paused).
+///
+/// Async (reentrant-safe consumer ops): [`assign`](Self::assign),
+/// [`seek`](Self::seek), [`seek_to_beginning`](Self::seek_to_beginning),
+/// [`seek_to_end`](Self::seek_to_end), [`pause`](Self::pause),
+/// [`resume`](Self::resume), [`position`](Self::position),
+/// [`committed`](Self::committed),
+/// [`beginning_offsets`](Self::beginning_offsets),
+/// [`end_offsets`](Self::end_offsets),
+/// [`offsets_for_times`](Self::offsets_for_times),
+/// [`commit_sync`](Self::commit_sync),
+/// [`commit_async`](Self::commit_async).
+///
+/// Lifecycle / ownership operations (`poll`, `subscribe`, `unsubscribe`,
+/// `close`) are intentionally NOT exposed — Java does not invoke these
+/// reentrantly from callbacks.
+///
+/// # Concrete `async fn`, no `#[async_trait]`
+///
+/// `ConsumerHandle` is a concrete struct, so its async methods are
+/// concrete `async fn` returning an anonymous future (no
+/// `Pin<Box<dyn Future>>`), per CLAUDE.md §11. None of its methods are on
+/// a per-record hot path.
 #[derive(Clone)]
-pub struct WakeupHandle {
-    inner: WakeupHandleInner,
+pub struct ConsumerHandle {
+    inner: ConsumerHandleInner,
+}
+
+/// Shared state captured by a [`ConsumerHandle`] for an
+/// [`AsyncKafkaConsumer`]. Every field is already `Arc`-shared on the
+/// consumer; the handle holds cheap clones.
+#[derive(Clone)]
+pub(crate) struct AsyncConsumerHandleState {
+    /// Rotating wakeup token + bg-task `select!` poke (see
+    /// [`AsyncKafkaConsumer::wakeup`]).
+    wakeup_trigger: WakeupTrigger,
+    bg_wakeup: Arc<dyn Fn() + Send + Sync>,
+    /// Submits `ApplicationEvent`s to the bg task.
+    application_event_handler: Arc<ApplicationEventHandler>,
+    /// Subscription / assignment state (sync getters + `position` /
+    /// `seek` pre-checks).
+    subscriptions: Arc<Mutex<SubscriptionState>>,
+    /// Fetch buffer — `assign` drops buffered fetches for no-longer-owned
+    /// partitions (Java `fetchBuffer.retainAll`).
+    fetch_buffer: Arc<FetchBuffer>,
+    /// Time source for deadline computation.
+    time: Arc<dyn ThreadTime>,
+    /// Cached `default.api.timeout.ms`.
+    default_api_timeout_ms: i64,
 }
 
 #[derive(Clone)]
-enum WakeupHandleInner {
-    /// `AsyncKafkaConsumer`: fire the rotating-token trigger AND poke the
-    /// bg-task `select!`, exactly as `AsyncKafkaConsumer::wakeup` does.
-    Async {
-        wakeup_trigger: WakeupTrigger,
-        bg_wakeup: Arc<dyn Fn() + Send + Sync>,
-    },
-    /// `MockConsumer`: set the shared wakeup flag observed by the next
-    /// `poll()`.
+enum ConsumerHandleInner {
+    /// `AsyncKafkaConsumer`: full reentrant-safe op surface backed by the
+    /// shared `Arc` state.
+    Async(AsyncConsumerHandleState),
+    /// `MockConsumer`: only `wakeup()` is meaningful — it sets the shared
+    /// wakeup flag observed by the next `poll()`. The mock has no bg task
+    /// / event pipeline, so the async ops are not wired (they return an
+    /// `unsupported_version` error — the mock test surface drives the
+    /// concrete `MockConsumer` directly).
     Mock { flag: Arc<AtomicBool> },
 }
 
-impl WakeupHandle {
+impl ConsumerHandle {
     /// Fires the consumer's `wakeup()` from this handle. Equivalent to
     /// calling [`Consumer::wakeup`] on the owning consumer, but callable
     /// from any task / thread without holding a reference to the consumer.
     pub fn wakeup(&self) {
         match &self.inner {
-            WakeupHandleInner::Async { wakeup_trigger, bg_wakeup } => {
-                wakeup_trigger.wakeup();
-                bg_wakeup();
+            ConsumerHandleInner::Async(state) => {
+                state.wakeup_trigger.wakeup();
+                (state.bg_wakeup)();
             },
-            WakeupHandleInner::Mock { flag } => {
+            ConsumerHandleInner::Mock { flag } => {
                 flag.store(true, Ordering::SeqCst);
             },
         }
     }
 
-    /// Builds an async-consumer wakeup handle from its shared wakeup state.
-    pub(crate) fn for_async(wakeup_trigger: WakeupTrigger, bg_wakeup: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { inner: WakeupHandleInner::Async { wakeup_trigger, bg_wakeup } }
+    // ── Sync getters ───────────────────────────────────────────────────
+
+    /// [`Consumer::assignment`] via the shared `SubscriptionState`.
+    pub fn assignment(&self) -> HashSet<TopicPartition> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().assigned_partitions(),
+            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
     }
 
-    /// Builds a mock-consumer wakeup handle from its shared wakeup flag.
+    /// [`Consumer::subscription`] via the shared `SubscriptionState`.
+    pub fn subscription(&self) -> HashSet<String> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().subscription(),
+            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
+    }
+
+    /// [`Consumer::paused`] via the shared `SubscriptionState`.
+    pub fn paused(&self) -> HashSet<TopicPartition> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
+            ConsumerHandleInner::Mock { .. } => HashSet::new(),
+        }
+    }
+
+    // ── Async reentrant-safe consumer ops ───────────────────────────────
+
+    /// [`AsyncKafkaConsumer::assign`].
+    pub async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
+        self.async_state()?.assign(partitions).await
+    }
+
+    /// [`AsyncKafkaConsumer::seek`].
+    pub async fn seek(&self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+        self.async_state()?.seek(partition, offset, None).await
+    }
+
+    /// [`AsyncKafkaConsumer::seek_with_metadata`].
+    pub async fn seek_with_metadata(
+        &self,
+        partition: TopicPartition,
+        offset_and_metadata: OffsetAndMetadata,
+    ) -> Result<(), Error> {
+        let offset = offset_and_metadata.offset();
+        let epoch = offset_and_metadata.leader_epoch();
+        self.async_state()?.seek(partition, offset, epoch).await
+    }
+
+    /// [`AsyncKafkaConsumer::seek_to_beginning`].
+    pub async fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.async_state()?
+            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+            .await
+    }
+
+    /// [`AsyncKafkaConsumer::seek_to_end`].
+    pub async fn seek_to_end(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.async_state()?
+            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+            .await
+    }
+
+    /// [`AsyncKafkaConsumer::pause`].
+    pub async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.async_state()?.pause(partitions).await
+    }
+
+    /// [`AsyncKafkaConsumer::resume`].
+    pub async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.async_state()?.resume(partitions).await
+    }
+
+    /// [`AsyncKafkaConsumer::position`].
+    pub async fn position(&self, partition: &TopicPartition) -> Result<i64, Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.position(partition, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::position_timeout`].
+    pub async fn position_timeout(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
+        self.async_state()?.position(partition, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::committed`].
+    pub async fn committed(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.committed(partitions, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::beginning_offsets`].
+    pub async fn beginning_offsets(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
+        state.beginning_or_end_offsets(partitions, -2, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::end_offsets`].
+    pub async fn end_offsets(&self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
+        state.beginning_or_end_offsets(partitions, -1, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::offsets_for_times`].
+    pub async fn offsets_for_times(
+        &self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.offsets_for_times(timestamps_to_search, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_sync`]. Commits the offsets the bg
+    /// task has consumed (Java `commitSync()` with no offsets — commit
+    /// `allConsumed`).
+    pub async fn commit_sync(&self) -> Result<(), Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.commit_sync(None, timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_sync_offsets`].
+    pub async fn commit_sync_offsets(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
+        let state = self.async_state()?;
+        let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
+        state.commit_sync(Some(offsets), timeout).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget commit of the
+    /// offsets the bg task has consumed.
+    pub async fn commit_async(&self) -> Result<(), Error> {
+        self.async_state()?.commit_async(None).await
+    }
+
+    /// [`AsyncKafkaConsumer::commit_async_offsets`].
+    pub async fn commit_async_offsets(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
+        self.async_state()?.commit_async(Some(offsets)).await
+    }
+
+    /// Returns the shared async state, or an error if this handle was
+    /// obtained from a `MockConsumer` (which has no event pipeline). The
+    /// mock surface drives the concrete `MockConsumer` directly, so this
+    /// path is never hit by faithful mock tests.
+    fn async_state(&self) -> Result<&AsyncConsumerHandleState, Error> {
+        match &self.inner {
+            ConsumerHandleInner::Async(state) => Ok(state),
+            ConsumerHandleInner::Mock { .. } => Err(Error::unsupported_version(
+                "ConsumerHandle async operations are not supported on a MockConsumer handle; \
+                 drive the MockConsumer directly.",
+            )),
+        }
+    }
+
+    /// Builds an async-consumer handle from its shared state.
+    pub(crate) fn for_async(state: AsyncConsumerHandleState) -> Self {
+        Self { inner: ConsumerHandleInner::Async(state) }
+    }
+
+    /// Builds a mock-consumer handle from its shared wakeup flag.
     pub(crate) fn for_mock(flag: Arc<AtomicBool>) -> Self {
-        Self { inner: WakeupHandleInner::Mock { flag } }
+        Self { inner: ConsumerHandleInner::Mock { flag } }
+    }
+}
+
+impl AsyncConsumerHandleState {
+    /// Shared submit + wakeup-aware-await core, the **no-drain** sibling
+    /// of [`AsyncKafkaConsumer::submit_and_drain`].
+    ///
+    /// The handle cannot own the background-event receiver or the
+    /// rebalance-listener invoker (those stay on `&mut self`), so it does
+    /// NOT drain background events while waiting. It is only ever called
+    /// reentrantly from *inside* a rebalance-listener callback, by which
+    /// point (after Phase 41b) the background task is no longer frozen on
+    /// the callback ack — it keeps spinning and services this event. A
+    /// single rebalance callback never triggers a nested rebalance, so
+    /// there is nothing for the handle to drain.
+    ///
+    /// The wait honors `wakeup()` exactly like
+    /// [`AsyncKafkaConsumer::process_background_events_until`]'s
+    /// `enable_wakeup` arm: it races the receiver against the rotating
+    /// wakeup token's cancellation and the absolute `deadline_ms`. The
+    /// deadline / timeout logic is identical in shape — see that method
+    /// for the per-stage rationale.
+    async fn submit_and_await<T: Send + 'static>(
+        &self,
+        event: ApplicationEvent,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+    ) -> Result<T, Error> {
+        let now_ms = self.time.milliseconds();
+        self.application_event_handler.add(event, now_ms)?;
+        self.await_completion(receiver, deadline_ms, timeout_msg, enable_wakeup).await
+    }
+
+    /// Milliseconds remaining until `deadline_ms`, saturating at zero.
+    fn remaining_ms(&self, deadline_ms: i64) -> i64 {
+        deadline_ms.saturating_sub(self.time.milliseconds()).max(0)
+    }
+
+    fn default_api_timeout_deadline_ms(&self) -> i64 {
+        calculate_deadline_ms(self.time.milliseconds(), self.default_api_timeout_ms)
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::assign`].
+    async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
+        if partitions.is_empty() {
+            // Phase 41 Issue 4: On the owning consumer, `assign([])` delegates
+            // to `unsubscribe()` (leave the group). The handle intentionally
+            // does NOT expose the unsubscribe / leave-group lifecycle pipeline
+            // (it owns neither `background_event_rx` nor the close path), so it
+            // cannot faithfully reproduce `assign([])`. Submitting an empty
+            // `AssignmentChange` would clear the assignment WITHOUT leaving the
+            // group — a silent divergence from Java's `KafkaConsumer.assign([])`
+            // for a group consumer. Reject it with a clear error pointing the
+            // caller at the owning consumer's `unsubscribe()`.
+            return Err(Error::local_illegal_argument(
+                "ConsumerHandle::assign with an empty collection is not supported: on the owning \
+                 consumer assign([]) leaves the group (equivalent to unsubscribe()), which the \
+                 handle does not expose. Call unsubscribe() on the owning AsyncKafkaConsumer instead.",
+            ));
+        }
+
+        for tp in &partitions {
+            if tp.topic().trim().is_empty() {
+                return Err(Error::local_illegal_argument(
+                    "Topic partitions to assign to cannot have null or empty topic",
+                ));
+            }
+        }
+
+        let partitions_set: HashSet<TopicPartition> = partitions.into_iter().collect();
+        self.fetch_buffer.retain_all(&partitions_set);
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the assignment-change event to complete",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::seek`] /
+    /// [`AsyncKafkaConsumer::seek_with_metadata`].
+    async fn seek(&self, partition: TopicPartition, offset: i64, offset_epoch: Option<i32>) -> Result<(), Error> {
+        if offset < 0 {
+            return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
+        }
+        log::info!("Seeking to offset {offset} for partition {partition}");
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::SeekUnvalidated { handle, partition, offset, offset_epoch },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek event to complete",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe `seekToBeginning` / `seekToEnd`.
+    async fn seek_with_reset_strategy(
+        &self,
+        partitions: &[TopicPartition],
+        strategy: crate::consumer::AutoOffsetResetStrategy,
+    ) -> Result<(), Error> {
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::ResetOffset { handle, partitions: set, offset_reset_strategy: strategy },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek-with-reset-strategy event to complete",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::pause`].
+    async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::PausePartitions { handle, partitions: set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for PausePartitions",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::resume`].
+    async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.submit_and_await::<()>(
+            ApplicationEvent::ResumePartitions { handle, partitions: set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for ResumePartitions",
+            false,
+        )
+        .await
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::position_timeout`].
+    async fn position(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
+        {
+            let subs = self.subscriptions.lock().unwrap();
+            if !subs.is_assigned(partition) {
+                return Err(Error::local_illegal_state(
+                    "You can only check the position for partitions assigned to this consumer.",
+                ));
+            }
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        loop {
+            let position_offset = {
+                let subs = self.subscriptions.lock().unwrap();
+                subs.valid_position(partition)?.map(|fp| fp.offset)
+            };
+            if let Some(offset) = position_offset {
+                return Ok(offset);
+            }
+
+            let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+            let drain_result = self
+                .submit_and_await::<()>(
+                    ApplicationEvent::CheckAndUpdatePositions { handle },
+                    receiver,
+                    deadline_ms,
+                    "Timeout expired while waiting for CheckAndUpdatePositions",
+                    true,
+                )
+                .await;
+            match drain_result {
+                Ok(()) => {},
+                Err(Error::Timeout(_)) => {},
+                Err(err) => return Err(err),
+            }
+
+            if self.time.milliseconds() >= deadline_ms {
+                return Err(Error::timeout(format!(
+                    "Timeout of {}ms expired before the position for partition {} could be determined",
+                    timeout.as_millis(),
+                    partition
+                )));
+            }
+        }
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::committed_timeout`].
+    async fn committed(
+        &self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let result = self
+            .submit_and_await::<HashMap<TopicPartition, OffsetAndMetadata>>(
+                ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for FetchCommittedOffsets",
+                true,
+            )
+            .await;
+        match result {
+            Ok(map) => Ok(map),
+            Err(Error::Timeout(_)) => Err(Error::timeout(format!(
+                "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
+                timeout.as_millis(),
+                format_partitions_for_display(partitions),
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reentrant-safe `beginningOffsets` / `endOffsets`.
+    async fn beginning_or_end_offsets(
+        &self,
+        partitions: &[TopicPartition],
+        timestamp: i64,
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut timestamps_to_search: HashMap<TopicPartition, i64> = HashMap::new();
+        for tp in partitions {
+            timestamps_to_search.insert(tp.clone(), timestamp);
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        if timeout.is_zero() {
+            let (handle, _receiver, _erased) =
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+            self.application_event_handler.add(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
+                now_ms,
+            )?;
+            return Ok(HashMap::new());
+        }
+
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+        let result = self
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for ListOffsets",
+                false,
+            )
+            .await;
+        match result {
+            Ok(offsets_map) => {
+                let mut out = HashMap::with_capacity(offsets_map.len());
+                for (tp, opt) in offsets_map {
+                    if let Some(oat) = opt {
+                        out.insert(tp, oat.offset());
+                    }
+                }
+                Ok(out)
+            },
+            Err(Error::Timeout(_)) => Err(Error::timeout(format!(
+                "Failed to get offsets by times in {}ms",
+                timeout.as_millis()
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::offsets_for_times_timeout`].
+    async fn offsets_for_times(
+        &self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+        for (tp, ts) in &timestamps_to_search {
+            if *ts < 0 {
+                return Err(Error::local_illegal_argument(format!(
+                    "The target time for partition {tp} is {ts}. The target time cannot be negative."
+                )));
+            }
+        }
+        if timestamps_to_search.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        if timeout.is_zero() {
+            let (handle, _receiver, _erased) =
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+            self.application_event_handler.add(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
+                now_ms,
+            )?;
+            return Ok(HashMap::new());
+        }
+
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
+        let result = self
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
+                receiver,
+                deadline_ms,
+                "Timeout expired while waiting for ListOffsets",
+                false,
+            )
+            .await;
+        match result {
+            Ok(offsets_map) => {
+                let mut out = HashMap::with_capacity(offsets_map.len());
+                for (tp, opt) in offsets_map {
+                    if let Some(oat) = opt {
+                        out.insert(tp, oat.build_offset_and_timestamp()?);
+                    }
+                }
+                Ok(out)
+            },
+            Err(Error::Timeout(_)) => Err(Error::timeout(format!(
+                "Failed to get offsets by times in {}ms",
+                timeout.as_millis()
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::commit_sync`].
+    ///
+    /// Deviation from `AsyncKafkaConsumer::commit_sync`: the handle does
+    /// NOT own the `OffsetCommitCallbackInvoker`, the interceptor chain,
+    /// or `last_pending_async_commit`, so it does not (a) drain pending
+    /// async-commit callbacks, (b) run `interceptors.onCommit(...)`. It
+    /// submits a `CommitSync` event and awaits the committed offsets. The
+    /// interceptor `onCommit` hook fires from the owning consumer's own
+    /// `commit_*` path, not from a reentrant handle call — matching the
+    /// fact that a listener flushing offsets via `commit_sync` is
+    /// concerned with durability, not with the interceptor side-channel.
+    async fn commit_sync(
+        &self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        // Empty-offsets short-circuit (Java's `completedFuture(null)`).
+        if let Some(map) = &offsets
+            && map.is_empty()
+        {
+            return Ok(());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let (offsets_ready_handle, offsets_ready_rx, _erased_or) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler.add(
+            ApplicationEvent::CommitSync { handle, offsets_ready: offsets_ready_handle, offsets },
+            now_ms,
+        )?;
+        // Wait until the bg task has resolved which offsets to commit.
+        self.await_completion::<()>(
+            offsets_ready_rx,
+            deadline_ms,
+            "Timeout expired while waiting for commit offsets to be ready",
+            true,
+        )
+        .await?;
+        // Wait for the commit RPC result.
+        //
+        // RECORDED DEVIATION (definition-of-done.md §7): Java's
+        // `commitSync(Duration)` attaches no message of its own —
+        // `ConsumerUtils.getResult` rethrows the underlying `TimeoutException`
+        // as-is (`ConsumerUtils.java:219-231`). The text below is Rust-side
+        // diagnostics (it resembles `ClassicKafkaConsumer.java:745-748`, which
+        // is out of scope per `consumer-threading.md` §20). It is additive: the
+        // error class, code and retriable ancestry are the ones Java produces,
+        // and it deliberately does NOT format the offsets map. See the same
+        // note on `AsyncKafkaConsumer::commit_sync_offsets_timeout`.
+        self.await_completion::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            receiver,
+            deadline_ms,
+            format!(
+                "Timeout of {}ms expired before successfully committing offsets",
+                timeout.as_millis()
+            ),
+            true,
+        )
+        .await
+        .map(|_committed| ())
+    }
+
+    /// Reentrant-safe [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget:
+    /// submits a `CommitAsync` event and spawns a detached task to consume
+    /// the result (logging failures). The handle cannot store
+    /// `last_pending_async_commit` or run the callback invoker, so user
+    /// `OffsetCommitCallback`s are NOT supported on the handle — the
+    /// no-callback overload mirrors Java's `commitAsync()`.
+    async fn commit_async(&self, offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>) -> Result<(), Error> {
+        if let Some(map) = &offsets
+            && map.is_empty()
+        {
+            return Ok(());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let (offsets_ready_handle, offsets_ready_rx, _erased_or) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler.add(
+            ApplicationEvent::CommitAsync { handle, offsets_ready: offsets_ready_handle, offsets },
+            now_ms,
+        )?;
+        // Java's commitAsync is non-blocking and never throws Wakeup; wait
+        // only for offsets-ready (so the commit window is pinned) with
+        // wakeup disabled, then detach.
+        self.await_completion::<()>(
+            offsets_ready_rx,
+            deadline_ms,
+            "Timeout expired while waiting for commit offsets to be ready",
+            false,
+        )
+        .await?;
+        tokio::spawn(async move {
+            match receiver.await {
+                Ok(Ok(_committed)) => {},
+                Ok(Err(err)) => log::error!("Offset commit (via ConsumerHandle) failed: {err}"),
+                Err(_recv_err) => log::error!("commit_async (via ConsumerHandle) receiver dropped without completion"),
+            }
+        });
+        Ok(())
+    }
+
+    /// The shared wakeup-aware, no-drain await core (see
+    /// [`Self::submit_and_await`]). Awaits an already-submitted event's
+    /// receiver, racing it against the rotating wakeup token's
+    /// cancellation (when `enable_wakeup`) and the absolute `deadline_ms`.
+    /// All handle ops funnel their wait through this one helper so the
+    /// deadline / timeout logic is not duplicated. The commit paths submit
+    /// one event but await two receivers (offsets-ready + commit result),
+    /// hence the submit and the await are separated here.
+    async fn await_completion<T: Send + 'static>(
+        &self,
+        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+    ) -> Result<T, Error> {
+        loop {
+            if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
+            match receiver.try_recv() {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(err)) => return Err(err),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(Error::local_illegal_state(
+                        "Background task dropped the completion sender without completing it",
+                    ));
+                },
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    let remaining = self.remaining_ms(deadline_ms);
+                    if remaining <= 0 {
+                        return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+                    }
+                    let wait = std::cmp::min(remaining, 100) as u64;
+                    let token = if enable_wakeup {
+                        Some(self.wakeup_trigger.current_token())
+                    } else {
+                        None
+                    };
+                    let recv_fut = &mut receiver;
+                    match token {
+                        Some(tok) => {
+                            tokio::select! {
+                                biased;
+                                _ = tok.cancelled() => {},
+                                res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
+                                    match res {
+                                        Ok(Ok(Ok(value))) => return Ok(value),
+                                        Ok(Ok(Err(err))) => return Err(err),
+                                        Ok(Err(_recv_err)) => {
+                                            return Err(Error::local_illegal_state(
+                                                "Background task dropped the completion sender without completing it",
+                                            ));
+                                        },
+                                        Err(_elapsed) => {},
+                                    }
+                                },
+                            }
+                        },
+                        None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
+                            Ok(Ok(Ok(value))) => return Ok(value),
+                            Ok(Ok(Err(err))) => return Err(err),
+                            Ok(Err(_recv_err)) => {
+                                return Err(Error::local_illegal_state(
+                                    "Background task dropped the completion sender without completing it",
+                                ));
+                            },
+                            Err(_elapsed) => {},
+                        },
+                    }
+                },
+            }
+            if self.remaining_ms(deadline_ms) <= 0 {
+                return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+            }
+        }
     }
 }
 
@@ -190,6 +958,52 @@ impl WakeupHandle {
 /// `Box<dyn Fn>` closures that close / wakeup the underlying
 /// `ConsumerNetworkThread<K>` regardless of its concrete `K`.
 ///
+/// A type-erased, thread-safe lifecycle hook (`signal_close` / `wakeup`).
+/// Erased so the close handle does not carry the consumer's `K`/`V` types.
+type LifecycleFn = Box<dyn Fn() + Send + Sync>;
+
+/// Builds the two lifecycle closures a [`NetworkThreadCloseHandle`] needs:
+/// `signal_close_fn` (clear the running flag, then nudge the bg task) and
+/// `wakeup_fn` (nudge the bg task).
+///
+/// Both nudge the **transport** primitive — the notify the bg loop's poll
+/// `select!` waits on — and NOT the [`WakeupTrigger`]. That distinction is the
+/// whole point of this function existing:
+///
+///   - `WakeupTrigger::wakeup()` is a no-op once `disable()` has run, and
+///     `close()` calls `disable()` as its very first step. Routing the close
+///     nudge through the trigger therefore made BOTH `signal_close()` and
+///     `wakeup()` dead by the time close used them: the bg task only noticed
+///     `running == false` after its in-flight poll drained naturally, so every
+///     `close()` paid a full `poll_wait_time_ms`.
+///   - Cancelling the token also arms a user-visible `Error::Wakeup` that
+///     the next public API call raises (§11), which a lifecycle nudge must not
+///     do.
+///
+/// Java routes the same way: `ConsumerNetworkThread.close(timeout)` sets the
+/// timeout then calls `wakeup()` -> `networkClientDelegate.wakeup()` ->
+/// `Selector.wakeup()` (`ConsumerNetworkThread.java:380-381`). The user-facing
+/// `WakeupTrigger` is never involved in shutdown.
+///
+/// Returned as a pair from one function so production and tests share the
+/// wiring. The fixture previously stubbed these closures, which is exactly why
+/// the dead-nudge bug survived: the stub set a flag, so it could not reproduce
+/// the trigger's `disabled` short-circuit.
+fn build_close_handle_fns(
+    running: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+) -> (LifecycleFn, LifecycleFn) {
+    let close_notify = Arc::clone(&notify);
+    let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        running.store(false, Ordering::Release);
+        close_notify.notify_one();
+    });
+    let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        notify.notify_one();
+    });
+    (signal_close_fn, wakeup_fn)
+}
+
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
 /// instance; dropped (with `signal_close`) on close.
 pub(crate) struct NetworkThreadCloseHandle {
@@ -198,7 +1012,7 @@ pub(crate) struct NetworkThreadCloseHandle {
     signal_close_fn: Box<dyn Fn() + Send + Sync>,
     /// Wakes the bg-task's `select!` on the wakeup token. Held as an
     /// `Arc` (not `Box`) so a clone can be handed to a shareable
-    /// [`WakeupHandle`] (so cross-task `wakeup()` — a first-class Java
+    /// [`ConsumerHandle`] (so cross-task `wakeup()` — a first-class Java
     /// pattern — is expressible without `unsafe`); the bg-wakeup
     /// closure is `Send + Sync` and side-effect-idempotent.
     wakeup_fn: Arc<dyn Fn() + Send + Sync>,
@@ -242,7 +1056,7 @@ impl NetworkThreadCloseHandle {
     }
 
     /// Clones the bg-task wakeup closure as a shareable `Arc`. Used to
-    /// build a [`WakeupHandle`] that can fire the bg-task `select!` from
+    /// build a [`ConsumerHandle`] that can fire the bg-task `select!` from
     /// another task without holding any reference to the consumer.
     pub(crate) fn wakeup_fn_clone(&self) -> Arc<dyn Fn() + Send + Sync> {
         Arc::clone(&self.wakeup_fn)
@@ -261,7 +1075,7 @@ impl NetworkThreadCloseHandle {
     }
 
     /// Awaits the bg loop to completion. Returns `Ok(())` on clean exit,
-    /// or wraps a task / thread panic as a `KafkaError::illegal_state`.
+    /// or wraps a task / thread panic as a `Error::local_illegal_state`.
     ///
     /// For [`BgJoin::Spawned`] this awaits the tokio `JoinHandle` exactly
     /// as before. For [`BgJoin::Dedicated`] it first awaits the `done`
@@ -271,13 +1085,13 @@ impl NetworkThreadCloseHandle {
     /// future. Both paths are idempotent (a second call is a no-op) and
     /// never hang if the bg loop already exited (a closed/`None` receiver
     /// is treated as a clean exit).
-    pub(crate) async fn await_join(&mut self) -> Result<(), KafkaError> {
+    pub(crate) async fn await_join(&mut self) -> Result<(), Error> {
         match &mut self.join {
             BgJoin::Spawned(handle) => {
                 if let Some(handle) = handle.take() {
                     match handle.await {
                         Ok(()) => Ok(()),
-                        Err(join_err) => Err(KafkaError::illegal_state(format!(
+                        Err(join_err) => Err(Error::local_illegal_state(format!(
                             "Consumer network thread terminated with error: {join_err}"
                         ))),
                     }
@@ -304,10 +1118,10 @@ impl NetworkThreadCloseHandle {
                         // Outer: the spawn_blocking task itself; inner: the
                         // dedicated OS thread.
                         Ok(Ok(())) => Ok(()),
-                        Ok(Err(_panic)) => Err(KafkaError::illegal_state(
+                        Ok(Err(_panic)) => Err(Error::local_illegal_state(
                             "Consumer network thread terminated with error: panic".to_string(),
                         )),
-                        Err(join_err) => Err(KafkaError::illegal_state(format!(
+                        Err(join_err) => Err(Error::local_illegal_state(format!(
                             "Consumer network thread terminated with error: {join_err}"
                         ))),
                     }
@@ -378,6 +1192,34 @@ where
     /// shared reference to per-poll helpers without re-construction.
     fetch_collector: Arc<FetchCollector<K, V>>,
 
+    /// The metrics registry (Java `private final Metrics metrics`). Kept so
+    /// Phase M7 can expose the public `metrics()` accessor over the same
+    /// registry the fetch path records into. The fetch managers hold
+    /// `Arc<FetchMetricsManager>` clones that reference this same registry.
+    #[allow(dead_code)]
+    metrics: Arc<Metrics>,
+
+    /// Consumer-level poll/commit timing metrics (`KafkaConsumerMetrics`,
+    /// `AsyncKafkaConsumer.java:291`). Records `time-between-poll`,
+    /// `poll-idle-ratio-avg`, `last-poll-seconds-ago`,
+    /// `commit-sync-time-ns-total`, `committed-time-ns-total` into the same
+    /// `metrics` registry. Wired in `poll`/`commit_sync`/`committed`/`close`.
+    kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
+
+    /// Async-consumer background-task / event-queue metrics
+    /// (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Records into the
+    /// same `metrics` registry; wired into the bg task, the event handlers,
+    /// and the network client delegate. Used app-side by
+    /// `process_background_events` (bg-event queue/processing time) and
+    /// removed in `close`.
+    async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+
+    /// Shared mirror of the background-event queue depth (Java reads
+    /// `backgroundEventQueue.size()`; tokio mpsc has no `len()`). Bumped by
+    /// `BackgroundEventHandler::add` on the bg task, reset to 0 by
+    /// `process_background_events` (Java's `drainEvents`).
+    background_event_queue_size: Arc<AtomicI64>,
+
     // ── App-side only ─────────────────────────────────────────────────
     /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
     client_id: Arc<str>,
@@ -435,7 +1277,7 @@ where
     /// the same source.
     isolation_level: IsolationLevel,
     /// `true` after [`Self::close`] has run. Subsequent calls return
-    /// `KafkaError::illegal_state`.
+    /// `Error::local_illegal_state`.
     closed: AtomicBool,
     /// Listener registered via `subscribe_with_listener` /
     /// `subscribe_pattern_with_listener`. Wrapped in `Mutex<Option<…>>`
@@ -450,6 +1292,13 @@ where
     /// `Mutex<Option<...>>` because `poll()` takes `&mut self` and is the
     /// only caller.
     inflight_poll: Option<InflightPoll>,
+    /// Java: `private volatile boolean hasPendingReconciliation` (AK 4.3.1,
+    /// KAFKA-20106). Set on the bg task by the `memberStateListener`'s
+    /// `on_member_state_change` (`true` iff the member is `RECONCILING`);
+    /// read by the app-side [`Self::collect_fetch`] to decide whether to wait
+    /// for the in-flight poll's reconciliation check before returning
+    /// buffered records. Shared with [`ConsumerStateNotifier`] via `Arc`.
+    has_pending_reconciliation: Arc<AtomicBool>,
     /// Cached `ConsumerConfig` for late-bound config lookups (e.g.
     /// inside `close`).
     config: ConsumerConfig,
@@ -562,6 +1411,14 @@ pub(crate) struct ConsumerStateNotifier {
     group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
     /// Shared with [`AsyncKafkaConsumer::group_assignment_snapshot`].
     group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+    /// Shared with [`AsyncKafkaConsumer::has_pending_reconciliation`]
+    /// (AK 4.3.1, KAFKA-20106). Set to `true` when the member enters
+    /// `RECONCILING`, `false` otherwise, via
+    /// [`MemberStateListener::on_member_state_change`] fired on the bg task.
+    /// Read by the app-side `collect_fetch` to decide whether to wait for the
+    /// reconciliation check before returning buffered records. Java:
+    /// `setHasPendingReconciliation(memberState == MemberState.RECONCILING)`.
+    has_pending_reconciliation: Arc<AtomicBool>,
 }
 
 impl ConsumerStateNotifier {
@@ -572,12 +1429,14 @@ impl ConsumerStateNotifier {
         group_instance_id: Option<String>,
         group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
         group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+        has_pending_reconciliation: Arc<AtomicBool>,
     ) -> Self {
         Self {
             group_id: group_id.into(),
             group_instance_id,
             group_metadata,
             group_assignment_snapshot,
+            has_pending_reconciliation,
         }
     }
 
@@ -623,6 +1482,13 @@ impl ConsumerStateNotifier {
     /// `None` (assignment-only consumer never populated the cache), the
     /// slot stays `None` — Java's `oldGroupMetadataOptional.map(...)`
     /// short-circuits on empty.
+    /// Returns a clone of the shared `has_pending_reconciliation` flag so
+    /// the [`AsyncKafkaConsumer`] can read the same atomic the notifier
+    /// writes from `on_member_state_change`.
+    pub(crate) fn has_pending_reconciliation_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.has_pending_reconciliation)
+    }
+
     pub(crate) fn reset_group_metadata(&self) {
         let mut guard = self.group_metadata.lock().unwrap();
         if let Some(old) = guard.as_ref() {
@@ -660,6 +1526,14 @@ impl MemberStateListener for ConsumerStateNotifier {
         let mut guard = self.group_assignment_snapshot.lock().unwrap();
         *guard = partitions.clone();
     }
+
+    /// Java: `memberStateListener.onMemberStateChange(memberState)`
+    /// (`AsyncKafkaConsumer.java`) →
+    /// `setHasPendingReconciliation(memberState == MemberState.RECONCILING)`.
+    fn on_member_state_change(&self, member_state: MemberState) {
+        self.has_pending_reconciliation
+            .store(member_state == MemberState::Reconciling, Ordering::Release);
+    }
 }
 
 /// Components handed to [`AsyncKafkaConsumer::new_with_thread`]: the
@@ -684,6 +1558,17 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub network_thread_close: NetworkThreadCloseHandle,
     pub fetch_buffer: Arc<FetchBuffer>,
     pub fetch_collector: Arc<FetchCollector<K, V>>,
+    /// The metrics registry. Owned here so Phase M7 can expose the public
+    /// `metrics()` accessor over the same registry the fetch path records into.
+    pub metrics: Arc<Metrics>,
+    /// Consumer-level poll/commit timing metrics
+    /// (`KafkaConsumerMetrics`), recording into the same `metrics` registry.
+    pub kafka_consumer_metrics: Arc<KafkaConsumerMetrics>,
+    /// Async-consumer background-task / event-queue metrics
+    /// (`AsyncConsumerMetrics`), recording into the same `metrics` registry.
+    pub async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+    /// Shared mirror of the background-event queue depth.
+    pub background_event_queue_size: Arc<AtomicI64>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
@@ -750,7 +1635,7 @@ where
     ///   `BackgroundEventHandler`, `FetchBuffer`, `FetchConfig`,
     ///   `Deserializers`, `ConsumerInterceptors`, and the
     ///   `OffsetCommitCallbackInvoker`. Returns
-    ///   `Err(KafkaError::unsupported_version(...))` at the end because
+    ///   `Err(Error::unsupported_version(...))` at the end because
     ///   the `RequestManagers` (commit (2/N)) and bg-task spawn (commit
     ///   (3/N)) are not yet wired — see PLAN.md commit-table rows 1-3.
     /// - **Commit (2/N):** Adds `RequestManagers` wiring (coordinator,
@@ -773,11 +1658,48 @@ where
     ///
     /// Mirrors the table in PLAN.md (Java lines 390-508 → Rust action).
     /// Each block below references the Java line that originated it.
+    ///
+    /// # Errors
+    ///
+    /// Java wraps the whole constructor body in
+    /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
+    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:509-517`), so EVERY
+    /// construction failure reaches the caller as a `KafkaException` carrying
+    /// that message with the underlying failure as its cause. This wrapper
+    /// reproduces that; [`Self::new_inner`] holds the body.
+    ///
+    /// The other half of Java's catch body — `close(Duration.ZERO, ...)` to
+    /// release partially-built resources (KAFKA-2121) — has no counterpart
+    /// here: every fallible step in `new_inner` precedes the `tokio::spawn`,
+    /// which happens inside the infallible `new_with_components`, so no
+    /// resource needing shutdown exists yet on any error path.
     pub fn new(
         config: ConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
         value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
+        Self::new_inner(config, key_deserializer, value_deserializer).map_err(|err| {
+            // Java's wrap is UNCONDITIONAL — unlike
+            // `ConsumerUtils.maybeWrapAsKafkaException`, it wraps a
+            // `KafkaException` too, so there is no `is_kafka_error()` guard
+            // here. "Failed to construct kafka consumer" is the string users
+            // match on.
+            Error::KafkaError(crate::common::KafkaError::with_message_and_source(
+                crate::common::protocol::Errors::UnknownServerError,
+                "Failed to construct kafka consumer",
+                err,
+            ))
+        })
+    }
+
+    /// The body of Java's constructor `try` block
+    /// (`AsyncKafkaConsumer.java:390-508`). See [`Self::new`] for the
+    /// `catch (Throwable t)` wrap applied to every error it returns.
+    fn new_inner(
+        config: ConsumerConfig,
+        key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
+        value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
+    ) -> Result<Self, Error> {
         use crate::ApiVersions;
         use crate::DefaultHostResolver;
         use crate::client_utils;
@@ -818,14 +1740,6 @@ where
         let (_app_event_tx, _app_event_rx) = mpsc::unbounded_channel::<
             crate::consumer::internals::events::application_event::ApplicationEventEnvelope,
         >();
-        // Shared wake signal: the app side fires it on every
-        // `ApplicationEventHandler::add`; the bg task `select!`s on it so a
-        // freshly enqueued event preempts the network poll immediately
-        // (Java's `wakeupNetworkThread()`). Without it, events submitted
-        // while the bg task is parked in `poll_default` wait up to
-        // `MAX_POLL_TIMEOUT_MS` before being serviced.
-        let event_notify = Arc::new(tokio::sync::Notify::new());
-
         // Java line 411 — `subscriptions = createSubscriptionState(config,
         // logContext)`. The `auto.offset.reset` strategy is parsed once at
         // ctor time.
@@ -871,11 +1785,59 @@ where
         let api_versions = Arc::new(ApiVersions::new());
 
         // Java lines 425-429 — `backgroundEventHandler = new
-        // BackgroundEventHandler(...)`.
-        let background_event_handler = Arc::new(BackgroundEventHandler::new(bg_event_tx));
+        // BackgroundEventHandler(...)`. The `AsyncConsumerMetrics` and the
+        // shared background-event queue-depth counter are wired below (after
+        // the `metrics` registry exists) before the handler is shared.
+        let mut background_event_handler = BackgroundEventHandler::new(bg_event_tx);
 
         // Java line 432 — `fetchBuffer = new FetchBuffer(logContext)`.
         let fetch_buffer = Arc::new(FetchBuffer::new());
+
+        // Java lines 402/419 — `metrics = createMetrics(config, time, reporters)`
+        // then `fetchMetricsManager = createFetchMetricsManager(metrics)`.
+        // The consumer owns the `Arc<Metrics>` (kept for Phase M7's public
+        // `metrics()` accessor); the `Arc<FetchMetricsManager>` is shared into
+        // the fetch path (FetchRequestManager / FetchCollector). The full
+        // Metrics-wiring (`consumer.metrics()`, reporter list) is finalized in
+        // M7 over THIS same registry — no re-plumb.
+        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config);
+
+        // M4: the consumer-level + heartbeat + offset-commit metrics managers
+        // all register against the SAME `Arc<Metrics>` registry. Java
+        // constructs each from `metrics` in the relevant constructor
+        // (`KafkaConsumerMetrics`/`HeartbeatMetricsManager`/
+        // `OffsetCommitMetricsManager`). The heartbeat/commit managers are
+        // wired into their bg-task request managers post-construction (the
+        // request managers are built below), mirroring the coordinator/
+        // interceptor-hook setter pattern.
+        let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
+        let offset_commit_metrics_manager = Arc::new(
+            crate::consumer::internals::offset_commit_metrics_manager::OffsetCommitMetricsManager::new(&metrics),
+        );
+        let heartbeat_metrics_manager =
+            Arc::new(crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager::new(&metrics));
+
+        // M6: the async-consumer background-task / event-queue metrics
+        // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
+        // against the SAME `Arc<Metrics>` under `CONSUMER_METRIC_GROUP`
+        // (`consumer-metrics`). Wired into the bg task, the application/
+        // background event handlers, and the network client delegate (the
+        // record sites Java passes `asyncConsumerMetrics` to). The two
+        // `Arc<AtomicI64>` queue-depth counters mirror Java's O(1)
+        // `queue.size()` for the application/background event queues (the
+        // tokio mpsc sender exposes no `len()`).
+        let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        ));
+        let application_event_queue_size = Arc::new(AtomicI64::new(0));
+        let background_event_queue_size = Arc::new(AtomicI64::new(0));
+
+        // Wire the background-event handler's metrics + queue-depth counter
+        // before it is shared into the delegate (single owner here).
+        background_event_handler
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&background_event_queue_size));
+        let background_event_handler = Arc::new(background_event_handler);
 
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
@@ -894,7 +1856,7 @@ where
         // ClientUtils.createChannelBuilder(config, time, logContext)`. Selects
         // the channel builder from `security.protocol` + `ssl.*` / `sasl.*`
         // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN
-        // only. Errors surface as a `KafkaError` from the ctor (no panic).
+        // only. Errors surface as a `Error` from the ctor (no panic).
         let channel_builder = channel_builders::client_channel_builder(
             config.security_protocol,
             Some(&config.ssl_config),
@@ -903,7 +1865,7 @@ where
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -929,7 +1891,7 @@ where
             MetadataRecoveryStrategy::None,
             log_context,
         );
-        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(NetworkClientDelegate::new(
+        let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,
             Arc::clone(&metadata).metadata_arc(),
@@ -937,7 +1899,25 @@ where
             false, // notify_metadata_errors_via_error_queue — Java
                    // passes `false` for the consumer ctor (Java
                    // `AsyncKafkaConsumer.java:443`).
-        )));
+        );
+        // M6: Java passes `asyncConsumerMetrics` to the delegate ctor; wire it
+        // here before the delegate is shared with the bg task.
+        network_client_delegate_inner.set_async_consumer_metrics(Arc::clone(&async_consumer_metrics));
+
+        // The single "nudge the background task" primitive: the selector's own
+        // wakeup handle, i.e. Java's `Selector.wakeup()`. Everything that needs
+        // the bg task to stop waiting pokes THIS — `ApplicationEventHandler::add`
+        // (Java's `wakeupNetworkThread()`), the §31 rebalance-ack path,
+        // `FetchRequestManager`'s completion signal, `wakeup()` and
+        // `signal_close()`. It is a lock-free `Arc<Notify>`, so firing it never
+        // contends with the delegate mutex the bg task holds while polling.
+        //
+        // Taken from the delegate rather than created here on purpose: a
+        // separate `Notify` would only be forwarded to this one, and having two
+        // interchangeable-looking nudge channels is what let several call sites
+        // poke the wrong one.
+        let event_notify = network_client_delegate_inner.wakeup_handle();
+        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(network_client_delegate_inner));
 
         // Java line 446 — `offsetCommitCallbackInvoker = new
         // OffsetCommitCallbackInvoker(interceptors)`. The interceptor
@@ -964,7 +1944,38 @@ where
         // Java line 447 — `groupMetadata.set(initializeGroupMetadata(...))`
         // — only when `group.id` is present. The cache itself lives on
         // the consumer struct (built inside `new_with_components`).
-        let group_id = config.group_id().map(|s| s.to_string());
+        //
+        // `initializeGroupMetadata(String, Optional<String>)`
+        // (`AsyncKafkaConsumer.java:747-757`) rejects a present-but-empty
+        // `group.id` before building anything:
+        //
+        // ```java
+        // if (groupId != null) {
+        //     if (groupId.isEmpty()) {
+        //         throw new InvalidGroupIdException("The configured " + ConsumerConfig.GROUP_ID_CONFIG
+        //             + " should not be an empty string or whitespace.");
+        //     } else {
+        //         return Optional.of(initializeConsumerGroupMetadata(groupId, groupInstanceId));
+        //     }
+        // }
+        // ```
+        //
+        // Without it, `Some("")` is "in a group" for the coordinator / commit /
+        // heartbeat / membership wiring below but "not in a group" for
+        // `return_error_if_group_id_not_defined`, so one consumer holds two
+        // contradictory answers and puts an empty group id on the wire.
+        // (Java's check is `isEmpty()` only, despite the message naming
+        // whitespace; the message is reproduced verbatim regardless.)
+        let group_id = match config.group_id() {
+            Some("") => {
+                return Err(Error::invalid_group_id(format!(
+                    "The configured {} should not be an empty string or whitespace.",
+                    ConsumerConfig::GROUP_ID_CONFIG
+                )));
+            },
+            Some(group_id) => Some(group_id.to_string()),
+            None => None,
+        };
 
         // ═══════════════════════════════════════════════════════════════
         // Phase 12 commit (2/N): RequestManagers wiring.
@@ -1016,6 +2027,7 @@ where
                 Arc::clone(&subscriptions),
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
+                Arc::new(crate::common::metrics::time::SystemTime),
                 current_time_ms,
             ))
         });
@@ -1048,6 +2060,13 @@ where
                 as Arc<dyn crate::consumer::internals::offset_commit_callback_invoker::AutoCommitInterceptorHook>);
         }
 
+        // M4: wire the OffsetCommitMetricsManager into the commit manager so
+        // the commit-response handler records per-commit request latency
+        // (`CommitRequestManager.java:767`).
+        if let Some(commit_arc) = commit.as_ref() {
+            commit_arc.set_offset_commit_metrics_manager(Arc::clone(&offset_commit_metrics_manager));
+        }
+
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
         // groupProtocol == CONSUMER) config.ignore(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
         // Rust does not track "ignored" config keys (no `ConfigDef`
@@ -1075,6 +2094,17 @@ where
                 Arc::clone(&metadata),
                 Arc::clone(&background_event_handler),
                 auto_commit_enabled,
+                // M5: rebalance latency/rate/failure metrics, registered against
+                // the consumer's shared Arc<Metrics> (M3 field). Java builds the
+                // ConsumerRebalanceMetricsManager inside the membership-manager
+                // constructor; we build it here and pass it in.
+                Some(Arc::new(
+                    crate::consumer::internals::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager::new(
+                        &metrics,
+                        Arc::clone(&subscriptions),
+                    ),
+                )),
+                Arc::new(crate::common::metrics::time::SystemTime),
             ))),
             _ => None,
         };
@@ -1084,14 +2114,21 @@ where
         // build heartbeat-request bodies).
         let consumer_heartbeat: Option<ConsumerHeartbeatRequestManager> =
             match (coordinator.as_ref(), membership_opt.as_ref()) {
-                (Some(coord_arc), Some(membership)) => Some(ConsumerHeartbeatRequestManager::new(
-                    current_time_ms,
-                    &config,
-                    Arc::clone(coord_arc),
-                    Arc::clone(&subscriptions),
-                    Arc::clone(membership),
-                    Arc::clone(&background_event_handler),
-                )),
+                (Some(coord_arc), Some(membership)) => {
+                    let mut hb = ConsumerHeartbeatRequestManager::new(
+                        current_time_ms,
+                        &config,
+                        Arc::clone(coord_arc),
+                        Arc::clone(&subscriptions),
+                        Arc::clone(membership),
+                        Arc::clone(&background_event_handler),
+                    );
+                    // M4: wire the HeartbeatMetricsManager so the send/response
+                    // paths record `last-heartbeat-seconds-ago` /
+                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
+                    hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    Some(hb)
+                },
                 _ => None,
             };
 
@@ -1160,7 +2197,7 @@ where
             let is_unavailable: crate::consumer::internals::fetch_request_manager::IsUnavailableFn =
                 Arc::new(|_n: &Node| false);
             let maybe_auth: crate::consumer::internals::fetch_request_manager::MaybeAuthFailureFn =
-                Arc::new(|_n: &Node| Ok::<(), KafkaError>(()));
+                Arc::new(|_n: &Node| Ok::<(), Error>(()));
 
             let mut frm = FetchRequestManager::new(
                 Arc::clone(&metadata),
@@ -1171,6 +2208,7 @@ where
                 is_unavailable,
                 maybe_auth,
                 Arc::clone(&api_versions),
+                Arc::clone(&fetch_metrics_manager),
             );
             // Wake the bg task when a fetch response is ready so it is drained
             // into the FetchBuffer promptly, instead of waiting for the
@@ -1222,6 +2260,7 @@ where
             config.group_instance_id().map(|s| s.to_string()),
             Arc::clone(&group_metadata),
             Arc::clone(&group_assignment_snapshot),
+            Arc::new(AtomicBool::new(false)),
         ));
 
         if let Some(membership) = membership_opt.as_ref() {
@@ -1296,12 +2335,28 @@ where
             Arc::clone(&application_event_reaper),
         );
 
-        // Java lines 471-481 — `applicationEventHandler`.
-        let application_event_handler =
-            Arc::new(ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify)));
+        // Java lines 471-481 — `applicationEventHandler`. M6: wire the
+        // `AsyncConsumerMetrics` + shared application-event queue-depth
+        // counter before sharing the handler (Java passes
+        // `asyncConsumerMetrics` to the ctor).
+        let mut application_event_handler = ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify));
+        application_event_handler
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
+        let application_event_handler = Arc::new(application_event_handler);
 
-        // Java lines 482-487 — `rebalanceListenerInvoker`.
-        let rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+        // Java lines 482-487 — `rebalanceListenerInvoker`. Java passes a
+        // `RebalanceCallbackMetricsManager` + `Time` into the constructor; we
+        // wire them post-construction so the no-arg `new` stays usable in
+        // tests. The metrics manager registers against the consumer's shared
+        // `Arc<Metrics>` (M3 field); the clock is `SystemTime` (the same clock
+        // the metrics registry uses), so the recorded latency durations match.
+        let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+        rebalance_listener_invoker.set_metrics(
+            crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager::new(
+                &metrics,
+            ),
+            Arc::new(crate::common::metrics::time::SystemTime),
+        );
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
         // `CompletableEventReaper` as the application reaper since the
@@ -1320,6 +2375,7 @@ where
             Arc::clone(&subscriptions),
             fetch_config,
             Arc::clone(&_deserializers),
+            Arc::clone(&fetch_metrics_manager),
             fetch_collector_time,
         ));
 
@@ -1342,7 +2398,7 @@ where
         // with the bg thread.
         let max_time_to_wait_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS));
 
-        let network_thread = ConsumerNetworkThread::new(
+        let mut network_thread = ConsumerNetworkThread::new(
             Arc::clone(&time),
             _app_event_rx,
             Arc::clone(&application_event_reaper),
@@ -1352,23 +2408,19 @@ where
             membership_opt.clone(),
             wakeup_trigger.clone(),
             Arc::clone(&max_time_to_wait_ms),
-            Arc::clone(&event_notify),
         );
+        // M6: Java passes `asyncConsumerMetrics` to the `ConsumerNetworkThread`
+        // ctor; wire it (plus the application-event queue-depth counter the bg
+        // task resets to 0 on drain) before spawning the bg task.
+        network_thread
+            .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
 
         // Capture the running-flag + wakeup handles before moving
         // `network_thread` into `tokio::spawn`. The erased closures
         // call these to signal close / wake the bg task without
         // holding a reference to the concrete `K` type.
-        let signal_close_running = network_thread.running_handle();
-        let signal_close_wakeup = wakeup_trigger.clone();
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            signal_close_running.store(false, Ordering::Release);
-            signal_close_wakeup.wakeup();
-        });
-        let wakeup_for_fn = wakeup_trigger.clone();
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_for_fn.wakeup();
-        });
+        let (signal_close_fn, wakeup_fn) =
+            build_close_handle_fns(network_thread.running_handle(), Arc::clone(&event_notify));
 
         // The `max_time_to_wait_ms` slot is seeded with
         // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
@@ -1453,6 +2505,10 @@ where
             network_thread_close,
             fetch_buffer,
             fetch_collector,
+            metrics,
+            kafka_consumer_metrics,
+            async_consumer_metrics,
+            background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
             deserializers: _deserializers,
@@ -1465,6 +2521,44 @@ where
         };
 
         Ok(Self::new_with_components(components))
+    }
+
+    /// Builds the consumer's `Metrics` registry and `FetchMetricsManager`.
+    ///
+    /// Translates Java's `ConsumerUtils.createMetrics(config, time, reporters)`
+    /// followed by `createFetchMetricsManager(metrics)`. The `MetricConfig`
+    /// carries the `metrics.num.samples`, `metrics.sample.window.ms`, and
+    /// `metrics.recording.level` settings and the single `client-id` tag; the
+    /// registry uses the `"consumer"` metric group prefix. The (no-op) reporter
+    /// list and the JMX context are deferred to Phase M7; for M3 the registry is
+    /// reporter-less but fully functional. Returns the owned `Arc<Metrics>`
+    /// (kept on the consumer for M7's public accessor) and the
+    /// `Arc<FetchMetricsManager>` shared into the fetch path.
+    fn create_fetch_metrics_manager(config: &ConsumerConfig) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
+        const CONSUMER_METRIC_GROUP_PREFIX: &str = "consumer";
+        const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(CONSUMER_CLIENT_ID_METRIC_TAG.to_string(), config.client_id().to_string());
+
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .with_samples(config.metrics_num_samples)
+            .with_time_window_ms(config.metrics_sample_window_ms)
+            .with_record_level(recording_level)
+            .with_tags(tags);
+
+        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+
+        // `client-id` is a default config tag, so it is added automatically to
+        // every metric name; the registry's template tag set therefore lists
+        // only `client-id` (matching Java's singleton tag set).
+        let mut registry_tags = indexmap::IndexSet::new();
+        registry_tags.insert(CONSUMER_CLIENT_ID_METRIC_TAG.to_string());
+        let registry = FetchMetricsRegistry::new(registry_tags, CONSUMER_METRIC_GROUP_PREFIX);
+
+        let manager = Arc::new(FetchMetricsManager::new(Arc::clone(&metrics), registry));
+        (metrics, manager)
     }
 
     pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
@@ -1494,10 +2588,15 @@ where
             network_thread_close: components.network_thread_close,
             fetch_buffer: components.fetch_buffer,
             fetch_collector: components.fetch_collector,
+            metrics: components.metrics,
+            kafka_consumer_metrics: components.kafka_consumer_metrics,
+            async_consumer_metrics: components.async_consumer_metrics,
+            background_event_queue_size: components.background_event_queue_size,
             client_id: components.client_id,
             group_id: components.group_id,
             group_metadata: components.group_metadata,
             group_assignment_snapshot: components.group_assignment_snapshot,
+            has_pending_reconciliation: components.state_notifier.has_pending_reconciliation_handle(),
             state_notifier: components.state_notifier,
             rebalance_listener_invoker: components.rebalance_listener_invoker,
             offset_commit_callback_invoker: components.offset_commit_callback_invoker,
@@ -1592,6 +2691,24 @@ where
         &self.client_id
     }
 
+    /// Java: `Map<MetricName, ? extends Metric> metrics()`
+    /// (`AsyncKafkaConsumer.java:1200-1202`:
+    /// `return Collections.unmodifiableMap(metrics.metrics());`).
+    ///
+    /// Snapshots the consumer's owned `Arc<Metrics>` registry — the SAME
+    /// registry into which every metrics manager (fetch, kafka-consumer,
+    /// heartbeat, offset-commit, rebalance + rebalance-callback, async)
+    /// registers (M3–M6). The returned map is therefore the full Java metric
+    /// set. Cold path (monitoring frequency); the snapshot clones the
+    /// registry `HashMap` under its lock.
+    ///
+    /// Rust returns the owned `HashMap` (caller may not mutate the registry
+    /// through it — it is a clone of `Arc<KafkaMetric>` handles), the natural
+    /// analog of Java's `Collections.unmodifiableMap`.
+    pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        self.metrics.metrics()
+    }
+
     /// Java: `ConsumerGroupMetadata groupMetadata()`.
     ///
     /// # Java divergence
@@ -1607,7 +2724,7 @@ where
     ///       decision), and panicking on a pure accessor diverges
     ///       sharply from idiomatic Rust;
     ///   (b) the strict-Java behavior IS surfaced via `commit_*` /
-    ///       `subscribe` etc., which call `throw_if_group_id_not_defined()`
+    ///       `subscribe` etc., which call `return_error_if_group_id_not_defined()`
     ///       on the error-bearing path.
     ///
     /// The Java test
@@ -1684,20 +2801,33 @@ where
     /// Java: `void wakeup()`. Sync — callable from any task, including
     /// signal handlers.
     pub fn wakeup(&self) {
+        // Two halves, two primitives, deliberately:
+        //   1. cancel the token — this is the user-visible half, what makes the
+        //      next blocking-style API return `Error::Wakeup` (§11);
+        //   2. nudge the transport notify so an in-flight `KafkaClient::poll`
+        //      returns promptly instead of running out its poll wait. Idempotent
+        //      and not user-visible, so it is safe even when the token was
+        //      already cancelled.
         self.wakeup_trigger.wakeup();
-        // Also wake the bg task's `select!` directly so the underlying
-        // `KafkaClient::poll` is unblocked even if the wakeup token was
-        // already cancelled.
         self.network_thread_close.wakeup();
     }
 
-    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
-    /// [`Self::wakeup`] from another task / thread. See [`WakeupHandle`]
-    /// for the rationale (Java's `Consumer` is freely shareable across
-    /// threads; this is the safe Rust equivalent for the cross-task
-    /// `wakeup()` pattern).
-    pub fn wakeup_handle(&self) -> WakeupHandle {
-        WakeupHandle::for_async(self.wakeup_trigger.clone(), self.network_thread_close.wakeup_fn_clone())
+    /// Returns a `Clone + Send + Sync` [`ConsumerHandle`] exposing
+    /// [`Self::wakeup`] and the reentrant-safe consumer ops, callable from
+    /// another task / thread. See [`ConsumerHandle`] for the rationale
+    /// (Java's `Consumer` is freely shareable across threads; this is the
+    /// safe Rust equivalent for both the cross-task `wakeup()` pattern and
+    /// in-callback rebalance-listener reentrancy).
+    pub fn handle(&self) -> ConsumerHandle {
+        ConsumerHandle::for_async(AsyncConsumerHandleState {
+            wakeup_trigger: self.wakeup_trigger.clone(),
+            bg_wakeup: self.network_thread_close.wakeup_fn_clone(),
+            application_event_handler: Arc::clone(&self.application_event_handler),
+            subscriptions: Arc::clone(&self.subscriptions),
+            fetch_buffer: Arc::clone(&self.fetch_buffer),
+            time: Arc::clone(&self.time),
+            default_api_timeout_ms: self.default_api_timeout_ms,
+        })
     }
 
     /// Returns the cached `max_time_to_wait` value, set by the bg task
@@ -1723,7 +2853,7 @@ where
     //
     // Each method:
     //   1. Verifies `closed` (Java's `acquireAndEnsureOpen`).
-    //   2. Validates arguments (returning `KafkaError::illegal_argument`
+    //   2. Validates arguments (returning `Error::local_illegal_argument`
     //      where Java throws `IllegalArgumentException`). Rust's type
     //      system makes the `null`-target tests un-translatable;
     //      `"".trim().is_empty()` covers the empty/blank case.
@@ -1747,12 +2877,12 @@ where
     /// (`AsyncKafkaConsumer.java:1192-1197`). Java throws
     /// `InvalidGroupIdException` (`ApiException` subclass with
     /// `Errors.InvalidGroupId`); the Rust analog is
-    /// `KafkaError::invalid_group_id(...)` which surfaces a `Generic`
+    /// `Error::invalid_group_id(...)` which surfaces a `KafkaError`
     /// variant carrying `Errors::InvalidGroupId` so user code can
     /// dispatch on the error code.
-    fn throw_if_group_id_not_defined(&self) -> Result<(), KafkaError> {
+    fn return_error_if_group_id_not_defined(&self) -> Result<(), Error> {
         if self.group_id.as_deref().map(str::is_empty).unwrap_or(true) {
-            return Err(KafkaError::invalid_group_id(
+            return Err(Error::invalid_group_id(
                 "To use the group management or offset commit APIs, you must provide a valid \
                  group.id in the consumer configuration.",
             ));
@@ -1764,9 +2894,9 @@ where
     /// reentrancy guard is dropped per Phase 11 PLAN.md deferral #4
     /// (Rust's `&mut self` enforces single-caller exclusivity at
     /// compile time), so this is just the `closed` check.
-    fn ensure_open(&self) -> Result<(), KafkaError> {
+    fn ensure_open(&self) -> Result<(), Error> {
         if self.is_closed() {
-            return Err(KafkaError::illegal_state("This consumer has already been closed."));
+            return Err(Error::local_illegal_state("This consumer has already been closed."));
         }
         Ok(())
     }
@@ -1775,10 +2905,10 @@ where
     ///
     /// Subscribes to the given topics. An empty list acts as
     /// `unsubscribe()`. Errors:
-    ///   - [`KafkaError::illegal_argument`] if any topic is empty / whitespace.
-    ///   - [`KafkaError::invalid_group_id`] if `group.id` is unset
+    ///   - [`Error::local_illegal_argument`] if any topic is empty / whitespace.
+    ///   - [`Error::invalid_group_id`] if `group.id` is unset
     ///     (Java's `InvalidGroupIdException`).
-    pub async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError> {
+    pub async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.subscribe_internal_topics(topics, None).await
     }
 
@@ -1793,13 +2923,13 @@ where
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.subscribe_internal_topics(topics, Some(listener)).await
     }
 
     /// Java: `void subscribe(SubscriptionPattern)` — server-side regex
     /// subscribe (KIP-848 RE2J).
-    pub async fn subscribe_re2j_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), KafkaError> {
+    pub async fn subscribe_re2j_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
         self.subscribe_to_regex(pattern, None).await
     }
 
@@ -1808,7 +2938,7 @@ where
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.subscribe_to_regex(pattern, Some(listener)).await
     }
 
@@ -1817,7 +2947,7 @@ where
     /// Takes a compiled `regex::Regex` instead of a raw `&str` so we
     /// preserve compile-time pattern validation (Java's `Pattern.compile`
     /// is also up-front).
-    pub async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), KafkaError> {
+    pub async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), Error> {
         self.subscribe_internal_pattern(pattern, None).await
     }
 
@@ -1826,7 +2956,7 @@ where
         &mut self,
         pattern: Regex,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.subscribe_internal_pattern(pattern, Some(listener)).await
     }
 
@@ -1835,9 +2965,9 @@ where
         &mut self,
         topics: Vec<String>,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
 
         if topics.is_empty() {
             // Java: `topics.isEmpty()` is treated as the same as
@@ -1847,7 +2977,7 @@ where
 
         for topic in &topics {
             if topic.trim().is_empty() {
-                return Err(KafkaError::illegal_argument(
+                return Err(Error::local_illegal_argument(
                     "Topic collection to subscribe to cannot contain null or empty topic",
                 ));
             }
@@ -1866,6 +2996,17 @@ where
         // `Ok(())` (so a failed submission does not leave the app-side
         // slot pointing at a listener that never landed in
         // `SubscriptionState`).
+        //
+        // The mirror is written UNCONDITIONALLY, including with `None`:
+        // Java has a single slot (`SubscriptionState.rebalanceListener`)
+        // and `subscribe(topics)` without a listener calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so a listener-less subscribe
+        // must CLEAR the previous registration. Skipping the write for
+        // `None` would leave the app-side mirror pointing at the replaced
+        // listener, which `leave_group_on_close` would then wrongly invoke
+        // (and which would keep the listener alive past its release
+        // point).
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
         // Java's `subscribe(...)` does NOT call `setActiveTask` — match
         // by passing `enable_wakeup=false`.
@@ -1877,9 +3018,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -1888,11 +3027,11 @@ where
         &mut self,
         pattern: Regex,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
         if pattern.as_str().is_empty() {
-            return Err(KafkaError::illegal_argument("Topic pattern to subscribe to cannot be empty"));
+            return Err(Error::local_illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
 
         log::info!("Subscribed to pattern: '{pattern}'");
@@ -1910,9 +3049,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -1921,11 +3058,11 @@ where
         &mut self,
         pattern: SubscriptionPattern,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
         if pattern.pattern().is_empty() {
-            return Err(KafkaError::illegal_argument("Topic pattern to subscribe to cannot be empty"));
+            return Err(Error::local_illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
 
         log::info!("Subscribing to regular expression {}", pattern.pattern());
@@ -1943,9 +3080,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -1962,9 +3097,73 @@ where
     /// drain happens — without it, the bg task would await the
     /// listener-callback ack indefinitely while the app side blocks on
     /// `add_and_get`.
-    pub async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
+    pub async fn unsubscribe(&mut self) -> Result<(), Error> {
+        // Java's `acquireAndEnsureOpen()` sits OUTSIDE the `try`
+        // (`AsyncKafkaConsumer.java:1830`), so a closed-consumer failure is
+        // not covered by the `catch (Exception e) { log.error("Unsubscribe
+        // failed", e); throw e; }` below — match that by returning before the
+        // guarded section.
         self.ensure_open()?;
 
+        // Everything Java runs inside its `try` lives in the inner helper, so
+        // that a failure escaping it takes Java's outer-catch path: log
+        // "Unsubscribe failed" and propagate WITHOUT resetting the group
+        // metadata (Java's `resetGroupMetadata()` is the last statement of
+        // the `try`, at `:1848`, and is skipped when the `try` throws).
+        let result = self.unsubscribe_inner().await;
+
+        // NOTE: the app-side `rebalance_listener` mirror is deliberately NOT
+        // cleared here. Java's `SubscriptionState.unsubscribe()`
+        // (`SubscriptionState.java:347-355`) clears the subscription, the
+        // assignment, the pattern and the subscription type but leaves
+        // `rebalanceListener` alone — `registerRebalanceListener` is only ever
+        // called from the three `subscribe(...)` overloads — and
+        // `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`) does not touch it
+        // either. Since Java has ONE slot and the mirror is what
+        // `process_background_events` reads to invoke the callback, clearing it
+        // here would silently skip a `PartitionsRemoved` event that the bg task
+        // enqueued while the registration was still live but the app drains
+        // after `unsubscribe()` returns. The retained listener is released by
+        // the next `subscribe(...)` (which writes the mirror unconditionally,
+        // `None` included) or when the consumer is dropped.
+
+        match result {
+            Ok(()) => {
+                // Java: `resetGroupMetadata()` at `:1848` — clear the cached
+                // generation_id / member_id, preserving the old group_id +
+                // group_instance_id (the slot stays Some(...) so subsequent
+                // group_metadata() observations match Java's
+                // "post-unsubscribe" contract; see Issue 21).
+                self.state_notifier.reset_group_metadata();
+                Ok(())
+            },
+            Err(Error::Timeout(msg)) => {
+                // Java's inner `catch (TimeoutException e)` logs an error and
+                // falls through to `resetGroupMetadata()`, so the unsubscribe
+                // still reports success.
+                log::error!("Failed while waiting for the unsubscribe event to complete: {msg}");
+                self.state_notifier.reset_group_metadata();
+                Ok(())
+            },
+            Err(err) => {
+                // Java's outer `catch (Exception e)`: log and rethrow, with no
+                // `resetGroupMetadata()` — the caller can still inspect
+                // `group_metadata()`'s member_id / generation_id.
+                log::error!("Unsubscribe failed: {err}");
+                Err(err)
+            },
+        }
+    }
+
+    /// The body of Java's `unsubscribe()` `try` block
+    /// (`AsyncKafkaConsumer.java:1831-1849`, excluding the trailing
+    /// `resetGroupMetadata()`).
+    ///
+    /// Split out so that the caller can reproduce Java's outer
+    /// `catch (Exception e)` — which logs and rethrows without resetting the
+    /// group metadata — while the inner `catch (TimeoutException e)` result is
+    /// still distinguishable.
+    async fn unsubscribe_inner(&mut self) -> Result<(), Error> {
         self.fetch_buffer.retain_all(&std::collections::HashSet::new());
 
         let assigned_for_log = {
@@ -1985,55 +3184,35 @@ where
         // `GroupAuthorizationException` / `TopicAuthorizationException`
         // surfaced as fatal background errors during unsubscribe so the
         // unsubscribe still completes. Rust surfaces these as
-        // [`KafkaError::TopicAuthorization`] / [`KafkaError::GroupAuthorization`].
-        let ignore_predicate =
-            |err: &KafkaError| matches!(err, KafkaError::TopicAuthorization(_) | KafkaError::GroupAuthorization(_));
+        // [`Error::TopicAuthorization`] / [`Error::GroupAuthorization`].
+        let ignore_predicate = |err: &Error| matches!(err, Error::TopicAuthorization(_) | Error::GroupAuthorization(_));
 
-        let result = self
-            .process_background_events_until::<()>(
-                receiver,
-                deadline_ms,
-                ignore_predicate,
-                "Failed while waiting for the unsubscribe event to complete",
-                // Java's `unsubscribe()` does NOT call
-                // `wakeupTrigger.setActiveTask(...)` (see
-                // `AsyncKafkaConsumer.java:1830-1850`). Match that.
-                false,
-            )
-            .await;
-
-        // Reset the listener field — the previous subscription is gone.
-        *self.rebalance_listener.lock().unwrap() = None;
-
-        // Java: `resetGroupMetadata()` at `AsyncKafkaConsumer.java:1848`,
-        // called UNCONDITIONALLY after `processBackgroundEvents(...)` —
-        // both on the success path and on `TimeoutException`. Mirror
-        // Java's placement: clear the cached generation_id / member_id
-        // before returning, preserving the old group_id +
-        // group_instance_id (the slot stays Some(...) so subsequent
-        // group_metadata() observations match Java's "post-unsubscribe"
-        // contract; see Issue 21).
-        self.state_notifier.reset_group_metadata();
-
-        match result {
-            Ok(()) => Ok(()),
-            Err(KafkaError::Timeout(msg)) => {
-                // Java logs an error and returns successfully (the
-                // unsubscribe event is "fire and forget" past the
-                // deadline): `log.error("Failed while waiting...")`.
-                log::error!("Failed while waiting for the unsubscribe event to complete: {msg}");
-                Ok(())
-            },
-            Err(err) => Err(err),
-        }
+        self.process_background_events_until_inner::<()>(
+            receiver,
+            deadline_ms,
+            ignore_predicate,
+            "Failed while waiting for the unsubscribe event to complete",
+            // Java's `unsubscribe()` does NOT call
+            // `wakeupTrigger.setActiveTask(...)` (see
+            // `AsyncKafkaConsumer.java:1830-1850`). Match that.
+            false,
+            /* skip_rebalance_callback = */ false,
+            // AK 4.3.1 (KAFKA-20428): unsubscribe passes
+            // `skipAssignmentEvents = true` so a `PartitionsAssigned`
+            // event queued by an in-flight reconciliation is not applied
+            // (the consumer is already leaving).
+            /* skip_assignment_events = */
+            true,
+        )
+        .await
     }
 
     /// Java: `void assign(Collection<TopicPartition>)`.
     ///
     /// Manually assigns the given partitions. An empty collection acts
     /// as `unsubscribe()`. Errors:
-    ///   - [`KafkaError::illegal_argument`] if any topic is empty / whitespace.
-    pub async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+    ///   - [`Error::local_illegal_argument`] if any topic is empty / whitespace.
+    pub async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         self.ensure_open()?;
 
         if partitions.is_empty() {
@@ -2042,7 +3221,7 @@ where
 
         for tp in &partitions {
             if tp.topic().trim().is_empty() {
-                return Err(KafkaError::illegal_argument(
+                return Err(Error::local_illegal_argument(
                     "Topic partitions to assign to cannot have null or empty topic",
                 ));
             }
@@ -2091,7 +3270,7 @@ where
     ///     to keep spinning the drain loop or fall through to the
     ///     bounded `pollInterval` wait (Java
     ///     `AsyncKafkaConsumer.java:2287-2293`).
-    ///   - `Err(KafkaError)` on the first error event drained. Subsequent
+    ///   - `Err(Error)` on the first error event drained. Subsequent
     ///     events are still processed (mirroring Java's
     ///     `firstError.compareAndSet`); the additional errors are logged
     ///     at `warn` level.
@@ -2106,14 +3285,14 @@ where
     /// across the listener invocation. The implementation does not
     /// acquire the guard at all — the listener invoker reads paused
     /// partitions inside its own brief lock window.
-    pub(crate) async fn process_background_events(&mut self) -> Result<bool, KafkaError> {
-        self.process_background_events_inner(false).await
+    pub(crate) async fn process_background_events(&mut self) -> Result<bool, Error> {
+        self.process_background_events_inner(false, false).await
     }
 
     /// Inner implementation of [`Self::process_background_events`].
     ///
     /// `skip_rebalance_callback` controls how a pending §31
-    /// `ConsumerRebalanceListenerCallbackNeeded` event is handled:
+    /// `PartitionsRemoved` / `PartitionsAssigned` event is handled:
     ///
     ///   - `false` (normal blocking-style APIs — `poll`, `commit_sync`, …):
     ///     invoke the user listener on the caller's task, send the result
@@ -2121,18 +3300,56 @@ where
     ///     surfaces to the caller — matching Java's `processBackgroundEvents`
     ///     which rethrows the wrapped callback error.
     ///   - `true` (close path — `leave_group_on_close`): do NOT invoke the
-    ///     user listener at all; send `Ok(())` on the §31 ack so the bg
-    ///     task's parked `invoke_rebalance_callback` unblocks and
-    ///     reconciliation completes cleanly. Java never invokes
-    ///     `on_partitions_assigned` (or any reconcile-queued callback)
-    ///     during `close()` — close runs rebalance callbacks only via
-    ///     `runRebalanceCallbacksOnClose` (revoked/lost, Step 4). Acking is
-    ///     a Rust-only necessity because our bg task parks on the ack
-    ///     (Java's `CompletableFuture` chain does not). See
+    ///     user listener at all; send `Ok(())` on the `PartitionsRemoved` ack
+    ///     so the bg task's parked reconcile / release unblocks and completes
+    ///     cleanly. Java never invokes `on_partitions_assigned` (or any
+    ///     reconcile-queued callback) during `close()` — close runs rebalance
+    ///     callbacks only via `runRebalanceCallbacksOnClose` (revoked/lost,
+    ///     Step 4). Acking is a Rust-only necessity because our bg task parks
+    ///     on the ack (Java's `CompletableFuture` chain does not). See
     ///     `leave_group_on_close`.
-    async fn process_background_events_inner(&mut self, skip_rebalance_callback: bool) -> Result<bool, KafkaError> {
-        let mut first_error: Option<KafkaError> = None;
+    ///
+    /// `skip_assignment_events` (AK 4.3.1, KAFKA-20428) — Java's
+    /// `skipAssignmentEvents`. When `true` (unsubscribe / close), a
+    /// `PartitionsAssigned` event is NOT processed (no assignment applied, no
+    /// callback run); its ack is completed with an error to unblock the bg
+    /// reconciliation, and it is NOT recorded into `first_error`. These
+    /// assignment-update events are only relevant from `poll()`; during
+    /// `unsubscribe()` the consumer is already leaving, so applying a new
+    /// assignment would be wrong. `PartitionsRemoved` (revoke / lost) events
+    /// are always processed regardless of this flag (they are relevant during
+    /// unsubscribe so the user can flush offsets). Close sets both flags.
+    async fn process_background_events_inner(
+        &mut self,
+        skip_rebalance_callback: bool,
+        skip_assignment_events: bool,
+    ) -> Result<bool, Error> {
+        let mut first_error: Option<Error> = None;
         let mut had_events = false;
+        // Java records `recordBackgroundEventQueueProcessingTime(now - startMs)`
+        // for the whole drained batch (after `drainEvents`). The Rust drain is
+        // incremental (`try_recv` loop), so capture `start_ms` before the loop
+        // and record once after. Clone the metrics `Arc` up front so `&mut self`
+        // stays usable in the loop body.
+        let async_consumer_metrics = Arc::clone(&self.async_consumer_metrics);
+        let start_ms = self.time.milliseconds();
+
+        // Java `BackgroundEventHandler.drainEvents` (lines 65-70) records
+        // `recordBackgroundEventQueueSize(0)` UNCONDITIONALLY on every drain —
+        // there is no `isEmpty()` early-return (unlike `processApplicationEvents`).
+        // Since `process_background_events` runs at the top of every blocking-style
+        // API, Java continuously refreshes this gauge while idle. That
+        // unconditional refresh is preserved: the record below runs on every
+        // drain, empty or not.
+        //
+        // What is NOT preserved is the literal `0`, and deliberately so. Java's
+        // `drainTo` calls `fullyLock()`, so nothing can arrive mid-drain and `0`
+        // is exact. The `try_recv` loop below does not block senders, so storing
+        // `0` up front would overwrite the `fetch_add(1)` of any `add` racing the
+        // loop whose event is still queued. Instead each received envelope
+        // decrements by one, leaving the counter conserved (`+1` per successful
+        // send in `BackgroundEventHandler::add`, `-1` per dequeue) and therefore
+        // equal to the true depth at every observation point.
 
         loop {
             let envelope = match self.background_event_rx.try_recv() {
@@ -2142,49 +3359,50 @@ where
                     // The bg task has shut down. Nothing more to drain;
                     // surface only if no other error has been recorded.
                     if first_error.is_none() && !self.is_closed() {
-                        first_error = Some(KafkaError::illegal_state("Consumer background task is no longer running."));
+                        first_error =
+                            Some(Error::local_illegal_state("Consumer background task is no longer running."));
                     }
                     break;
                 },
             };
             had_events = true;
+            // Conserve the depth counter: one dequeue, one decrement.
+            self.background_event_queue_size.fetch_sub(1, Ordering::SeqCst);
+            // Java AKC:2206 — record the time this event spent in the queue.
+            async_consumer_metrics.record_background_event_queue_time(self.time.milliseconds() - envelope.enqueued_ms);
 
             match envelope.event {
                 BackgroundEvent::Error { error } => {
                     Self::record_first_error(&mut first_error, error);
                 },
-                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack }
-                    if skip_rebalance_callback =>
-                {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } if skip_rebalance_callback => {
                     // Close path: do NOT invoke the user listener. Java never
-                    // invokes `on_partitions_assigned` (or any §31 callback
-                    // enqueued by reconciliation) during `close()` — close
-                    // runs rebalance callbacks only via
+                    // invokes reconcile-queued callbacks during `close()` —
+                    // close runs rebalance callbacks only via
                     // `runRebalanceCallbacksOnClose` (revoked/lost, Step 4),
-                    // and uses plain `addAndGet` (no `processBackgroundEvents`)
-                    // for the rest of the close steps, so any callback the
-                    // membership manager queued is simply never run and is
-                    // discarded when the consumer closes.
+                    // and uses plain `addAndGet` for the rest of the close
+                    // steps, so any callback the membership manager queued is
+                    // simply never run and is discarded when the consumer
+                    // closes.
                     //
-                    // We still must send the §31 ack so the bg task's
-                    // `invoke_rebalance_callback` (parked on `ack_rx.await`)
-                    // unblocks and reconciliation completes cleanly — without
-                    // it the bg task never makes progress and
+                    // We still must send the §31 ack so the bg task's parked
+                    // reconcile / release drive unblocks and completes cleanly
+                    // — without it the bg task never makes progress and
                     // `network_thread_close.await_join()` (Step 8) hangs. Java
                     // has no equivalent dependency because its KIP-848
                     // reconcile chains via `CompletableFuture` and never parks
                     // the bg thread on the ack.
-                    //
-                    // Ack with `Ok(())`: a benign success completes the
-                    // reconcile, so the membership stops re-enqueuing the
-                    // callback. This is observably equivalent to Java, where
-                    // the callback is never invoked and the broker drives the
-                    // member out via the in-flight LeaveGroup.
                     let _ = method_name;
                     let _ = partitions;
                     let _ = ack.send(Ok(()));
+                    self.application_event_handler.wake_background_task();
                 },
-                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+                    // AK 4.3.1 (KAFKA-20106): `process(PartitionsRemovedEvent)`
+                    // → `invokeRebalanceCallbackAndNotifyBackgroundThread`.
+                    // `method_name` is `ON_PARTITIONS_REVOKED` or
+                    // `ON_PARTITIONS_LOST` (assign is a separate event now).
+                    //
                     // Read the currently-registered listener and drop the
                     // guard before invoking (§16 / §31). The
                     // `rebalance_listener` lock is separate from
@@ -2194,16 +3412,8 @@ where
                     let result = match listener {
                         Some(listener) => {
                             // Invoke on the caller's task — never `tokio::spawn`.
-                            // The invoker drops `SubscriptionState`'s guard
-                            // before `.await`ing the user-supplied callback
-                            // (see `consumer_rebalance_listener_invoker.rs`).
                             use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName as M;
                             match method_name {
-                                M::OnPartitionsAssigned => {
-                                    self.rebalance_listener_invoker
-                                        .invoke_partitions_assigned(&listener, &partitions)
-                                        .await
-                                },
                                 M::OnPartitionsRevoked => {
                                     self.rebalance_listener_invoker
                                         .invoke_partitions_revoked(&listener, &partitions)
@@ -2214,25 +3424,20 @@ where
                                         .invoke_partitions_lost(&listener, &partitions)
                                         .await
                                 },
+                                // A `PartitionsRemoved` event never carries
+                                // `ON_PARTITIONS_ASSIGNED` (that path is the
+                                // `PartitionsAssigned` event); treat defensively
+                                // as revoked to stay Java-faithful.
+                                M::OnPartitionsAssigned => {
+                                    self.rebalance_listener_invoker
+                                        .invoke_partitions_revoked(&listener, &partitions)
+                                        .await
+                                },
                             }
                         },
-                        // No listener registered — match Java's behavior
-                        // (Java's invoker treats a missing listener as a
-                        // successful no-op).
                         None => Ok(()),
                     };
 
-                    // Java `invokeRebalanceCallbacks` (AsyncKafkaConsumer.java:2334)
-                    // passes the listener's error through
-                    // `maybeWrapAsKafkaException(e, "User rebalance callback
-                    // throws an error")` before building the completed event.
-                    // The conditional wrap REPLACES the message only when the
-                    // listener error is NOT already a KafkaException (Java's
-                    // `IllegalArgumentException`/`IllegalStateException`); a
-                    // KafkaException passes through unchanged. Wakeup is itself
-                    // a KafkaException and is propagated verbatim. Both the ack
-                    // (bg-side future) and the app-side surfacing carry the
-                    // wrapped error, matching Java's single event payload.
                     let result = result.map_err(|err| {
                         crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
                             err,
@@ -2240,19 +3445,157 @@ where
                         )
                     });
 
-                    // Send the result on the embedded oneshot ack so the
-                    // bg task can advance the rebalance state machine.
                     let send_result = result.clone();
                     let _ = ack.send(send_result);
 
-                    // Java throws if the result is an error — we propagate
-                    // via `first_error` so subsequent events are still
-                    // processed.
+                    // Phase 41b: poke the bg-task wakeup `Notify` so the
+                    // bg loop wakes promptly and `try_recv`s this ack on
+                    // its next `reconcile` entry — rather than waiting out
+                    // the selector poll timeout. This reuses the existing
+                    // application-event wakeup primitive (Java's
+                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
+                    // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
+                    // Perf Contract item 2).
+                    //
+                    // This MUST be the application-event notify, NOT
+                    // `network_thread_close.wakeup()` / `wakeup_trigger.wakeup()`.
+                    // Those cancel the wakeup token, which is Java's
+                    // `KafkaConsumer.wakeup()` — it arms a user-visible
+                    // `Error::Wakeup` that the *next* public API call
+                    // raises (§11). Since every rebalance fires a listener
+                    // callback, using it here made a spurious `Wakeup` the
+                    // normal outcome of any rebalance, breaking `poll()` for
+                    // every consumer with a listener registered. Both signals
+                    // reach the selector through `run_once`'s `select!`, so
+                    // this wakes the loop just as promptly with no
+                    // user-visible side effect.
+                    self.application_event_handler.wake_background_task();
+
+                    if let Err(err) = result {
+                        Self::record_first_error(&mut first_error, err);
+                    }
+                },
+                BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack }
+                    if skip_assignment_events || skip_rebalance_callback =>
+                {
+                    // AK 4.3.1 (KAFKA-20428): during unsubscribe / close, skip
+                    // processing assignment-update events — they are only
+                    // relevant from `poll()`. Java completes the event's future
+                    // EXCEPTIONALLY to unblock the reconciliation in the
+                    // background, logs, and continues WITHOUT recording the
+                    // error into `firstError`.
+                    let _ = assigned_partitions;
+                    let _ = added_partitions;
+                    // Java: `new KafkaException("Assignment event skipped ...")` — a
+                    // bare KafkaException carries no error code; use the neutral
+                    // `UnknownServerError` code while preserving the message text.
+                    //
+                    // Message-fidelity note (Critic 64, Observation 2): Java has a
+                    // single literal for this skip
+                    // (`AsyncKafkaConsumer.java:2359`, "...consumer is
+                    // unsubscribing"), and reaches it ONLY via the unsubscribe
+                    // path — Java's `close()` never passes
+                    // `skipAssignmentEvents=true`. Rust reaches this arm on BOTH
+                    // unsubscribe AND close (close sets `skip_assignment_events`
+                    // to unblock the bg reconcile that Java simply abandons), so
+                    // on the close path the "unsubscribing" wording is slightly
+                    // inaccurate. This is a deliberate, benign deviation: the
+                    // error is internal (it rides the bg-reconcile ack, is
+                    // completed-exceptionally-not-recorded, and is never surfaced
+                    // to the user), and the message text is byte-identical to
+                    // Java's only literal for this skip.
+                    let _ = ack.send(Err(Error::with_message(
+                        crate::common::protocol::Errors::UnknownServerError,
+                        "Assignment event skipped because consumer is unsubscribing",
+                    )));
+                    log::debug!("Skipped processing PartitionsAssigned during unsubscribe/close");
+                    self.application_event_handler.wake_background_task();
+                },
+                BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                    // AK 4.3.1 (KAFKA-20106): `process(PartitionsAssignedEvent)`.
+                    // 1. Apply the new assignment on the bg thread, triggered
+                    //    and awaited here so `consumer.assignment()` only
+                    //    changes within `poll()` (`applyNewAssignment` →
+                    //    `ApplyAssignmentEvent`).
+                    // 2. If a listener is registered, run `on_partitions_assigned`.
+                    // 3. Reply on the ack (the `PartitionsAssignedEvent.future()`)
+                    //    so the bg reconciliation resumes.
+                    let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+
+                    // Step 1 — applyNewAssignment: enqueue + await the
+                    // ApplyAssignmentEvent. Java `addAndGet(applyEvent)`.
+                    let apply_result = {
+                        let now_ms = self.time.milliseconds();
+                        let apply_deadline = i64::MAX; // Java: ApplyAssignmentEvent deadlineMs = Long.MAX_VALUE
+                        let (apply_handle, apply_rx, _erased) = make_completable_event::<()>(apply_deadline);
+                        self.application_event_handler
+                            .add_and_get::<()>(
+                                ApplicationEvent::ApplyAssignment {
+                                    handle: apply_handle,
+                                    assigned_partitions: assigned_set,
+                                    added_partitions: added_partitions.clone(),
+                                },
+                                apply_rx,
+                                now_ms,
+                            )
+                            .await
+                    };
+
+                    if let Err(err) = apply_result {
+                        // Java: wrap as "Failed to apply the new assignment",
+                        // complete the event future exceptionally, and throw
+                        // (recorded into firstError here).
+                        let wrapped = crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
+                            err,
+                            "Failed to apply the new assignment",
+                        );
+                        let _ = ack.send(Err(wrapped.clone()));
+                        self.application_event_handler.wake_background_task();
+                        Self::record_first_error(&mut first_error, wrapped);
+                        continue;
+                    }
+
+                    // Steps 2 + 3 — run `on_partitions_assigned` if a listener
+                    // exists, else complete the future with success.
+                    let listener = self.rebalance_listener.lock().unwrap().clone();
+                    let result = match listener {
+                        Some(listener) => {
+                            self.rebalance_listener_invoker
+                                .invoke_partitions_assigned(&listener, &added_partitions)
+                                .await
+                        },
+                        None => Ok(()),
+                    };
+                    let result = result.map_err(|err| {
+                        crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
+                            err,
+                            "User rebalance callback throws an error",
+                        )
+                    });
+                    let send_result = result.clone();
+                    let _ = ack.send(send_result);
+                    self.application_event_handler.wake_background_task();
+
                     if let Err(err) = result {
                         Self::record_first_error(&mut first_error, err);
                     }
                 },
             }
+        }
+
+        // The depth refresh Java does before its drain (see the note above it).
+        // Recorded here instead, and unconditionally, so it reflects what the
+        // conserved counter actually holds after the loop — including anything
+        // enqueued while the loop was running.
+        // Floored at 0 for the same reason as the application-event gauge.
+        async_consumer_metrics
+            .record_background_event_queue_size(self.background_event_queue_size.load(Ordering::SeqCst).max(0) as i32);
+
+        // Java AKC:2219 — record the total processing time for the drained
+        // batch (only when at least one event was processed, matching Java's
+        // `if (!events.isEmpty())` guard).
+        if had_events {
+            async_consumer_metrics.record_background_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
 
         // Java line 2222: reap expired completable events regardless of
@@ -2281,7 +3624,7 @@ where
     /// (`AsyncKafkaConsumer.java:2271`). Each iteration:
     ///
     /// 1. Observes any pending wakeup (§11) — if [`Self::wakeup`] has
-    ///    been called the loop returns `KafkaError::Wakeup` and the
+    ///    been called the loop returns `Error::Wakeup` and the
     ///    caller rotates the token.
     /// 2. Drains the bg-event channel (invokes any pending listener
     ///    callbacks on the caller's task).
@@ -2301,17 +3644,17 @@ where
     /// guarantee from `wakeup_trigger.disable()` is also respected on
     /// the per-API axis.
     ///
-    /// Returns `Err(KafkaError::timeout(...))` when the deadline
-    /// expires without a completion, or `Err(KafkaError::Wakeup(...))`
+    /// Returns `Err(Error::timeout(...))` when the deadline
+    /// expires without a completion, or `Err(Error::Wakeup(...))`
     /// when a concurrent `wakeup()` interrupts the wait.
     pub(crate) async fn process_background_events_until<T: Send + 'static>(
         &mut self,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
-        ignore_error_predicate: impl Fn(&KafkaError) -> bool,
+        ignore_error_predicate: impl Fn(&Error) -> bool,
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
-    ) -> Result<T, KafkaError> {
+    ) -> Result<T, Error> {
         self.process_background_events_until_inner(
             receiver,
             deadline_ms,
@@ -2319,24 +3662,26 @@ where
             timeout_msg,
             enable_wakeup,
             /* skip_rebalance_callback = */ false,
+            /* skip_assignment_events = */ false,
         )
         .await
     }
 
     /// Inner implementation of [`Self::process_background_events_until`]
-    /// with the extra `skip_rebalance_callback` flag forwarded to
-    /// [`Self::process_background_events_inner`]. See that method for the
-    /// close-path rationale.
+    /// with the extra `skip_rebalance_callback` / `skip_assignment_events`
+    /// flags forwarded to [`Self::process_background_events_inner`]. See that
+    /// method for the close-path / unsubscribe rationale.
     #[allow(clippy::too_many_arguments)]
     async fn process_background_events_until_inner<T: Send + 'static>(
         &mut self,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
-        ignore_error_predicate: impl Fn(&KafkaError) -> bool,
+        ignore_error_predicate: impl Fn(&Error) -> bool,
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
         skip_rebalance_callback: bool,
-    ) -> Result<T, KafkaError> {
+        skip_assignment_events: bool,
+    ) -> Result<T, Error> {
         let mut receiver = receiver;
 
         loop {
@@ -2352,7 +3697,10 @@ where
                 return Err(err);
             }
 
-            let had_events = match self.process_background_events_inner(skip_rebalance_callback).await {
+            let had_events = match self
+                .process_background_events_inner(skip_rebalance_callback, skip_assignment_events)
+                .await
+            {
                 Ok(had) => had,
                 Err(err) => {
                     if ignore_error_predicate(&err) {
@@ -2371,7 +3719,7 @@ where
                 Ok(Ok(value)) => return Ok(value),
                 Ok(Err(err)) => return Err(err),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err(KafkaError::illegal_state(
+                    return Err(Error::local_illegal_state(
                         "Background task dropped the completion sender without completing it",
                     ));
                 },
@@ -2382,7 +3730,7 @@ where
                     if !had_events {
                         let remaining = self.remaining_ms(deadline_ms);
                         if remaining <= 0 {
-                            return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
+                            return Err(Error::timeout(timeout_msg.as_ref().to_string()));
                         }
                         let wait = std::cmp::min(remaining, 100) as u64;
                         // §11: race the receiver against the wakeup
@@ -2401,7 +3749,7 @@ where
                                     biased;
                                     _ = tok.cancelled() => {
                                         // Loop top will surface
-                                        // KafkaError::Wakeup via
+                                        // Error::Wakeup via
                                         // maybe_trigger_wakeup + rotate.
                                     },
                                     res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
@@ -2409,7 +3757,7 @@ where
                                             Ok(Ok(Ok(value))) => return Ok(value),
                                             Ok(Ok(Err(err))) => return Err(err),
                                             Ok(Err(_recv_err)) => {
-                                                return Err(KafkaError::illegal_state(
+                                                return Err(Error::local_illegal_state(
                                                     "Background task dropped the completion sender without completing it",
                                                 ));
                                             },
@@ -2423,7 +3771,7 @@ where
                                 Ok(Ok(Ok(value))) => return Ok(value),
                                 Ok(Ok(Err(err))) => return Err(err),
                                 Ok(Err(_recv_err)) => {
-                                    return Err(KafkaError::illegal_state(
+                                    return Err(Error::local_illegal_state(
                                         "Background task dropped the completion sender without completing it",
                                     ));
                                 },
@@ -2436,7 +3784,7 @@ where
 
             // Java line 2299: `while (timer.notExpired())`.
             if self.remaining_ms(deadline_ms) <= 0 {
-                return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
+                return Err(Error::timeout(timeout_msg.as_ref().to_string()));
             }
         }
     }
@@ -2459,11 +3807,11 @@ where
     pub(crate) async fn submit_and_drain<T: Send + 'static>(
         &mut self,
         event: ApplicationEvent,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
-    ) -> Result<T, KafkaError> {
+    ) -> Result<T, Error> {
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
         self.process_background_events_until::<T>(receiver, deadline_ms, |_| false, timeout_msg, enable_wakeup)
@@ -2488,10 +3836,10 @@ where
     async fn submit_and_drain_for_close<T: Send + 'static>(
         &mut self,
         event: ApplicationEvent,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         timeout_msg: impl AsRef<str>,
-    ) -> Result<T, KafkaError> {
+    ) -> Result<T, Error> {
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
         self.process_background_events_until_inner::<T>(
@@ -2501,6 +3849,7 @@ where
             timeout_msg,
             /* enable_wakeup = */ false,
             /* skip_rebalance_callback = */ true,
+            /* skip_assignment_events = */ true,
         )
         .await
     }
@@ -2512,9 +3861,19 @@ where
         deadline_ms.saturating_sub(now).max(0)
     }
 
-    /// Java: `firstError.compareAndSet(null, e)` — first error wins;
-    /// subsequent errors are logged at `warn`.
-    fn record_first_error(slot: &mut Option<KafkaError>, err: KafkaError) {
+    /// Java: `KafkaException e = ConsumerUtils.maybeWrapAsKafkaException(t);`
+    /// followed by `firstError.compareAndSet(null, e)`
+    /// (`AsyncKafkaConsumer.java:2213-2216`) — the error is wrapped FIRST, so
+    /// both the recorded error and the warn-logged one are `KafkaException`s;
+    /// then first-error-wins, and subsequent errors are logged at `warn`.
+    ///
+    /// The wrap is conditional (see
+    /// [`maybe_wrap_as_kafka_error`](crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error)):
+    /// an error already in the `KafkaException` hierarchy passes through
+    /// unchanged, so this only affects the generic runtime-error variants for
+    /// which `is_kafka_error()` would otherwise answer `false`.
+    fn record_first_error(slot: &mut Option<Error>, err: Error) {
+        let err = crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error(err);
         if slot.is_none() {
             *slot = Some(err);
         } else {
@@ -2547,25 +3906,46 @@ where
     /// The translated body mirrors Java line-for-line; deviations are
     /// limited to:
     ///
-    ///   - `kafkaConsumerMetrics.record*` — NO-OPs (Phase 11 PLAN.md #1).
-    ///   - The `try/finally` in Java is a single function body in Rust;
-    ///     panic-safety is achieved via early returns instead.
+    ///   - The `try/finally` in Java is realized with an inner helper
+    ///     (`poll_inner`) so `kafkaConsumerMetrics.recordPollEnd` runs on
+    ///     every exit path (the `finally`), matching
+    ///     `AsyncKafkaConsumer.java:882`.
     ///   - `interceptors.onConsume(...)` mutates the records in place via
     ///     `Mutex<ConsumerInterceptors>`.
-    pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, KafkaError> {
+    pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error> {
         self.ensure_open()?;
 
+        // Java: `kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs())`
+        // (`AsyncKafkaConsumer.java:841`) — recorded right after
+        // `acquireAndEnsureOpen`, before the subscription check. The timer is
+        // created at `poll()` entry, so `currentTimeMs()` is the entry time.
+        let start_ms = self.time.milliseconds();
+        self.kafka_consumer_metrics.record_poll_start(start_ms);
+
+        // Java's `try { … } finally { recordPollEnd(...) }`: run the body and
+        // record poll-end on every exit path (including errors).
+        let result = self.poll_inner(timeout, start_ms).await;
+
+        // Java: `kafkaConsumerMetrics.recordPollEnd(timer.currentTimeMs())`
+        // (`:882`).
+        self.kafka_consumer_metrics.record_poll_end(self.time.milliseconds());
+        result
+    }
+
+    /// The `try`-body of [`Self::poll`] (`AsyncKafkaConsumer.java:842-880`).
+    /// Separated so [`Self::poll`] can record `recordPollEnd` in a
+    /// `finally`-equivalent regardless of how this returns.
+    async fn poll_inner(&mut self, timeout: Duration, start_ms: i64) -> Result<ConsumerRecords<K, V>, Error> {
         // Java: `subscriptions.hasNoSubscriptionOrUserAssignment()`.
         {
             let subs = self.subscriptions.lock().unwrap();
             if subs.has_no_subscription_or_user_assignment() {
-                return Err(KafkaError::illegal_state(
+                return Err(Error::local_illegal_state(
                     "Consumer is not subscribed to any topics or assigned any partitions",
                 ));
             }
         }
 
-        let start_ms = self.time.milliseconds();
         let poll_deadline_ms = calculate_deadline_ms(start_ms, timeout.as_millis() as i64);
         let mut first_pass = true;
 
@@ -2627,7 +4007,7 @@ where
     /// queue is drained and `process_background_events` is invoked, so a
     /// failed callback / fatal background error short-circuits with the
     /// inflight event cleared (matching Java's `try { … } catch (Throwable t) { … }`).
-    async fn check_inflight_poll(&mut self, poll_deadline_ms: i64, first_pass: bool) -> Result<(), KafkaError> {
+    async fn check_inflight_poll(&mut self, poll_deadline_ms: i64, first_pass: bool) -> Result<(), Error> {
         if first_pass && self.inflight_poll.is_some() {
             self.maybe_clear_previous_inflight_poll()?;
         }
@@ -2657,7 +4037,11 @@ where
         if let Err(err) = invocation_result {
             log::trace!("Inflight event AsyncPoll failed due to {err}, clearing");
             self.inflight_poll = None;
-            return Err(err);
+            // Java: `throw ConsumerUtils.maybeWrapAsKafkaException(t)`
+            // (`AsyncKafkaConsumer.java:919`) — the conditional wrap, so a
+            // generic runtime error from user-supplied callback code still
+            // reaches the application as a `KafkaException`.
+            return Err(crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error(err));
         }
 
         if self.inflight_poll.is_some() {
@@ -2673,7 +4057,7 @@ where
     /// propagation can run inside a single try-block-equivalent body —
     /// Java's `try { ... } catch (Throwable t)` semantics translate as
     /// "run this helper, observe the result".
-    async fn run_check_inflight_drain(&mut self) -> Result<(), KafkaError> {
+    async fn run_check_inflight_drain(&mut self) -> Result<(), Error> {
         // Invoke any callbacks queued by previous async commits.
         self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
         // Drain pending background events (rebalance-listener callbacks,
@@ -2684,7 +4068,7 @@ where
 
     /// Java: `private void maybeClearPreviousInflightPoll()`
     /// (`AsyncKafkaConsumer.java:930-963`).
-    fn maybe_clear_previous_inflight_poll(&mut self) -> Result<(), KafkaError> {
+    fn maybe_clear_previous_inflight_poll(&mut self) -> Result<(), Error> {
         let inflight = match self.inflight_poll.as_ref() {
             Some(i) => i,
             None => return Ok(()),
@@ -2720,7 +4104,7 @@ where
 
     /// Java: `private void maybeClearCurrentInflightPoll(boolean newlySubmittedEvent)`
     /// (`AsyncKafkaConsumer.java:965-986`).
-    fn maybe_clear_current_inflight_poll(&mut self, newly_submitted_event: bool) -> Result<(), KafkaError> {
+    fn maybe_clear_current_inflight_poll(&mut self, newly_submitted_event: bool) -> Result<(), Error> {
         let inflight = match self.inflight_poll.as_ref() {
             Some(i) => i,
             None => return Ok(()),
@@ -2764,25 +4148,35 @@ where
     ///
     /// Errors (e.g. `OffsetOutOfRange`, `TopicAuthorizationFailed`)
     /// propagate to the caller — Java raises them out of `poll(Duration)`.
-    async fn poll_for_fetches(&self, poll_deadline_ms: i64) -> Result<ConsumerRecords<K, V>, KafkaError> {
-        // Java: `pollTimeout = min(maximumTimeToWait, timer.remainingMs())`
-        // when committed-offset management is enabled (always true for a
-        // group consumer). Capping at `maximumTimeToWait` bounds how long
-        // this blocks so the poll loop re-runs `check_inflight_poll` —
-        // draining §31 background events / rebalance callbacks — at least
-        // that often. The heartbeat manager's `maximum_time_to_wait` shrinks
-        // during membership work, exactly as in Java.
-        let remaining = self.remaining_ms(poll_deadline_ms);
-        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
-
+    async fn poll_for_fetches(&self, poll_deadline_ms: i64) -> Result<ConsumerRecords<K, V>, Error> {
         // Java's first `collectFetch()` — return immediately if data is ready.
         // Java (`pollForFetches`:1879) uses `Fetch.isEmpty()`
         // (`numRecords == 0 && !positionAdvanced`), so a position-advanced /
         // zero-record fetch returns here rather than blocking on the buffer.
+        //
+        // AK 4.3.1 (KAFKA-20106): `collectFetch()` first waits for the
+        // in-flight poll's reconciliation check (see
+        // [`Self::wait_reconciliation_check`]). If it times out, return empty.
+        if !self.wait_reconciliation_check().await {
+            return Ok(ConsumerRecords::empty());
+        }
         let fetch = self.fetch_collector.collect_fetch(&self.fetch_buffer)?;
         if !fetch.is_fetch_empty() {
             return Ok(fetch);
         }
+
+        // Java (AK 4.3.1): `pollTimeout` is computed AFTER the first
+        // `collectFetch()` returns empty — no need to compute it when data is
+        // already available.
+        // `pollTimeout = min(maximumTimeToWait, timer.remainingMs())` when
+        // committed-offset management is enabled (always true for a group
+        // consumer). Capping at `maximumTimeToWait` bounds how long this
+        // blocks so the poll loop re-runs `check_inflight_poll` — draining §31
+        // background events / rebalance callbacks — at least that often. The
+        // heartbeat manager's `maximum_time_to_wait` shrinks during membership
+        // work, exactly as in Java.
+        let remaining = self.remaining_ms(poll_deadline_ms);
+        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
         if poll_timeout_ms <= 0 {
             // No time left to wait; the caller's loop re-checks the deadline.
             return Ok(fetch);
@@ -2839,7 +4233,7 @@ where
         // the `setFetchAction` side by racing the cancellation token instead
         // of a back-channel: when `wakeup()` cancels the token this arm
         // wins, the poll() loop top calls `maybe_trigger_wakeup`, and
-        // `KafkaError::Wakeup` is surfaced + the token rotated.
+        // `Error::Wakeup` is surfaced + the token rotated.
         let token = self.wakeup_trigger.current_token();
         tokio::select! {
             biased;
@@ -2849,8 +4243,80 @@ where
 
         // Java's second `collectFetch()` — may still be empty on a timeout or
         // a wakeup; the caller's loop re-checks the deadline / surfaces the
-        // wakeup.
+        // wakeup. AK 4.3.1: gate on the reconciliation check again.
+        if !self.wait_reconciliation_check().await {
+            return Ok(ConsumerRecords::empty());
+        }
         self.fetch_collector.collect_fetch(&self.fetch_buffer)
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): the first stage of `collectFetch()`.
+    ///
+    /// Do not return buffered records if the background hasn't checked for
+    /// pending reconciliations for the in-flight poll event. This is key
+    /// because partitions may need revocation, so we must wait for the
+    /// reconciliation check that triggers commits and marks partitions as
+    /// pending revocation before we can safely collect records from the
+    /// buffer.
+    ///
+    /// Returns `true` if the caller may proceed to collect a fetch, `false`
+    /// if it should return an empty fetch (the reconciliation check has not
+    /// completed and there was no time to wait, or the wait timed out).
+    ///
+    /// Java:
+    /// ```java
+    /// if (hasPendingReconciliation && inflightPoll != null && !inflightPoll.isReconciliationCheckComplete()) {
+    ///     long timeoutMs = inflightPoll.deadlineMs() - time.milliseconds();
+    ///     if (timeoutMs > 0) {
+    ///         try {
+    ///             wakeupTrigger.setActiveTask(inflightPoll.reconciliationCheckFuture());
+    ///             ConsumerUtils.getResult(inflightPoll.reconciliationCheckFuture(), timeoutMs);
+    ///         } catch (TimeoutException e) { return Fetch.empty(); }
+    ///         finally { wakeupTrigger.clearTask(); }
+    ///     } else { return Fetch.empty(); }
+    /// }
+    /// ```
+    ///
+    /// The `wakeupTrigger.setActiveTask` is realized here by racing the
+    /// rotating cancellation token (§11): a concurrent `wakeup()` cancels the
+    /// token, this wait returns, and the poll loop top surfaces
+    /// `Error::Wakeup`. The lost-wakeup race is closed by creating the
+    /// `notified()` future BEFORE re-checking the completion flag.
+    async fn wait_reconciliation_check(&self) -> bool {
+        if !self.has_pending_reconciliation.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(inflight) = self.inflight_poll.as_ref() else {
+            return true;
+        };
+        if inflight.state.is_reconciliation_check_complete() {
+            return true;
+        }
+        let timeout_ms = inflight.deadline_ms.saturating_sub(self.time.milliseconds());
+        if timeout_ms <= 0 {
+            // No time to wait and reconciliation check not complete.
+            return false;
+        }
+        // Create the notified() future BEFORE the completion re-check to avoid
+        // a lost wakeup (create-future-then-check ordering).
+        let notified = inflight.state.reconciliation_check_notify().notified();
+        if inflight.state.is_reconciliation_check_complete() {
+            return true;
+        }
+        let token = self.wakeup_trigger.current_token();
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                // A concurrent wakeup(); return empty so the poll loop top
+                // surfaces Error::Wakeup and rotates the token (§11).
+                false
+            }
+            _ = notified => true,
+            _ = tokio::time::sleep(Duration::from_millis(timeout_ms as u64)) => {
+                // Java: TimeoutException -> return Fetch.empty().
+                false
+            }
+        }
     }
 
     // ── Commit ─────────────────────────────────────────────────────────
@@ -2891,11 +4357,8 @@ where
         &mut self,
         commit_event: CommitEventKind,
         enable_wakeup: bool,
-    ) -> Result<
-        tokio::sync::oneshot::Receiver<Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>>,
-        KafkaError,
-    > {
-        self.throw_if_group_id_not_defined()?;
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>, Error> {
+        self.return_error_if_group_id_not_defined()?;
         self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
 
         // Java's `if (event.offsets().isPresent() && event.offsets().get().isEmpty())`
@@ -2959,13 +4422,13 @@ where
     }
 
     /// Translates Java's `void commitSync()` (uses default API timeout).
-    pub async fn commit_sync(&mut self) -> Result<(), KafkaError> {
+    pub async fn commit_sync(&mut self) -> Result<(), Error> {
         self.commit_sync_internal(None, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
 
     /// Translates Java's `void commitSync(Duration timeout)`.
-    pub async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), KafkaError> {
+    pub async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
         self.commit_sync_internal(None, timeout).await
     }
 
@@ -2974,7 +4437,7 @@ where
     pub async fn commit_sync_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.commit_sync_internal(Some(offsets), Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -2985,7 +4448,7 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.commit_sync_internal(Some(offsets), timeout).await
     }
 
@@ -3014,8 +4477,26 @@ where
         &mut self,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
         timeout: Duration,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.ensure_open()?;
+        // Java: `long commitStart = time.nanoseconds()` at the top of
+        // `commitSync` (`AsyncKafkaConsumer.java:1709`), recorded in `finally`
+        // as `recordCommitSync(time.nanoseconds() - commitStart)` (`:1721`).
+        let commit_start_ns = self.time.nanoseconds();
+        let result = self.commit_sync_inner(offsets, timeout).await;
+        self.kafka_consumer_metrics
+            .record_commit_sync(self.time.nanoseconds() - commit_start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::commit_sync_internal`]
+    /// (`AsyncKafkaConsumer.java:1710-1718`). Separated so the caller can
+    /// record `recordCommitSync` in a `finally`-equivalent.
+    async fn commit_sync_inner(
+        &mut self,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         let now_ms = self.time.milliseconds();
         let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
 
@@ -3073,7 +4554,7 @@ where
 
     /// Translates Java's `void commitAsync()` (no callback, no offsets —
     /// commit `allConsumed`).
-    pub async fn commit_async(&mut self) -> Result<(), KafkaError> {
+    pub async fn commit_async(&mut self) -> Result<(), Error> {
         self.commit_async_internal(None, None).await
     }
 
@@ -3081,7 +4562,7 @@ where
     pub async fn commit_async_with_callback(
         &mut self,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.commit_async_internal(None, Some(callback)).await
     }
 
@@ -3091,7 +4572,7 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.commit_async_internal(Some(offsets), Some(callback)).await
     }
 
@@ -3101,7 +4582,7 @@ where
         &mut self,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
         callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.ensure_open()?;
         // Issue 22 / `AsyncKafkaConsumer.java:1684-1700`: Java's
         // `commitAsync` is documented as non-blocking and never throws
@@ -3182,7 +4663,14 @@ where
         &mut self,
         deadline_ms: i64,
         enable_wakeup: bool,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
+        // Java clears `lastPendingAsyncCommit` *after* `getResult(futureToAwait,
+        // timer)` returns normally (line 1741); its `finally` (`:1742-1747`)
+        // deliberately does NOT clear it, so a timeout or a wakeup leaves the
+        // handle in place and a later `commit_sync` still waits for the pending
+        // async commit — preserving the documented
+        // callback-before-sync-commit ordering. The `take()` here is therefore
+        // paired with a restore on every non-success exit below.
         if let Some(mut rx) = self.last_pending_async_commit.take() {
             // Mirror Java's plain `ConsumerUtils.getResult(futureToAwait,
             // timer)` (line 1740): a deadline-bounded await on the
@@ -3197,15 +4685,21 @@ where
                 // `wakeupTrigger.setActiveTask(futureToAwait)` (line
                 // 1737-1739) before the wait; our rotating-token
                 // equivalent re-checks here so a concurrent `wakeup()`
-                // surfaces `KafkaError::Wakeup`.
+                // surfaces `Error::Wakeup`.
                 if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
                     self.wakeup_trigger.rotate();
+                    // Not a success exit: keep the pending handle (Java's
+                    // `finally` does not clear it).
+                    self.last_pending_async_commit = Some(rx);
                     return Err(err);
                 }
 
                 let remaining = self.remaining_ms(deadline_ms);
                 if remaining <= 0 {
-                    return Err(KafkaError::timeout(
+                    // Not a success exit: keep the pending handle (Java's
+                    // `finally` does not clear it).
+                    self.last_pending_async_commit = Some(rx);
+                    return Err(Error::timeout(
                         "Timed out waiting for last pending async commit to complete".to_string(),
                     ));
                 }
@@ -3223,7 +4717,7 @@ where
                     tokio::select! {
                         biased;
                         _ = tok.cancelled() => {
-                            // Loop top surfaces KafkaError::Wakeup via
+                            // Loop top surfaces Error::Wakeup via
                             // maybe_trigger_wakeup + rotate.
                         },
                         res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
@@ -3263,9 +4757,9 @@ where
     // `acquireAndEnsureOpen()` closed-consumer guard.
 
     /// Java: `void seek(TopicPartition, long offset)`.
-    pub async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
+    pub async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         if offset < 0 {
-            return Err(KafkaError::illegal_argument("seek offset must not be a negative number"));
+            return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
         }
         self.ensure_open()?;
         log::info!("Seeking to offset {offset} for partition {partition}");
@@ -3287,10 +4781,10 @@ where
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let offset = offset_and_metadata.offset();
         if offset < 0 {
-            return Err(KafkaError::illegal_argument("seek offset must not be a negative number"));
+            return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
         }
         self.ensure_open()?;
         match offset_and_metadata.leader_epoch() {
@@ -3315,13 +4809,13 @@ where
     }
 
     /// Java: `void seekToBeginning(Collection<TopicPartition>)`.
-    pub async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    pub async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
             .await
     }
 
     /// Java: `void seekToEnd(Collection<TopicPartition>)`.
-    pub async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    pub async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
             .await
     }
@@ -3332,7 +4826,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         strategy: crate::consumer::AutoOffsetResetStrategy,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.ensure_open()?;
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let deadline_ms = self.default_api_timeout_deadline_ms();
@@ -3348,19 +4842,19 @@ where
     }
 
     /// Java: `long position(TopicPartition)` — uses default API timeout.
-    pub async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError> {
+    pub async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error> {
         self.position_timeout(partition, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
 
     /// Java: `long position(TopicPartition, Duration timeout)`
     /// (`AsyncKafkaConsumer.java:1133-1155`).
-    pub async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError> {
+    pub async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
         self.ensure_open()?;
         {
             let subs = self.subscriptions.lock().unwrap();
             if !subs.is_assigned(partition) {
-                return Err(KafkaError::illegal_state(
+                return Err(Error::local_illegal_state(
                     "You can only check the position for partitions assigned to this consumer.",
                 ));
             }
@@ -3402,7 +4896,7 @@ where
             // error handling.
             match drain_result {
                 Ok(()) => {},
-                Err(KafkaError::Timeout(_)) => {
+                Err(Error::Timeout(_)) => {
                     // Loop will re-check `remaining_ms` below and
                     // surface the user-facing timeout error.
                 },
@@ -3412,7 +4906,7 @@ where
             // The drain helper rotates the token on wakeup itself, so
             // the second-line check below is only the deadline guard.
             if self.time.milliseconds() >= deadline_ms {
-                return Err(KafkaError::timeout(format!(
+                return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
                     timeout.as_millis(),
                     partition
@@ -3425,7 +4919,7 @@ where
     pub async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         self.committed_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -3436,9 +4930,27 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        // Java: `long start = time.nanoseconds()` after `acquireAndEnsureOpen`
+        // (`AsyncKafkaConsumer.java:1166`), recorded in `finally` as
+        // `recordCommitted(time.nanoseconds() - start)` (`:1187`) — runs on
+        // every exit path (empty partitions, group-id errors, timeout).
+        let start_ns = self.time.nanoseconds();
+        let result = self.committed_inner(partitions, timeout).await;
+        self.kafka_consumer_metrics.record_committed(self.time.nanoseconds() - start_ns);
+        result
+    }
+
+    /// The `try`-body of [`Self::committed_timeout`]
+    /// (`AsyncKafkaConsumer.java:1167-1185`). Separated so the caller can
+    /// record `recordCommitted` in a `finally`-equivalent.
+    async fn committed_inner(
+        &mut self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+        self.return_error_if_group_id_not_defined()?;
         if partitions.is_empty() {
             return Ok(HashMap::new());
         }
@@ -3464,14 +4976,14 @@ where
             .await;
         match result {
             Ok(map) => Ok(map),
-            Err(KafkaError::Timeout(_)) => {
+            Err(Error::Timeout(_)) => {
                 // Issue 19: Java formats the partitions set via
                 // `Set.toString()` (`[t-0, t-1]`) — `AsyncKafkaConsumer.java:1180-1182`.
                 // The Rust analog uses `TopicPartition`'s Display
                 // (`Display: "{topic}-{partition}"`) and emits the
                 // same `[a-0, b-1]` shape rather than the noisy
                 // `{:?}` Debug form.
-                Err(KafkaError::timeout(format!(
+                Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
                     timeout.as_millis(),
                     format_partitions_for_display(partitions),
@@ -3486,7 +4998,7 @@ where
     ///
     /// Phase 11 commit (6/N) wires the `CurrentLag` event. The previous
     /// stub (commit (2/N)) returned `None` for every input.
-    pub async fn current_lag_async(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, KafkaError> {
+    pub async fn current_lag_async(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
         self.ensure_open()?;
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<Option<i64>>(deadline_ms);
@@ -3514,7 +5026,7 @@ where
     pub async fn beginning_offsets(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.beginning_offsets_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -3524,16 +5036,13 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
         self.beginning_or_end_offsets(partitions, -2, timeout).await
     }
 
     /// Java: `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>)`.
-    pub async fn end_offsets(
-        &mut self,
-        partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    pub async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.end_offsets_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -3543,7 +5052,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
         self.beginning_or_end_offsets(partitions, -1, timeout).await
     }
@@ -3556,7 +5065,7 @@ where
         partitions: &[TopicPartition],
         timestamp: i64,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.ensure_open()?;
         if partitions.is_empty() {
             return Ok(HashMap::new());
@@ -3626,7 +5135,7 @@ where
                 }
                 Ok(out)
             },
-            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+            Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
                 timeout.as_millis()
             ))),
@@ -3638,7 +5147,7 @@ where
     pub async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         self.offsets_for_times_timeout(timestamps_to_search, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -3649,12 +5158,12 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         self.ensure_open()?;
         // Java's per-entry argument validation: negative targets rejected.
         for (tp, ts) in &timestamps_to_search {
             if *ts < 0 {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "The target time for partition {tp} is {ts}. The target time cannot be negative."
                 )));
             }
@@ -3719,7 +5228,7 @@ where
                 }
                 Ok(out)
             },
-            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+            Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
                 timeout.as_millis()
             ))),
@@ -3730,7 +5239,7 @@ where
     // ── Topic metadata: partitionsFor / listTopics ────────────────────
 
     /// Java: `List<PartitionInfo> partitionsFor(String topic)`.
-    pub async fn partitions_for(&mut self, topic: &str) -> Result<Vec<crate::common::PartitionInfo>, KafkaError> {
+    pub async fn partitions_for(&mut self, topic: &str) -> Result<Vec<crate::common::PartitionInfo>, Error> {
         self.partitions_for_timeout(topic, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -3741,7 +5250,7 @@ where
         &mut self,
         topic: &str,
         timeout: Duration,
-    ) -> Result<Vec<crate::common::PartitionInfo>, KafkaError> {
+    ) -> Result<Vec<crate::common::PartitionInfo>, Error> {
         self.ensure_open()?;
         // Java: `Cluster cluster = this.metadata.fetch();
         //        List<PartitionInfo> parts = cluster.partitionsForTopic(topic);
@@ -3755,7 +5264,17 @@ where
         }
 
         if timeout.is_zero() {
-            return Err(KafkaError::timeout(format!(
+            // Java: `throw new TimeoutException();`
+            // (`AsyncKafkaConsumer.java:1219`) — the class, code
+            // (`REQUEST_TIMED_OUT`) and retriable ancestry all match; only the
+            // message differs. RECORDED DEVIATION
+            // (definition-of-done.md §7): Java's no-arg constructor leaves
+            // `getMessage()` null, which `Error` cannot represent — the nearest
+            // forms are an empty string (rendering as `"TimeoutError: "`) or the
+            // code's default text, and neither says which call timed out. The
+            // added text is strictly additive diagnostics; nothing in the
+            // hierarchy or the wire code changes.
+            return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before partitions for topic {topic} could be determined",
                 timeout.as_millis()
             )));
@@ -3780,7 +5299,7 @@ where
     }
 
     /// Java: `Map<String, List<PartitionInfo>> listTopics()`.
-    pub async fn list_topics(&mut self) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, KafkaError> {
+    pub async fn list_topics(&mut self) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, Error> {
         self.list_topics_timeout(Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -3790,10 +5309,14 @@ where
     pub async fn list_topics_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, KafkaError> {
+    ) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, Error> {
         self.ensure_open()?;
         if timeout.is_zero() {
-            return Err(KafkaError::timeout(format!(
+            // Java: `throw new TimeoutException();`
+            // (`AsyncKafkaConsumer.java:1247`). Same recorded deviation as
+            // `partitions_for_timeout` above — Java's message is null, which
+            // `Error` cannot represent; class, code and ancestry match.
+            return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before all topics' metadata could be listed",
                 timeout.as_millis()
             )));
@@ -3818,7 +5341,7 @@ where
 
     /// Java: `void pause(Collection<TopicPartition>)`
     /// (`AsyncKafkaConsumer.java:1273-1283`).
-    pub async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    pub async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.ensure_open()?;
         if partitions.is_empty() {
             return Ok(());
@@ -3841,7 +5364,7 @@ where
 
     /// Java: `void resume(Collection<TopicPartition>)`
     /// (`AsyncKafkaConsumer.java:1286-1296`).
-    pub async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    pub async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.ensure_open()?;
         if partitions.is_empty() {
             return Ok(());
@@ -3868,9 +5391,9 @@ where
     /// Both Java overloads log a warning and otherwise no-op under the
     /// KIP-848 protocol (the classic protocol implements them via
     /// `ConsumerCoordinator`). We match that: log + no-op, return
-    /// `Ok(())`. No `KafkaError::unsupported_version` since Java does not
+    /// `Ok(())`. No `Error::unsupported_version` since Java does not
     /// throw.
-    pub async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), KafkaError> {
+    pub async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
         log::warn!("Operation not supported in new consumer group protocol");
         Ok(())
     }
@@ -3904,7 +5427,7 @@ where
     // (`AsyncKafkaConsumer.java:1422-1588`). The close sequence runs
     // best-effort: each step that throws is logged and the close
     // continues so the network thread is always joined. The final error
-    // (if any) is propagated only when `swallow_exception=false`.
+    // (if any) is propagated only when `swallow_error=false`.
     //
     // The eight Java steps (line 1553-1577) map to Rust as:
     //   1. `wakeup_trigger.disable()` — Java's
@@ -3926,7 +5449,7 @@ where
     //      Java's `closeQuietly(consumerNetworkThread)`.
 
     /// Java: `void close()`. Closes the consumer with default timeout.
-    pub async fn close(&mut self) -> Result<(), KafkaError> {
+    pub async fn close(&mut self) -> Result<(), Error> {
         self.close_internal(
             Duration::from_millis(crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS),
             crate::consumer::GroupMembershipOperation::Default,
@@ -3936,7 +5459,7 @@ where
     }
 
     /// Java: `void close(CloseOptions options)`.
-    pub async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), KafkaError> {
+    pub async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         let timeout = options
             .timeout_value()
             .unwrap_or_else(|| Duration::from_millis(crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS));
@@ -3953,8 +5476,8 @@ where
         &mut self,
         timeout: Duration,
         membership_operation: crate::consumer::GroupMembershipOperation,
-        swallow_exception: bool,
-    ) -> Result<(), KafkaError> {
+        swallow_error: bool,
+    ) -> Result<(), Error> {
         log::trace!("Closing the Kafka consumer");
         if self.is_closed() {
             // Java treats double-close as a silent no-op (the closed
@@ -3981,8 +5504,8 @@ where
         let close_deadline_ms = calculate_deadline_ms(close_start_ms, capped_timeout_ms);
 
         // First-error tracking mirrors Java's `AtomicReference<Throwable> firstException`.
-        let mut first_error: Option<KafkaError> = None;
-        let record = |slot: &mut Option<KafkaError>, op: &str, err: KafkaError| {
+        let mut first_error: Option<Error> = None;
+        let record = |slot: &mut Option<Error>, op: &str, err: Error| {
             log::error!("{op}: {err}");
             if slot.is_none() {
                 *slot = Some(err);
@@ -4005,7 +5528,10 @@ where
         }
 
         // Step 5: leave_group_on_close.
-        if let Err(err) = self.leave_group_on_close(close_deadline_ms, membership_operation).await {
+        if let Err(err) = self
+            .leave_group_on_close(close_deadline_ms, capped_timeout_ms, membership_operation)
+            .await
+        {
             record(&mut first_error, "Failed to leave group while closing consumer", err);
         }
 
@@ -4037,18 +5563,54 @@ where
             reaper.reap(now_ms);
         }
 
+        // Java: `closeQuietly(kafkaConsumerMetrics, "kafka consumer metrics",
+        // firstException)` (`AsyncKafkaConsumer.java:1573`) — removes the
+        // consumer-level poll/commit metrics from the registry. `close()` is
+        // infallible here (no error to fold into `first_error`).
+        self.kafka_consumer_metrics.close();
+
+        // Java: `closeQuietly(asyncConsumerMetrics, "async consumer metrics",
+        // firstException)` (`AsyncKafkaConsumer.java:1574`) — removes the
+        // async-consumer background-task / event-queue sensors from the
+        // registry. `close()` is infallible here.
+        self.async_consumer_metrics.close();
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
+        // Java (`AsyncKafkaConsumer.java:1581-1587`):
+        //
+        // ```java
+        // Throwable exception = firstException.get();
+        // if (exception != null && !swallowException) {
+        //     if (exception instanceof InterruptException) {
+        //         throw (InterruptException) exception;
+        //     }
+        //     throw new KafkaException("Failed to close kafka consumer", exception);
+        // }
+        // ```
+        //
+        // The wrap is what makes `catch (KafkaException e)` around `close()`
+        // — the canonical Java idiom — reliable: whatever step failed, the
+        // caller is handed a `KafkaException` with this message and the
+        // original as its cause. It matters here because `first_error` can
+        // hold an error that is NOT in the `KafkaException` hierarchy, e.g.
+        // the `Error::LocalIllegalState` "Consumer background task is no longer
+        // running." raised through
+        // `await_pending_async_commits_and_execute_commit_callbacks`.
+        //
+        // Java's `InterruptException` pass-through has no counterpart: Rust
+        // tasks have no thread-interruption mechanism, so no step can record
+        // that error.
         match first_error {
-            Some(err) if !swallow_exception => Err(err),
+            Some(err) if !swallow_error => Err(Error::kafka_with_source("Failed to close kafka consumer", err)),
             _ => Ok(()),
         }
     }
 
     /// Java: `private void autoCommitOnClose(final Timer timer)`
     /// (`AsyncKafkaConsumer.java:1596-1604`).
-    async fn auto_commit_on_close(&mut self, deadline_ms: i64) -> Result<(), KafkaError> {
+    async fn auto_commit_on_close(&mut self, deadline_ms: i64) -> Result<(), Error> {
         if self.group_id.is_none() {
             return Ok(());
         }
@@ -4071,7 +5633,7 @@ where
 
     /// Java: `private void stopFindCoordinatorOnClose()`
     /// (`AsyncKafkaConsumer.java:1661-1666`).
-    fn stop_find_coordinator_on_close(&self) -> Result<(), KafkaError> {
+    fn stop_find_coordinator_on_close(&self) -> Result<(), Error> {
         if self.group_id.is_none() {
             return Ok(());
         }
@@ -4104,7 +5666,7 @@ where
     /// (a) include manual `assign(...)` partitions, and (b) miss the
     /// "partition was just revoked but `SubscriptionState` hasn't been
     /// updated yet" window the snapshot still covers.
-    async fn run_rebalance_callbacks_on_close(&mut self) -> Result<(), KafkaError> {
+    async fn run_rebalance_callbacks_on_close(&mut self) -> Result<(), Error> {
         if self.group_id.is_none() {
             return Ok(());
         }
@@ -4134,7 +5696,7 @@ where
             None => return Ok(()),
         };
 
-        if member_epoch > 0 {
+        let result = if member_epoch > 0 {
             self.rebalance_listener_invoker
                 .invoke_partitions_revoked(&listener, &assigned)
                 .await
@@ -4142,7 +5704,16 @@ where
             self.rebalance_listener_invoker
                 .invoke_partitions_lost(&listener, &assigned)
                 .await
-        }
+        };
+
+        // Java: `if (error != null) throw ConsumerUtils.maybeWrapAsKafkaException(error);`
+        // (`AsyncKafkaConsumer.java:1641-1642`). Without the wrap the same
+        // user-listener error is classified differently depending on the path
+        // that surfaced it: wrapped on a normal rebalance (via
+        // `maybe_wrap_as_kafka_error_with_msg`) but raw here, so
+        // `is_kafka_error()` would answer `true` in one case and `false` in the
+        // other for one and the same listener failure.
+        result.map_err(crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error)
     }
 
     /// Java: `private void leaveGroupOnClose(Timer, GroupMembershipOperation)`
@@ -4150,8 +5721,9 @@ where
     async fn leave_group_on_close(
         &mut self,
         deadline_ms: i64,
+        timeout_ms: i64,
         membership_operation: crate::consumer::GroupMembershipOperation,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if self.group_id.is_none() {
             return Ok(());
         }
@@ -4192,13 +5764,16 @@ where
                 log::info!("Completed leaving the group");
                 Ok(())
             },
-            Err(KafkaError::Timeout(_)) => {
+            Err(Error::Timeout(_)) => {
                 // Java's `catch (TimeoutException) { log.warn(...) }` —
                 // close proceeds.
+                // Java logs `timer.timeoutMs()` — the *configured* close
+                // timeout, not the remaining budget (which is 0 on exactly
+                // this path, and so tells the operator nothing).
                 log::warn!(
                     "Consumer attempted to leave the group but couldn't complete it within {} ms. \
                      It will proceed to close.",
-                    self.remaining_ms(deadline_ms)
+                    timeout_ms
                 );
                 Ok(())
             },
@@ -4249,17 +5824,21 @@ where
         AsyncKafkaConsumer::current_lag(self, topic_partition)
     }
 
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        AsyncKafkaConsumer::metrics(self)
+    }
+
     fn wakeup(&self) {
         AsyncKafkaConsumer::wakeup(self);
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        AsyncKafkaConsumer::wakeup_handle(self)
+    fn handle(&self) -> ConsumerHandle {
+        AsyncKafkaConsumer::handle(self)
     }
 
     // ── Subscribe / unsubscribe / assign ───────────────────────────────
 
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError> {
+    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
         AsyncKafkaConsumer::subscribe(self, topics).await
     }
 
@@ -4267,11 +5846,11 @@ where
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         AsyncKafkaConsumer::subscribe_with_listener(self, topics, listener).await
     }
 
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), KafkaError> {
+    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
         AsyncKafkaConsumer::subscribe_re2j_pattern(self, pattern).await
     }
 
@@ -4279,38 +5858,35 @@ where
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         AsyncKafkaConsumer::subscribe_re2j_pattern_with_listener(self, pattern, listener).await
     }
 
-    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         AsyncKafkaConsumer::assign(self, partitions).await
     }
 
-    async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
+    async fn unsubscribe(&mut self) -> Result<(), Error> {
         AsyncKafkaConsumer::unsubscribe(self).await
     }
 
     // ── Poll ───────────────────────────────────────────────────────────
 
-    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, KafkaError> {
+    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error> {
         AsyncKafkaConsumer::poll(self, timeout).await
     }
 
     // ── Commit ─────────────────────────────────────────────────────────
 
-    async fn commit_sync(&mut self) -> Result<(), KafkaError> {
+    async fn commit_sync(&mut self) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_sync(self).await
     }
 
-    async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), KafkaError> {
+    async fn commit_sync_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_sync_timeout(self, timeout).await
     }
 
-    async fn commit_sync_offsets(
-        &mut self,
-        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), KafkaError> {
+    async fn commit_sync_offsets(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_sync_offsets(self, offsets).await
     }
 
@@ -4318,18 +5894,18 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_sync_offsets_timeout(self, offsets, timeout).await
     }
 
-    async fn commit_async(&mut self) -> Result<(), KafkaError> {
+    async fn commit_async(&mut self) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_async(self).await
     }
 
     async fn commit_async_with_callback(
         &mut self,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_async_with_callback(self, callback).await
     }
 
@@ -4337,13 +5913,13 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         AsyncKafkaConsumer::commit_async_offsets_with_callback(self, offsets, callback).await
     }
 
     // ── Seek ───────────────────────────────────────────────────────────
 
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
+    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         AsyncKafkaConsumer::seek(self, partition, offset).await
     }
 
@@ -4351,32 +5927,32 @@ where
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         AsyncKafkaConsumer::seek_with_metadata(self, partition, offset_and_metadata).await
     }
 
-    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         AsyncKafkaConsumer::seek_to_beginning(self, partitions).await
     }
 
-    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         AsyncKafkaConsumer::seek_to_end(self, partitions).await
     }
 
     // ── Position / committed ───────────────────────────────────────────
 
-    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError> {
+    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error> {
         AsyncKafkaConsumer::position(self, partition).await
     }
 
-    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError> {
+    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
         AsyncKafkaConsumer::position_timeout(self, partition, timeout).await
     }
 
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         AsyncKafkaConsumer::committed(self, partitions).await
     }
 
@@ -4384,13 +5960,13 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         AsyncKafkaConsumer::committed_timeout(self, partitions, timeout).await
     }
 
     // ── Topic metadata ────────────────────────────────────────────────
 
-    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<crate::common::PartitionInfo>, KafkaError> {
+    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<crate::common::PartitionInfo>, Error> {
         AsyncKafkaConsumer::partitions_for(self, topic).await
     }
 
@@ -4398,25 +5974,25 @@ where
         &mut self,
         topic: &str,
         timeout: Duration,
-    ) -> Result<Vec<crate::common::PartitionInfo>, KafkaError> {
+    ) -> Result<Vec<crate::common::PartitionInfo>, Error> {
         AsyncKafkaConsumer::partitions_for_timeout(self, topic, timeout).await
     }
 
-    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, KafkaError> {
+    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, Error> {
         AsyncKafkaConsumer::list_topics(self).await
     }
 
     async fn list_topics_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, KafkaError> {
+    ) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, Error> {
         AsyncKafkaConsumer::list_topics_timeout(self, timeout).await
     }
 
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         AsyncKafkaConsumer::offsets_for_times(self, timestamps_to_search).await
     }
 
@@ -4424,14 +6000,14 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         AsyncKafkaConsumer::offsets_for_times_timeout(self, timestamps_to_search, timeout).await
     }
 
     async fn beginning_offsets(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         AsyncKafkaConsumer::beginning_offsets(self, partitions).await
     }
 
@@ -4439,11 +6015,11 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         AsyncKafkaConsumer::beginning_offsets_timeout(self, partitions, timeout).await
     }
 
-    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
         AsyncKafkaConsumer::end_offsets(self, partitions).await
     }
 
@@ -4451,31 +6027,31 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         AsyncKafkaConsumer::end_offsets_timeout(self, partitions, timeout).await
     }
 
     // ── Pause / resume ─────────────────────────────────────────────────
 
-    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         AsyncKafkaConsumer::pause(self, partitions).await
     }
 
-    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         AsyncKafkaConsumer::resume(self, partitions).await
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
-    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), KafkaError> {
+    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), Error> {
         AsyncKafkaConsumer::enforce_rebalance(self, reason).await
     }
 
-    async fn close(&mut self) -> Result<(), KafkaError> {
+    async fn close(&mut self) -> Result<(), Error> {
         AsyncKafkaConsumer::close(self).await
     }
 
-    async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), KafkaError> {
+    async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         AsyncKafkaConsumer::close_with_options(self, options).await
     }
 }
@@ -4515,7 +6091,7 @@ mod tests {
     struct TestBytesDeserializer;
 
     impl Deserializer<Vec<u8>> for TestBytesDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             Ok(data.to_vec())
         }
     }
@@ -4535,6 +6111,19 @@ mod tests {
         /// Handle on the shared `SubscriptionState` so tests can inspect /
         /// pre-populate it.
         subscriptions: Arc<Mutex<SubscriptionState>>,
+        /// Set to `true` whenever the consumer's bg-task wakeup fn is invoked
+        /// (Phase 41 Issue 3 observability). Lets a `&mut self`-level component
+        /// test assert that the ack-send path in `process_background_events`
+        /// pokes the bg wakeup `Notify`.
+        ///
+        /// NOTE: this flag stands in for the *user-facing* wakeup
+        /// (`NetworkThreadCloseHandle::wakeup` → `WakeupTrigger::wakeup`).
+        /// The ack path must NOT fire that one — see
+        /// `process_background_events_ack_pokes_bg_notify_not_user_wakeup`.
+        bg_wakeup_called: Arc<AtomicBool>,
+        /// The application-event `Notify` the bg loop parks on — the correct
+        /// target of the §31 step-4 ack poke.
+        event_notify: Arc<tokio::sync::Notify>,
     }
 
     /// Builds a consumer along with the test-side channel handles needed
@@ -4557,10 +6146,10 @@ mod tests {
         // Test stand-in for the bg task's app-event receiver. Tests hold
         // this `app_event_rx` and pull events off it themselves.
         let (app_handler_tx, app_event_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let app_handler = Arc::new(ApplicationEventHandler::new(
-            app_handler_tx,
-            Arc::new(tokio::sync::Notify::new()),
-        ));
+        // Held by the returned handles so tests can assert on the REAL poke
+        // primitive the bg loop parks on, rather than a stub flag.
+        let event_notify = Arc::new(tokio::sync::Notify::new());
+        let app_handler = Arc::new(ApplicationEventHandler::new(app_handler_tx, Arc::clone(&event_notify)));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let max_time = Arc::new(AtomicI64::new(0));
         let wakeup = WakeupTrigger::new();
@@ -4572,12 +6161,17 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
+        // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
+        // mirror that here as well as setting the flag, so a test asserting
+        // "no wakeup is pending" really exercises what the app would observe.
+        let wakeup_trigger_for_fn = wakeup.clone();
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
+                wakeup_trigger_for_fn.wakeup();
             }),
             join_handle,
         );
@@ -4608,11 +6202,20 @@ mod tests {
             "",
             IsolationLevel::ReadUncommitted,
         );
+        let (metrics, fetch_metrics_manager) =
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
+        let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
+        let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        ));
+        let background_event_queue_size = Arc::new(AtomicI64::new(0));
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
             Arc::clone(&subs),
             fetch_config,
             Arc::clone(&deserializers),
+            Arc::clone(&fetch_metrics_manager),
             Arc::new(crate::consumer::internals::fetch_collector::SystemFetchCollectorTime),
         ));
 
@@ -4630,6 +6233,7 @@ mod tests {
             None,
             Arc::clone(&group_metadata_slot),
             Arc::clone(&group_assignment_snapshot_slot),
+            Arc::new(AtomicBool::new(false)),
         ));
 
         let components = AsyncKafkaConsumerComponents {
@@ -4647,6 +6251,10 @@ mod tests {
             network_thread_close: close_handle,
             fetch_buffer,
             fetch_collector,
+            metrics,
+            kafka_consumer_metrics,
+            async_consumer_metrics,
+            background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
             deserializers,
@@ -4659,7 +6267,13 @@ mod tests {
         };
         (
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
-            ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions: subs },
+            ConsumerTestHandles {
+                app_event_rx,
+                bg_event_tx,
+                subscriptions: subs,
+                bg_wakeup_called: wakeup_called,
+                event_notify,
+            },
         )
     }
 
@@ -4826,25 +6440,87 @@ mod tests {
         assert!(token.is_cancelled(), "wakeup() must cancel the current token");
     }
 
-    /// A `WakeupHandle` obtained from the consumer fires the SAME wakeup
-    /// state as `wakeup()` — proving the shareable handle is a faithful,
-    /// `Send`-able stand-in for the cross-task `wakeup()` pattern (the
-    /// safe replacement for the deleted unsafe test helper).
+    /// A [`ConsumerHandle`] obtained from the consumer fires the SAME
+    /// wakeup state as `wakeup()` — proving the shareable handle is a
+    /// faithful, `Send`-able stand-in for the cross-task `wakeup()`
+    /// pattern (the safe replacement for the deleted unsafe test helper).
     #[tokio::test]
-    async fn wakeup_handle_cancels_current_token() {
+    async fn handle_wakeup_cancels_current_token() {
         let consumer = make_test_consumer();
         let token = consumer.wakeup_trigger.current_token();
         assert!(!token.is_cancelled());
 
         // The handle is moved into another task — no reference to the
         // consumer crosses the task boundary.
-        let handle = consumer.wakeup_handle();
+        let handle = consumer.handle();
         let joined = tokio::spawn(async move {
             handle.wakeup();
         });
         joined.await.expect("waker task");
 
-        assert!(token.is_cancelled(), "wakeup_handle().wakeup() must cancel the current token");
+        assert!(token.is_cancelled(), "handle().wakeup() must cancel the current token");
+    }
+
+    /// Phase 41c / §31 deadlock regression (blocker b): a reentrant
+    /// `ConsumerHandle` op submitted from another task (standing in for a
+    /// rebalance-listener body) routes an `ApplicationEvent` through the bg
+    /// pipeline and completes — proving the handle's no-drain await is NOT
+    /// frozen. The op is `pause`, which (like every bg-routed handle op)
+    /// goes through `submit_and_await`. We act as the bg task by reading
+    /// the app-event channel and completing the event's handle; the handle
+    /// op must then return promptly.
+    #[tokio::test]
+    async fn handle_reentrant_op_completes_through_bg_pipeline() {
+        let (consumer, mut handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        // Submit the reentrant op from another task — exactly how a
+        // captured handle is used from inside a listener.
+        let op = tokio::spawn(async move { handle.pause(std::slice::from_ref(&tp)).await });
+
+        // Act as the bg task: pull the PausePartitions envelope and
+        // complete it. (The real bg loop keeps spinning during a callback
+        // after Phase 41b, so this event is serviced rather than stranded.)
+        let env = handles.app_event_rx.recv().await.expect("PausePartitions envelope must arrive");
+        match env.event {
+            ApplicationEvent::PausePartitions { handle, partitions } => {
+                assert_eq!(partitions.len(), 1);
+                handle.complete(());
+            },
+            other => panic!("expected PausePartitions, got {}", other.type_name()),
+        }
+
+        op.await
+            .expect("handle op task ok")
+            .expect("reentrant pause completes — no deadlock");
+        // The consumer must outlive the handle/op (shared Arc state).
+        drop(consumer);
+    }
+
+    /// Phase 41 Issue 4: `ConsumerHandle::assign([])` must REJECT the empty
+    /// collection (rather than silently clearing the assignment without
+    /// leaving the group). On the owning consumer `assign([])` delegates to
+    /// `unsubscribe()` (group leave), which the handle does not expose, so the
+    /// handle returns a clear error pointing the caller at the owning
+    /// consumer's `unsubscribe()`. A non-empty `assign` still routes through
+    /// the bg pipeline as before.
+    #[tokio::test]
+    async fn handle_assign_empty_is_rejected() {
+        let (consumer, _handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
+
+        let err = handle.assign(Vec::new()).await.expect_err("empty assign must be rejected");
+        assert!(
+            matches!(err, Error::LocalIllegalArgument(_)),
+            "empty assign should be an illegal-argument error, got {err:?}",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsubscribe"),
+            "error must point the caller at unsubscribe(); got: {msg}",
+        );
+        drop(consumer);
     }
 
     /// Phase 12.5 Issue 7 regression: the production ctor must register
@@ -4870,6 +6546,59 @@ mod tests {
     /// manager's auto-generated UUID. Reverting the listener
     /// registration in `new_with_components` makes this test fail with
     /// an empty `member_id`.
+    /// Java wraps the whole `AsyncKafkaConsumer` constructor body in
+    /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
+    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:509-517`), so every
+    /// construction failure reaches the caller with that exact message and the
+    /// underlying failure as its cause.
+    ///
+    /// Propagating the inner error raw would change both the class (an
+    /// `IllegalArgumentException` from address parsing answers `false` to
+    /// `is_kafka_error()`) and the message — and "Failed to construct kafka
+    /// consumer" is the string users match on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn constructor_failure_is_wrapped_as_failed_to_construct_kafka_consumer() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        // A bootstrap address with no port passes `ConsumerConfig` parsing but
+        // fails `parse_and_validate_addresses` inside the constructor body —
+        // i.e. inside Java's `try`.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "no-port-here".to_string())]);
+        let config = ConsumerConfig::from_properties(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an unparseable bootstrap address must fail construction");
+
+        // Java's message, verbatim.
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        // Java throws a `KafkaException`, so the hierarchy predicate must agree.
+        assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
+        assert!(
+            !matches!(err, Error::LocalIllegalArgument(_)),
+            "the raw IllegalArgument must not escape: {err:?}"
+        );
+        // The original failure is the cause (Java's second constructor arg).
+        let source = std::error::Error::source(&err).expect("the underlying failure must be the cause");
+        assert!(
+            source.to_string().contains("Invalid url in bootstrap.servers"),
+            "cause must be the address-parse failure, got: {source}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn issue_7_commit_request_manager_registered_as_member_state_listener() {
         use std::collections::HashMap;
@@ -4879,8 +6608,8 @@ mod tests {
         // Local string deserializer matching the smoke-test pattern.
         struct TestStringDeserializer;
         impl Deserializer<String> for TestStringDeserializer {
-            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
-                String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(format!("invalid utf-8: {}", e)))
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
             }
         }
 
@@ -5034,42 +6763,61 @@ mod tests {
     ) -> tokio::task::JoinHandle<Option<ApplicationEventEnvelope>> {
         tokio::spawn(async move {
             let env = rx.recv().await?;
-            match &env.event {
-                ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::AssignmentChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::Unsubscribe { handle } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::SeekUnvalidated { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResetOffset { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::PausePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResumePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                _ => {
-                    // Unknown variant — leave the handle un-completed; the
-                    // test's `add_and_get` will time out and the
-                    // assertion will be a clear failure.
-                },
-            }
+            complete_event(&env);
             Some(env)
         })
+    }
+
+    /// Same as [`auto_complete_next_event`] but keeps completing every event
+    /// that arrives until the channel closes — for tests that make more than
+    /// one blocking call.
+    fn auto_complete_all_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                complete_event(&env);
+            }
+        })
+    }
+
+    /// Completes the handle carried by an application event, so the app-side
+    /// `add_and_get` resolves without a background task.
+    fn complete_event(env: &ApplicationEventEnvelope) {
+        match &env.event {
+            ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::AssignmentChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::Unsubscribe { handle } => {
+                handle.complete(());
+            },
+            ApplicationEvent::SeekUnvalidated { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResetOffset { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::PausePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResumePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            _ => {
+                // Unknown variant — leave the handle un-completed; the
+                // test's `add_and_get` will time out and the
+                // assertion will be a clear failure.
+            },
+        }
     }
 
     /// Java: `testSubscribeGeneratesEvent`.
@@ -5129,8 +6877,8 @@ mod tests {
             .await
             .expect_err("must err");
         match err {
-            KafkaError::IllegalArgument(msg) => {
-                assert_eq!(msg, "Topic pattern to subscribe to cannot be empty");
+            Error::LocalIllegalArgument(msg) => {
+                assert_eq!(msg.message(), "Topic pattern to subscribe to cannot be empty");
             },
             other => panic!("expected IllegalArgument, got {other:?}"),
         }
@@ -5176,7 +6924,7 @@ mod tests {
     async fn subscribe_rejects_blank_topic() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let err = consumer.subscribe(vec!["  ".to_string()]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     /// Java: `testAssign` (Java line 816-824). Asserts the
@@ -5260,7 +7008,7 @@ mod tests {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("  ".to_string(), 0);
         let err = consumer.assign(vec![tp]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     /// Sanity check: subscribe stores the listener app-side so
@@ -5271,26 +7019,176 @@ mod tests {
         struct DummyListener;
         #[async_trait]
         impl ConsumerRebalanceListener for DummyListener {
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
         }
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let completer = auto_complete_next_event(handles.app_event_rx);
+        let completer = auto_complete_all_events(handles.app_event_rx);
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
         consumer
             .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
             .await
             .expect("ok");
-        let _ = completer.await;
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
         assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+
+        // Java keeps ONE slot: a listener-less `subscribe(topics)` calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so it must CLEAR the app-side
+        // mirror too — otherwise `leave_group_on_close` would invoke the
+        // replaced listener, and (through the C FFI) its `user_data_destroy`
+        // hook would be withheld until the consumer is dropped.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("ok");
+        let stored = consumer.rebalance_listener.lock().unwrap().clone();
+        assert!(
+            stored.is_none(),
+            "a listener-less subscribe must clear the previously stored listener"
+        );
+        completer.abort();
+    }
+
+    /// The other half of the single-slot invariant: `unsubscribe()` must
+    /// **keep** the registered listener.
+    ///
+    /// `SubscriptionState.unsubscribe()` (`SubscriptionState.java:347-355`)
+    /// clears the subscription, group subscription, assignment, assigned topic
+    /// ids, pattern and subscription type and bumps `assignmentId` — it does
+    /// not touch `rebalanceListener`, which is only ever written by the three
+    /// `subscribe(...)` overloads (`:193`, `:199`, `:205`, `:219`). Neither
+    /// does `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`).
+    ///
+    /// Rust duplicates Java's one slot (bg-side `SubscriptionState`, app-side
+    /// mirror, because §31 invokes the callback on the caller's task) and the
+    /// **mirror** is what `process_background_events` reads. So the observable
+    /// consequence of clearing it here is a `PartitionsRemoved` event (AK
+    /// 4.3.1's rename of `ConsumerRebalanceListenerCallbackNeeded`, revoke/lost
+    /// shape unchanged) enqueued by the bg task while
+    /// the registration was still live, but drained by the app after
+    /// `unsubscribe()` returned, silently taking the `None => Ok(())` arm and
+    /// skipping the user's `on_partitions_revoked`. That behaviour — not just
+    /// the field state — is what this test pins, together with the fact that a
+    /// later listener-less `subscribe(...)` (Java's
+    /// `registerRebalanceListener(Optional.empty())`) is what ends the
+    /// registration.
+    #[tokio::test]
+    async fn unsubscribe_keeps_the_registered_listener() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct RecordingListener {
+            revoked: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for RecordingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        /// Enqueues the callback-needed event the bg task would raise and
+        /// drains it, returning the ack result.
+        async fn drive_revoked_callback(
+            consumer: &mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+            bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        ) -> Result<(), Error> {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("send ok");
+            consumer.process_background_events().await.expect("drain ok");
+            ack_rx.await.expect("ack received")
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_all_events(handles.app_event_rx);
+        let listener: Arc<RecordingListener> = Arc::new(RecordingListener { revoked: AtomicUsize::new(0) });
+        let erased: Arc<dyn ConsumerRebalanceListener> = Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>;
+
+        consumer
+            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&erased))
+            .await
+            .expect("subscribe ok");
+        // The fixture has no background task, so apply the registration the
+        // `ApplicationEventProcessor` would perform for
+        // `TopicSubscriptionChange` — that is the bg-side half of the slot.
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t".to_string()].into_iter().collect(), Some(Arc::clone(&erased)))
+            .expect("subscribe_topics ok");
+
+        consumer.unsubscribe().await.expect("unsubscribe ok");
+        // ...and the bg-side half of `Unsubscribe`.
+        handles.subscriptions.lock().unwrap().unsubscribe();
+
+        // Both copies of Java's single slot must still hold the listener.
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_some(),
+            "SubscriptionState::unsubscribe must not clear the listener (Java parity)"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_some(),
+            "the app-side mirror must track SubscriptionState's slot across unsubscribe()"
+        );
+
+        // Observable behaviour: a callback the bg task raised while the
+        // registration was live is still delivered to the user.
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "a rebalance callback drained after unsubscribe() must still reach the retained listener"
+        );
+
+        // A listener-less `subscribe(...)` is what ends the registration
+        // (`registerRebalanceListener(Optional.empty())`), on both copies.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("subscribe ok");
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t2".to_string()].into_iter().collect(), None)
+            .expect("subscribe_topics ok");
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_none(),
+            "a listener-less subscribe clears SubscriptionState's slot"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_none(),
+            "...and the app-side mirror with it"
+        );
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "the de-registered listener must not be invoked again"
+        );
+
+        completer.abort();
     }
 
     // ─── Phase 11 commit (8/N) Java test translations ───
@@ -5306,7 +7204,10 @@ mod tests {
     //     `issue_10_commit_sync_drains_listener_callback_while_waiting`
     //     (inline above) AND the §31 regression pair in commit 11/N.
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
-    //     PLAN deferral #1 (AsyncConsumerMetrics deferred past Phase 12).
+    //     TRANSLATED (Phase M7) as
+    //     `test_record_background_event_queue_size_and_time` (inline below).
+    //     Drains a bg event under a mock `ThreadTime` advanced by 10 ms, then
+    //     reads the values via the public `metrics()` accessor (M7).
     //   - testEmptyStreamRebalanceData, testStreamRebalanceData,
     //     testCloseInvokesStreamsRebalanceListenerOnTasksRevokedWhenMemberEpochPositive,
     //     testCloseInvokesStreamsRebalanceListenerOnAllTasksLostWhenMemberEpochZeroOrNegative,
@@ -5317,7 +7218,7 @@ mod tests {
     //     (classic-protocol out of scope per §20).
     //   - testFailConstructor — PLAN deferral #5 (Supplier-based ctor
     //     failure paths don't translate; the equivalent error path is
-    //     observed via the `KafkaError` returned from `new_consumer` on
+    //     observed via the `Error` returned from `new_consumer` on
     //     bad config).
     //   - testGroupMetadataIsResetAfterUnsubscribe (Java line 1350-1374)
     //     — translated below as
@@ -5364,8 +7265,8 @@ mod tests {
         consumer.closed.store(true, Ordering::Release);
         let err = consumer.commit_sync().await.expect_err("must err");
         match err {
-            KafkaError::IllegalState(msg) => {
-                assert_eq!(msg, "This consumer has already been closed.");
+            Error::LocalIllegalState(msg) => {
+                assert_eq!(msg.message(), "This consumer has already been closed.");
             },
             other => panic!("expected IllegalState, got {other:?}"),
         }
@@ -5379,7 +7280,7 @@ mod tests {
     /// `group_metadata()`; Rust returns a stub `ConsumerGroupMetadata::new("")`
     /// for groupless consumers (see `group_metadata` doc, line 615+).
     /// The exact-message assertion is on the equivalent error surface:
-    /// `commit_sync()`'s `throw_if_group_id_not_defined` (line 758-766),
+    /// `commit_sync()`'s `return_error_if_group_id_not_defined` (line 758-766),
     /// which carries the Java message verbatim. This validates the
     /// message text contract without introducing a Rust-side panic on
     /// the read-only `group_metadata()` accessor.
@@ -5534,8 +7435,8 @@ mod tests {
     /// (Java line 1871-1877). The Re2J pattern subscribe path requires
     /// a configured `group.id`; without it, the call errors with the
     /// Rust analog of `InvalidGroupIdException` —
-    /// `KafkaError::invalid_group_id(...)` which surfaces a
-    /// `Generic` variant carrying `Errors::InvalidGroupId` (Issue 16).
+    /// `Error::invalid_group_id(...)` which surfaces a
+    /// `KafkaError` variant carrying `Errors::InvalidGroupId` (Issue 16).
     #[tokio::test]
     async fn subscribe_re2j_pattern_without_group_id_errors() {
         use crate::common::protocol::Errors;
@@ -5675,13 +7576,11 @@ mod tests {
     #[tokio::test]
     async fn process_background_events_surfaces_error_event() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::Error { error: KafkaError::timeout("boom") },
-            enqueued_ms: 0,
-        };
+        let env =
+            BackgroundEventEnvelope { event: BackgroundEvent::Error { error: Error::timeout("boom") }, enqueued_ms: 0 };
         handles.bg_event_tx.send(env).expect("send ok");
         let result = consumer.process_background_events().await;
-        assert!(matches!(result, Err(KafkaError::Timeout(_))));
+        assert!(matches!(result, Err(Error::Timeout(_))));
     }
 
     /// Callback-needed event with no listener registered: succeeds and
@@ -5692,10 +7591,13 @@ mod tests {
         use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        // AK 4.3.1: the revoke path (`PartitionsRemoved`) exercises the same
+        // no-listener ack machinery without needing a bg AEP to process an
+        // ApplyAssignmentEvent (the assign path's `PartitionsAssigned` would).
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
             },
@@ -5709,8 +7611,11 @@ mod tests {
     }
 
     /// Callback-needed event with a registered listener: the listener's
-    /// `on_partitions_assigned` is invoked inline on the caller's task,
-    /// and the ack is sent with the listener's result.
+    /// callback is invoked inline on the caller's task, and the ack is sent
+    /// with the listener's result. (AK 4.3.1: uses the revoke path
+    /// `PartitionsRemoved`, which invokes the listener directly without a bg
+    /// AEP; the assign path's `PartitionsAssigned` would require one to
+    /// process the ApplyAssignmentEvent.)
     #[tokio::test]
     async fn process_background_events_invokes_registered_listener() {
         use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
@@ -5723,14 +7628,14 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for RecordingListener {
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.count.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
-                Ok(())
-            }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
         }
@@ -5740,10 +7645,10 @@ mod tests {
         *consumer.rebalance_listener.lock().unwrap() =
             Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
 
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
             },
@@ -5761,6 +7666,374 @@ mod tests {
         drop(handles.subscriptions);
     }
 
+    /// Phase 41 Issue 3: the ack-send path in `process_background_events`
+    /// must poke the bg-task wakeup `Notify` so the bg loop observes the ack
+    /// promptly (rather than waiting out the selector poll timeout). The
+    /// non-Docker component tests otherwise busy-drive the membership loop and
+    /// never exercise this poke — removing it after `ack.send(...)` would fail
+    /// no local test without this one.
+    ///
+    /// It must poke the **application-event notify**, and must NOT touch the
+    /// wakeup token (`network_thread_close.wakeup()` →
+    /// `WakeupTrigger::wakeup()`). The token is Java's
+    /// `KafkaConsumer.wakeup()`: cancelling it arms a user-visible
+    /// `Error::Wakeup` that the next public API call raises (§11). Since
+    /// every rebalance fires a listener callback, poking the token here made a
+    /// spurious `Wakeup` the normal outcome of any rebalance — it broke
+    /// `poll()` for every consumer with a listener registered, across 12
+    /// integration tests, while the earlier version of this test passed
+    /// because the fixture's wakeup fn is a flag-setting stub that does not
+    /// reproduce production's token cancellation.
+    ///
+    /// So this asserts both halves: the notify got its permit, AND no
+    /// user-visible wakeup is pending afterwards.
+    #[tokio::test]
+    async fn process_background_events_ack_pokes_bg_notify_not_user_wakeup() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct NoopListener;
+        #[async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::new(NoopListener) as Arc<dyn ConsumerRebalanceListener>);
+
+        // Nothing must have fired before the callback is processed.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), handles.event_notify.notified())
+                .await
+                .is_err(),
+            "the application-event notify must not be poked before the callback ack is sent",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "no user-visible wakeup may be pending before the callback",
+        );
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+        consumer.process_background_events().await.expect("ok");
+        assert!(ack_rx.await.expect("ack received").is_ok());
+
+        // The ack-send path must have poked the application-event notify.
+        // `notify_one()` stores a permit when nobody is parked, so an
+        // already-satisfied `notified()` resolves immediately.
+        tokio::time::timeout(Duration::from_secs(1), handles.event_notify.notified())
+            .await
+            .expect("process_background_events must poke the bg notify after sending the listener ack");
+
+        // ...and must NOT have armed a user-visible wakeup. This is the
+        // regression: with `network_thread_close.wakeup()` here, the next
+        // `poll()` / `commit_sync()` / `position()` fails with
+        // `Wakeup("WakeupTrigger fired")` even though the user never called
+        // `wakeup()`.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "the ack poke must not fire the user-facing wakeup fn",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "the ack poke must not arm a user-visible Error::Wakeup",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// The **close** arm (`skip_rebalance_callback = true`) must poke the
+    /// bg-task notify too.
+    ///
+    /// §31 requires the poke for every `RebalanceListenerCallbackNeeded` ack,
+    /// not only the ones that ran a listener. This arm discards the callback
+    /// (Java never invokes §31 callbacks during `close()`) but still sends the
+    /// ack so the parked reconcile completes — and the ack alone does not wake
+    /// the bg loop. Without the poke the loop only notices after the selector
+    /// poll times out, while `network_thread_close.await_join()` is waiting on
+    /// that very reconcile, so every `close()` pays a poll timeout.
+    ///
+    /// The sibling test above covers the normal arm. This one exists because
+    /// the two arms are separate code paths: the poke was present in one and
+    /// missing in the other, and no test noticed.
+    #[tokio::test]
+    async fn process_background_events_close_arm_pokes_bg_notify() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use tokio::sync::oneshot;
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+
+        // `skip_rebalance_callback = true` is the close path: the callback is
+        // discarded, the ack is still sent.
+        consumer
+            .process_background_events_inner(
+                /* skip_rebalance_callback = */ true, /* skip_assignment_events = */ true,
+            )
+            .await
+            .expect("ok");
+        assert!(ack_rx.await.expect("ack received").is_ok(), "the ack must still be sent");
+
+        tokio::time::timeout(Duration::from_secs(1), handles.event_notify.notified())
+            .await
+            .expect("the close arm must poke the bg notify after sending the ack");
+
+        // Same constraint as the normal arm: the poke must not arm a
+        // user-visible wakeup.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "the close-arm poke must not fire the user-facing wakeup fn",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "the close-arm poke must not arm a user-visible Error::Wakeup",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20428): when `skip_assignment_events` is set (the
+    /// unsubscribe / close path), a pending `PartitionsAssigned` event is NOT
+    /// applied — its ack is completed EXCEPTIONALLY to unblock the bg
+    /// reconciliation, with the message Java uses. Translated from
+    /// `AsyncKafkaConsumerTest#testUnsubscribeWithPendingAssignmentEvent`.
+    #[tokio::test]
+    async fn process_background_events_skips_pending_partitions_assigned_when_unsubscribing() {
+        use tokio::sync::oneshot;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        // skip_assignment_events = true (unsubscribe path).
+        consumer
+            .process_background_events_inner(
+                /* skip_rebalance_callback = */ false, /* skip_assignment_events = */ true,
+            )
+            .await
+            .expect("ok — the skipped assignment event is not an app-side error");
+
+        // The pending assignment event was completed exceptionally.
+        let ack_result = ack_rx.await.expect("ack received");
+        match ack_result {
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("Assignment event skipped because consumer is unsubscribing"),
+                "unexpected skip error: {err}",
+            ),
+            Ok(()) => panic!("PartitionsAssigned must be completed with an error when skipping assignment events"),
+        }
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20382): if applying the new assignment
+    /// (`ApplyAssignmentEvent`) fails, the `PartitionsAssigned` event is
+    /// completed exceptionally (a background error is surfaced) so the bg
+    /// reconciliation can complete. Translated from
+    /// `AsyncKafkaConsumerTest#testPartitionsAssignedEventSendsErrorWhenApplyAssignmentFails`.
+    #[tokio::test]
+    async fn partitions_assigned_event_sends_error_when_apply_assignment_fails() {
+        use tokio::sync::oneshot;
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let bg_event_tx = handles.bg_event_tx.clone();
+
+        // Fake bg: fail the ApplyAssignmentEvent that applyNewAssignment sends.
+        let fake_bg = tokio::spawn(async move {
+            let env = handles.app_event_rx.recv().await.expect("ApplyAssignmentEvent envelope");
+            match env.event {
+                ApplicationEvent::ApplyAssignment { handle, .. } => {
+                    handle.complete_with_error(Error::local_illegal_state("apply failed"));
+                },
+                other => panic!("expected ApplyAssignment, got {}", other.type_name()),
+            }
+            handles
+        });
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        // process_background_events records the wrapped apply error as the
+        // first error and returns it.
+        let result = consumer.process_background_events().await;
+        assert!(result.is_err(), "apply-assignment failure must surface as an app-side error");
+
+        // The PartitionsAssigned ack was completed with the wrapped error.
+        let ack_result = ack_rx.await.expect("ack received");
+        match ack_result {
+            Err(err) => assert!(
+                err.to_string().contains("Failed to apply the new assignment"),
+                "unexpected apply error: {err}",
+            ),
+            Ok(()) => panic!("PartitionsAssigned must be completed with an error when apply fails"),
+        }
+
+        let handles = fake_bg.await.expect("fake bg joins");
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): `collect_fetch` does NOT wait for the
+    /// reconciliation check when there is no pending reconciliation.
+    /// Translated from
+    /// `AsyncKafkaConsumerTest#testPollDoesNotWaitForReconciliationCheckIfNoPendingReconciliation`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_true_when_no_pending_reconciliation() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        // has_pending_reconciliation defaults to false.
+        assert!(consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// The check passes through immediately when it is already complete.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_true_when_already_complete() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        state.mark_reconciliation_check_complete();
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
+        assert!(consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): `collect_fetch` waits until the reconciliation
+    /// check completes when there is a pending reconciliation. Translated from
+    /// `AsyncKafkaConsumerTest#testPollWaitsForReconciliationCheckComplete`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_waits_then_proceeds_when_completed() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state: Arc::clone(&state) });
+        // Complete the check from another task shortly after.
+        let s = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            s.mark_reconciliation_check_complete();
+        });
+        assert!(
+            consumer.wait_reconciliation_check().await,
+            "must proceed once the check completes"
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// Returns `false` (return empty fetch) when the deadline has already
+    /// passed and the reconciliation check is not complete.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_false_on_timeout() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        // deadline already in the past (<= now) -> no time to wait.
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
+        assert!(!consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): a `wakeup()` interrupts the reconciliation-check
+    /// wait. Translated from
+    /// `AsyncKafkaConsumerTest#testWakeupWhileWaitingOnReconciliationCheck`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_interrupted_by_wakeup() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new()); // never completed
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
+        // A concurrent wakeup cancels the token; the wait returns false so the
+        // poll loop top surfaces Error::Wakeup.
+        consumer.wakeup_trigger.wakeup();
+        assert!(
+            !consumer.wait_reconciliation_check().await,
+            "wakeup must interrupt the reconciliation-check wait",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// The close-handle closures must nudge the transport notify, never the
+    /// [`WakeupTrigger`].
+    ///
+    /// `close()` calls `wakeup_trigger.disable()` as its first step, and
+    /// `WakeupTrigger::wakeup()` is a no-op once disabled — so a close nudge
+    /// routed through the trigger is dead exactly when it is needed. Both
+    /// `signal_close()` and `wakeup()` were routed that way, leaving the bg task
+    /// to discover `running == false` only after its in-flight poll drained.
+    ///
+    /// This asserts the wiring directly, on the same function production uses.
+    /// It cannot regress silently: the trigger is not even a parameter, so
+    /// nothing about its disabled state can affect the result.
+    #[tokio::test]
+    async fn close_handle_fns_nudge_the_transport_notify() {
+        use std::sync::atomic::AtomicBool;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (signal_close_fn, wakeup_fn) = build_close_handle_fns(Arc::clone(&running), Arc::clone(&notify));
+
+        // `wakeup_fn` alone: nudge only, running flag untouched.
+        wakeup_fn();
+        assert!(running.load(Ordering::Acquire), "wakeup must not signal close");
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("wakeup_fn must nudge the transport notify");
+
+        // `signal_close_fn`: clears the flag AND nudges, so the bg task wakes
+        // from its poll and observes the flag on the next loop check.
+        signal_close_fn();
+        assert!(!running.load(Ordering::Acquire), "signal_close must clear the running flag");
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("signal_close_fn must nudge the transport notify");
+    }
+
     /// Empty bg-events channel: returns immediately with `Ok(())`.
     #[tokio::test]
     async fn process_background_events_on_empty_channel_is_ok() {
@@ -5768,9 +8041,195 @@ mod tests {
         consumer.process_background_events().await.expect("ok");
     }
 
+    /// Issue 2 regression (Phase M6): the `background-event-queue-size` gauge
+    /// must snap back to 0 on an *idle* (empty) drain, matching Java's
+    /// `BackgroundEventHandler.drainEvents` which records
+    /// `recordBackgroundEventQueueSize(0)` unconditionally. Pre-seed a stale
+    /// peak (as the bg task's `add` would leave it), then drain an empty
+    /// channel and assert both the shared `AtomicI64` and the registered
+    /// metric reset to 0.
+    #[tokio::test]
+    async fn idle_drain_resets_background_event_queue_size_to_zero() {
+        use crate::common::metric::Metric;
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+
+        // An idle drain with a genuinely empty queue. The counter starts at 0 and
+        // must stay there.
+        //
+        // This test used to store 2 into the counter while leaving the channel
+        // empty, then assert an empty drain reset it to 0. That premise was
+        // self-contradictory — it claimed two events were "enqueued, not yet
+        // drained" while nothing was queued — and it asserted the very
+        // under-reporting that motivated conserving the counter: the old
+        // `store(0)` wiped a live count. With the counter conserved (`+1` per send, `-1` per
+        // dequeue) an empty drain has nothing to subtract, so 0 is reached by
+        // construction rather than by overwriting.
+        consumer.process_background_events().await.expect("ok");
+
+        // The shared counter must be reset to 0.
+        assert_eq!(
+            consumer.background_event_queue_size.load(Ordering::SeqCst),
+            0,
+            "an empty drain must leave the conserved counter at 0"
+        );
+        // The registered gauge must read 0, not linger at the stale peak.
+        let mn = consumer.metrics.metric_name_group(
+            "background-event-queue-size",
+            crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
+        );
+        let value = consumer
+            .metrics
+            .metric(&mn)
+            .expect("background-event-queue-size metric present")
+            .metric_value()
+            .as_double()
+            .expect("double-valued gauge");
+        assert_eq!(
+            value, 0.0,
+            "the gauge must be refreshed to 0 on an idle drain, matching Java's unconditional record"
+        );
+    }
+
+    /// Java `AsyncKafkaConsumerTest.testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime`
+    /// (line 1952). Deferred from Phase M6 (needed the public `metrics()`
+    /// accessor + a mock-clock-injectable consumer); translated here.
+    ///
+    /// Java enqueues a `PartitionsRemovedEvent` stamped
+    /// with `time.milliseconds()`, records `recordBackgroundEventQueueSize(1)`,
+    /// sleeps the mock clock 10 ms, calls `processBackgroundEvents()`, then
+    /// asserts via the registry: `background-event-queue-size` == 0,
+    /// `background-event-queue-time-avg` == 10, `-time-max` == 10.
+    #[tokio::test]
+    async fn test_record_background_event_queue_size_and_time() {
+        use crate::common::metric::Metric;
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::consumer_network_thread::ThreadTime;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        use tokio::sync::oneshot;
+
+        // Mock clock so the recorded queue-time (now - enqueuedMs) is exactly
+        // 10 ms, deterministically. `self.time` drives both the enqueue stamp
+        // and the drain-time read in `process_background_events`.
+        struct MockThreadTime {
+            millis: std::sync::Mutex<i64>,
+        }
+        impl MockThreadTime {
+            fn sleep(&self, dur_ms: i64) {
+                *self.millis.lock().unwrap() += dur_ms;
+            }
+        }
+        impl ThreadTime for MockThreadTime {
+            fn milliseconds(&self) -> i64 {
+                *self.millis.lock().unwrap()
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        // Swap in the mock clock (start at an arbitrary non-zero epoch).
+        let mock_time = Arc::new(MockThreadTime { millis: std::sync::Mutex::new(1_000) });
+        consumer.time = Arc::clone(&mock_time) as Arc<dyn ThreadTime>;
+
+        // Java: `event.setEnqueuedMs(time.milliseconds()); backgroundEventQueue.add(event);`
+        // A no-listener callback-needed event acks Ok(()) — the time recording
+        // does not depend on the listener result.
+        let enqueued_ms = mock_time.milliseconds();
+        let (ack_tx, _ack_rx) = oneshot::channel::<Result<(), Error>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                partitions: Vec::new(),
+                ack: ack_tx,
+            },
+            enqueued_ms,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+
+        // Java: `asyncConsumerMetrics.recordBackgroundEventQueueSize(1);`
+        consumer.async_consumer_metrics.record_background_event_queue_size(1);
+
+        // Java: `time.sleep(10); consumer.processBackgroundEvents();`
+        mock_time.sleep(10);
+        consumer.process_background_events().await.expect("drain ok");
+
+        // Read the values through the PUBLIC `metrics()` accessor (M7).
+        let snapshot = consumer.metrics();
+        let read = |name: &str| -> f64 {
+            let mn = consumer.metrics.metric_name_group(name, CONSUMER_METRIC_GROUP);
+            snapshot
+                .get(&mn)
+                .unwrap_or_else(|| panic!("metric {name} present"))
+                .metric_value()
+                .as_double()
+                .expect("double-valued metric")
+        };
+
+        assert_eq!(read("background-event-queue-size"), 0.0);
+        assert_eq!(read("background-event-queue-time-avg"), 10.0);
+        assert_eq!(read("background-event-queue-time-max"), 10.0);
+    }
+
+    /// Phase M7: the public `metrics()` accessor returns the registry snapshot
+    /// that the metrics managers populate. Mirrors the read contract of
+    /// Java's `AsyncKafkaConsumer.metrics()` (`Collections.unmodifiableMap`).
+    ///
+    /// This proves that the three metrics families that register EAGERLY in
+    /// this fixture — fetch (`create_fetch_metrics_manager`), kafka-consumer
+    /// (`KafkaConsumerMetrics::new`), and async-consumer
+    /// (`AsyncConsumerMetrics::new`) — each surface a representative metric in
+    /// the public `metrics()` snapshot, i.e. the registry plumbing reaches the
+    /// public accessor and the snapshot is the live registry, not an
+    /// empty/partial map.
+    ///
+    /// The other four families (heartbeat / offset-commit / rebalance /
+    /// rebalance-callback) register against the shared `Metrics` only through
+    /// their request managers, which the production ctor builds but this
+    /// fixture does not (`RequestManagers::new(None × 7)`). Their registration
+    /// against the shared `Metrics` is covered by their own M4/M5 manager tests
+    /// (`heartbeat_metrics`, `offset_commit_metrics`, the
+    /// `ConsumerRebalanceMetricsManager` / `RebalanceCallbackMetricsManager`
+    /// tests). We deliberately do NOT force-register managers the fixture does
+    /// not build, so this test stays honest about what it constructs.
+    #[tokio::test]
+    async fn metrics_snapshot_includes_eagerly_registered_families() {
+        use crate::common::metric::Metric;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        // Group name built by `FetchMetricsRegistry::new` from the
+        // `"consumer"` prefix (`create_fetch_metrics_manager`).
+        const FETCH_MANAGER_METRIC_GROUP: &str = "consumer-fetch-manager-metrics";
+
+        let consumer = make_test_consumer();
+        let snapshot = consumer.metrics();
+        assert!(!snapshot.is_empty(), "metrics() must not be empty");
+
+        let assert_present = |name: &str, group: &str| {
+            let mn = consumer.metrics.metric_name_group(name, group);
+            assert!(
+                snapshot.contains_key(&mn),
+                "metrics() snapshot must include `{name}` (group `{group}`)"
+            );
+        };
+
+        // Fetch family (M3): a client-level fetch metric registered eagerly in
+        // `FetchMetricsManager::new`.
+        assert_present("records-consumed-total", FETCH_MANAGER_METRIC_GROUP);
+        // Kafka-consumer family (M4): registered eagerly in
+        // `KafkaConsumerMetrics::new` under the consumer-metrics group.
+        assert_present("last-poll-seconds-ago", CONSUMER_METRIC_GROUP);
+        // Async-consumer family (M6): registered eagerly in
+        // `AsyncConsumerMetrics::new` under the consumer-metrics group.
+        assert_present("background-event-queue-size", CONSUMER_METRIC_GROUP);
+
+        // The snapshot is keyed by MetricName and the values impl `Metric`:
+        // every entry's `metric_name()` matches its key (sanity of the snapshot).
+        for (name, metric) in &snapshot {
+            assert_eq!(metric.metric_name(), name);
+        }
+    }
+
     /// Issue 11 regression: a blocking API with `enable_wakeup=true`
     /// (`commit_sync`, here) must observe a `wakeup()` posted by
-    /// another task and return `KafkaError::Wakeup`. This mirrors
+    /// another task and return `Error::Wakeup`. This mirrors
     /// Java's `wakeupTrigger.setActiveTask(commitFuture)` discipline at
     /// `AsyncKafkaConsumer.java:1716`.
     #[tokio::test]
@@ -5784,7 +8243,7 @@ mod tests {
             .commit_sync_timeout(Duration::from_secs(5))
             .await
             .expect_err("must wake up before deadline");
-        assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
         // Token rotated after the wakeup was surfaced.
         assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
     }
@@ -5801,7 +8260,7 @@ mod tests {
             .committed_timeout(&[tp], Duration::from_secs(5))
             .await
             .expect_err("must wake up before deadline");
-        assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
         assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
     }
 
@@ -5834,9 +8293,8 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::CheckAndUpdatePositions { handle } = env.event {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
-                        "bg-side test failure (Issue 14 regression)",
-                    ));
+                    handle
+                        .complete_with_error(Error::local_illegal_state("bg-side test failure (Issue 14 regression)"));
                     return;
                 }
             }
@@ -5847,7 +8305,7 @@ mod tests {
             .await
             .expect_err("must surface the bg-task error, not a generic Timeout");
         assert!(
-            matches!(err, KafkaError::IllegalState(ref m) if m.contains("Issue 14 regression")),
+            matches!(err, Error::LocalIllegalState(ref m) if m.message().contains("Issue 14 regression")),
             "expected IllegalState (bg-task explicit error), got {err:?}"
         );
         drainer.await.expect("drainer ok");
@@ -5858,7 +8316,7 @@ mod tests {
     /// (`AsyncKafkaConsumer.java:1684-1700`) is documented as
     /// non-blocking and never throws `WakeupException`. Pre-cancelling
     /// the wakeup token before calling `commit_async` must not surface
-    /// `KafkaError::Wakeup`.
+    /// `Error::Wakeup`.
     #[tokio::test]
     async fn issue_22_commit_async_does_not_observe_wakeup() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
@@ -5934,14 +8392,14 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for InlineListener {
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
-                Ok(())
-            }
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.invoked.store(true, Ordering::SeqCst);
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
         }
@@ -5971,11 +8429,14 @@ mod tests {
 
             // 2. Post a listener callback that the app side must drain
             //    while it's blocked on the commit.
-            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            // AK 4.3.1: use the revoke path (`PartitionsRemoved`), which the
+            // app drains and invokes inline without needing a bg AEP to
+            // process an ApplyAssignmentEvent (the assign path would).
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
             bg_event_tx
                 .send(BackgroundEventEnvelope {
-                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
                     },
@@ -6055,7 +8516,7 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for CommitRequestingListener {
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 // Fire a commit request and (synchronously) await its
                 // completion via another channel. This stands in for
                 // the Java pattern `consumer.commitSync()` inside the
@@ -6064,10 +8525,10 @@ mod tests {
                 self.revoked.store(true, Ordering::SeqCst);
                 Ok(())
             }
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
         }
@@ -6101,10 +8562,10 @@ mod tests {
             };
 
             // 2. Post the rebalance-listener callback.
-            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
             bg_event_tx
                 .send(BackgroundEventEnvelope {
-                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                    event: BackgroundEvent::PartitionsRemoved {
                         method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
@@ -6159,7 +8620,7 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for BlockingListener {
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.invoked.store(true, Ordering::SeqCst);
                 // Take the receiver out of the mutex and await it —
                 // the test side holds the matching sender and decides
@@ -6168,10 +8629,10 @@ mod tests {
                 let _ = rx.await;
                 Ok(())
             }
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
         }
@@ -6187,11 +8648,11 @@ mod tests {
 
         // Post a `RebalanceListenerCallbackNeeded` event mimicking
         // the bg task's `invoke_rebalance_callback`.
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         handles
             .bg_event_tx
             .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                event: BackgroundEvent::PartitionsRemoved {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
@@ -6248,7 +8709,10 @@ mod tests {
     //
     // Skipped Java tests for this commit (each carries a one-line rationale):
     //   - `testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime` —
-    //     `AsyncConsumerMetrics` deferred to a separate cross-cutting commit.
+    //     `AsyncConsumerMetrics` is now WIRED (Phase M6) and verified by the
+    //     handler-side smoke tests; the end-to-end value assertion under a
+    //     mock clock awaits the M7 public `metrics()` accessor + MockTime
+    //     fixture (see the matching skip note in the commit-8 batch above).
     //   - `testReaperInvokedInPoll` — depends on the metrics observers that
     //     would observe the reaper invocations. The `reap` call itself is
     //     wired and unit-tested via the bg-events drain test in commit 3.
@@ -6260,8 +8724,8 @@ mod tests {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
         assert!(
-            matches!(err, KafkaError::IllegalState(ref msg)
-                if msg == "Consumer is not subscribed to any topics or assigned any partitions"),
+            matches!(err, Error::LocalIllegalState(ref msg)
+                if msg.message() == "Consumer is not subscribed to any topics or assigned any partitions"),
             "unexpected err: {err:?}"
         );
     }
@@ -6273,14 +8737,14 @@ mod tests {
         consumer.closed.store(true, Ordering::Release);
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
         assert!(
-            matches!(err, KafkaError::IllegalState(ref msg)
-                if msg.contains("already been closed")),
+            matches!(err, Error::LocalIllegalState(ref msg)
+                if msg.message().contains("already been closed")),
             "unexpected err: {err:?}"
         );
     }
 
     /// Java: `testWakeupBeforeCallingPoll` — `wakeup()` posted before
-    /// `poll()` must surface as `KafkaError::Wakeup`. After the error is
+    /// `poll()` must surface as `Error::Wakeup`. After the error is
     /// raised, a subsequent `poll()` must observe a fresh token (Java's
     /// "clear the volatile flag after throwing WakeupException once").
     #[tokio::test]
@@ -6301,7 +8765,7 @@ mod tests {
         assert!(pre_token.is_cancelled(), "pre-condition: wakeup() cancelled the token");
 
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("wakeup err");
-        assert!(matches!(err, KafkaError::Wakeup(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::Wakeup(_)), "unexpected err: {err:?}");
 
         // After raising the wakeup error the consumer must have rotated
         // the token so the next poll observes a fresh one (§11).
@@ -6374,12 +8838,12 @@ mod tests {
         }
         // Plant a previous inflight that already completed with an error.
         let state = Arc::new(AsyncPollState::new());
-        state.complete_exceptionally(KafkaError::timeout("prior poll deadline"));
+        state.complete_with_error(Error::timeout("prior poll deadline"));
         consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
 
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
         assert!(
-            matches!(err, KafkaError::Timeout(ref m) if m == "prior poll deadline"),
+            matches!(err, Error::Timeout(ref m) if m.message() == "prior poll deadline"),
             "unexpected err: {err:?}"
         );
         assert!(
@@ -6508,7 +8972,7 @@ mod tests {
 
     /// `commit_sync` on a groupless consumer errors with the Rust
     /// analog of Java's `InvalidGroupIdException` —
-    /// `KafkaError::invalid_group_id(...)` (Issue 16). Mirrors Java's
+    /// `Error::invalid_group_id(...)` (Issue 16). Mirrors Java's
     /// `testCommitSyncWithoutGroupId`.
     #[tokio::test]
     async fn commit_sync_without_group_id_errors() {
@@ -6568,17 +9032,12 @@ mod tests {
     struct NoopCallback;
     #[async_trait::async_trait]
     impl crate::consumer::OffsetCommitCallback for NoopCallback {
-        async fn on_complete(
-            &self,
-            _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-            _error: Option<&KafkaError>,
-        ) {
-        }
+        async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, _error: Option<&Error>) {}
     }
 
     // ─── Seek / position / committed / lag tests (commit 6/N) ───
 
-    /// `seek` with a negative offset rejects with `IllegalArgument`.
+    /// `seek` with a negative offset rejects with `LocalIllegalArgument`.
     /// Java: `seek` throws `IllegalArgumentException("seek offset must not
     /// be a negative number")`.
     #[tokio::test]
@@ -6586,7 +9045,7 @@ mod tests {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("t".to_string(), 0);
         let err = consumer.seek(tp, -1).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalArgument(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "unexpected err: {err:?}");
     }
 
     /// `seek` enqueues a `SeekUnvalidated` event. Mirrors Java's
@@ -6602,7 +9061,7 @@ mod tests {
                 if partition == tp && offset == 42));
     }
 
-    /// `position` on an unassigned partition returns `IllegalState`.
+    /// `position` on an unassigned partition returns `LocalIllegalState`.
     #[tokio::test]
     async fn position_on_unassigned_partition_errors() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
@@ -6611,7 +9070,7 @@ mod tests {
             .position_timeout(&tp, Duration::from_millis(0))
             .await
             .expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalState(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::LocalIllegalState(_)), "unexpected err: {err:?}");
     }
 
     /// `committed` on an empty partition set returns an empty map without
@@ -6627,7 +9086,7 @@ mod tests {
 
     /// `committed` without group_id errors with the Rust analog of
     /// Java's `InvalidGroupIdException` —
-    /// `KafkaError::invalid_group_id(...)` (Issue 16).
+    /// `Error::invalid_group_id(...)` (Issue 16).
     #[tokio::test]
     async fn committed_without_group_id_errors() {
         use crate::common::protocol::Errors;
@@ -6679,7 +9138,7 @@ mod tests {
             .await
             .expect_err("must err");
         assert!(
-            matches!(err, KafkaError::IllegalArgument(ref msg) if msg.contains("negative")),
+            matches!(err, Error::LocalIllegalArgument(ref msg) if msg.message().contains("negative")),
             "unexpected err: {err:?}"
         );
     }
@@ -6716,7 +9175,7 @@ mod tests {
             .partitions_for_timeout("t", Duration::from_millis(0))
             .await
             .expect_err("must err");
-        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::Timeout(_)), "unexpected err: {err:?}");
     }
 
     /// `list_topics` with zero timeout errors with `Timeout`.
@@ -6727,7 +9186,7 @@ mod tests {
             .list_topics_timeout(Duration::from_millis(0))
             .await
             .expect_err("must err");
-        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::Timeout(_)), "unexpected err: {err:?}");
     }
 
     // ─── Phase 11 commit (9/N) Java test translations: poll / commit / wakeup ───
@@ -6768,7 +9227,7 @@ mod tests {
     //     `Phase-12/RESPONSE-ROUTING-AUDIT.md`).
     //   - testCommitted — full happy-path commit fetch — requires a
     //     completer that returns offsets through the FetchCommittedOffsets
-    //     handle; the new `committed_propagates_event_exception` exercises
+    //     handle; the new `committed_propagates_event_error` exercises
     //     the same path with an error variant. Phase 12.5 integration
     //     tests cover the happy path against a real broker.
     //   - testPollThrowsInterruptExceptionIfInterrupted — Java's
@@ -6808,7 +9267,7 @@ mod tests {
 
         consumer.wakeup_trigger.wakeup();
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("wakeup");
-        assert!(matches!(err, KafkaError::Wakeup(_)));
+        assert!(matches!(err, Error::Wakeup(_)));
 
         // Second poll: must NOT raise (Java's `assertDoesNotThrow`).
         let _ = consumer.poll(Duration::from_millis(0)).await.expect("ok");
@@ -6850,13 +9309,13 @@ mod tests {
     /// the `FetchCommittedOffsetsEvent` is completed exceptionally, the
     /// error propagates out of `committed_timeout`.
     #[tokio::test]
-    async fn committed_propagates_event_exception() {
+    async fn committed_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         // Drainer completes the FetchCommittedOffsets handle with an error.
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::FetchCommittedOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::illegal_state("Test exception"));
+                    handle.complete_with_error(Error::local_illegal_state("Test error"));
                     return;
                 }
             }
@@ -6868,11 +9327,8 @@ mod tests {
             .await
             .expect_err("must err");
         // Java surfaces this as `KafkaException`; Rust surfaces the
-        // underlying KafkaError.
-        assert!(
-            !matches!(err, KafkaError::Timeout(_)),
-            "non-timeout err propagates, got {err:?}"
-        );
+        // underlying Error.
+        assert!(!matches!(err, Error::Timeout(_)), "non-timeout err propagates, got {err:?}");
         drainer.await.expect("drainer ok");
     }
 
@@ -6958,7 +9414,7 @@ mod tests {
             .bg_event_tx
             .send(BackgroundEventEnvelope {
                 event: BackgroundEvent::Error {
-                    error: KafkaError::illegal_state("Nobody expects the Spanish Inquisition"),
+                    error: Error::local_illegal_state("Nobody expects the Spanish Inquisition"),
                 },
                 enqueued_ms: 0,
             })
@@ -6969,6 +9425,25 @@ mod tests {
         assert!(
             msg.contains("Nobody expects the Spanish Inquisition"),
             "expected the bg error message, got: {msg}"
+        );
+        // Java wraps each background-event failure through
+        // `ConsumerUtils.maybeWrapAsKafkaException(t)`
+        // (`AsyncKafkaConsumer.java:2213`), so what reaches the application is
+        // always a `KafkaException` — even though the bg task raised a generic
+        // `IllegalStateException`.
+        assert!(
+            err.is_kafka_error(),
+            "the background error must be wrapped into the Kafka error hierarchy: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::LocalIllegalState(_)),
+            "must not surface as a raw IllegalState: {err:?}"
+        );
+        // The original is still reachable as the cause (Java's `getCause()`).
+        let source = std::error::Error::source(&err).expect("the original error must be the cause");
+        assert!(
+            source.to_string().contains("Nobody expects the Spanish Inquisition"),
+            "cause must be the original bg error, got: {source}"
         );
     }
 
@@ -6991,7 +9466,7 @@ mod tests {
             .bg_event_tx
             .send(BackgroundEventEnvelope {
                 event: BackgroundEvent::Error {
-                    error: KafkaError::illegal_state("Nobody expects the Spanish Inquisition"),
+                    error: Error::local_illegal_state("Nobody expects the Spanish Inquisition"),
                 },
                 enqueued_ms: 0,
             })
@@ -6999,7 +9474,7 @@ mod tests {
         handles
             .bg_event_tx
             .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::Error { error: KafkaError::illegal_state("Spam, Spam, Spam") },
+                event: BackgroundEvent::Error { error: Error::local_illegal_state("Spam, Spam, Spam") },
                 enqueued_ms: 0,
             })
             .expect("send ok");
@@ -7025,7 +9500,7 @@ mod tests {
                 match env.event {
                     ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
                         offsets_ready.complete(());
-                        handle.complete_exceptionally(KafkaError::illegal_state("Test exception"));
+                        handle.complete_with_error(Error::local_illegal_state("Test error"));
                     },
                     ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
                         offsets_ready.complete(());
@@ -7046,24 +9521,34 @@ mod tests {
         assert!(completer.await.expect("task ok"));
     }
 
-    /// Java: `testCommitAsyncUserSuppliedCallbackWithException` (line 342-356,
-    /// `@ParameterizedTest`) — the parameter is the exception type
-    /// (KafkaException / GroupAuthorizationException). The Rust analog
-    /// is two test methods, one per exception variant.
+    /// Java: `testCommitAsyncUserSuppliedCallbackWithException` (line 347-360,
+    /// `@ParameterizedTest`) — the parameter is the exception type, supplied by
+    /// `commitExceptionSupplier` (`:382-385`) as `new KafkaException(..)` and
+    /// `new GroupAuthorizationException(..)`. The Rust analog is two test
+    /// methods, one per variant.
+    ///
+    /// This one must be a *bare* `KafkaException` — [`Error::kafka`], the
+    /// [`Error::KafkaError`] variant — not a `LocalIllegalState`, which is
+    /// outside the `KafkaException` hierarchy entirely. Java's assertion is
+    /// `assertSame(exception.getClass(), callback.exception.getClass())`: the
+    /// point of the case is that a `KafkaException` reaches the user callback
+    /// *unwrapped*, which a class that `is_kafka_error()` rejects cannot
+    /// exercise (the sibling below was corrected for the same reason).
+    /// The message drops Java's "exception" wording per CLAUDE.md §2.
     #[tokio::test]
-    async fn commit_async_user_supplied_callback_with_exception_kafka() {
-        commit_async_callback_with_exception(KafkaError::illegal_state("Test exception")).await;
+    async fn commit_async_user_supplied_callback_with_error_kafka() {
+        commit_async_callback_with_error(Error::kafka("Test error")).await;
     }
 
     #[tokio::test]
-    async fn commit_async_user_supplied_callback_with_exception_group_authz() {
-        // Issue 23: must use `KafkaError::GroupAuthorization`, not a string-shaped
-        // `IllegalArgument`. Java's `@ParameterizedTest` second parameter is
+    async fn commit_async_user_supplied_callback_with_error_group_authz() {
+        // Issue 23: must use `Error::GroupAuthorization`, not a string-shaped
+        // `LocalIllegalArgument`. Java's `@ParameterizedTest` second parameter is
         // `GroupAuthorizationException` (`AsyncKafkaConsumerTest.java:342-356`).
-        commit_async_callback_with_exception(KafkaError::group_authorization("test-group")).await;
+        commit_async_callback_with_error(Error::group_authorization("test-group")).await;
     }
 
-    async fn commit_async_callback_with_exception(injected: KafkaError) {
+    async fn commit_async_callback_with_error(injected: Error) {
         use std::sync::atomic::AtomicUsize;
         struct RecordingCallback {
             saw_error: Arc<std::sync::Mutex<Option<String>>>,
@@ -7071,11 +9556,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl crate::consumer::OffsetCommitCallback for RecordingCallback {
-            async fn on_complete(
-                &self,
-                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-                error: Option<&KafkaError>,
-            ) {
+            async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
                 if let Some(e) = error {
                     *self.saw_error.lock().unwrap() = Some(format!("{e}"));
                 }
@@ -7092,7 +9573,7 @@ mod tests {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::CommitAsync { handle, offsets_ready, .. } = env.event {
                     offsets_ready.complete(());
-                    handle.complete_exceptionally(injected_clone.clone());
+                    handle.complete_with_error(injected_clone.clone());
                     return true;
                 }
             }
@@ -7323,14 +9804,14 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for CountingListener {
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.revoked.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.lost.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -7382,14 +9863,14 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for CountingListener {
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.revoked.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.lost.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -7433,14 +9914,14 @@ mod tests {
         }
         #[async_trait]
         impl ConsumerRebalanceListener for CountingListener {
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.revoked.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 self.lost.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -7488,7 +9969,7 @@ mod tests {
     }
 
     /// After `close`, every async public API errors with
-    /// `IllegalState` because `ensure_open()` short-circuits. Mirrors
+    /// `LocalIllegalState` because `ensure_open()` short-circuits. Mirrors
     /// Java's `testShouldThrowAfterClose` (every public method
     /// asserted to throw post-close). Issue 20 expanded: covers every
     /// blocking-style API on `AsyncKafkaConsumer`, not just two.
@@ -7529,7 +10010,7 @@ mod tests {
         macro_rules! assert_closed {
             ($name:expr, $expr:expr) => {{
                 let err = $expr.expect_err(concat!($name, ": must err"));
-                assert!(matches!(err, KafkaError::IllegalState(_)), "{}: {err:?}", $name);
+                assert!(matches!(err, Error::LocalIllegalState(_)), "{}: {err:?}", $name);
             }};
         }
 
@@ -7661,7 +10142,7 @@ mod tests {
     // SKIPs (commit 10 batch):
     //   - testFailConstructor — PLAN deferral #5 (Supplier-style ctor
     //     failure paths don't translate; bad-config path observed via
-    //     `KafkaError` returned from `new_consumer`).
+    //     `Error` returned from `new_consumer`).
     //   - testCloseInvokesStreamsRebalanceListener* /
     //     testCloseWrapsStreamsRebalanceListenerException — PLAN
     //     deferral #2 (Streams out of scope per §20).
@@ -7760,11 +10241,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl crate::consumer::OffsetCommitCallback for ClosingCallback {
-            async fn on_complete(
-                &self,
-                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-                _error: Option<&KafkaError>,
-            ) {
+            async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, _error: Option<&Error>) {
                 self.invoked.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -7966,41 +10443,41 @@ mod tests {
     /// When the `ResetOffsetEvent` is completed exceptionally with a
     /// timeout, `seek_to_beginning` surfaces the error.
     #[tokio::test]
-    async fn seek_to_beginning_propagates_event_exception() {
+    async fn seek_to_beginning_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("test".to_string(), 0);
 
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ResetOffset { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::timeout("test timeout"));
+                    handle.complete_with_error(Error::timeout("test timeout"));
                     return;
                 }
             }
         });
 
         let err = consumer.seek_to_beginning(&[tp]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::Timeout(_)), "unexpected err: {err:?}");
         drainer.await.expect("task ok");
     }
 
     /// Java: `testSeekToEndWithException` (Java line 1836-1842). Symmetric.
     #[tokio::test]
-    async fn seek_to_end_propagates_event_exception() {
+    async fn seek_to_end_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("test".to_string(), 0);
 
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ResetOffset { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::timeout("test timeout"));
+                    handle.complete_with_error(Error::timeout("test timeout"));
                     return;
                 }
             }
         });
 
         let err = consumer.seek_to_end(&[tp]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::Timeout(_)), "unexpected err: {err:?}");
         drainer.await.expect("task ok");
     }
 
@@ -8121,14 +10598,14 @@ mod tests {
     /// (Java line 884-897). The `ListOffsetsEvent` completes
     /// exceptionally and the error propagates.
     #[tokio::test]
-    async fn beginning_offsets_propagates_event_exception() {
+    async fn beginning_offsets_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("t0".to_string(), 0);
 
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "Unexpected failure processing List Offsets event",
                     ));
                     return;
@@ -8140,10 +10617,7 @@ mod tests {
             .beginning_offsets_timeout(&[tp], Duration::from_millis(100))
             .await
             .expect_err("must err");
-        assert!(
-            !matches!(err, KafkaError::Timeout(_)),
-            "non-timeout err propagates, got {err:?}"
-        );
+        assert!(!matches!(err, Error::Timeout(_)), "non-timeout err propagates, got {err:?}");
         drainer.await.expect("task ok");
     }
 
@@ -8159,7 +10633,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::timeout(
+                    handle.complete_with_error(Error::timeout(
                         "Event did not complete in time and was expired by the reaper",
                     ));
                     return;
@@ -8172,8 +10646,8 @@ mod tests {
             .await
             .expect_err("must err");
         match err {
-            KafkaError::Timeout(msg) => {
-                assert_eq!(msg, "Failed to get offsets by times in 100ms");
+            Error::Timeout(msg) => {
+                assert_eq!(msg.message(), "Failed to get offsets by times in 100ms");
             },
             other => panic!("expected Timeout, got {other:?}"),
         }
@@ -8192,7 +10666,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::timeout(
+                    handle.complete_with_error(Error::timeout(
                         "Event did not complete in time and was expired by the reaper",
                     ));
                     return;
@@ -8205,8 +10679,8 @@ mod tests {
             .await
             .expect_err("must err");
         match err {
-            KafkaError::Timeout(msg) => {
-                assert_eq!(msg, "Failed to get offsets by times in 250ms");
+            Error::Timeout(msg) => {
+                assert_eq!(msg.message(), "Failed to get offsets by times in 250ms");
             },
             other => panic!("expected Timeout, got {other:?}"),
         }
@@ -8280,7 +10754,7 @@ mod tests {
                 .await
                 .expect_err("negative target rejected");
             assert!(
-                matches!(err, KafkaError::IllegalArgument(ref m) if m.contains("negative")),
+                matches!(err, Error::LocalIllegalArgument(ref m) if m.message().contains("negative")),
                 "expected IllegalArgument with 'negative', got {err:?}"
             );
         }
@@ -8299,7 +10773,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(KafkaError::timeout(
+                    handle.complete_with_error(Error::timeout(
                         "Event did not complete in time and was expired by the reaper",
                     ));
                     return;
@@ -8312,8 +10786,8 @@ mod tests {
             .await
             .expect_err("must err");
         match err {
-            KafkaError::Timeout(msg) => {
-                assert_eq!(msg, "Failed to get offsets by times in 100ms");
+            Error::Timeout(msg) => {
+                assert_eq!(msg.message(), "Failed to get offsets by times in 100ms");
             },
             other => panic!("expected Timeout, got {other:?}"),
         }
@@ -8338,7 +10812,7 @@ mod tests {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
                     saw_flag.store(true, Ordering::SeqCst);
-                    handle.complete_exceptionally(KafkaError::timeout("bg-side timeout"));
+                    handle.complete_with_error(Error::timeout("bg-side timeout"));
                     return;
                 }
             }
@@ -8348,7 +10822,7 @@ mod tests {
             .beginning_offsets_timeout(&[tp], Duration::from_millis(1))
             .await
             .expect_err("must err");
-        assert!(matches!(err, KafkaError::Timeout(_)), "got {err:?}");
+        assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
         drainer.await.expect("drainer ok");
         assert!(saw_list_offsets.load(Ordering::SeqCst), "ListOffsets event must be enqueued");
     }
@@ -8433,7 +10907,7 @@ mod tests {
             .process_background_events_until::<()>(receiver, deadline, |_| false, "drain helper timeout", false)
             .await
             .expect_err("must time out");
-        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::Timeout(_)), "unexpected err: {err:?}");
     }
 
     /// Compile-time check: `AsyncKafkaConsumer<K, V>` is `Consumer<K, V>`.
@@ -8543,7 +11017,7 @@ mod tests {
     }
 
     /// A panic inside the dedicated bg thread is mapped to the SAME
-    /// `KafkaError::illegal_state("Consumer network thread terminated
+    /// `Error::local_illegal_state("Consumer network thread terminated
     /// with error: ...")` shape as the `Spawned` JoinError path.
     #[tokio::test]
     async fn dedicated_thread_panic_maps_to_illegal_state() {
@@ -8566,13 +11040,146 @@ mod tests {
             .await
             .expect("await_join must not hang on panic");
         match result {
-            Err(KafkaError::IllegalState(msg)) => {
+            Err(Error::LocalIllegalState(msg)) => {
                 assert!(
-                    msg.contains("Consumer network thread terminated with error"),
+                    msg.message().contains("Consumer network thread terminated with error"),
                     "unexpected message: {msg}"
                 );
             },
             other => panic!("expected IllegalState on thread panic, got {other:?}"),
         }
+    }
+
+    /// Java's `initializeGroupMetadata` rejects a present-but-EMPTY `group.id`
+    /// before building anything
+    /// (`AsyncKafkaConsumer.java:747-757`), and the constructor's
+    /// `catch (Throwable t)` then wraps it (`:509-517`).
+    ///
+    /// Accepting it leaves the consumer internally inconsistent: `Some("")` is
+    /// "in a group" for the coordinator / commit / heartbeat / membership
+    /// wiring but "not in a group" for `return_error_if_group_id_not_defined`, so
+    /// `FindCoordinator` and `ConsumerGroupHeartbeat` go on the wire with an
+    /// empty group id while `commit_sync()` reports `InvalidGroupId`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_group_id_is_rejected_at_construction() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.id".to_string(), String::new()),
+        ]);
+        let config = ConsumerConfig::from_properties(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an empty group.id must fail construction");
+
+        // Wrapped as Java wraps every constructor failure.
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err.source().expect("the InvalidGroupId is the cause");
+        assert_eq!(cause.error(), crate::common::protocol::Errors::InvalidGroupId);
+        assert_eq!(
+            "The configured group.id should not be an empty string or whitespace.",
+            cause.message()
+        );
+    }
+
+    /// A `group.id` that is absent, or non-empty, still constructs — so the
+    /// check above cannot be an unconditional rejection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_empty_and_absent_group_id_still_construct() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        for group_id in [None, Some("a-group")] {
+            let mut props = HashMap::from([("bootstrap.servers".to_string(), "127.0.0.1:1".to_string())]);
+            if let Some(g) = group_id {
+                props.insert("group.id".to_string(), g.to_string());
+            }
+            let config = ConsumerConfig::from_properties(&props).expect("config validates");
+            let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+                config,
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .unwrap_or_else(|e| panic!("group_id={group_id:?} must construct, got {e}"));
+            let _ = consumer.close().await;
+        }
+    }
+
+    /// Java's `close` wraps whatever the close steps recorded:
+    ///
+    /// ```java
+    /// throw new KafkaException("Failed to close kafka consumer", exception);
+    /// ```
+    /// (`AsyncKafkaConsumer.java:1586`).
+    ///
+    /// This is what makes `catch (KafkaException e)` around `close()` — the
+    /// canonical Java idiom — reliable. Returning the recorded error raw breaks
+    /// it whenever that error is outside the `KafkaException` hierarchy, which
+    /// the flat `Error` enum makes reachable (an `LocalIllegalState` from the close
+    /// path answers `false` to `is_kafka_error()`).
+    #[tokio::test]
+    async fn close_wraps_the_first_error_as_failed_to_close_kafka_consumer() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Fail the leave-group step with an error that is NOT a
+        // `KafkaException` in Java terms, so the wrap is observable in the
+        // hierarchy answer and not only in the message.
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete_with_error(Error::local_illegal_state(
+                            "Consumer background task is no longer running.",
+                        ));
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let err = consumer.close().await.expect_err("the failed step must surface");
+        drop(drainer);
+
+        assert_eq!("Failed to close kafka consumer", err.message());
+        assert!(err.is_kafka_error(), "Java guarantees the caller a KafkaException: {err:?}");
+        let cause = err.source().expect("the recorded error is the cause");
+        assert!(
+            matches!(cause, Error::LocalIllegalState(_)),
+            "the original error must be the cause, got {cause:?}"
+        );
+        assert_eq!("Consumer background task is no longer running.", cause.message());
+        // The consumer is still marked closed — the wrap happens after the
+        // state flip, as in Java.
+        assert!(consumer.is_closed());
     }
 }

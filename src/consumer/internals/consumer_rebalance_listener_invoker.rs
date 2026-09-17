@@ -41,11 +41,15 @@
 //! `SubscriptionState` mutex guard before invoking the listener — see
 //! `consumer-threading.md` §16.
 //!
-//! # Metrics (deferred)
+//! # Metrics
 //!
-//! Java records partitions-revoked / assigned / lost latency via
-//! `RebalanceCallbackMetricsManager`. Per Phase 11 PLAN.md deferral #1
-//! (AsyncConsumerMetrics out of scope), metrics are dropped here.
+//! Java records partitions-revoked / assigned / lost callback latency via
+//! `RebalanceCallbackMetricsManager`. Phase M5 wires this: the invoker holds an
+//! optional [`RebalanceCallbackMetricsManager`] + a metrics `Time` clock,
+//! captures `start` before the listener `.await`, and on success records
+//! `now - start` (matching Java, which records only after the listener returns
+//! and skips the record call on an exception). `None` → no recording (tests
+//! that don't exercise metrics); the live consumer always sets it.
 //!
 //! # Exception handling
 //!
@@ -55,8 +59,8 @@
 //!   - catches every other `Exception` and returns it as the method's
 //!     return value (Java's signature is `Exception invokeXxx(...)`).
 //!
-//! The Rust translation collapses both paths to `Result<(), KafkaError>`:
-//!   - `KafkaError::Wakeup` and (Java's) `InterruptException` analogs
+//! The Rust translation collapses both paths to `Result<(), Error>`:
+//!   - `Error::Wakeup` and (Java's) `InterruptException` analogs
 //!     return as-is — the caller (`process_background_events` in
 //!     `AsyncKafkaConsumer`) distinguishes them when propagating to the
 //!     user.
@@ -70,8 +74,11 @@ use std::sync::{Arc, Mutex};
 
 use log::{error, info};
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::metrics::Time;
+use crate::common::metrics::time::SystemTime;
+use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
+use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 
 /// Invokes the user-supplied
@@ -85,16 +92,32 @@ use crate::consumer::internals::subscription_state::SubscriptionState;
 /// `on_partitions_revoked` / `on_partitions_lost`.
 pub(crate) struct ConsumerRebalanceListenerInvoker {
     subscriptions: Arc<Mutex<SubscriptionState>>,
-    // metrics_manager: RebalanceCallbackMetricsManager,  // DEFERRED (metrics)
+    /// Java: `RebalanceCallbackMetricsManager metricsManager`. `None` until
+    /// the consumer wires it (tests may leave it unset). When present,
+    /// per-callback latency is recorded on success.
+    metrics_manager: Option<RebalanceCallbackMetricsManager>,
+    /// Java: `Time time`. The metrics clock used to time callbacks. Defaults
+    /// to `SystemTime`; the consumer overrides it to share the metrics clock
+    /// when it wires up `metrics_manager`.
+    time: Arc<dyn Time>,
 }
 
 impl ConsumerRebalanceListenerInvoker {
-    /// Java's constructor. The `LogContext`, `Time`, and
-    /// `RebalanceCallbackMetricsManager` arguments are dropped:
-    ///   - log prefix is handled by the `log` crate;
-    ///   - timing for metrics is dropped per Phase 11 PLAN.md deferral #1.
+    /// Java's constructor. The `LogContext` argument is dropped (log prefix is
+    /// handled by the `log` crate). The `RebalanceCallbackMetricsManager` and
+    /// `Time` are wired post-construction via [`Self::set_metrics`] (M4
+    /// `set_*_metrics_manager` precedent); until then no latency is recorded.
     pub(crate) fn new(subscriptions: Arc<Mutex<SubscriptionState>>) -> Self {
-        Self { subscriptions }
+        Self { subscriptions, metrics_manager: None, time: Arc::new(SystemTime) }
+    }
+
+    /// Wire the callback-latency metrics manager and the clock used to time
+    /// callbacks. Java passes both into the constructor; we set them
+    /// post-construction so existing call sites/tests that don't exercise
+    /// metrics keep the no-arg `new`.
+    pub(crate) fn set_metrics(&mut self, metrics_manager: RebalanceCallbackMetricsManager, time: Arc<dyn Time>) {
+        self.metrics_manager = Some(metrics_manager);
+        self.time = time;
     }
 
     /// Java: `Exception invokePartitionsAssigned(SortedSet<TopicPartition>)`.
@@ -113,19 +136,27 @@ impl ConsumerRebalanceListenerInvoker {
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
         assigned_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         info!("Adding newly assigned partitions: {assigned_partitions:?}");
 
         // Java's path checks `listener.isPresent()` before invoking; in
         // Rust the caller already proved the listener exists by passing
         // an `Arc` reference. No guard needed here.
 
+        // Java: `final long startMs = time.milliseconds();` captured before
+        // the listener call; the latency is recorded only on success.
+        let start_ms = self.time.milliseconds();
         match listener.on_partitions_assigned(assigned_partitions).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(metrics) = &self.metrics_manager {
+                    metrics.record_partitions_assigned_latency(self.time.milliseconds() - start_ms);
+                }
+                Ok(())
+            },
             Err(err) => match &err {
-                // WakeupException + InterruptException propagate directly
-                // per Java's invoker contract.
-                KafkaError::Wakeup(_) => Err(err),
+                // Java: `catch (WakeupException | InterruptException e) { throw e; }`
+                // — both propagate directly, with no error log.
+                Error::Wakeup(_) | Error::Interrupt(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsAssigned for partitions {:?}: {}",
@@ -145,7 +176,7 @@ impl ConsumerRebalanceListenerInvoker {
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
         revoked_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         info!("Revoke previously assigned partitions {revoked_partitions:?}");
 
         // Java: `revokePausedPartitions.retainAll(revokedPartitions)` then
@@ -163,10 +194,18 @@ impl ConsumerRebalanceListenerInvoker {
             info!("The pause flag in partitions {revoke_paused:?} will be removed due to revocation.");
         }
 
+        let start_ms = self.time.milliseconds();
         match listener.on_partitions_revoked(revoked_partitions).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(metrics) = &self.metrics_manager {
+                    metrics.record_partitions_revoked_latency(self.time.milliseconds() - start_ms);
+                }
+                Ok(())
+            },
             Err(err) => match &err {
-                KafkaError::Wakeup(_) => Err(err),
+                // Java: `catch (WakeupException | InterruptException e) { throw e; }`
+                // — both propagate directly, with no error log.
+                Error::Wakeup(_) | Error::Interrupt(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsRevoked for partitions {:?}: {}",
@@ -183,7 +222,7 @@ impl ConsumerRebalanceListenerInvoker {
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
         lost_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         info!("Lost previously assigned partitions {lost_partitions:?}");
 
         let lost_paused: Vec<TopicPartition> = {
@@ -198,10 +237,18 @@ impl ConsumerRebalanceListenerInvoker {
             info!("The pause flag in partitions {lost_paused:?} will be removed due to partition lost.");
         }
 
+        let start_ms = self.time.milliseconds();
         match listener.on_partitions_lost(lost_partitions).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(metrics) = &self.metrics_manager {
+                    metrics.record_partitions_lost_latency(self.time.milliseconds() - start_ms);
+                }
+                Ok(())
+            },
             Err(err) => match &err {
-                KafkaError::Wakeup(_) => Err(err),
+                // Java: `catch (WakeupException | InterruptException e) { throw e; }`
+                // — both propagate directly, with no error log.
+                Error::Wakeup(_) | Error::Interrupt(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsLost for partitions {:?}: {}",
@@ -248,15 +295,15 @@ mod tests {
 
     #[async_trait]
     impl ConsumerRebalanceListener for CountingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.on_revoked.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.on_assigned.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.on_lost.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -269,30 +316,30 @@ mod tests {
 
     #[async_trait]
     impl ConsumerRebalanceListener for FailingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::illegal_state(self.err_msg))
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::local_illegal_state(self.err_msg))
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::illegal_state(self.err_msg))
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::local_illegal_state(self.err_msg))
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::illegal_state(self.err_msg))
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::local_illegal_state(self.err_msg))
         }
     }
 
-    /// Test listener that always returns `KafkaError::Wakeup`.
+    /// Test listener that always returns `Error::Wakeup`.
     struct WakingListener;
 
     #[async_trait]
     impl ConsumerRebalanceListener for WakingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::wakeup("woken"))
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::wakeup("woken"))
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::wakeup("woken"))
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::wakeup("woken"))
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::wakeup("woken"))
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::wakeup("woken"))
         }
     }
 
@@ -348,18 +395,18 @@ mod tests {
         let invoker = make_invoker();
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailingListener { err_msg: "kaboom" });
         let err = invoker.invoke_partitions_revoked(&listener, &[]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalState(ref msg) if msg == "kaboom"));
+        assert!(matches!(err, Error::LocalIllegalState(ref msg) if msg.message() == "kaboom"));
     }
 
     /// Java: `WakeupException` is re-thrown directly. The Rust analog
-    /// returns `Err(KafkaError::Wakeup)` exactly as the listener emitted
+    /// returns `Err(Error::Wakeup)` exactly as the listener emitted
     /// (no wrapping).
     #[tokio::test]
     async fn invoke_partitions_assigned_propagates_wakeup_unchanged() {
         let invoker = make_invoker();
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(WakingListener);
         let err = invoker.invoke_partitions_assigned(&listener, &[]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::Wakeup(_)));
+        assert!(matches!(err, Error::Wakeup(_)));
     }
 
     /// Issue 6 regression: `invokePartitionsRevoked` must exercise the
@@ -440,5 +487,102 @@ mod tests {
 
         invoker.invoke_partitions_revoked(&arc_listener, &[revoked]).await.expect("ok");
         assert_eq!(listener.on_revoked.load(Ordering::SeqCst), 1);
+    }
+
+    /// Listener that advances a shared `MockTime` by a fixed amount inside each
+    /// callback so the invoker measures a deterministic non-zero latency.
+    struct SleepingListener {
+        time: Arc<crate::common::metrics::time::mock::MockTime>,
+        sleep_ms: i64,
+    }
+
+    #[async_trait]
+    impl ConsumerRebalanceListener for SleepingListener {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            self.time.sleep(self.sleep_ms);
+            Ok(())
+        }
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            self.time.sleep(self.sleep_ms);
+            Ok(())
+        }
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            self.time.sleep(self.sleep_ms);
+            Ok(())
+        }
+    }
+
+    /// M5 regression: a wired invoker records per-callback latency on success
+    /// (Java's `recordPartitionsAssignedLatency` etc.). Drives a MockTime that
+    /// the listener advances during its callback, then asserts the recorded
+    /// avg/max via the `RebalanceCallbackMetricsManager`'s metrics. Without the
+    /// wiring the `start_ms` capture + record-on-success path is unexercised.
+    #[tokio::test]
+    async fn invoke_records_per_callback_latency_on_success() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::metrics::{Metrics, Time};
+        use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
+
+        let time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let manager = RebalanceCallbackMetricsManager::new(&metrics);
+        let assign_avg = manager.partition_assign_latency_avg.clone();
+        let revoke_max = manager.partition_revoke_latency_max.clone();
+        let lost_avg = manager.partition_lost_latency_avg.clone();
+
+        let mut invoker = ConsumerRebalanceListenerInvoker::new(make_subs());
+        invoker.set_metrics(manager, Arc::clone(&time) as Arc<dyn Time>);
+
+        let assigned_listener: Arc<dyn ConsumerRebalanceListener> =
+            Arc::new(SleepingListener { time: Arc::clone(&time), sleep_ms: 7 });
+        invoker.invoke_partitions_assigned(&assigned_listener, &[]).await.expect("ok");
+
+        let revoked_listener: Arc<dyn ConsumerRebalanceListener> =
+            Arc::new(SleepingListener { time: Arc::clone(&time), sleep_ms: 11 });
+        invoker.invoke_partitions_revoked(&revoked_listener, &[]).await.expect("ok");
+
+        let lost_listener: Arc<dyn ConsumerRebalanceListener> =
+            Arc::new(SleepingListener { time: Arc::clone(&time), sleep_ms: 13 });
+        invoker.invoke_partitions_lost(&lost_listener, &[]).await.expect("ok");
+
+        let v = |name: &crate::common::MetricName| metrics.metric(name).unwrap().metric_value().as_double().unwrap();
+        assert_eq!(7.0, v(&assign_avg));
+        assert_eq!(11.0, v(&revoke_max));
+        assert_eq!(13.0, v(&lost_avg));
+    }
+
+    /// M5 regression: a failing listener does NOT record latency (Java skips
+    /// the `record*` call when the callback throws — the record is reached only
+    /// after a successful return).
+    #[tokio::test]
+    async fn invoke_does_not_record_latency_on_error() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::metrics::{Metrics, Time};
+        use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
+
+        let time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let manager = RebalanceCallbackMetricsManager::new(&metrics);
+        let assign_avg = manager.partition_assign_latency_avg.clone();
+
+        let mut invoker = ConsumerRebalanceListenerInvoker::new(make_subs());
+        invoker.set_metrics(manager, Arc::clone(&time) as Arc<dyn Time>);
+
+        let failing: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailingListener { err_msg: "kaboom" });
+        invoker.invoke_partitions_assigned(&failing, &[]).await.expect_err("must err");
+
+        // No record on the error path — the Avg metric has no samples and
+        // reports NaN (Java's `Avg` returns NaN with zero count).
+        assert!(
+            metrics
+                .metric(&assign_avg)
+                .unwrap()
+                .metric_value()
+                .as_double()
+                .unwrap()
+                .is_nan()
+        );
     }
 }

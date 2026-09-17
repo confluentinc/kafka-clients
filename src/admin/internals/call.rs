@@ -23,25 +23,39 @@
 //! subclass) are modelled as boxed sync closures owned by the [`Call`].
 
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 
 use super::admin_metadata_manager::AdminMetadataManager;
 
 /// Builds the request body for a [`Call`] given the per-attempt timeout.
-pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBuilder>, KafkaError> + Send>;
+pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBuilder>, Error> + Send>;
 /// Processes a successful response for a [`Call`].
-pub(crate) type HandleResponseFn = Box<dyn FnMut(&ConcreteResponse, i64) -> HandleResult + Send>;
+///
+/// The third argument is the node the request was actually sent to — Java's
+/// `Call.curNode()`, which `KafkaAdminClient.newCall` hands to
+/// `AdminApiDriver.onResponse` (and from there to `AdminApiHandler`, which may
+/// store it in public API such as `ConsumerGroupDescription.coordinator()`).
+/// Because a closure cannot reach `Call`'s own fields the way a Java anonymous
+/// subclass reaches `curNode()`, the node is passed in explicitly. It is `None`
+/// only before the node provider has assigned one, which cannot happen on the
+/// response path.
+pub(crate) type HandleResponseFn = Box<dyn FnMut(&ConcreteResponse, i64, Option<&Node>) -> HandleResult + Send>;
 /// Terminal-failure hook for a [`Call`].
-pub(crate) type HandleFailureFn = Box<dyn FnMut(&KafkaError) + Send>;
+pub(crate) type HandleFailureFn = Box<dyn FnMut(&Error) + Send>;
 /// Unsupported-version hook; returns `true` iff the call should be retried after
 /// a protocol downgrade (without spending a retry).
 pub(crate) type HandleUnsupportedVersionFn = Box<dyn FnMut() -> bool + Send>;
 /// Retry hook invoked from `Call.fail`'s retriable branch (mirrors Java's
 /// `Call.maybeRetry`). Returns whether the runnable should re-queue this call or
 /// the hook has taken over (e.g. the [`AdminApiDriver`] re-issued requests).
-pub(crate) type MaybeRetryFn = Box<dyn FnMut(&KafkaError, i64) -> MaybeRetryOutcome + Send>;
+pub(crate) type MaybeRetryFn = Box<dyn FnMut(&Error, i64) -> MaybeRetryOutcome + Send>;
+/// Hook invoked by the polling loop when no node could be assigned to a call
+/// (mirrors Java's `Call.handleNodeUnavailable`). Returns `true` if the call
+/// took corrective action and should be removed from the pending queue, `false`
+/// to remain pending and retry node assignment on a later iteration.
+pub(crate) type HandleNodeUnavailableFn = Box<dyn FnMut(&AdminMetadataManager, i64) -> bool + Send>;
 
 /// The outcome of [`Call::maybe_retry`].
 pub(crate) enum MaybeRetryOutcome {
@@ -63,7 +77,7 @@ pub(crate) enum HandleResult {
     /// [`fail`](super::admin_client_runnable) (respecting backoff / retries).
     /// Mirrors an exception escaping Java's `handleResponse` (e.g.
     /// `NOT_CONTROLLER`).
-    Retry(KafkaError),
+    Retry(Error),
 }
 
 /// Strategy for selecting the target node of a [`Call`].
@@ -115,7 +129,7 @@ impl NodeProvider {
         metadata_manager: &AdminMetadataManager,
         client: &C,
         now: i64,
-    ) -> Result<Option<Node>, KafkaError> {
+    ) -> Result<Option<Node>, Error> {
         match self {
             NodeProvider::MetadataUpdate => {
                 // Mirrors MetadataUpdateNodeIdProvider (rebootstrap only applies
@@ -204,6 +218,30 @@ pub(crate) struct Call {
     /// retries lookup rather than re-sending to a dead node). `None` mirrors
     /// Java's default `maybeRetry` (re-queue into pending calls).
     maybe_retry_fn: Option<MaybeRetryFn>,
+    /// Optional override of `Call.handleNodeUnavailable` (used by the
+    /// `AdminApiDriver` partition-leader calls so a fulfillment target that has
+    /// left the cluster is sent back to the lookup stage). `None` mirrors Java's
+    /// default `handleNodeUnavailable`, which returns `false`.
+    handle_node_unavailable_fn: Option<HandleNodeUnavailableFn>,
+}
+
+impl std::fmt::Display for Call {
+    /// `Call.toString()` (`KafkaAdminClient.java:1001-1004`):
+    ///
+    /// ```java
+    /// return "Call(callName=" + callName + ", deadlineMs=" + deadlineMs +
+    ///     ", tries=" + tries + ", nextAllowedTryMs=" + nextAllowedTryMs + ")";
+    /// ```
+    ///
+    /// Java embeds this rendering in the `TimeoutException` message that
+    /// `handleTimeoutFailure` builds, so it is part of the observable text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Call(callName={}, deadlineMs={}, tries={}, nextAllowedTryMs={})",
+            self.call_name, self.deadline_ms, self.tries, self.next_allowed_try_ms
+        )
+    }
 }
 
 impl Call {
@@ -230,6 +268,7 @@ impl Call {
             handle_failure_fn,
             handle_unsupported_version_fn,
             maybe_retry_fn: None,
+            handle_node_unavailable_fn: None,
         }
     }
 
@@ -238,10 +277,27 @@ impl Call {
         self.maybe_retry_fn = Some(f);
     }
 
+    /// Sets the `handle_node_unavailable` override (mirrors overriding
+    /// `Call.handleNodeUnavailable`).
+    pub(crate) fn set_handle_node_unavailable_fn(&mut self, f: HandleNodeUnavailableFn) {
+        self.handle_node_unavailable_fn = Some(f);
+    }
+
+    /// Invoked by the polling loop when no node could be assigned to this call.
+    /// Returns `true` if the call took corrective action and should be removed
+    /// from the pending queue, `false` to remain pending. Mirrors
+    /// `Call.handleNodeUnavailable`; the default (no hook) returns `false`.
+    pub(crate) fn handle_node_unavailable(&mut self, metadata_manager: &AdminMetadataManager, now: i64) -> bool {
+        match self.handle_node_unavailable_fn.as_mut() {
+            Some(f) => f(metadata_manager, now),
+            None => false,
+        }
+    }
+
     /// Runs the retry hook from `fail`'s retriable branch, returning whether the
     /// runnable should re-queue this call. Mirrors `Call.maybeRetry`; the
     /// default (no hook) requeues.
-    pub(crate) fn maybe_retry(&mut self, error: &KafkaError, now: i64) -> MaybeRetryOutcome {
+    pub(crate) fn maybe_retry(&mut self, error: &Error, now: i64) -> MaybeRetryOutcome {
         match self.maybe_retry_fn.as_mut() {
             Some(f) => f(error, now),
             None => MaybeRetryOutcome::Requeue,
@@ -271,17 +327,22 @@ impl Call {
     }
 
     /// Builds the request body for this attempt.
-    pub(crate) fn create_request(&mut self, timeout_ms: i32) -> Result<Box<dyn RequestBuilder>, KafkaError> {
+    pub(crate) fn create_request(&mut self, timeout_ms: i32) -> Result<Box<dyn RequestBuilder>, Error> {
         (self.create_request_fn)(timeout_ms)
     }
 
     /// Processes a successful response.
+    ///
+    /// Passes `cur_node` to the hook, mirroring `driver.onResponse(..., this.curNode())`
+    /// in `KafkaAdminClient.newCall`. The fields are destructured so the hook's
+    /// `&mut` borrow and the node's shared borrow stay disjoint.
     pub(crate) fn handle_response(&mut self, response: &ConcreteResponse, now: i64) -> HandleResult {
-        (self.handle_response_fn)(response, now)
+        let Self { cur_node, handle_response_fn, .. } = self;
+        (handle_response_fn)(response, now, cur_node.as_ref())
     }
 
     /// Runs the terminal-failure hook.
-    pub(crate) fn handle_failure(&mut self, error: &KafkaError) {
+    pub(crate) fn handle_failure(&mut self, error: &Error) {
         (self.handle_failure_fn)(error);
     }
 

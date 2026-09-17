@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
 
@@ -29,10 +29,11 @@ use super::ReplicaInfo;
 /// Corresponds to `org.apache.kafka.clients.admin.LogDirDescription`.
 #[derive(Clone, Debug)]
 pub struct LogDirDescription {
-    error: Option<KafkaError>,
+    error: Option<Error>,
     replica_infos: HashMap<TopicPartition, ReplicaInfo>,
     total_bytes: Option<i64>,
     usable_bytes: Option<i64>,
+    is_cordoned: bool,
 }
 
 impl LogDirDescription {
@@ -40,26 +41,44 @@ impl LogDirDescription {
     ///
     /// Corresponds to the two-argument `LogDirDescription(ApiException, Map)`
     /// constructor.
-    pub fn new(error: Option<KafkaError>, replica_infos: HashMap<TopicPartition, ReplicaInfo>) -> Self {
-        Self::with_volume_bytes(error, replica_infos, UNKNOWN_VOLUME_BYTES, UNKNOWN_VOLUME_BYTES)
+    pub fn new(error: Option<Error>, replica_infos: HashMap<TopicPartition, ReplicaInfo>) -> Self {
+        Self::with_volume_bytes_and_cordoned(error, replica_infos, UNKNOWN_VOLUME_BYTES, UNKNOWN_VOLUME_BYTES, false)
     }
 
-    /// Creates a new `LogDirDescription` with the given raw volume sizes. A raw
-    /// value of `UNKNOWN_VOLUME_BYTES` (`-1`) maps to `None`.
+    /// Creates a new `LogDirDescription` with the given raw volume sizes and no
+    /// cordoning. A raw value of `UNKNOWN_VOLUME_BYTES` (`-1`) maps to `None`.
     ///
     /// Corresponds to the four-argument
     /// `LogDirDescription(ApiException, Map, long, long)` constructor.
     pub fn with_volume_bytes(
-        error: Option<KafkaError>,
+        error: Option<Error>,
         replica_infos: HashMap<TopicPartition, ReplicaInfo>,
         total_bytes: i64,
         usable_bytes: i64,
+    ) -> Self {
+        Self::with_volume_bytes_and_cordoned(error, replica_infos, total_bytes, usable_bytes, false)
+    }
+
+    /// Creates a new `LogDirDescription` with the given raw volume sizes and
+    /// cordoning flag. A raw value of `UNKNOWN_VOLUME_BYTES` (`-1`) maps to
+    /// `None`.
+    ///
+    /// Corresponds to the five-argument
+    /// `LogDirDescription(ApiException, Map, long, long, boolean)` constructor
+    /// (KIP-1066).
+    pub fn with_volume_bytes_and_cordoned(
+        error: Option<Error>,
+        replica_infos: HashMap<TopicPartition, ReplicaInfo>,
+        total_bytes: i64,
+        usable_bytes: i64,
+        is_cordoned: bool,
     ) -> Self {
         Self {
             error,
             replica_infos,
             total_bytes: (total_bytes != UNKNOWN_VOLUME_BYTES).then_some(total_bytes),
             usable_bytes: (usable_bytes != UNKNOWN_VOLUME_BYTES).then_some(usable_bytes),
+            is_cordoned,
         }
     }
 
@@ -68,7 +87,7 @@ impl LogDirDescription {
     ///
     /// - `KafkaStorageError` — the log directory is offline.
     /// - `UnknownServerError` — the server experienced an unexpected error.
-    pub fn error(&self) -> Option<&KafkaError> {
+    pub fn error(&self) -> Option<&Error> {
         self.error.as_ref()
     }
 
@@ -89,14 +108,19 @@ impl LogDirDescription {
     pub fn usable_bytes(&self) -> Option<i64> {
         self.usable_bytes
     }
+
+    /// Whether this log directory is cordoned or not.
+    pub fn is_cordoned(&self) -> bool {
+        self.is_cordoned
+    }
 }
 
 impl std::fmt::Display for LogDirDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "LogDirDescription(replicaInfos={:?}, error={:?}, totalBytes={:?}, usableBytes={:?})",
-            self.replica_infos, self.error, self.total_bytes, self.usable_bytes
+            "LogDirDescription(replicaInfos={:?}, error={:?}, totalBytes={:?}, usableBytes={:?}, isCordoned={})",
+            self.replica_infos, self.error, self.total_bytes, self.usable_bytes, self.is_cordoned
         )
     }
 }
@@ -112,16 +136,23 @@ mod tests {
         assert!(d.error().is_none());
         assert_eq!(d.total_bytes(), None);
         assert_eq!(d.usable_bytes(), None);
+        assert!(!d.is_cordoned());
+    }
+
+    #[test]
+    fn cordoned_flag_is_carried() {
+        let d = LogDirDescription::with_volume_bytes_and_cordoned(None, HashMap::new(), -1, -1, true);
+        assert!(d.is_cordoned());
+        assert_eq!(d.total_bytes(), None);
+        // The four-arg constructor defaults `is_cordoned` to false.
+        let d2 = LogDirDescription::with_volume_bytes(None, HashMap::new(), 1, 2);
+        assert!(!d2.is_cordoned());
     }
 
     #[test]
     fn known_volume_bytes_are_present() {
-        let d = LogDirDescription::with_volume_bytes(
-            Some(KafkaError::new(Errors::KafkaStorageError)),
-            HashMap::new(),
-            123,
-            456,
-        );
+        let d =
+            LogDirDescription::with_volume_bytes(Some(Error::new(Errors::KafkaStorageError)), HashMap::new(), 123, 456);
         assert_eq!(d.error().unwrap().error(), Errors::KafkaStorageError);
         assert_eq!(d.total_bytes(), Some(123));
         assert_eq!(d.usable_bytes(), Some(456));

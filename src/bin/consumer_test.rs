@@ -28,7 +28,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{ConsumerConfig, new_consumer};
 
@@ -44,7 +44,7 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(1000);
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
         Ok(String::from_utf8_lossy(data).into_owned())
     }
 }
@@ -58,7 +58,7 @@ fn now_millis() -> u128 {
 /// Wraps `poll()` to also report how long the call took.
 async fn poll_with_timing(
     consumer: &mut Box<dyn confluent_kafka::consumer::Consumer<String, String>>,
-) -> Result<(confluent_kafka::consumer::ConsumerRecords<String, String>, Duration), KafkaError> {
+) -> Result<(confluent_kafka::consumer::ConsumerRecords<String, String>, Duration), Error> {
     let started = Instant::now();
     let records = consumer.poll(POLL_TIMEOUT).await?;
     Ok((records, started.elapsed()))

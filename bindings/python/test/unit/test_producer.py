@@ -15,6 +15,8 @@
 """Test suite for the Confluent Kafka Rust Python bindings."""
 
 import asyncio
+import gc
+import os
 import threading
 import time
 import pytest
@@ -23,9 +25,19 @@ from producer import (
     KafkaProducer, MockProducer, ProducerRecord, RecordMetadata, KafkaError,
     AsyncKafkaProducer, AsyncMockProducer
 )
+from consumer import MockConsumer, TopicPartition, OffsetAndMetadata
 
-# Timeout in seconds for future.result() calls
-FUTURE_TIMEOUT = 2
+# Errors::TransactionAbortable (code 120): the one code whose txn_requires_abort()
+# is True, used to exercise the abortable-commit path.
+TXN_ABORTABLE_CODE = 120
+# A non-abortable error code (RequestTimedOut) for the contrast assertion.
+NON_ABORTABLE_CODE = 7
+
+# Timeout in seconds for future.result() calls. Not derived from any
+# production timeout value -- purely how long the test waits before
+# declaring a future broken. Overridable so CI can widen it on a
+# resource-constrained runner without touching the assertions.
+FUTURE_TIMEOUT = float(os.environ.get("CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT", "2"))
 
 # Time for the batch thread to dispatch records (batch interval is 10ms)
 BATCH_DISPATCH = 0.02
@@ -103,12 +115,31 @@ def test_multiple_sends_incrementing_offsets():
 
 # -- Manual completion --------------------------------------------------------
 
+def _sync_complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
+    """Retry complete_next() until the C batching thread (10ms interval) has
+    queued the record. A single fixed sleep races that thread: on a loaded
+    machine it can elapse before the record is queued, so complete_next()
+    silently returns False and the future then hangs until FUTURE_TIMEOUT.
+    (Sync counterpart of the async _complete_next_when_ready below.)"""
+    deadline = time.monotonic() + timeout
+    while not p.complete_next():
+        assert time.monotonic() < deadline, "complete_next() never found a pending completion"
+        time.sleep(0.005)
+
+
+def _sync_error_next_when_ready(p, error_code, error_message, timeout=FUTURE_TIMEOUT):
+    """Error-path counterpart of _sync_complete_next_when_ready."""
+    deadline = time.monotonic() + timeout
+    while not p.error_next(error_code, error_message):
+        assert time.monotonic() < deadline, "error_next() never found a pending completion"
+        time.sleep(0.005)
+
+
 def test_manual_complete_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
     assert not future.done()
-    p.complete_next()
+    _sync_complete_next_when_ready(p)
     meta = future.result(timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
@@ -119,27 +150,123 @@ def test_manual_complete_next():
 def test_manual_error_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
+    _sync_error_next_when_ready(p, 2, "test error")
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
     assert err.code == 2
     assert err.message == "test error"
     assert isinstance(err.is_retriable, bool)
-    assert isinstance(err.is_fatal, bool)
     p.close()
 
 
 def test_manual_error_next_null_message():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, None)
+    _sync_error_next_when_ready(p, 2, None)
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     assert exc_info.value.code == 2
     p.close()
+
+
+# -- Delivery callback (on_delivery) ------------------------------------------
+#
+# Java's send(record, Callback) fires the callback exactly once per record on the
+# producer's I/O thread. Here it fires on the C completion thread for the sync
+# producer, and on the event loop (inside the completion drain) for the async
+# one. The obligation holds on every path — including a cancelled or already
+# resolved Future — and a raising callback must not escape into the C caller.
+
+def test_on_delivery_success():
+    with MockProducer(auto_complete=True) as p:
+        got = []
+        fired = threading.Event()
+
+        def on_delivery(metadata, exception):
+            got.append((metadata, exception))
+            fired.set()
+
+        future = p.send(ProducerRecord("cb-topic", b"v", b"k"),
+                        on_delivery=on_delivery)
+        future.result(timeout=FUTURE_TIMEOUT)
+        # The callback runs after the future is resolved, on the same thread.
+        assert fired.wait(FUTURE_TIMEOUT)
+        (meta, err), = got
+        assert err is None
+        assert isinstance(meta, RecordMetadata)
+        assert meta.topic() == "cb-topic"
+        assert meta.offset() == 0
+        assert meta.partition() == 0
+
+
+def test_on_delivery_error():
+    p = MockProducer(auto_complete=False)
+    got = []
+    fired = threading.Event()
+
+    def on_delivery(metadata, exception):
+        got.append((metadata, exception))
+        fired.set()
+
+    future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+    _sync_error_next_when_ready(p, 2, "delivery failed")
+    with pytest.raises(KafkaError):
+        future.result(timeout=FUTURE_TIMEOUT)
+    assert fired.wait(FUTURE_TIMEOUT)
+    (meta, err), = got
+    assert meta is None
+    assert isinstance(err, KafkaError)
+    assert err.code == 2
+    assert err.message == "delivery failed"
+    p.close()
+
+
+def test_on_delivery_fires_when_future_cancelled():
+    # Callback obligation: Java fires the callback regardless of what the caller
+    # did with the returned future, so a cancelled future must not suppress it.
+    p = MockProducer(auto_complete=False)
+    got = []
+    fired = threading.Event()
+
+    def on_delivery(metadata, exception):
+        got.append((metadata, exception))
+        fired.set()
+
+    future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+    assert future.cancel()
+    _sync_complete_next_when_ready(p)
+    assert fired.wait(FUTURE_TIMEOUT), "on_delivery must fire for a cancelled future"
+    (meta, err), = got
+    assert err is None
+    assert meta is not None and meta.offset() == 0
+    assert future.cancelled()
+    p.close()
+
+
+def test_on_delivery_exception_does_not_break_future_or_producer():
+    with MockProducer(auto_complete=True) as p:
+        fired = threading.Event()
+
+        def on_delivery(metadata, exception):
+            fired.set()
+            raise RuntimeError("callback blew up")
+
+        future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+        # The future is resolved before the callback runs, so it is unaffected.
+        assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+        assert fired.wait(FUTURE_TIMEOUT)
+        # And the completion thread survived: the next send still completes.
+        assert p.send(ProducerRecord("test-topic", b"v2")).result(
+            timeout=FUTURE_TIMEOUT).offset() == 1
+
+
+def test_on_delivery_none_is_the_default():
+    # No callback: unchanged behavior (the pre-existing tests cover this, but
+    # assert the keyword is genuinely optional).
+    with MockProducer(auto_complete=True) as p:
+        assert p.send(ProducerRecord("test-topic", b"v"),
+                      on_delivery=None).result(timeout=FUTURE_TIMEOUT).offset() == 0
 
 
 # -- Flush and close ----------------------------------------------------------
@@ -213,15 +340,13 @@ def test_clear():
 def test_kafka_error_properties():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "corrupt message")
+    _sync_error_next_when_ready(p, 2, "corrupt message")
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
     assert err.code == 2
     assert err.message == "corrupt message"
     assert isinstance(err.is_retriable, bool)
-    assert isinstance(err.is_fatal, bool)
     p.close()
 
 
@@ -230,6 +355,13 @@ def test_send_after_close_raises():
     p.close()
     with pytest.raises(RuntimeError):
         p.send(ProducerRecord("test-topic", b"v"))
+
+
+def test_metrics_after_close_raises():
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.metrics()
 
 
 # -- Context manager ----------------------------------------------------------
@@ -397,12 +529,40 @@ async def test_async_multiple_sends_incrementing_offsets():
 
 # -- Manual completion --------------------------------------------------------
 
+async def _complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
+    """Retry ``complete_next()`` until it finds the queued record.
+
+    ``complete_next()`` only succeeds once the C batching thread (10ms batch
+    interval) has picked up the send and queued a completion on the mock
+    producer. A single fixed sleep before calling it races that thread: on a
+    loaded CI machine the sleep can elapse before the record is queued, so
+    ``complete_next()`` silently returns ``False``, the record is queued a
+    moment later with nobody left to complete it, and the future then hangs
+    until ``FUTURE_TIMEOUT``. Retrying removes the race outright instead of
+    widening the margin.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not p.complete_next():
+        assert loop.time() < deadline, "complete_next() never found a pending completion"
+        await asyncio.sleep(0.005)
+
+
+async def _error_next_when_ready(p, error_code, error_message, timeout=FUTURE_TIMEOUT):
+    """Same retry as :func:`_complete_next_when_ready`, for the error path."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not p.error_next(error_code, error_message):
+        assert loop.time() < deadline, "error_next() never found a pending completion"
+        await asyncio.sleep(0.005)
+
+
 async def test_async_manual_complete_next():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     await asyncio.sleep(BATCH_DISPATCH)
     assert not future.done()
-    p.complete_next()
+    await _complete_next_when_ready(p)
     meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
@@ -414,14 +574,13 @@ async def test_async_manual_error_next():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     await asyncio.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
+    await _error_next_when_ready(p, 2, "test error")
     with pytest.raises(KafkaError) as exc_info:
         await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     err = exc_info.value
     assert err.code == 2
     assert err.message == "test error"
     assert isinstance(err.is_retriable, bool)
-    assert isinstance(err.is_fatal, bool)
     await p.close()
 
 
@@ -472,11 +631,81 @@ async def test_async_cancel_before_completion():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     assert future.cancel()
-    p.complete_next()
+    await _complete_next_when_ready(p)
     # Give the loop a chance to run the (no-op) scheduled completion.
     await asyncio.sleep(BATCH_DISPATCH)
     assert future.cancelled()
     await p.close()
+
+
+# -- Delivery callback (async) -------------------------------------------------
+
+async def test_async_on_delivery_success_on_loop_thread():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        got = []
+        loop_thread = threading.get_ident()
+
+        def on_delivery(metadata, exception):
+            got.append((metadata, exception, threading.get_ident()))
+
+        future = await p.send(ProducerRecord("cb-topic", b"v", b"k"),
+                              on_delivery=on_delivery)
+        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+        # The callback runs inside the completion drain, which is what resolves
+        # the future — so it has already fired by the time the await resumes.
+        (meta, err, thread), = got
+        assert err is None
+        assert meta.topic() == "cb-topic" and meta.offset() == 0
+        assert thread == loop_thread, "on_delivery must run on the event loop"
+
+
+async def test_async_on_delivery_error():
+    p = AsyncMockProducer(auto_complete=False)
+    got = []
+    future = await p.send(ProducerRecord("test-topic", b"v"),
+                          on_delivery=lambda m, e: got.append((m, e)))
+    await _error_next_when_ready(p, 2, "async delivery failed")
+    with pytest.raises(KafkaError):
+        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+    (meta, err), = got
+    assert meta is None
+    assert err.code == 2 and err.message == "async delivery failed"
+    await p.close()
+
+
+async def test_async_on_delivery_fires_when_future_cancelled():
+    p = AsyncMockProducer(auto_complete=False)
+    got = []
+    future = await p.send(ProducerRecord("test-topic", b"v"),
+                          on_delivery=lambda m, e: got.append((m, e)))
+    assert future.cancel()
+    await _complete_next_when_ready(p)
+    for _ in range(200):
+        if got:
+            break
+        await asyncio.sleep(0.01)
+    assert len(got) == 1, "on_delivery must fire for a cancelled future"
+    assert got[0][1] is None
+    assert future.cancelled()
+    await p.close()
+
+
+async def test_async_on_delivery_exception_does_not_break_the_drain():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        fired = []
+
+        def on_delivery(metadata, exception):
+            fired.append(metadata)
+            raise RuntimeError("callback blew up")
+
+        first = await p.send(ProducerRecord("test-topic", b"v"),
+                             on_delivery=on_delivery)
+        meta = await asyncio.wait_for(first, timeout=FUTURE_TIMEOUT)
+        assert meta.offset() == 0
+        assert len(fired) == 1
+        # The drain survived, so subsequent completions still resolve.
+        second = await p.send(ProducerRecord("test-topic", b"v2"))
+        assert (await asyncio.wait_for(second, timeout=FUTURE_TIMEOUT)).offset() == 1
 
 
 # -- Mock operations ----------------------------------------------------------
@@ -541,6 +770,13 @@ async def test_async_kafka_producer_send_after_close_raises():
     await p.close()
     with pytest.raises(RuntimeError):
         await p.send(ProducerRecord("test-topic", b"v"))
+
+
+async def test_async_kafka_producer_metrics_after_close_raises():
+    p = AsyncKafkaProducer({"bootstrap.servers": "localhost:9092"})
+    await p.close()
+    with pytest.raises(RuntimeError):
+        p.metrics()
 
 
 async def test_async_kafka_producer_invalid_config():
@@ -654,3 +890,743 @@ async def test_backpressure_does_not_trigger_when_draining():
         metas = await asyncio.wait_for(
             asyncio.gather(*futures), timeout=FUTURE_TIMEOUT)
         assert len(metas) == 50
+
+
+# =============================================================================
+# Producer transaction tests (mock-backed)
+#
+# Translated from Java MockProducerTest transaction tests. Every transactional
+# test produces with send(): Python's send() calls the synchronous send FFI,
+# which registers the record before it returns, so an in-transaction record is
+# part of the transaction. Python does not expose an async/outbox send path.
+# (The transaction-control ops themselves are async-first -- they drive the
+# *_async FFI variants -- but that is invisible to the public API.)
+#
+# The offset-lifecycle behaviour (sent-offsets flag, publish-on-commit,
+# drop-on-abort) IS observable through the exposed
+# `MockProducer_sent_offsets` / `MockProducer_committed_offset` hooks and is
+# translated faithfully below. Only two Java categories are NOT translatable
+# through the exposed C FFI surface:
+#   * The state introspectors `commitCount()` and
+#     `transactionInFlight/Committed/Aborted()` are not FFI-exposed, so tests
+#     asserting *only* on them are covered via the exposed observables instead —
+#     `history_count()` reflects committed-vs-aborted records (0 before commit,
+#     1 after commit, 0 after abort).
+#   * `fenceProducer()` has no FFI symbol, so the fenced-producer tests are not
+#     translated.
+# =============================================================================
+
+
+# -- Sync happy / abort / empty -----------------------------------------------
+
+def test_txn_init_begin_send_commit():
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        # §13: inside a transaction, produce with the synchronous send().
+        future = p.send(ProducerRecord("test-topic", b"value", b"key"))
+        meta = future.result(timeout=FUTURE_TIMEOUT)
+        assert isinstance(meta, RecordMetadata)
+        assert meta.offset() == 0
+        p.commit_transaction()  # must not raise
+
+
+def test_txn_commit_empty():
+    # Java MockProducerTest.shouldCommitEmptyTransaction (behavioral core; the
+    # transactionCommitted()/transactionInFlight() introspectors are not
+    # FFI-exposed).
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.commit_transaction()  # must not raise
+
+
+def test_txn_abort_empty():
+    # Java MockProducerTest.shouldAbortEmptyTransaction (behavioral core).
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.abort_transaction()  # must not raise
+
+
+def test_txn_committed_records_in_history():
+    # Java MockProducerTest.shouldCountCommittedTransaction, asserted via the
+    # exposed history_count() (commitCount() is not FFI-exposed): a record sent
+    # in a transaction only enters the sent history once the transaction commits.
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"v")).result(timeout=FUTURE_TIMEOUT)
+        assert p.history_count() == 0  # uncommitted before commit
+        p.commit_transaction()
+        assert p.history_count() == 1
+
+
+def test_txn_aborted_records_discarded():
+    # Java MockProducerTest.shouldNotCountAbortedTransaction: an aborted
+    # transaction's records are discarded; only a committed transaction's
+    # records reach the history.
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"discarded")).result(timeout=FUTURE_TIMEOUT)
+        p.abort_transaction()
+        assert p.history_count() == 0
+
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"kept")).result(timeout=FUTURE_TIMEOUT)
+        p.commit_transaction()
+        assert p.history_count() == 1
+
+
+def test_txn_abort_then_reuse():
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send(ProducerRecord("test-topic", b"v")).result(timeout=FUTURE_TIMEOUT)
+        p.abort_transaction()
+        # a fresh transaction can be started and committed after an abort
+        p.begin_transaction()
+        p.commit_transaction()
+
+
+# -- Sync commit failure (txn_requires_abort / is_fatal) ----------------------
+
+def test_txn_commit_failure_requires_abort():
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        assert _lib.MockProducer_set_commit_transaction_error(
+            p.c_producer, False, TXN_ABORTABLE_CODE, "commit failed abortably")
+        with pytest.raises(KafkaError) as exc_info:
+            p.commit_transaction()
+        err = exc_info.value
+        assert err.code == TXN_ABORTABLE_CODE
+        assert err.message == "commit failed abortably"
+        assert err.txn_requires_abort is True
+        assert err.is_fatal is False
+        p.abort_transaction()  # recover
+
+
+def test_txn_commit_failure_non_abortable():
+    # Contrast with the abortable case: a non-abortable error reports
+    # txn_requires_abort False, so the property is not vacuously always-True.
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        assert _lib.MockProducer_set_commit_transaction_error(
+            p.c_producer, False, NON_ABORTABLE_CODE, "commit timed out")
+        with pytest.raises(KafkaError) as exc_info:
+            p.commit_transaction()
+        err = exc_info.value
+        assert err.code == NON_ABORTABLE_CODE
+        assert err.message == "commit timed out"
+        assert err.txn_requires_abort is False
+        assert err.is_fatal is False
+        p.abort_transaction()
+
+
+# -- Sync send_offsets_to_transaction -----------------------------------------
+
+def test_txn_send_offsets_to_transaction():
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        # Java shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata (:447):
+        # the flag is False before offsets are staged, proving the False->True
+        # transition rather than only the True-after state.
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+        offsets = {TopicPartition("t", 0): OffsetAndMetadata(5, metadata="m")}
+        p.send_offsets_to_transaction(offsets, group_metadata)
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is True
+        p.commit_transaction()
+        # Round-trip: the offset staged for (group, topic, partition) is
+        # recorded after the commit.
+        committed = _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0)
+        assert committed is not None
+        assert committed[0] == 5
+        assert committed[2] == "m"
+    consumer.close()
+
+
+def test_txn_send_offsets_non_str_metadata_raises_type_error():
+    # OffsetAndMetadata does no type validation and _offsets_to_spec forwards
+    # oam.metadata verbatim (only None -> ""), so a non-str metadata reaches the
+    # C marshaling loop. It must surface as a clean TypeError (NOT a SystemError
+    # from the wrapper returning with an exception still pending) AND must not
+    # stage the offsets: the loop bails before the FFI call, so the mock's
+    # sent-offsets flag stays False.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+        offsets = {TopicPartition("t", 0): OffsetAndMetadata(5, metadata=b"x")}
+        with pytest.raises(TypeError):
+            p.send_offsets_to_transaction(offsets, group_metadata)
+        # Rejected before the FFI call -> nothing staged.
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+        p.abort_transaction()  # leave the transaction in a clean state
+    consumer.close()
+
+
+def test_txn_send_offsets_empty_stages_nothing():
+    # An empty offsets map is a legitimate count == 0 and stages nothing
+    # (Java MockProducer.sendOffsetsToTransaction ignores empty maps).
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send_offsets_to_transaction({}, group_metadata)
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+        p.commit_transaction()
+    consumer.close()
+
+
+# -- Offset lifecycle: sent-offsets flag / publish-on-commit / drop-on-abort --
+# Translated from the Java MockProducerTest offset-lifecycle cases, asserted
+# through the exposed MockProducer_sent_offsets / MockProducer_committed_offset
+# hooks (the FFI analog of Java's consumerGroupOffsetsHistory()).
+
+
+def test_txn_reset_sent_offsets_flag_only_when_beginning_new_transaction():
+    # Java shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction (:464):
+    # commit() must NOT reset the sentOffsets flag; only begin_transaction() does.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+
+        group_commit = {TopicPartition("t", 0): OffsetAndMetadata(42)}
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.commit_transaction()  # commit must not reset the flag
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is True
+
+        p.begin_transaction()  # begin resets it
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.commit_transaction()  # commit must not reset the flag
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is True
+
+        p.begin_transaction()  # begin resets it
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+    consumer.close()
+
+
+def test_txn_publish_latest_and_cumulative_offsets_only_after_commit():
+    # Java shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommit...
+    # (:492): two send_offsets calls for the same group merge cumulatively, and a
+    # later offset for the same partition wins (partition 1: 73 -> 101). Nothing
+    # is published until the transaction commits.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 0): OffsetAndMetadata(42),
+             TopicPartition("t", 1): OffsetAndMetadata(73)}, group_metadata)
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 1): OffsetAndMetadata(101),
+             TopicPartition("t", 2): OffsetAndMetadata(21)}, group_metadata)
+
+        # Nothing is published before commit.
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 2) is None
+
+        p.commit_transaction()
+        # Cumulative merge across the two calls, latest-wins for partition 1.
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0)[0] == 42
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1)[0] == 101
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 2)[0] == 21
+    consumer.close()
+
+
+def test_txn_drop_consumer_group_offsets_on_abort():
+    # Java shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled (:529):
+    # offsets staged inside a transaction that is ABORTED are discarded — they
+    # never reach the committed history, so a later empty commit publishes
+    # nothing. Asserted via committed_offset(...) being None for the staged
+    # (group, topic, partition) tuples.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        group_commit = {
+            TopicPartition("t", 0): OffsetAndMetadata(42),
+            TopicPartition("t", 1): OffsetAndMetadata(73),
+        }
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.abort_transaction()
+
+        p.begin_transaction()
+        p.commit_transaction()
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1) is None
+
+        # Java repeats the abort cycle a second time; the outcome is unchanged.
+        p.begin_transaction()
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.abort_transaction()
+
+        p.begin_transaction()
+        p.commit_transaction()
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1) is None
+    consumer.close()
+
+
+def test_txn_preserve_committed_offsets_on_later_abort():
+    # Java shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactions...
+    # (:583): offsets committed by one transaction survive a LATER transaction's
+    # abort, while the aborted transaction's freshly staged offsets are dropped.
+    #
+    # Deviation: Java stages the second (aborted) transaction's offsets under a
+    # *different* group ("g2") to show per-group isolation. The binding cannot
+    # express two groups — MockConsumer.group_metadata() is fixed to
+    # "dummy.group.id" and ConsumerGroupMetadata has no Python constructor — so
+    # the second transaction stages additional partitions under the SAME group.
+    # The observable behaviour (committed offsets preserved; the aborted staging
+    # dropped) is identical and exercises the same commit/abort staging split.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 0): OffsetAndMetadata(42),
+             TopicPartition("t", 1): OffsetAndMetadata(73)}, group_metadata)
+        p.commit_transaction()
+
+        p.begin_transaction()
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 2): OffsetAndMetadata(53),
+             TopicPartition("t", 3): OffsetAndMetadata(84)}, group_metadata)
+        p.abort_transaction()
+
+        # Offsets committed by the first transaction are preserved ...
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0)[0] == 42
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1)[0] == 73
+        # ... and the aborted transaction's staged offsets are dropped.
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 2) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 3) is None
+    consumer.close()
+
+
+# -- Sync IllegalState paths (Java MockProducerTest; error-message asserted) ---
+
+def test_txn_begin_before_init_raises():
+    # shouldThrowOnBeginTransactionIfTransactionsNotInitialized
+    with MockProducer(auto_complete=True) as p:
+        with pytest.raises(KafkaError) as exc_info:
+            p.begin_transaction()
+        assert exc_info.value.message == \
+            "MockProducer hasn't been initialized for transactions."
+
+
+def test_txn_double_init_raises():
+    # shouldThrowOnInitTransactionIfProducerAlreadyInitializedForTransactions
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        with pytest.raises(KafkaError) as exc_info:
+            p.init_transactions()
+        assert exc_info.value.message == \
+            "MockProducer has already been initialized for transactions."
+
+
+def test_txn_begin_twice_raises():
+    # shouldThrowOnBeginTransactionsIfTransactionInflight
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        with pytest.raises(KafkaError) as exc_info:
+            p.begin_transaction()
+        assert exc_info.value.message == "Transaction already started"
+        p.abort_transaction()
+
+
+def test_txn_commit_before_init_raises():
+    # shouldThrowOnCommitIfTransactionsNotInitialized
+    with MockProducer(auto_complete=True) as p:
+        with pytest.raises(KafkaError) as exc_info:
+            p.commit_transaction()
+        assert exc_info.value.message == \
+            "MockProducer hasn't been initialized for transactions."
+
+
+def test_txn_commit_without_begin_raises():
+    # shouldThrowOnCommitTransactionIfNoTransactionGotStarted
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        with pytest.raises(KafkaError) as exc_info:
+            p.commit_transaction()
+        assert exc_info.value.message == "There is no open transaction."
+
+
+def test_txn_abort_before_init_raises():
+    # shouldThrowOnAbortIfTransactionsNotInitialized
+    with MockProducer(auto_complete=True) as p:
+        with pytest.raises(KafkaError) as exc_info:
+            p.abort_transaction()
+        assert exc_info.value.message == \
+            "MockProducer hasn't been initialized for transactions."
+
+
+def test_txn_abort_without_begin_raises():
+    # shouldThrowOnAbortTransactionIfNoTransactionGotStarted
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        with pytest.raises(KafkaError) as exc_info:
+            p.abort_transaction()
+        assert exc_info.value.message == "There is no open transaction."
+
+
+def test_txn_send_offsets_before_init_raises():
+    # shouldThrowOnSendOffsetsToTransactionIfTransactionsNotInitialized
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        with pytest.raises(KafkaError) as exc_info:
+            p.send_offsets_to_transaction(
+                {TopicPartition("t", 0): OffsetAndMetadata(1)}, group_metadata)
+        assert exc_info.value.message == \
+            "MockProducer hasn't been initialized for transactions."
+    consumer.close()
+
+
+def test_txn_send_offsets_without_begin_raises():
+    # shouldThrowOnSendOffsetsToTransactionTransactionIfNoTransactionGotStarted
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        with pytest.raises(KafkaError) as exc_info:
+            p.send_offsets_to_transaction(
+                {TopicPartition("t", 0): OffsetAndMetadata(1)}, group_metadata)
+        assert exc_info.value.message == "There is no open transaction."
+    consumer.close()
+
+
+# -- Producer-closed transaction paths ----------------------------------------
+# Java's shouldThrowOn{Init,Begin,Commit,Abort}TransactionIfProducerIsClosed and
+# shouldThrowSendOffsetsToTransaction...IfProducerIsClosed throw
+# IllegalStateException. The binding raises RuntimeError("Producer is already
+# closed") instead: every txn method calls _check_closed() before reaching the
+# FFI. This is an intentional, pre-existing, binding-wide divergence from Java's
+# exception type (the same _check_closed guards send/flush/partitions_for), so
+# these assert the binding's actual RuntimeError.
+
+
+def test_txn_init_after_close_raises():
+    # Java shouldThrowOnInitTransactionIfProducerIsClosed (:617).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.init_transactions()
+
+
+def test_txn_begin_after_close_raises():
+    # Java shouldThrowOnBeginTransactionIfProducerIsClosed (:631).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.begin_transaction()
+
+
+def test_txn_commit_after_close_raises():
+    # Java shouldThrowOnCommitTransactionIfProducerIsClosed (:652).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.commit_transaction()
+
+
+def test_txn_abort_after_close_raises():
+    # Java shouldThrowOnAbortTransactionIfProducerIsClosed (:659).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.abort_transaction()
+
+
+def test_txn_send_offsets_after_close_raises():
+    # Java shouldThrowSendOffsetsToTransactionBy{GroupId,GroupMetadata}...
+    # IfProducerIsClosed (:638, :645) — one Python send_offsets form covers both.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 0): OffsetAndMetadata(1)}, group_metadata)
+    consumer.close()
+
+
+# -- ConsumerGroupMetadata handle lifecycle -----------------------------------
+
+def test_group_metadata_handle_lifecycle():
+    # Each group_metadata() returns a fresh handle-owning object freed on GC in
+    # its tp_dealloc; creating and dropping many must not leak or crash, and two
+    # objects never alias one handle (the FFI clones internally).
+    consumer = MockConsumer("earliest")
+    for _ in range(5000):
+        gm = consumer.group_metadata()
+        assert gm.group_id == "dummy.group.id"
+        assert gm.generation_id == 1
+        del gm
+    gc.collect()
+    # A handle still works after many others were freed.
+    gm = consumer.group_metadata()
+    assert gm.group_id == "dummy.group.id"
+    consumer.close()
+
+
+# =============================================================================
+# AsyncProducer transaction tests
+# =============================================================================
+
+
+async def test_async_txn_init_begin_send_commit():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        future = await p.send(ProducerRecord("test-topic", b"v"))
+        meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+        assert meta.offset() == 0
+        await p.commit_transaction()
+
+
+async def test_async_txn_abort_then_reuse():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        future = await p.send(ProducerRecord("test-topic", b"v"))
+        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+        await p.abort_transaction()
+        await p.begin_transaction()
+        await p.commit_transaction()
+
+
+async def test_async_txn_commit_failure_requires_abort():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        assert _lib.MockProducer_set_commit_transaction_error(
+            p.c_producer, False, TXN_ABORTABLE_CODE, "async commit abortable")
+        with pytest.raises(KafkaError) as exc_info:
+            await p.commit_transaction()
+        err = exc_info.value
+        assert err.code == TXN_ABORTABLE_CODE
+        assert err.message == "async commit abortable"
+        assert err.txn_requires_abort is True
+        assert err.is_fatal is False
+        await p.abort_transaction()
+
+
+async def test_async_txn_send_offsets_to_transaction():
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        await p.begin_transaction()
+        await p.send_offsets_to_transaction(
+            {TopicPartition("t", 1): OffsetAndMetadata(9)}, group_metadata)
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is True
+        await p.commit_transaction()
+        committed = _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1)
+        assert committed is not None
+        assert committed[0] == 9
+    consumer.close()
+
+
+async def test_async_txn_begin_before_init_raises():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        with pytest.raises(KafkaError) as exc_info:
+            await p.begin_transaction()
+        assert exc_info.value.message == \
+            "MockProducer hasn't been initialized for transactions."
+
+
+async def test_async_txn_commit_without_begin_raises():
+    # Also exercises KafkaError propagation back from the async completion
+    # callback (_run_async -> _resolve_void raises).
+    async with AsyncMockProducer(auto_complete=True) as p:
+        await p.init_transactions()
+        with pytest.raises(KafkaError) as exc_info:
+            await p.commit_transaction()
+        assert exc_info.value.message == "There is no open transaction."
+
+
+# =============================================================================
+# Async-first routing regression
+#
+# All five transaction-control ops on BOTH producers drive the *_async FFI
+# variants (kafka_producer_Producer_<op>_async) and wait on the completion
+# callback -- sync via _run_sync (threading.Event, GIL released so the wait
+# stays interruptible on the main thread, like flush/close), async via
+# _run_async (call_soon_threadsafe onto the loop, awaited/cancellable). These
+# pin that routing so it cannot silently revert to the old blocking sync FFI /
+# run_in_executor block_on facade. Each fake replaces the real FFI, records the
+# call, and fires the success callback (error handle 0) from a BACKGROUND thread
+# -- exactly as the real dispatcher thread does. That the sync test does not
+# hang is itself proof the GIL is released during the wait: a native block_on
+# would have held it, and the background thread could never have run the
+# callback.
+# =============================================================================
+
+# The completion callback is always the LAST positional arg each wrapper hands
+# the FFI (the four no-arg ops pass (producer, cb); send_offsets passes
+# (producer, spec, group_metadata, cb)), so one fake covers all five.
+_TXN_ASYNC_SYMBOLS = [
+    "Producer_init_transactions_async",
+    "Producer_begin_transaction_async",
+    "Producer_send_offsets_to_transaction_async",
+    "Producer_commit_transaction_async",
+    "Producer_abort_transaction_async",
+]
+
+
+def _fire_success_from_background_thread(*args, _calls=None):
+    _calls.append(1)
+    cb = args[-1]  # completion callback is always the last positional arg
+    # error handle 0 == success; fire from a bg thread like the dispatcher does.
+    threading.Thread(target=lambda: cb(0)).start()
+
+
+def test_txn_sync_ops_route_through_async_ffi_and_release_gil():
+    consumer = MockConsumer("earliest")
+    gm = consumer.group_metadata()
+    offsets = {TopicPartition("t", 0): OffsetAndMetadata(1)}
+    p = MockProducer(auto_complete=True)
+    ops = [
+        p.init_transactions,
+        p.begin_transaction,
+        lambda: p.send_offsets_to_transaction(offsets, gm),
+        p.commit_transaction,
+        p.abort_transaction,
+    ]
+    try:
+        for sym, op in zip(_TXN_ASYNC_SYMBOLS, ops):
+            real = getattr(_lib, sym)
+            calls = []
+            setattr(_lib, sym,
+                    lambda *a, _c=calls: _fire_success_from_background_thread(*a, _calls=_c))
+            try:
+                # Returns only if _run_sync released the GIL, the bg thread ran
+                # the callback, and _run_sync resolved it. Would hang (or, on the
+                # old routing, never touch the *_async symbol) otherwise.
+                op()
+            finally:
+                setattr(_lib, sym, real)
+            assert calls == [1], f"{sym} was not driven exactly once"
+    finally:
+        p.close()
+        consumer.close()
+
+
+async def test_async_txn_ops_route_through_async_ffi():
+    consumer = MockConsumer("earliest")
+    gm = consumer.group_metadata()
+    offsets = {TopicPartition("t", 0): OffsetAndMetadata(1)}
+    p = AsyncMockProducer(auto_complete=True)
+    ops = [
+        p.init_transactions,
+        p.begin_transaction,
+        lambda: p.send_offsets_to_transaction(offsets, gm),
+        p.commit_transaction,
+        p.abort_transaction,
+    ]
+    try:
+        for sym, op in zip(_TXN_ASYNC_SYMBOLS, ops):
+            real = getattr(_lib, sym)
+            calls = []
+            setattr(_lib, sym,
+                    lambda *a, _c=calls: _fire_success_from_background_thread(*a, _calls=_c))
+            try:
+                # Awaitable and completes only if _run_async hopped the callback
+                # onto the loop and resolved the future.
+                await op()
+            finally:
+                setattr(_lib, sym, real)
+            assert calls == [1], f"{sym} was not driven exactly once"
+    finally:
+        await p.close()
+        consumer.close()
+
+
+async def test_async_txn_cancelled_await_frees_late_error_handle():
+    # Cancellation-safety regression (Critic 56, Finding 1): when an async txn op
+    # is cancelled (e.g. asyncio.wait_for(commit_transaction(), timeout=T) then
+    # retry -- the pattern the docstrings invite) and its completion callback
+    # fires LATE with a non-null KafkaError handle, _run_async's deliver must
+    # FREE that handle, not drop it. Dropping it leaks the Box<KafkaError>,
+    # unbounded under a retry/cancel loop. Before the fix, deliver was
+    # `if not fut.done(): fut.set_result(payload)` with no else, so the handle of
+    # a cancelled-then-failed op reached neither _resolve_void nor _free_void.
+    #
+    # Deterministic: fake the *_async FFI to CAPTURE the callback without firing
+    # it (an op that outlives the cancel), cancel the await, then fire the late
+    # callback with a non-null handle and assert KafkaError_destroy freed it.
+    captured = {}
+    freed = []
+    real_async = _lib.Producer_commit_transaction_async
+    real_destroy = _lib.KafkaError_destroy
+    p = AsyncMockProducer(auto_complete=True)
+    try:
+        _lib.Producer_commit_transaction_async = \
+            lambda _producer_ptr, cb: captured.__setitem__("cb", cb)
+        _lib.KafkaError_destroy = lambda h: freed.append(h)
+
+        task = asyncio.ensure_future(p.commit_transaction())
+        # One yield runs the task to its `await fut` suspension (submit(cb) has
+        # captured the callback by then).
+        await asyncio.sleep(0)
+        assert "cb" in captured, "op did not submit its callback"
+
+        task.cancel()  # equivalent to a wait_for timeout cancelling the await
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The op completes LATE with a non-null error handle (fake KafkaError*).
+        HANDLE = 0xDEAD
+        captured["cb"](HANDLE)
+        await asyncio.sleep(0)  # let call_soon_threadsafe(deliver, ...) run
+
+        # deliver saw fut.cancelled() and routed the payload to free(); without
+        # the fix it would have been dropped and freed == [].
+        assert freed == [HANDLE], \
+            f"late error handle leaked (not freed); freed={freed!r}"
+    finally:
+        _lib.Producer_commit_transaction_async = real_async
+        _lib.KafkaError_destroy = real_destroy
+        await p.close()

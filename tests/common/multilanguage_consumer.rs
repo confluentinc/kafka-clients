@@ -19,10 +19,17 @@
 //! Scope: only the surface the C FFI / Python binding support is bridged
 //! (poll, subscribe(topics), assign, commit_sync, committed, position, seek,
 //! pause/resume, *_offsets, offsets_for_times, partitions_for, list_topics,
-//! the non-blocking state reads, wakeup, close). The binding bridges no
-//! callbacks, so listener/commit-callback/pattern-subscription methods return
-//! an `illegal_state` error — tests needing those are native-Rust-only and are
-//! never routed through this client.
+//! the non-blocking state reads, wakeup, close).
+//!
+//! The callback-taking trait methods (`subscribe_with_listener`,
+//! `commit_async_*_with_callback`) return an `illegal_state` error, and
+//! deliberately keep doing so even though the bindings *do* bridge those
+//! callbacks now: a `dyn ConsumerRebalanceListener` living in this process
+//! cannot be handed to a server in another one. Callback coverage for the gRPC
+//! backends goes through [`crate::common::callback_log::ConsumerCallbackLog`]
+//! instead, which asks the server to register a listener built by its own
+//! binding and reads back what it observed. Regex pattern subscription remains
+//! unbridged entirely; tests needing it are native-Rust-only.
 //!
 //! The trait's blocking-in-Java methods are `async` and forward to a unary RPC
 //! that the server awaits. The handful of methods that are *sync* in the trait
@@ -38,11 +45,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
+use confluent_kafka::common::metrics::{ClosureGauge, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::common::{KafkaError, PartitionInfo, TopicPartition};
+use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
-    OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern, WakeupHandle,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -63,11 +71,7 @@ pub struct MultilanguageConsumer {
 impl MultilanguageConsumer {
     /// Connect to `channel` and create a server-side consumer from `config`
     /// (empty config selects a MockConsumer server-side).
-    pub async fn new(
-        channel: Channel,
-        config: HashMap<String, String>,
-        backend: &'static str,
-    ) -> Result<Self, KafkaError> {
+    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
         let client_id = config
             .get("client.id")
             .cloned()
@@ -84,16 +88,24 @@ impl MultilanguageConsumer {
         Ok(Self { consumer_id: response.consumer_id, client, backend, client_id })
     }
 
-    fn unsupported(&self, method: &str) -> KafkaError {
-        KafkaError::illegal_state(format!(
-            "{} is not supported on the {} gRPC multilanguage backend (the binding bridges no callbacks / pattern subscription)",
+    /// The server-local consumer id. Needed by
+    /// [`crate::common::callback_log::grpc::ConsumerLog`], which drives the
+    /// callback-registering RPCs and `GetCallbackLog` against the same
+    /// server-side consumer.
+    pub fn consumer_id(&self) -> u64 {
+        self.consumer_id
+    }
+
+    fn unsupported(&self, method: &str) -> Error {
+        Error::local_illegal_state(format!(
+            "{} is not supported on the {} gRPC multilanguage backend (an in-process callback cannot cross the wire — use ConsumerCallbackLog; pattern subscription is unbridged)",
             method, self.backend
         ))
     }
 
     // ── async RPC helpers (shared by the trait methods and the sync wrappers) ──
 
-    async fn status_rpc<Fut>(&self, fut: Fut) -> Result<(), KafkaError>
+    async fn status_rpc<Fut>(&self, fut: Fut) -> Result<(), Error>
     where
         Fut: std::future::Future<Output = Result<tonic::Response<proto::StatusResponse>, tonic::Status>>,
     {
@@ -104,19 +116,22 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn subscribe_rpc(&self, topics: Vec<String>) -> Result<(), KafkaError> {
+    async fn subscribe_rpc(&self, topics: Vec<String>) -> Result<(), Error> {
         let mut client = self.client.clone();
-        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics };
+        // with_listener stays false here: this is the plain subscribe(topics).
+        // The listener-registering variant lives on ConsumerCallbackLog, since
+        // the listener must be created by the server's own binding.
+        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics, with_listener: false };
         self.status_rpc(client.subscribe(req)).await
     }
 
-    async fn assign_rpc(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn assign_rpc(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req = proto::AssignRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
         self.status_rpc(client.assign(req)).await
     }
 
-    async fn tp_list_rpc(&self, partitions: &[TopicPartition], which: TpListOp) -> Result<(), KafkaError> {
+    async fn tp_list_rpc(&self, partitions: &[TopicPartition], which: TpListOp) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req =
             proto::TopicPartitionListRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
@@ -128,7 +143,7 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn poll_rpc(&self, timeout: Duration) -> Result<ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+    async fn poll_rpc(&self, timeout: Duration) -> Result<ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
         let mut client = self.client.clone();
         let req = proto::PollRequest { consumer_id: self.consumer_id, timeout_ms: timeout.as_millis() as i64 };
         let response = client
@@ -143,7 +158,7 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>) -> Result<(), KafkaError> {
+    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req = proto::CommitSyncRequest { consumer_id: self.consumer_id, offsets };
         self.status_rpc(client.commit_sync(req)).await
@@ -152,7 +167,7 @@ impl MultilanguageConsumer {
     async fn committed_rpc(
         &self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         let mut client = self.client.clone();
         let req = proto::CommittedRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
         let response = client
@@ -167,7 +182,7 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn position_rpc(&self, partition: &TopicPartition) -> Result<i64, KafkaError> {
+    async fn position_rpc(&self, partition: &TopicPartition) -> Result<i64, Error> {
         let mut client = self.client.clone();
         let req = proto::PositionRequest { consumer_id: self.consumer_id, partition: Some(tp_to_proto(partition)) };
         let response = client
@@ -186,7 +201,7 @@ impl MultilanguageConsumer {
         &self,
         partitions: &[TopicPartition],
         end: bool,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         let mut client = self.client.clone();
         let req =
             proto::TopicPartitionListRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
@@ -204,7 +219,7 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn partitions_for_rpc(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for_rpc(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let mut client = self.client.clone();
         let req = proto::ConsumerPartitionsForRequest { consumer_id: self.consumer_id, topic: topic.to_string() };
         let response = client
@@ -218,8 +233,8 @@ impl MultilanguageConsumer {
         Ok(response.partitions.into_iter().map(partition_info_from_proto).collect())
     }
 
-    fn empty_response(&self, rpc: &str) -> KafkaError {
-        KafkaError::illegal_state(format!("{} backend returned empty {} response", self.backend, rpc))
+    fn empty_response(&self, rpc: &str) -> Error {
+        Error::local_illegal_state(format!("{} backend returned empty {} response", self.backend, rpc))
     }
 
     /// Run an async RPC to completion from a sync trait method. Valid on the
@@ -318,12 +333,52 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         });
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        unimplemented!("wakeup_handle is not supported on the gRPC multilanguage backend")
+    fn handle(&self) -> ConsumerHandle {
+        // A `ConsumerHandle` can only be built by the client crate
+        // (`ConsumerHandle::for_async` / `for_mock` are `pub(crate)`), and this
+        // backend's consumer lives out-of-process behind gRPC, so there is no
+        // local state to hand out. Same stance as the `wakeup_handle()` this
+        // replaced. `wakeup()` itself IS supported — see the sync `wakeup` above,
+        // which issues a `Wakeup` RPC.
+        unimplemented!("handle() is not supported on the gRPC multilanguage backend; use wakeup() directly")
+    }
+
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        // Added to the `Consumer` trait by Milestone-9 Phase M7, and wired
+        // through to the backend's real registry over the `Metrics` RPC — this
+        // is a live consumer in another language, NOT a mock, so reporting an
+        // empty map would misreport its state.
+        //
+        // Each entry is rebuilt locally as a `ClosureGauge` returning the value
+        // the backend measured while serving the RPC. That is snapshot, not
+        // live, semantics — which is exactly what `Consumer::metrics`
+        // documents ("a point-in-time snapshot taken under the registry lock
+        // ... not a live view"). A live cross-process measurable would need an
+        // RPC per `metric_value()` read and is not what the trait promises.
+        let mut client = self.client.clone();
+        let id = self.consumer_id;
+        let backend = self.backend;
+        self.block(async move {
+            let resp = client
+                .metrics(proto::ConsumerIdRequest { consumer_id: id })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, backend))
+                .expect("metrics RPC failed")
+                .into_inner();
+            match resp.result {
+                Some(proto::metrics_response::Result::Metrics(list)) => {
+                    list.metrics.into_iter().map(metric_from_proto).collect()
+                },
+                Some(proto::metrics_response::Result::Error(e)) => {
+                    panic!("metrics failed on the {backend} backend: {}", kafka_error_from_proto(e))
+                },
+                None => HashMap::new(),
+            }
+        })
     }
 
     // ── subscription / assignment ──
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError> {
+    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.subscribe_rpc(topics).await
     }
 
@@ -331,11 +386,11 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         _topics: Vec<String>,
         _listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Err(self.unsupported("subscribe_with_listener"))
     }
 
-    async fn subscribe_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), KafkaError> {
+    async fn subscribe_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), Error> {
         Err(self.unsupported("subscribe_pattern"))
     }
 
@@ -343,38 +398,35 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         _pattern: SubscriptionPattern,
         _listener: Arc<dyn ConsumerRebalanceListener>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Err(self.unsupported("subscribe_pattern_with_listener"))
     }
 
-    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         self.assign_rpc(&partitions).await
     }
 
-    async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
+    async fn unsubscribe(&mut self) -> Result<(), Error> {
         let mut client = self.client.clone();
         self.status_rpc(client.unsubscribe(proto::ConsumerIdRequest { consumer_id: self.consumer_id }))
             .await
     }
 
     // ── poll ──
-    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+    async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
         self.poll_rpc(timeout).await
     }
 
     // ── commit ──
-    async fn commit_sync(&mut self) -> Result<(), KafkaError> {
+    async fn commit_sync(&mut self) -> Result<(), Error> {
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_sync_timeout(&mut self, _timeout: Duration) -> Result<(), KafkaError> {
+    async fn commit_sync_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_sync_offsets(
-        &mut self,
-        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    ) -> Result<(), KafkaError> {
+    async fn commit_sync_offsets(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         self.commit_rpc(offset_map_to_proto(&offsets)).await
     }
 
@@ -382,18 +434,18 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _timeout: Duration,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.commit_rpc(offset_map_to_proto(&offsets)).await
     }
 
-    async fn commit_async(&mut self) -> Result<(), KafkaError> {
+    async fn commit_async(&mut self) -> Result<(), Error> {
         // Mapped to a synchronous commit server-side; the offset ends up
         // committed. Tests that depend on async-not-yet-committed timing are
         // native-Rust-only and never reach this backend.
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), KafkaError> {
+    async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
         Err(self.unsupported("commit_async_with_callback"))
     }
 
@@ -401,12 +453,12 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _callback: Arc<dyn OffsetCommitCallback>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Err(self.unsupported("commit_async_offsets_with_callback"))
     }
 
     // ── seek ──
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
+    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req = proto::SeekRequest {
             consumer_id: self.consumer_id,
@@ -422,7 +474,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req = proto::SeekRequest {
             consumer_id: self.consumer_id,
@@ -434,27 +486,27 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.status_rpc(client.seek(req)).await
     }
 
-    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.tp_list_rpc(partitions, TpListOp::SeekToBeginning).await
     }
 
-    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.tp_list_rpc(partitions, TpListOp::SeekToEnd).await
     }
 
     // ── position / committed ──
-    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError> {
+    async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error> {
         self.position_rpc(partition).await
     }
 
-    async fn position_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, KafkaError> {
+    async fn position_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
         self.position_rpc(partition).await
     }
 
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         self.committed_rpc(partitions).await
     }
 
@@ -462,24 +514,20 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         self.committed_rpc(partitions).await
     }
 
     // ── metadata ──
-    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         self.partitions_for_rpc(topic).await
     }
 
-    async fn partitions_for_timeout(
-        &mut self,
-        topic: &str,
-        _timeout: Duration,
-    ) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for_timeout(&mut self, topic: &str, _timeout: Duration) -> Result<Vec<PartitionInfo>, Error> {
         self.partitions_for_rpc(topic).await
     }
 
-    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, KafkaError> {
+    async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
         let mut client = self.client.clone();
         let response = client
             .list_topics(proto::ConsumerIdRequest { consumer_id: self.consumer_id })
@@ -493,10 +541,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         }
     }
 
-    async fn list_topics_timeout(
-        &mut self,
-        _timeout: Duration,
-    ) -> Result<HashMap<String, Vec<PartitionInfo>>, KafkaError> {
+    async fn list_topics_timeout(&mut self, _timeout: Duration) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
         self.list_topics().await
     }
 
@@ -504,7 +549,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         let mut client = self.client.clone();
         let timestamps = timestamps_to_search
             .iter()
@@ -529,14 +574,14 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         self.offsets_for_times(timestamps_to_search).await
     }
 
     async fn beginning_offsets(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.long_offsets_rpc(partitions, false).await
     }
 
@@ -544,11 +589,11 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.long_offsets_rpc(partitions, false).await
     }
 
-    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.long_offsets_rpc(partitions, true).await
     }
 
@@ -556,31 +601,31 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, i64>, Error> {
         self.long_offsets_rpc(partitions, true).await
     }
 
     // ── flow control ──
-    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.tp_list_rpc(partitions, TpListOp::Pause).await
     }
 
-    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.tp_list_rpc(partitions, TpListOp::Resume).await
     }
 
-    async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), KafkaError> {
+    async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
         Err(self.unsupported("enforce_rebalance"))
     }
 
     // ── lifecycle ──
-    async fn close(&mut self) -> Result<(), KafkaError> {
+    async fn close(&mut self) -> Result<(), Error> {
         let mut client = self.client.clone();
         self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: None }))
             .await
     }
 
-    async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), KafkaError> {
+    async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
         // CloseOptions has no public timeout getter, and the server's close
         // ignores per-call timeouts anyway, so map to a plain close.
         let mut client = self.client.clone();
@@ -632,6 +677,36 @@ fn offset_map_from_proto(map: proto::OffsetMap) -> HashMap<TopicPartition, Offse
             Some((tp, offset_and_metadata_from_proto(e.offset?)))
         })
         .collect()
+}
+
+/// Rebuilds one `metrics()` entry from its proto form.
+///
+/// The measured value is wrapped in a [`ClosureGauge`] that returns the
+/// snapshotted reading, so the resulting [`KafkaMetric`] satisfies the trait's
+/// `Arc<KafkaMetric>` value type while preserving snapshot semantics (see
+/// `MultilanguageConsumer::metrics`). A `Gauge` provider is used for every kind,
+/// including `Double`: a `Measurable` would imply the value is re-derivable
+/// locally from live stat state, which it is not.
+fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
+    let tags: std::collections::BTreeMap<String, String> = m.tags.into_iter().collect();
+    let name = MetricName::new(m.name, m.group, m.description, tags);
+    // A `None` value means the backend sent no `value` oneof member; report 0.0
+    // rather than fabricating a kind.
+    let value = match m.value {
+        Some(proto::metric::Value::DoubleValue(d)) => MetricValue::Double(d),
+        Some(proto::metric::Value::StringValue(s)) => MetricValue::String(s),
+        Some(proto::metric::Value::LongValue(l)) => MetricValue::Long(l),
+        Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
+        None => MetricValue::Double(0.0),
+    };
+    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let metric = KafkaMetric::new(
+        name.clone(),
+        MetricValueProvider::Gauge(Box::new(gauge)),
+        Arc::new(MetricConfig::new()),
+        Arc::new(SystemTime),
+    );
+    (name, Arc::new(metric))
 }
 
 fn long_offset_map_from_proto(map: proto::LongOffsetMap) -> HashMap<TopicPartition, i64> {

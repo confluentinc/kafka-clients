@@ -18,9 +18,10 @@
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler`.
-//! The `AsyncConsumerMetrics.recordBackgroundEventQueueSize` calls are
-//! dropped per the Phase-5 PLAN ("Out of scope: AsyncConsumerMetrics
-//! instrumentation").
+//! The `AsyncConsumerMetrics.recordBackgroundEventQueueSize` call is wired
+//! in Phase M6 (via a shared `Arc<AtomicI64>` queue-depth mirror, since the
+//! tokio mpsc sender has no `len()`); it is recorded only when the metrics
+//! have been wired post-construction by the live consumer.
 //!
 //! # Sender-only by design
 //!
@@ -35,9 +36,13 @@
 //! As with [`super::application_event_handler::ApplicationEventHandler`],
 //! the channel is **unbounded** to match Java's `LinkedBlockingQueue`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use tokio::sync::mpsc;
 
-use crate::common::KafkaError;
+use crate::common::Error;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 
 use super::background_event::{BackgroundEvent, BackgroundEventEnvelope};
 
@@ -50,6 +55,15 @@ use super::background_event::{BackgroundEvent, BackgroundEventEnvelope};
 /// `drain_events` is not provided.
 pub(crate) struct BackgroundEventHandler {
     sender: mpsc::UnboundedSender<BackgroundEventEnvelope>,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent).
+    async_consumer_metrics: Option<Arc<AsyncConsumerMetrics>>,
+    /// Shared mirror of the background-event queue depth. Java reads
+    /// `backgroundEventQueue.size()`; the tokio mpsc sender exposes no
+    /// `len()`, so this `AtomicI64` is incremented here on enqueue and
+    /// reset to 0 by the app side's drain (`processBackgroundEvents`,
+    /// folding Java's `drainEvents` `recordBackgroundEventQueueSize(0)`).
+    queue_size: Option<Arc<AtomicI64>>,
 }
 
 impl BackgroundEventHandler {
@@ -57,19 +71,38 @@ impl BackgroundEventHandler {
     /// the app side owns the receiver and drains it via
     /// `process_background_events` in Phase 10.
     pub(crate) fn new(sender: mpsc::UnboundedSender<BackgroundEventEnvelope>) -> Self {
-        Self { sender }
+        Self { sender, async_consumer_metrics: None, queue_size: None }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` and shared queue-depth counter
+    /// post-construction (M4/M5 setter precedent).
+    pub(crate) fn set_async_consumer_metrics(
+        &mut self,
+        metrics: Arc<AsyncConsumerMetrics>,
+        queue_size: Arc<AtomicI64>,
+    ) {
+        self.async_consumer_metrics = Some(metrics);
+        self.queue_size = Some(queue_size);
     }
 
     /// Java: `add(BackgroundEvent event)`. Stamps `enqueued_ms` and
     /// sends.
     ///
-    /// Returns `Err(KafkaError::illegal_state(...))` if the receiver has
+    /// Returns `Err(Error::local_illegal_state(...))` if the receiver has
     /// already been dropped — equivalent to Java's `IllegalStateException`
     /// thrown by a closed queue.
-    pub(crate) fn add(&self, event: BackgroundEvent, now_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn add(&self, event: BackgroundEvent, now_ms: i64) -> Result<(), Error> {
         let envelope = BackgroundEventEnvelope { event, enqueued_ms: now_ms };
+        // Java records `backgroundEventQueue.size() + 1` before adding.
+        if let (Some(metrics), Some(queue_size)) = (&self.async_consumer_metrics, &self.queue_size) {
+            let new_size = queue_size.fetch_add(1, Ordering::SeqCst) + 1;
+            metrics.record_background_event_queue_size(new_size as i32);
+        }
         self.sender.send(envelope).map_err(|err| {
-            KafkaError::illegal_state(format!(
+            if let Some(queue_size) = &self.queue_size {
+                queue_size.fetch_sub(1, Ordering::SeqCst);
+            }
+            Error::local_illegal_state(format!(
                 "App-side background-event receiver is closed; cannot enqueue {}",
                 err.0.event.type_name()
             ))
@@ -96,31 +129,31 @@ mod tests {
         let handler = BackgroundEventHandler::new(tx);
 
         handler
-            .add(BackgroundEvent::Error { error: KafkaError::timeout("boom") }, 7)
+            .add(BackgroundEvent::Error { error: Error::timeout("boom") }, 7)
             .expect("send ok");
 
         let env = rx.recv().await.expect("got envelope");
         assert_eq!(env.enqueued_ms, 7);
         match env.event {
             BackgroundEvent::Error { error } => {
-                assert!(matches!(error, KafkaError::Timeout(_)));
+                assert!(matches!(error, Error::Timeout(_)));
             },
             other => panic!("unexpected variant {}", other.type_name()),
         }
     }
 
-    /// Verifies that a `ConsumerRebalanceListenerCallbackNeeded` event
-    /// carries its oneshot ack through the channel intact.
+    /// Verifies that a `PartitionsRemoved` event carries its oneshot ack
+    /// through the channel intact.
     #[tokio::test]
-    async fn callback_needed_event_round_trips_ack() {
+    async fn partitions_removed_event_round_trips_ack() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = BackgroundEventHandler::new(tx);
 
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         handler
             .add(
-                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
                 },
@@ -130,8 +163,8 @@ mod tests {
 
         let env = rx.recv().await.expect("got envelope");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions, vec![TopicPartition::new("t".to_string(), 0)]);
                 ack.send(Ok(())).expect("ack ok");
             },
@@ -147,8 +180,41 @@ mod tests {
         drop(rx);
         let handler = BackgroundEventHandler::new(tx);
         let err = handler
-            .add(BackgroundEvent::Error { error: KafkaError::timeout("x") }, 0)
+            .add(BackgroundEvent::Error { error: Error::timeout("x") }, 0)
             .expect_err("must fail");
-        assert!(matches!(err, KafkaError::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
+    }
+
+    /// M6 wiring: `add` records the background-event queue size against the
+    /// `AsyncConsumerMetrics` and bumps the shared queue-depth counter
+    /// (Java records `backgroundEventQueue.size() + 1` before adding).
+    #[tokio::test]
+    async fn add_records_queue_size_when_metrics_wired() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::Metrics;
+        use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let metrics = Arc::new(Metrics::new());
+        let acm = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), CONSUMER_METRIC_GROUP));
+        let queue_size = Arc::new(AtomicI64::new(0));
+
+        let mut handler = BackgroundEventHandler::new(tx);
+        handler.set_async_consumer_metrics(Arc::clone(&acm), Arc::clone(&queue_size));
+
+        handler
+            .add(BackgroundEvent::Error { error: Error::timeout("a") }, 0)
+            .expect("send ok");
+        handler
+            .add(BackgroundEvent::Error { error: Error::timeout("b") }, 0)
+            .expect("send ok");
+
+        assert_eq!(queue_size.load(Ordering::SeqCst), 2);
+        let mn = metrics.metric_name_group("background-event-queue-size", CONSUMER_METRIC_GROUP);
+        assert_eq!(metrics.metric(&mn).unwrap().metric_value().as_double(), Some(2.0));
+
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_some());
     }
 }

@@ -34,9 +34,13 @@
 //!     await is `select!`ing on the token". Whoever calls `.await` is
 //!     the active task; whoever calls `wakeup()` cancels it.
 //!   * Java's `DisabledWakeups` → "the current token has been replaced
-//!     with one that is permanently cancelled BUT we record the
-//!     disabled state so [`Self::wakeup`] / [`Self::rotate`] become
-//!     no-ops and `maybe_trigger_wakeup` does not throw".
+//!     with a fresh, UN-cancelled one — discarding any pending wakeup,
+//!     as Java's `pendingTask.set(...)` does — plus a recorded disabled
+//!     state so [`Self::wakeup`] / [`Self::rotate`] become no-ops and
+//!     `maybe_trigger_wakeup` does not throw". The replacement token
+//!     must not be cancelled: every `select!` arm here waits on
+//!     `cancelled()`, so a cancelled token would make each of them
+//!     complete instantly and spin instead of waiting.
 //!
 //! # Dead-code lint
 //!
@@ -55,7 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Cancellation primitive shared between the app side
 /// (`AsyncKafkaConsumer::wakeup()`) and the background task.
@@ -121,7 +125,7 @@ impl WakeupTrigger {
 
     /// Replace the current token with a fresh, un-cancelled one. Called
     /// by the app side after a public method returns
-    /// `KafkaError::wakeup(...)` — `consumer-threading.md` §11 explicitly
+    /// `Error::wakeup(...)` — `consumer-threading.md` §11 explicitly
     /// states this is the analog of Java's "throw `WakeupException`,
     /// then clear the volatile flag".
     pub(crate) fn rotate(&self) {
@@ -139,21 +143,44 @@ impl WakeupTrigger {
     /// Java's `disableWakeups()`. After this call, `wakeup()` and
     /// `rotate()` are no-ops and `maybe_trigger_wakeup()` will never
     /// return an error. Intended to be called by `close()`.
+    ///
+    /// A pending wakeup is **discarded**, not preserved. Java does this by
+    /// overwriting whatever the pending task was:
+    ///
+    /// ```java
+    /// public void disableWakeups() {
+    ///     pendingTask.set(new DisabledWakeups());
+    /// }
+    /// ```
+    ///
+    /// A `set` (not a compare-and-swap), so an outstanding `WakeupFuture`
+    /// is thrown away. Discarding it matters beyond parity: `select!` arms
+    /// on this side use `current_token().cancelled()`, and a cancelled
+    /// token completes that arm *immediately, every iteration*. Leaving one
+    /// in place turns every bounded wait into a spin — for the whole
+    /// `default.api.timeout.ms` on a concurrent handle op, or the close
+    /// timeout on the close path itself — because the `disabled` flag
+    /// silences `maybe_trigger_wakeup`'s escape hatch at the same time.
+    ///
+    /// The store is ordered before the token swap so no task can observe
+    /// the fresh token while still believing wakeups are live.
     pub(crate) fn disable(&self) {
         self.inner.disabled.store(true, Ordering::Release);
+        // Not `rotate()`: that returns early once `disabled` is set.
+        self.inner.sender.send_replace(CancellationToken::new());
     }
 
     /// Java's `maybeTriggerWakeup()` — synchronous check. Returns
-    /// `Err(KafkaError::wakeup(...))` if the current token has been
+    /// `Err(Error::wakeup(...))` if the current token has been
     /// cancelled (i.e. a prior `wakeup()` is pending). Does NOT consume
     /// the wakeup state — the caller is expected to [`Self::rotate`]
     /// after raising the error to the user.
-    pub(crate) fn maybe_trigger_wakeup(&self) -> Result<(), KafkaError> {
+    pub(crate) fn maybe_trigger_wakeup(&self) -> Result<(), Error> {
         if self.inner.disabled.load(Ordering::Acquire) {
             return Ok(());
         }
         if self.current_token().is_cancelled() {
-            return Err(KafkaError::wakeup("WakeupTrigger fired"));
+            return Err(Error::wakeup("WakeupTrigger fired"));
         }
         Ok(())
     }
@@ -209,7 +236,7 @@ mod tests {
         let trigger = WakeupTrigger::new();
         trigger.wakeup();
         let err = trigger.maybe_trigger_wakeup().expect_err("must err");
-        assert!(matches!(err, KafkaError::Wakeup(_)));
+        assert!(matches!(err, Error::Wakeup(_)));
     }
 
     /// Java `testManualTriggerWhenWakeupNotCalled`.
@@ -246,6 +273,40 @@ mod tests {
         trigger.wakeup();
         let res2 = timeout(Duration::from_millis(200), token.cancelled()).await;
         assert!(res2.is_err(), "disabled trigger must continue to be inert");
+    }
+
+    /// `disable()` must DISCARD a wakeup that is already pending, mirroring
+    /// Java's `pendingTask.set(new DisabledWakeups())` overwriting an
+    /// outstanding `WakeupFuture`.
+    ///
+    /// The sibling tests above all disable a *fresh* trigger, so none of them
+    /// reaches this case. It is the one that matters: `await_completion`
+    /// selects on `current_token().cancelled()`, and a cancelled token left in
+    /// place completes that arm immediately on every iteration while the
+    /// `disabled` flag simultaneously silences `maybe_trigger_wakeup`'s escape
+    /// — a spin for the whole remaining timeout rather than a bounded wait.
+    #[tokio::test]
+    async fn disable_discards_a_pending_wakeup() {
+        let trigger = WakeupTrigger::new();
+
+        // A wakeup lands BEFORE close() disables the trigger.
+        trigger.wakeup();
+        let stale = trigger.current_token();
+        assert!(stale.is_cancelled(), "precondition: the wakeup cancelled the token");
+
+        trigger.disable();
+
+        // The token now in effect must be a fresh, un-cancelled one.
+        let token = trigger.current_token();
+        assert!(!token.is_cancelled(), "disable must discard the pending wakeup");
+        assert!(
+            trigger.maybe_trigger_wakeup().is_ok(),
+            "no wakeup error may surface after disable"
+        );
+
+        // And a waiter on it must actually block rather than return at once.
+        let res = timeout(Duration::from_millis(200), token.cancelled()).await;
+        assert!(res.is_err(), "a bounded wait must not be short-circuited after disable");
     }
 
     /// `rotate()` swaps in a fresh token; the old token's cancellation

@@ -46,5 +46,7 @@ pub(crate) mod list_offsets_handler;
 pub(crate) mod list_transactions_handler;
 pub(crate) mod partition_leader_cache;
 pub(crate) mod partition_leader_strategy;
+#[cfg(test)]
+mod partition_leader_strategy_integration_test;
 pub(crate) mod remove_members_from_consumer_group_handler;
 pub(crate) mod static_broker_strategy;

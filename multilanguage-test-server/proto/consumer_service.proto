@@ -25,9 +25,17 @@
 // imported and reused.
 //
 // Scope: only the consumer surface the C FFI / Python binding support is
-// modeled. The binding deliberately bridges no callbacks, so there are NO
-// RPCs for ConsumerRebalanceListener, OffsetCommitCallback, or regex pattern
-// subscription — tests needing those stay native-Rust-only.
+// modeled. Both user callbacks ARE now bridged by the bindings, so they are
+// modeled here too — but as *flags plus a log* rather than as reverse RPCs:
+// SubscribeRequest.with_listener asks the server to register a real
+// ConsumerRebalanceListener, CommitAsyncRequest.with_callback a real
+// OffsetCommitCallback, and GetCallbackLog reads back what those callbacks
+// actually observed (see CallbackLogEntry in producer_service.proto for the
+// encoding, which both services share). A reverse callback RPC would only test
+// the harness's own plumbing; the log tests the binding.
+//
+// Still out of scope: regex pattern subscription (subscribe_pattern /
+// subscribe_pattern_with_listener) — tests needing it stay native-Rust-only.
 //
 // Like the producer service, blocking methods are awaited server-side: the
 // unary RPC response IS the resolved result (no future/streaming on the wire).
@@ -53,6 +61,11 @@ service ConsumerService {
 
   // Offset commit (empty offsets => commit current positions).
   rpc CommitSync(CommitSyncRequest) returns (StatusResponse);
+  // Asynchronous commit. Returns as soon as the commit is *initiated*; when
+  // with_callback is set the server registers a real OffsetCommitCallback whose
+  // invocations land in the callback log (see GetCallbackLog). The callback
+  // fires on a later Poll/CommitSync/Close, exactly as in Java.
+  rpc CommitAsync(CommitAsyncRequest) returns (StatusResponse);
   rpc Committed(CommittedRequest) returns (CommittedResponse);
   rpc Position(PositionRequest) returns (PositionResponse);
 
@@ -79,9 +92,18 @@ service ConsumerService {
   rpc Subscription(ConsumerIdRequest) returns (SubscriptionResponse);
   rpc Paused(ConsumerIdRequest) returns (TopicPartitionListResponse);
 
+  // Metrics snapshot.
+  rpc Metrics(ConsumerIdRequest) returns (MetricsResponse);
+
   // Signalling / lifecycle.
   rpc Wakeup(ConsumerIdRequest) returns (StatusResponse);
   rpc Close(ConsumerCloseRequest) returns (StatusResponse);
+
+  // Read (without clearing) the consumer's user-callback log — every rebalance
+  // listener and offset-commit callback invocation the server's binding has
+  // performed so far. CallbackLogEntry / CallbackLogResponse are defined in
+  // producer_service.proto and shared by both services.
+  rpc GetCallbackLog(CallbackLogRequest) returns (CallbackLogResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +155,15 @@ message ConsumerCloseRequest {
 message SubscribeRequest {
   uint64 consumer_id = 1;
   repeated string topics = 2;
+  // When true the server subscribes *with* a ConsumerRebalanceListener that
+  // appends "assigned" / "revoked" / "lost" entries to the consumer's callback
+  // log (GetCallbackLog); when false it calls the plain subscribe(topics).
+  //
+  // Registering a listener is per-subscribe: a later listener-less Subscribe
+  // releases it (matching SubscriptionState, which only clears the listener on
+  // a *replacing* subscribe — never on unsubscribe). Entries already logged are
+  // not affected.
+  bool with_listener = 3;
 }
 
 message AssignRequest {
@@ -208,6 +239,16 @@ message CommitSyncRequest {
   uint64 consumer_id = 1;
   // Empty => commit the current consumed positions; otherwise commit these.
   repeated OffsetMapEntry offsets = 2;
+}
+
+// Same offsets shape as CommitSyncRequest, plus the callback flag.
+message CommitAsyncRequest {
+  uint64 consumer_id = 1;
+  // Empty => commit the current consumed positions; otherwise commit these.
+  repeated OffsetMapEntry offsets = 2;
+  // When true the server passes a real OffsetCommitCallback that appends a
+  // "commit" entry to the consumer's callback log.
+  bool with_callback = 3;
 }
 
 message CommittedRequest {
@@ -325,4 +366,25 @@ message SubscriptionResponse {
     StringList topics = 1;
     KafkaError error = 2;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+//
+// `Metric`, `MetricList`, and `MetricsResponse` are shared with the producer
+// service and are defined in producer_service.proto (imported above), alongside
+// the other shared messages (KafkaError, Node, PartitionInfo, Header). The
+// consumer `Metrics` RPC above takes a `ConsumerIdRequest` and returns that
+// shared `MetricsResponse`.
+
+// ---------------------------------------------------------------------------
+// Callback log
+// ---------------------------------------------------------------------------
+
+// The response (CallbackLogResponse) and entry (CallbackLogEntry) messages are
+// declared in producer_service.proto and shared by both services; only the
+// request is service-specific because the log is keyed by consumer id here.
+message CallbackLogRequest {
+  uint64 consumer_id = 1;
 }

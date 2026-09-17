@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod check_bindings;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +25,8 @@ fn main() -> anyhow::Result<()> {
         Some("format") => format()?,
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
+        Some("generate-error-codes") => generate_error_codes()?,
+        Some("check-bindings") => check_bindings_task()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -71,6 +75,8 @@ fn format_check() -> anyhow::Result<()> {
 }
 
 fn check_generated() -> anyhow::Result<()> {
+    check_error_codes_up_to_date()?;
+
     println!("🔍 Checking generated code formatting...");
 
     let generated_files = find_generated_files()?;
@@ -90,6 +96,38 @@ fn check_generated() -> anyhow::Result<()> {
     }
 
     println!("✅ All generated code is properly formatted!");
+    Ok(())
+}
+
+/// Statically checks the hand-written CPython extension module for
+/// `Py_BuildValue` / `PyArg_Parse*` format-arity mismatches.
+///
+/// These are variadic calls: a format string one unit short of its argument
+/// list compiles without a warning and reads a garbage pointer at run time,
+/// and for every admin RPC that Java's `MockAdminClient` leaves unsupported
+/// the affected drain's success path is dead code in the test suite. So this
+/// class of defect has to be caught statically or not at all.
+///
+/// An optional path argument overrides the default source file, which is what
+/// lets the checker be pointed at an older revision of the file (extracted
+/// with `git show`) to demonstrate that it detects a known-bad site.
+fn check_bindings_task() -> anyhow::Result<()> {
+    println!("🔍 Checking Python C-extension format-string arity...");
+
+    let paths: Vec<PathBuf> = {
+        let overrides: Vec<PathBuf> = env::args().skip(2).map(PathBuf::from).collect();
+        if overrides.is_empty() {
+            vec![PathBuf::from(check_bindings::DEFAULT_SOURCE)]
+        } else {
+            overrides
+        }
+    };
+
+    for path in &paths {
+        check_bindings::check_file(path)?;
+    }
+
+    println!("✅ No format-arity mismatches found!");
     Ok(())
 }
 
@@ -133,6 +171,180 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+// ---------------------------------------------------------------------------
+// Error-code constants generated from `kafka_common_ErrorCode_t`
+// ---------------------------------------------------------------------------
+//
+// `src/ffi/common.rs`'s `kafka_common_ErrorCode_t` is the one place the error
+// codes are declared. C sees them through the cbindgen-generated header, so it
+// needs nothing here; the two consumers that cannot include that header need a
+// copy of the values, and copies are what drift:
+//
+//   - `bindings/python/_error_code.py` -- the gRPC test servers put the real
+//     code on their own synthetic errors ("unknown consumer_id"), and a unit
+//     test asserts a code instead of matching message text. Private (leading
+//     underscore): the Python public API is `code` / `message` /
+//     `is_retriable` on `KafkaError` and nothing re-exports this module.
+//   - `tests/common/error_code.rs` -- the multilanguage harness decodes a proto
+//     `KafkaError` back into a Rust `Error` by its code. It cannot use the enum
+//     itself: `src/ffi` is behind the `ffi` feature, which the multilanguage
+//     test targets do not enable.
+//
+// `check-generated` re-runs the generation and fails on any difference, so a
+// stale copy breaks the build rather than a test (CLAUDE.md #6: xtask programs
+// rather than shell scripts).
+
+const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
+const ERROR_CODE_PY: &str = "bindings/python/_error_code.py";
+const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
+
+/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_t`.
+fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
+    let source = fs::read_to_string(ERROR_CODE_SOURCE)?;
+    let body = source
+        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+    // The enum is the only item declared before the next top-level `}`.
+    let body = body.split_once("\n}").map(|(body, _)| body).unwrap_or(body);
+
+    let mut codes = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(" = ") else {
+            continue;
+        };
+        let value: i32 = value.trim_end_matches(',').parse()?;
+        codes.push((name.to_string(), value));
+    }
+    if codes.is_empty() {
+        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+    }
+    Ok(codes)
+}
+
+fn error_codes_python(codes: &[(String, i32)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        r#"# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Error-code constants -- GENERATED, DO NOT EDIT.
+
+Generated from kafka_common_ErrorCode_t in src/ffi/common.rs by
+`cargo xtask generate-error-codes`, and checked for staleness by
+`cargo xtask check-generated`.
+
+Private plumbing, not public API: KafkaError exposes `code`, `message` and
+`is_retriable`, and neither producer.py nor consumer.py re-exports this module.
+The users are the gRPC test servers, which stamp the real code on their own
+synthetic errors, and the unit tests, which compare a code instead of matching
+message text.
+
+Values are the FFI error codes: Java's wire codes at Java's own values, plus
+negatives for the classes only the client raises. They are injective over the
+error classes, so the code alone identifies the class.
+"""
+
+"#,
+    );
+    for (name, value) in codes {
+        out.push_str(&format!("{name} = {value}\n"));
+    }
+    out
+}
+
+fn error_codes_rust(codes: &[(String, i32)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        r#"// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Error-code constants -- GENERATED, DO NOT EDIT.
+//!
+//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! `cargo xtask generate-error-codes`, and checked for staleness by
+//! `cargo xtask check-generated`.
+//!
+//! The multilanguage harness decodes a proto `KafkaError` back into an
+//! [`Error`](confluent_kafka::common::Error) by its code, and cannot use the
+//! enum itself: `src/ffi` is behind the `ffi` feature, which the multilanguage
+//! test targets do not enable.
+//!
+//! Values are the FFI error codes: Java's wire codes at Java's own values, plus
+//! negatives for the classes only the client raises. They are injective over
+//! the error classes, so the code alone identifies the class.
+
+"#,
+    );
+    for (name, value) in codes {
+        out.push_str(&format!("pub const {name}: i32 = {value};\n"));
+    }
+    out
+}
+
+fn generate_error_codes() -> anyhow::Result<()> {
+    println!("🔧 Generating error-code constants from {ERROR_CODE_SOURCE}...");
+
+    let codes = parse_error_codes()?;
+    fs::write(ERROR_CODE_PY, error_codes_python(&codes))?;
+    fs::write(ERROR_CODE_RS, error_codes_rust(&codes))?;
+
+    println!("✅ Wrote {} constants to {ERROR_CODE_PY} and {ERROR_CODE_RS}", codes.len());
+    Ok(())
+}
+
+/// Fail when a generated error-code file no longer matches the Rust enum.
+fn check_error_codes_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking generated error-code constants...");
+
+    let codes = parse_error_codes()?;
+    let mut stale = Vec::new();
+    for (path, expected) in [
+        (ERROR_CODE_PY, error_codes_python(&codes)),
+        (ERROR_CODE_RS, error_codes_rust(&codes)),
+    ] {
+        match fs::read_to_string(path) {
+            Ok(actual) if actual == expected => {},
+            _ => stale.push(path),
+        }
+    }
+
+    if !stale.is_empty() {
+        eprintln!("\n❌ Stale generated error-code constants: {}", stale.join(", "));
+        eprintln!("   Run: cargo xtask generate-error-codes");
+        exit(1);
+    }
+
+    println!("✅ Error-code constants are up to date ({} codes)", codes.len());
+    Ok(())
+}
+
 fn lint() -> anyhow::Result<()> {
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
@@ -165,6 +377,11 @@ fn lint() -> anyhow::Result<()> {
     ] {
         run_command("cargo", pass)?;
     }
+
+    // Lint the xtask crate itself. `cargo clippy` from the workspace root only
+    // covers the root package, so without this the build tooling — including
+    // the `check-bindings` scanner — would escape the lint gate entirely.
+    run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"])?;
 
     println!("✅ No lint issues found!");
     Ok(())
@@ -203,6 +420,23 @@ fn lint_fix() -> anyhow::Result<()> {
     ] {
         run_command("cargo", pass)?;
     }
+
+    // Fix the xtask crate itself (see the matching comment in `lint`).
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "xtask",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
 
     println!("✅ Lint fixes applied!");
     Ok(())
@@ -438,7 +672,9 @@ fn print_help() {
         "Tasks:
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
-  check-generated Check generated code formatting only (no changes)
+  check-generated Check generated code formatting and error-code staleness (no changes)
+  generate-error-codes  Regenerate the error-code constants for Python and the test harness
+  check-bindings  Check Py_BuildValue / PyArg_Parse* format arity in the Python C extension
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -452,6 +688,8 @@ Usage:
   cargo xtask format
   cargo xtask format-check
   cargo xtask check-generated
+  cargo xtask generate-error-codes
+  cargo xtask check-bindings [path/to/file.c]
   cargo xtask lint
   cargo xtask doc-hygiene
   cargo xtask lint-fix

@@ -14,14 +14,14 @@ build:
 
 devel-build: build
 
+# CTest unit suite, then the C-backend arm of the Rust multilang integration
+# suite. -C $(RUST_PROJECT_ROOT) because the parent dir (bindings/) has no Makefile.
 test: build
 	cd $(BUILD_DIR) && ctest --output-on-failure
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-c
 
-# Build the C++ gRPC server image used by the multilanguage integration
-# test harness. The build context is the repo root so the Dockerfile can
-# copy from target/release/, bindings/c/grpc_server/, and the proto
-# crate. Requires `cargo build --features ffi --release` to have
-# produced libconfluent_kafka.a in target/release/ first.
+# C++ gRPC server image for the multilang test harness. Context is the repo
+# root; requires libconfluent_kafka.a already built in target/release/.
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \

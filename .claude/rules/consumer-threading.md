@@ -63,20 +63,20 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
     {
         // Blocking-in-Java methods become async (see §1).
         async fn poll(&mut self, timeout: Duration)
-            -> Result<ConsumerRecords<K, V>, KafkaError>;
-        async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError>;
+            -> Result<ConsumerRecords<K, V>, Error>;
+        async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error>;
         async fn subscribe_with_listener(
             &mut self,
             topics: Vec<String>,
             listener: Arc<dyn ConsumerRebalanceListener>,
-        ) -> Result<(), KafkaError>;
-        async fn unsubscribe(&mut self) -> Result<(), KafkaError>;
-        async fn commit_sync(&mut self) -> Result<(), KafkaError>;
-        async fn commit_async(&mut self) -> Result<(), KafkaError>;
-        async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError>;
+        ) -> Result<(), Error>;
+        async fn unsubscribe(&mut self) -> Result<(), Error>;
+        async fn commit_sync(&mut self) -> Result<(), Error>;
+        async fn commit_async(&mut self) -> Result<(), Error>;
+        async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
         async fn committed(&mut self, partitions: &HashSet<TopicPartition>)
-            -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
-        async fn close(&mut self, options: CloseOptions) -> Result<(), KafkaError>;
+            -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
+        async fn close(&mut self, options: CloseOptions) -> Result<(), Error>;
         // ... other methods that block in Java ...
 
         // Methods that do not block in Java stay sync.
@@ -89,13 +89,13 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
     }
 
     pub fn new_consumer<K, V>(config: ConsumerConfig)
-        -> Result<Box<dyn Consumer<K, V>>, KafkaError>
+        -> Result<Box<dyn Consumer<K, V>>, Error>
     where K: Send + Sync + 'static, V: Send + Sync + 'static
     {
         match config.group_protocol() {
             GroupProtocol::Consumer =>
                 Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(config)?)),
-            GroupProtocol::Classic => Err(KafkaError::unsupported_version(
+            GroupProtocol::Classic => Err(Error::unsupported_version(
                 "Classic group protocol is not yet supported in this client; \
                  set group.protocol=consumer (KIP-848).",
             )),
@@ -157,7 +157,7 @@ Benefits over an enum-dispatch alternative:
 **Do NOT use `#[async_trait]` for:**
 
   - `Deserializer<T>` / `Serializer<T>` — per-record, sync trait
-    (`fn deserialize(bytes: &[u8]) -> Result<T, KafkaError>`).
+    (`fn deserialize(bytes: &[u8]) -> Result<T, Error>`).
   - `ConsumerInterceptor<K, V>` — per-batch but with per-record processing
     inside; keep generic dispatch (`<I: ConsumerInterceptor<K, V>>`) where
     feasible.
@@ -237,7 +237,7 @@ shared between the app side and the background task via
     and calls `token.cancel()`. Callable from any thread / task.
   - Every async public method (`poll`, `commit_sync`, `position`,
     `committed`, `close`, etc.) `select!`s `token.cancelled()` as a branch
-    and returns `KafkaError::Wakeup` when it wins.
+    and returns `Error::Wakeup` when it wins.
   - On returning `Wakeup`, the consumer **rotates** the token: sends a
     fresh `CancellationToken::new()` on the watch channel. The bg task
     observes the new token on its next loop iteration and uses it in its
@@ -260,7 +260,7 @@ volatile-flag combo.
   - The bg task re-reads `wakeup_rx.borrow().clone()` at the top of each
     `run_once` iteration before constructing its `select!`.
   - Rotate the token by sending `CancellationToken::new()` on the watch
-    channel immediately before returning `KafkaError::Wakeup` from a
+    channel immediately before returning `Error::Wakeup` from a
     public method. Do NOT try to plug the (Java-equivalent) race where a
     concurrent `wakeup()` call between cancellation and rotation can be
     lost — Java has the same race and the behavior is intentional.
@@ -428,13 +428,13 @@ send path. The symmetric rule on the receive path:
 **`Deserializer<T>` trait shape:**
 
     pub trait Deserializer<T>: Send + Sync + 'static {
-        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, KafkaError>;
+        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
         fn deserialize_with_headers(
             &self,
             topic: &str,
             headers: &Headers,
             data: &[u8],
-        ) -> Result<T, KafkaError> {
+        ) -> Result<T, Error> {
             self.deserialize(topic, data)
         }
     }
@@ -564,15 +564,71 @@ The mechanism mirrors Java's bidirectional event handshake
   1. The background task encounters a state change requiring a listener
      callback. It enqueues a `RebalanceListenerCallbackNeeded` event on
      the background-events channel, carrying a
-     `tokio::sync::oneshot::Sender<Result<(), KafkaError>>`.
-  2. The bg task **awaits** the matching `oneshot::Receiver`. Rebalance
-     state does not advance until the callback completes.
+     `tokio::sync::oneshot::Sender<Result<(), Error>>`.
+  2. The bg loop does **NOT** block on the matching `oneshot::Receiver`
+     (Phase 41). It stores the receiver as cross-iteration state on the
+     membership manager and **returns**, so the loop keeps spinning —
+     heartbeats, fetches, and any reentrant application events the listener
+     submits all continue. Only the membership *state transition* is gated:
+     each subsequent bg-loop iteration `try_recv`s the stored ack
+     (alloc-free, non-blocking) and the member stays in its transitional
+     state until the ack arrives. This applies to **both**:
+       - the **reconcile** callbacks (`on_partitions_revoked` /
+         `on_partitions_assigned`): the member stays `RECONCILING`
+         (`reconciliation_in_progress = true`); Java-faithful to
+         `revokeAndAssign(...).whenComplete(...)` chained off
+         `maybeReconcile`. Driven from `run_once` Phase 2.5
+         (`ConsumerMembershipManager::reconcile` → `drive_pending_reconcile`).
+       - the **release** callback (`on_partitions_lost`) fired by
+         `transitionToFenced` / `transitionToFatal` / `transitionToStale`
+         (Phase 41, Issue 2): the member stays `FENCED` / `FATAL` / `STALE`
+         until the ack arrives, then the release tail (`clearAssignment()` +
+         the fence/stale rejoin) runs. Java-faithful to
+         `signalPartitionsLost(...).whenComplete(...)`. Driven from `run_once`
+         Phase 2.4 (`ConsumerMembershipManager::drive_pending_release`).
+     This is Java-faithful: `ConsumerNetworkThread.runOnce()` fires the
+     callback, marks the transition in progress, and returns; the
+     `CompletableFuture` chain resumes when the callback future completes,
+     while the network thread keeps spinning. (Before Phase 41 the bg task
+     `ack_rx.await`ed inline for both the reconcile callbacks AND the release
+     callbacks, which deadlocked any reentrant op the listener submitted —
+     the listener runs on the app task whose `poll()` cannot return until the
+     listener does, but the bg task that must service the reentrant op was
+     frozen on the ack. Closing that deadlock is the reason for the change.
+     The `leave_group` / `unsubscribe` / `close` `on_partitions_lost`
+     callback is the one exception that was already non-blocking: it runs on
+     a `tokio::spawn`ed continuation in `process_unsubscribe` /
+     `process_leave_group_on_close`, NOT inline in the bg loop, so it never
+     froze the loop.)
+
+     A release transition that interleaves with an in-flight reconcile
+     callback **abandons** the stored reconcile state (Phase 41, Issue 1 —
+     `clear_pending_reconcile`), mirroring Java dropping the in-flight
+     reconcile future when the member leaves `RECONCILING` (its
+     `whenComplete` would then `maybeAbortReconciliation`). This lets a fresh
+     post-rejoin reconcile start immediately rather than being gated on the
+     stale ack draining.
   3. The app side, inside its `poll()` / `commit_*()` / etc. loop, drains
      the background-events channel via `try_recv` in a `while let` loop
      and, for each `RebalanceListenerCallbackNeeded`, invokes the
      user-supplied listener method inline on its own task.
-  4. The app side sends the listener's result on the `oneshot::Sender`;
-     the bg task receives it and continues the rebalance.
+  4. The app side sends the listener's result on the `oneshot::Sender` and
+     **pokes the application-event `Notify`** via
+     `ApplicationEventHandler::wake_background_task()` (Java's
+     `wakeupNetworkThread()` → `Selector.wakeup()` analog) so the bg loop wakes
+     promptly and `try_recv`s the ack on its next iteration (reconcile drive OR
+     release drive) — rather than waiting out the selector poll timeout. The
+     wake MUST NOT be `WakeupTrigger::wakeup()` /
+     `NetworkThreadCloseHandle`'s old trigger-based wakeup: that is the
+     user-facing `Consumer::wakeup()` cancellation token, and firing it
+     internally makes the caller's own `poll()` return `KafkaError::Wakeup`
+     although the user never called `wakeup()` (and after `close()` disables
+     the trigger, such a wake is silently inert). It also does NOT shrink
+     `poll_wait_time_ms` (that would busy-spin). The bg loop
+     observes the ack and advances the membership state transition. The poke
+     fires for every `RebalanceListenerCallbackNeeded` ack (reconcile and
+     release alike) since it sits in the single `process_background_events`
+     callback handler.
 
 **Why this matters:**
 
@@ -596,10 +652,33 @@ The mechanism mirrors Java's bidirectional event handshake
     `tokio::spawn` them.
   - Drop the `SubscriptionState` lock guard before invoking the listener
     (section 16) — listeners may call back into `consumer.assignment()`.
-  - The bg task awaits the `oneshot::Receiver` for the callback result
-    before continuing the rebalance state transition.
+  - The bg loop does NOT block on the `oneshot::Receiver` for ANY listener
+    callback; it stores the receiver and `try_recv`s it each iteration,
+    gating only the membership *state transition* on the ack (Phase 41).
+    Both paths are explicit cross-iteration state machines:
+      - reconcile (`on_partitions_revoked` / `on_partitions_assigned`):
+        `ConsumerMembershipManager::reconcile` → `drive_pending_reconcile` /
+        `continue_after_revoke` / `continue_after_assign`, translating Java's
+        `revokeAndAssign(...).whenComplete(...)` chain.
+      - release (`on_partitions_lost` from fence/fatal/stale):
+        `transition_to_{fenced,fatal,stale}` enqueue + store
+        `PendingRelease`; `drive_pending_release` runs the release tail,
+        translating Java's `signalPartitionsLost(...).whenComplete(...)`.
+    A release transition first `clear_pending_reconcile`s any in-flight
+    reconcile (Issue 1).
   - `OffsetCommitCallback` follows the same pattern: bg-side completion
     enqueues a callback-needed event; app-side drains and invokes.
+  - **In-callback reentrancy:** a listener that calls back into the
+    consumer (`assign`/`seek`/`pause`/`resume`/`position`/`committed`/
+    `beginning_offsets`/`commit_*`) does so through a captured
+    [`ConsumerHandle`] (§41 — the Rust equivalent of Java capturing the
+    `consumer` variable; the listener trait signature stays Java-identical,
+    taking only `&self` + partitions). This only works because the bg loop
+    is not frozen during the callback (step 2 above) — for `on_partitions_lost`
+    fired by fence/fatal/stale as well as for the reconcile callbacks.
+    (`ConsumerHandle::assign` with an EMPTY collection is rejected with a
+    clear error: on the owning consumer `assign([])` leaves the group, which
+    the handle does not expose — Phase 41, Issue 4.)
 
 **`ConsumerRebalanceListener` trait shape:**
 
@@ -608,15 +687,15 @@ The mechanism mirrors Java's bidirectional event handshake
         async fn on_partitions_revoked(
             &self,
             partitions: &[TopicPartition],
-        ) -> Result<(), KafkaError>;
+        ) -> Result<(), Error>;
         async fn on_partitions_assigned(
             &self,
             partitions: &[TopicPartition],
-        ) -> Result<(), KafkaError>;
+        ) -> Result<(), Error>;
         async fn on_partitions_lost(
             &self,
             partitions: &[TopicPartition],
-        ) -> Result<(), KafkaError> {
+        ) -> Result<(), Error> {
             // Matches Java's default behavior on the listener interface.
             self.on_partitions_revoked(partitions).await
         }
@@ -629,8 +708,28 @@ not per-record; the cost of one `Box<Future>` per callback is irrelevant.
 
   - `tokio::spawn(listener.on_partitions_revoked(...))` anywhere.
   - Calling listener methods from inside the bg task's `run_once`.
-  - Bg task continuing the rebalance state machine without awaiting the
-    `oneshot::Receiver` for callback completion (fire-and-forget).
+  - Bg loop **advancing the membership state transition** before the
+    callback ack arrives (fire-and-forget). NOTE the anti-pattern is
+    advancing the *state* prematurely — NOT the loop continuing to spin.
+    The loop MUST keep spinning during the callback (Phase 41b); blocking
+    the whole loop on the ack is itself a bug (it deadlocks reentrant ops).
+  - `ack_rx.await` inline inside the bg loop's reconcile path OR a release
+    transition (fence/fatal/stale `on_partitions_lost`) — it freezes the
+    loop for the whole callback and deadlocks any reentrant `ConsumerHandle`
+    op the listener submits. Store the receiver and `try_recv` it across
+    iterations instead (reconcile: `drive_pending_reconcile`; release:
+    `drive_pending_release`).
+  - Driving `poll_wait_time_ms` toward 0 (or otherwise busy-spinning the bg
+    loop) while a callback ack is pending. The selector poll keeps blocking
+    normally and is woken by the app-side `Notify` poke when the ack is
+    ready (Phase 41b Perf Contract).
+  - Any *internal* wake of the bg task routed through `WakeupTrigger` (the
+    user-facing `Consumer::wakeup()` token) instead of the application-event
+    `Notify` (`ApplicationEventHandler::wake_background_task()`). The trigger
+    poisons the caller's next blocking call with a spurious
+    `KafkaError::Wakeup`, and is silently inert once `close()` has disabled
+    it — the shutdown wake then no-ops and `close()` waits out the full
+    selector poll timeout.
   - A public blocking-style API that does not call
     `process_background_events` before its main wait.
   - A separate task spawned to "drain the background events channel" —

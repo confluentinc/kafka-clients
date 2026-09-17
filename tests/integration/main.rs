@@ -24,6 +24,7 @@ mod common;
 
 mod admin_acls_test;
 mod admin_cluster_configs_test;
+mod admin_delegation_tokens_test;
 mod admin_elections_reassignments_offsets_test;
 mod admin_features_test;
 mod admin_group_offsets_test;
@@ -40,6 +41,8 @@ mod consumer_test;
 mod consumer_topic_creation_test;
 mod metadata_test;
 #[cfg(feature = "multilanguage-tests")]
+mod multilanguage_admin_test;
+#[cfg(feature = "multilanguage-tests")]
 mod multilanguage_consumer_test;
 mod plaintext_consumer_assign_test;
 mod plaintext_consumer_callback_test;
@@ -48,8 +51,14 @@ mod plaintext_consumer_fetch_test;
 mod plaintext_consumer_poll_test;
 mod plaintext_consumer_subscription_test;
 mod plaintext_consumer_test;
-mod producer_perf_test;
-#[cfg(feature = "multilanguage-tests")]
+// Gated on `integration-tests`, NOT `multilanguage-tests`: the module holds two
+// rust-only tests (`test_close_with_zero_timeout_aborts_pending`,
+// `test_wrong_serializer_errors_send`) whose own attributes are
+// `#[cfg(feature = "integration-tests")]`. Under the narrower gate the module
+// never compiled in a plain integration run, so those attributes were dead and
+// `make test-integration` ran zero producer tests. The gRPC-backed tests inside
+// carry their own per-item `multilanguage-tests` gates.
+#[cfg(feature = "integration-tests")]
 mod producer_test;
 mod producer_transactions_test;
 mod sasl_ssl_consumer_test;

@@ -57,7 +57,9 @@ target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST
 
 add_executable(test_kafka_producer tests/test_kafka_producer.c)
 target_include_directories(test_kafka_producer PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The transaction-control guard test spawns a helper thread, so it needs pthread
+# explicitly in addition to ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_mock_consumer tests/test_mock_consumer.c)
 target_include_directories(test_mock_consumer PRIVATE ${RUST_INCLUDE_DIR})
@@ -69,11 +71,28 @@ target_include_directories(test_kafka_consumer PRIVATE ${RUST_INCLUDE_DIR})
 # addition to ${SYSTEM_LIBS} (which is empty under shared linking).
 target_link_libraries(test_kafka_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
+add_executable(test_consumer_callbacks tests/test_consumer_callbacks.c)
+target_include_directories(test_consumer_callbacks PRIVATE ${RUST_INCLUDE_DIR})
+# This test compares callback / caller thread ids, so it needs pthread
+# explicitly in addition to ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_consumer_callbacks unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
+
+add_executable(test_mock_admin tests/test_mock_admin.c)
+target_include_directories(test_mock_admin PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_mock_admin unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
+add_executable(test_kafka_admin tests/test_kafka_admin.c)
+target_include_directories(test_kafka_admin PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_kafka_admin unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
 add_test(NAME mock_consumer COMMAND test_mock_consumer)
 add_test(NAME kafka_consumer COMMAND test_kafka_consumer)
+add_test(NAME consumer_callbacks COMMAND test_consumer_callbacks)
+add_test(NAME mock_admin COMMAND test_mock_admin)
+add_test(NAME kafka_admin COMMAND test_kafka_admin)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).

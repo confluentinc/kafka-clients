@@ -20,6 +20,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
 bytes = "1"
+ambassador = "0.5"
 regex = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -45,6 +46,13 @@ snap = "1"
 lz4_flex = "0.11"
 zstd = "0.13"
 crc32c = "0.6"
+# IEEE 802.3 / zlib CRC-32 (poly 0x04C11DB7, reflected). Used as the default
+# producer key partitioner hash (`KeyHasher::Crc32`), matching librdkafka's
+# `consistent_random` partitioner and Python `zlib.crc32`. This is a DIFFERENT
+# polynomial from `crc32c` above (CRC-32C/Castagnoli, used for record-batch
+# CRCs) — do NOT conflate the two. Already present transitively via `flate2`,
+# so this adds no new compiled crate.
+crc32fast = "1"
 # FIPS-capable crypto backend (already the project's chosen rustls provider, see
 # `security/ssl/ssl_factory.rs` installing `rustls::crypto::aws_lc_rs`). Used for
 # PBKDF2-HMAC in `ScramFormatter::hi` (SCRAM credential salting, KIP-554). Already
@@ -85,6 +93,15 @@ path = "tests/producer/main.rs"
 [[test]]
 name = "consumer"
 path = "tests/consumer/main.rs"
+
+# Performance integration tests. `test = false` keeps them out of a plain
+# `cargo test` / `cargo test --all-features` (so CI's functional gate never
+# runs a latency budget under full-suite load); run them explicitly with
+# `cargo test --test performance` or `make test-integration-perf-rust`.
+[[test]]
+name = "performance"
+path = "tests/performance/main.rs"
+test = false
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

@@ -1,0 +1,41 @@
+# The wire-message code-generation pipeline.
+#
+# Source of truth for design/current/img/codegen-pipeline.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: no generated code is checked in -- `build.rs`
+# regenerates every message type from the JSON specs on each build, and the
+# crate sees them through one `generated` module.
+
+direction: right
+
+specs: "generator/messages/ — 197 JSON RPC specs\ngenerator/test-messages/ — 3 test-only specs" {
+  style.fill: "#eef6ff"
+}
+
+gen: "generator/ crate — org.apache.kafka.message\nMessageSpec, StructSpec, FieldSpec, FieldType,\nVersions, CodeBuffer, SchemaGenerator" {
+  style.fill: "#e8f5e9"
+}
+
+build: "build.rs (build-dependency on generator)" {
+  style.fill: "#fff7e6"
+}
+
+out: "OUT_DIR/generated/*.rs — one file per message type\nstructs + Message impl (size/add_size/read/write)\n+ ApiMessage impl (api_key) + builder setters + derives" {
+  style.fill: "#f3f0ff"
+}
+
+lib: "src/lib.rs:74-80 — pub mod generated { include!(...) }\nre-exported flat via `pub use generated::*`"
+
+wrap: "src/common/requests/ — hand-written wire wrappers\nwrap the generated *Data structs in ConcreteRequest / ConcreteResponse"
+
+specs -> gen: "parse"
+gen -> out: "emit (already rustfmt-shaped)"
+build -> gen: "invokes at build time" {style.stroke-dash: 3}
+out -> lib -> wrap
+
+note: |md
+  Flexibility is decided **per field**: the generator calls
+  `field_flexible_versions(field, msg_flex)`, so overrides such as
+  `RequestHeader.ClientId` ("none") stay length-prefixed.
+| {near: bottom-center}

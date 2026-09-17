@@ -29,8 +29,12 @@
 //     the resolved future.
 //
 //  2. send_with_callback's callback closure stays on the Rust client side.
-//     The proto only carries a `with_callback` flag so the server can
-//     log equivalent activity if desired.
+//     The `with_callback` flag additionally tells the server to register a
+//     *real* delivery callback through its own binding and record each
+//     invocation in a per-producer callback log, readable with GetCallbackLog.
+//     That is what makes the binding's callback bridging observable from the
+//     Rust harness (the closure passed to the Rust client can only prove the
+//     client-side plumbing).
 
 syntax = "proto3";
 
@@ -46,17 +50,50 @@ service ProducerService {
   // KafkaError that the future resolved with.
   rpc Send(SendRequest) returns (SendResponse);
 
+  // Transactions (Milestone 11). Each maps to the same-named KafkaProducer
+  // method and returns StatusResponse — empty on success, a populated
+  // KafkaError on failure. The four control RPCs act on the whole producer and
+  // share TransactionRequest; send_offsets_to_transaction additionally carries
+  // offsets + the consumer's ConsumerGroupMetadata, so it has its own request.
+
+  // Java initTransactions(): register transactional.id with the coordinator
+  // and fence any prior producer holding the same id.
+  rpc InitTransactions(TransactionRequest) returns (StatusResponse);
+
+  // Java beginTransaction(): the local state transition that opens a txn.
+  rpc BeginTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java commitTransaction(): flush and commit the ongoing txn.
+  rpc CommitTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java abortTransaction(): discard the ongoing txn's records.
+  rpc AbortTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java sendOffsetsToTransaction(offsets, groupMetadata): stage the given
+  // consumer-group offsets as part of the ongoing transaction — the producer
+  // half of the consume-transform-produce pattern. The offsets are only
+  // committed if the transaction itself commits.
+  rpc SendOffsetsToTransaction(SendOffsetsToTransactionRequest) returns (StatusResponse);
+
   // Flush all buffered records.
   rpc Flush(FlushRequest) returns (StatusResponse);
 
   // Get partition metadata for the given topic.
   rpc PartitionsFor(PartitionsForRequest) returns (PartitionsForResponse);
 
+  // Metrics snapshot.
+  rpc Metrics(MetricsRequest) returns (MetricsResponse);
+
   // Close the producer.
   rpc Close(CloseRequest) returns (StatusResponse);
 
   // Close with a timeout (milliseconds).
   rpc CloseTimeout(CloseTimeoutRequest) returns (StatusResponse);
+
+  // Read (without clearing) the producer's user-callback log — every
+  // delivery callback the server's binding has invoked so far. See
+  // CallbackLogEntry for the encoding.
+  rpc GetCallbackLog(ProducerCallbackLogRequest) returns (CallbackLogResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +158,54 @@ message RecordMetadata {
 }
 
 // ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+// Shared request for the four transaction control RPCs — each acts on the
+// whole producer, so only the handle is needed. send_offsets_to_transaction
+// carries offsets + ConsumerGroupMetadata as well, so it uses
+// SendOffsetsToTransactionRequest below instead.
+message TransactionRequest {
+  uint64 producer_id = 1;
+}
+
+// One (topic, partition, offset, leader_epoch, metadata) tuple for
+// send_offsets_to_transaction. Mirrors the parallel-array shape the sync C FFI
+// kafka_producer_Producer_send_offsets_to_transaction marshals through
+// read_offset_map, where leader_epoch and metadata are the only nullable
+// inputs: an absent (or < 0) leader_epoch means "no epoch", and an absent
+// metadata means the empty string. Hence both are proto3 `optional`, matching
+// OffsetAndMetadata's actual fields (leader_epoch is Option<i32>; metadata is a
+// plain String, which is always present but may be empty).
+message OffsetEntry {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional int32 leader_epoch = 4;
+  optional string metadata = 5;
+}
+
+// The four fields Rust's ConsumerGroupMetadata exposes
+// (consumer_group_metadata.rs). group_instance_id is present only for a static
+// member, so it is `optional`; the other three are always present (member_id /
+// group_id default to the empty string when unknown, generation_id to -1).
+message ConsumerGroupMetadata {
+  string group_id = 1;
+  int32 generation_id = 2;
+  string member_id = 3;
+  optional string group_instance_id = 4;
+}
+
+// send_offsets_to_transaction's request: the producer handle, the offsets to
+// stage, and the consuming group's metadata (generation + member id) the
+// coordinator needs to accept the TxnOffsetCommit sent on the group's behalf.
+message SendOffsetsToTransactionRequest {
+  uint64 producer_id = 1;
+  repeated OffsetEntry offsets = 2;
+  ConsumerGroupMetadata group_metadata = 3;
+}
+
+// ---------------------------------------------------------------------------
 // Flush / Close
 // ---------------------------------------------------------------------------
 
@@ -173,34 +258,129 @@ message Node {
 }
 
 // ---------------------------------------------------------------------------
+// Callback log
+//
+// Shared by both services: the entry and response messages live here (in the
+// *imported* proto) so ConsumerService can reuse them without duplicating the
+// definitions, since producer_service.proto cannot import consumer_service.proto
+// (that would be a cycle). Only the request differs, because the two services
+// key their logs by producer_id / consumer_id respectively.
+// ---------------------------------------------------------------------------
+
+// A (topic, partition) pair inside a CallbackLogEntry.
+//
+// Deliberately NOT consumer_service.proto's `TopicPartition`: that message is
+// declared in the importing file, so it isn't visible here. Moving it into this
+// file instead would relocate it between the two generated Python stub modules
+// (consumer_service_pb2 -> producer_service_pb2) and break every existing
+// `cpb.TopicPartition` reference in the servers, for no wire-format gain.
+message CallbackLogPartition {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+// One recorded invocation of a user callback that the server registered
+// through its language binding. All servers MUST emit identical `kind`
+// strings and use the same field encoding so the Rust harness can compare
+// backends:
+//
+//   kind        | partitions                | offsets                        | error
+//   ------------+---------------------------+--------------------------------+------------------
+//   "assigned"  | the assigned partitions   | empty                          | listener failure
+//   "revoked"   | the revoked partitions    | empty                          | listener failure
+//   "lost"      | the lost partitions       | empty                          | listener failure
+//   "commit"    | the committed partitions  | committed offset per partition | commit failure
+//   "delivery"  | the delivered-to partition| {"<topic>-<partition>": offset}| delivery failure
+//
+// `offsets` keys are always "<topic>-<partition>" (e.g. "my-topic-0").
+message CallbackLogEntry {
+  // One of "assigned", "revoked", "lost", "commit", "delivery".
+  string kind = 1;
+  repeated CallbackLogPartition partitions = 2;
+  // "<topic>-<partition>" -> offset. Empty for the rebalance kinds.
+  map<string, int64> offsets = 3;
+  // The callback's error message; empty string when the callback was
+  // invoked with no error.
+  string error = 4;
+}
+
+message CallbackLogResponse {
+  // Chronological, oldest first. Reading does not clear the log.
+  repeated CallbackLogEntry entries = 1;
+}
+
+message ProducerCallbackLogRequest {
+  uint64 producer_id = 1;
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
-// Mirrors crate::common::KafkaError. The `variant` discriminator selects
-// which of the optional variant-specific fields are meaningful.
+// Mirrors crate::common::KafkaError. `code` is the sole discriminator: it is
+// the FFI error code (kafka_common_ErrorCode_t in target/include/confluent_kafka.h),
+// which is injective over the client's error classes, so the receiver derives
+// the class from it alone.
 message KafkaError {
-  enum Variant {
-    GENERIC = 0;
-    TOPIC_AUTHORIZATION = 1;
-    INVALID_TOPIC = 2;
-    GROUP_AUTHORIZATION = 3;
-    BUFFER_EXHAUSTED = 4;
-    ILLEGAL_ARGUMENT = 5;
-    ILLEGAL_STATE = 6;
-    TIMEOUT = 7;
-    RECORD_TOO_LARGE = 8;
-    SERIALIZATION = 9;
-  }
+  // Field 1 held the `Variant` discriminator, 4 `is_retriable` and 5
+  // `is_fatal`. All three are gone: `code` identifies the class on its own,
+  // and both flags were write-only (every reader derives them from the code).
+  // The surviving numbers deliberately keep their values rather than being
+  // compacted -- the Python and C++ stubs are generated inside their Docker
+  // images, so a stale image silently keeps the old schema, and stable numbers
+  // mean such a reader sees absent fields instead of misparsing `code`.
+  reserved 1, 4, 5;
 
-  Variant variant = 1;
-  // Errors enum code (matches crate::common::protocol::Errors).
+  // kafka_common_ErrorCode_t: Java's wire codes at Java's own values, plus
+  // negatives for the classes only the client raises (e.g.
+  // LOCAL_ILLEGAL_STATE = -4, SERIALIZATION = -15, WAKEUP = -18).
   int32 code = 2;
   string message = 3;
-  bool is_retriable = 4;
-  bool is_fatal = 5;
 
-  // Variant-specific payloads. Populated only for the matching variant.
-  repeated string unauthorized_topics = 6; // TopicAuthorization
-  repeated string invalid_topics = 7;      // InvalidTopic
-  optional string group_id = 8;            // GroupAuthorization
+  // Class-specific payloads. Populated only for the matching `code`.
+  repeated string unauthorized_topics = 6; // TOPIC_AUTHORIZATION_FAILED
+  repeated string invalid_topics = 7;      // INVALID_TOPIC_ERROR
+  optional string group_id = 8;            // GROUP_AUTHORIZATION_FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+message MetricsRequest {
+  uint64 producer_id = 1;
+}
+
+// One entry of a `metrics()` snapshot: the four `MetricName` fields plus the
+// single measured value. Shared by the producer and consumer services (the
+// consumer service imports this file), mirroring how the Rust FFI shares one
+// metric-map machinery across both surfaces.
+//
+// The value is a snapshot, not a live handle — the backend measured it once
+// while serving this RPC. That matches the documented contract of the Rust
+// `metrics()` ("a point-in-time snapshot ... not a live view").
+message Metric {
+  string name = 1;
+  string group = 2;
+  string description = 3;
+  map<string, string> tags = 4;
+  // Mirrors the Rust `MetricValue` enum. Exactly one is set; `double_value` is
+  // the measurable case, the rest are the gauge cases.
+  oneof value {
+    double double_value = 5;
+    string string_value = 6;
+    int64 long_value = 7;
+    int32 int_value = 8;
+  }
+}
+
+message MetricList {
+  repeated Metric metrics = 1;
+}
+
+message MetricsResponse {
+  oneof result {
+    MetricList metrics = 1;
+    KafkaError error = 2;
+  }
 }

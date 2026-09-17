@@ -45,19 +45,23 @@
 //! `ProduceRequest.builder(data, useTransactionV1Version)` (`:930-936`). See
 //! [`Sender::send_produce_request`].
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 
 use crate::client_response::ClientResponse;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::errors::AuthenticationError;
+use crate::common::metrics::stats::{Avg, Max, Meter};
+use crate::common::metrics::{ClosureMeasurable, Sensor};
+use crate::common::network;
 use crate::common::protocol::Errors;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ProduceRequestBuilder;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
@@ -74,6 +78,7 @@ use super::ProduceRequestResult;
 use super::ProducerBatch;
 use super::ProducerMetadata;
 use super::RecordAccumulator;
+use super::SenderMetricsRegistry;
 use super::TransactionManager;
 use super::TxnRequestHandler;
 use super::transaction_manager::coordinator_type_name;
@@ -113,39 +118,11 @@ enum BatchAction {
 /// whole `AuthorizationException` family (contrast
 /// `.claude/rules/producer-transactions.md` §9, which is about the sites where
 /// Java does test the family).
-pub(crate) fn is_authorization_error_handled_by_sender(error: &KafkaError) -> bool {
+pub(crate) fn is_authorization_error_handled_by_sender(error: &Error) -> bool {
     matches!(
         error.error(),
         Errors::TransactionalIdAuthorizationFailed | Errors::ClusterAuthorizationFailed
     )
-}
-
-/// Which `catch` block in Java handles a failure raised by `runOnce`'s
-/// `transactionManager != null` block.
-///
-/// Java distinguishes the two by exception *type*: `catch (AuthenticationException e)`
-/// at `Sender.java:336` calls `transactionManager.authenticationFailed(e)` **and
-/// then falls through to `sendProducerData`**, while anything else propagates to
-/// `Sender.run`'s `catch (Exception e)` at `:248`, which only logs. `KafkaError` is
-/// flat, so the distinction is carried structurally instead — the same approach
-/// `common::network::authentication_error` already takes for the transport's
-/// `io::Error` boundary, and for the same reason: an error *kind* cannot express
-/// "this was a genuine authentication failure".
-enum TransactionPhaseError {
-    /// Java's `AuthenticationException`, raised by `awaitNodeReady` →
-    /// `NetworkClientUtils.awaitReady`.
-    Authentication(KafkaError),
-    /// Everything else.
-    Other(KafkaError),
-}
-
-impl TransactionPhaseError {
-    /// The wrapped error, for `Sender.run`'s log statement.
-    fn into_error(self) -> KafkaError {
-        match self {
-            Self::Authentication(error) | Self::Other(error) => error,
-        }
-    }
 }
 
 /// Suspends the Sender task for `duration_ms`, translating Java's
@@ -207,6 +184,289 @@ struct PendingProduceRequest {
     topic_names: HashMap<Uuid, String>,
 }
 
+/// Rebuilds the typed [`Error::Authentication`] that Java rethrows when
+/// `awaitNodeReady` fails with an `AuthenticationException`
+/// (`NetworkClientUtils.java:86-87`, escaping to `Sender.runOnce`'s catch at
+/// `Sender.java:336`).
+///
+/// The payload's bare message is used, NOT `error.to_string()`: the latter is the
+/// `io::Error`'s `Display`, which already carries the `"AuthenticationError: "`
+/// prefix, so rebuilding from it would show the application that prefix twice.
+/// Java rethrows the exception object with its message untouched.
+///
+/// `Error::Authentication` is the class `run_once`'s `is_authentication_error()`
+/// arm tests for (CLAUDE.md §10.4) — a codeless `UnknownServerError` would answer
+/// `false` to it and therefore to `request_utils::is_fatal_error` too.
+fn authentication_error_from_io(error: &std::io::Error) -> Error {
+    let message = network::authentication_error_message(error)
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string());
+    Error::Authentication(AuthenticationError::new(message))
+}
+
+/// Builds the `produce-throttle-time` sensor with its avg/max metrics.
+///
+/// Translated from Java's `Sender.throttleTimeSensor(SenderMetricsRegistry)`.
+/// Java models this as a `static` method on `Sender`; in Rust it is a free
+/// function in the sender module, because a static-like associated function on
+/// the generic `Sender<C>` cannot infer `C` at the call site.
+pub(crate) fn throttle_time_sensor(metrics: &SenderMetricsRegistry) -> Result<Arc<Sensor>, Error> {
+    let produce_throttle_time_sensor = metrics.sensor("produce-throttle-time")?;
+    produce_throttle_time_sensor.add(metrics.produce_throttle_time_avg.clone(), Box::new(Avg::new()))?;
+    produce_throttle_time_sensor.add(metrics.produce_throttle_time_max.clone(), Box::new(Max::new()))?;
+    Ok(produce_throttle_time_sensor)
+}
+
+/// A collection of sensors for the sender.
+///
+/// Translated from Java's `Sender.SenderMetrics` inner class. All recording is
+/// per-drained-batch / per-response (amortized over many records) — not on the
+/// per-record hot path (CLAUDE.md §11).
+struct SenderMetrics {
+    retry_sensor: Arc<Sensor>,
+    error_sensor: Arc<Sensor>,
+    queue_time_sensor: Arc<Sensor>,
+    request_time_sensor: Arc<Sensor>,
+    records_per_request_sensor: Arc<Sensor>,
+    batch_size_sensor: Arc<Sensor>,
+    compression_rate_sensor: Arc<Sensor>,
+    max_record_size_sensor: Arc<Sensor>,
+    batch_split_sensor: Arc<Sensor>,
+    metrics: SenderMetricsRegistry,
+    /// Provider of current wall-clock time in milliseconds. Java's
+    /// `SenderMetrics` holds a `Time time` and calls `time.milliseconds()`.
+    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Contextual log message prefix (for the unreachable registration-error path).
+    log_context: LogContext,
+}
+
+impl SenderMetrics {
+    /// Registers all sender sensors and the two constructor gauges
+    /// (`requests-in-flight`, `metadata-age`). Translates
+    /// `SenderMetrics(SenderMetricsRegistry, Metadata, KafkaClient, Time)`.
+    ///
+    /// `in_flight_count` is the shared handle over the network client's
+    /// in-flight-request counter (Java's gauge captures the `KafkaClient` and
+    /// calls `inFlightRequestCount()`; the client moves into the sender task, so
+    /// the gauge reads a shared atomic instead).
+    fn new(
+        metrics: SenderMetricsRegistry,
+        metadata: Arc<ProducerMetadata>,
+        in_flight_count: Arc<AtomicI32>,
+        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        log_context: LogContext,
+    ) -> Result<Self, Error> {
+        let batch_size_sensor = metrics.sensor("batch-size")?;
+        batch_size_sensor.add(metrics.batch_size_avg.clone(), Box::new(Avg::new()))?;
+        batch_size_sensor.add(metrics.batch_size_max.clone(), Box::new(Max::new()))?;
+
+        let compression_rate_sensor = metrics.sensor("compression-rate")?;
+        compression_rate_sensor.add(metrics.compression_rate_avg.clone(), Box::new(Avg::new()))?;
+
+        let queue_time_sensor = metrics.sensor("queue-time")?;
+        queue_time_sensor.add(metrics.record_queue_time_avg.clone(), Box::new(Avg::new()))?;
+        queue_time_sensor.add(metrics.record_queue_time_max.clone(), Box::new(Max::new()))?;
+
+        let request_time_sensor = metrics.sensor("request-time")?;
+        request_time_sensor.add(metrics.request_latency_avg.clone(), Box::new(Avg::new()))?;
+        request_time_sensor.add(metrics.request_latency_max.clone(), Box::new(Max::new()))?;
+
+        let records_per_request_sensor = metrics.sensor("records-per-request")?;
+        records_per_request_sensor.add_compound(Box::new(Meter::new(
+            metrics.record_send_rate.clone(),
+            metrics.record_send_total.clone(),
+        )))?;
+        records_per_request_sensor.add(metrics.records_per_request_avg.clone(), Box::new(Avg::new()))?;
+
+        let retry_sensor = metrics.sensor("record-retries")?;
+        retry_sensor.add_compound(Box::new(Meter::new(
+            metrics.record_retry_rate.clone(),
+            metrics.record_retry_total.clone(),
+        )))?;
+
+        let error_sensor = metrics.sensor("errors")?;
+        error_sensor.add_compound(Box::new(Meter::new(
+            metrics.record_error_rate.clone(),
+            metrics.record_error_total.clone(),
+        )))?;
+
+        let max_record_size_sensor = metrics.sensor("record-size")?;
+        max_record_size_sensor.add(metrics.record_size_max.clone(), Box::new(Max::new()))?;
+        max_record_size_sensor.add(metrics.record_size_avg.clone(), Box::new(Avg::new()))?;
+
+        // `requests-in-flight` gauge: Java `(config, now) -> client.inFlightRequestCount()`.
+        let in_flight_for_gauge = Arc::clone(&in_flight_count);
+        metrics.add_metric(
+            metrics.requests_in_flight.clone(),
+            Box::new(ClosureMeasurable::new(move |_config, _now| {
+                in_flight_for_gauge.load(Ordering::Relaxed) as f64
+            })),
+        )?;
+        // `metadata-age` gauge: Java `(config, now) -> (now - metadata.lastSuccessfulUpdate()) / 1000.0`.
+        let metadata_for_gauge = Arc::clone(&metadata);
+        metrics.add_metric(
+            metrics.metadata_age.clone(),
+            Box::new(ClosureMeasurable::new(move |_config, now| {
+                (now - metadata_for_gauge.last_successful_update()) as f64 / 1000.0
+            })),
+        )?;
+
+        let batch_split_sensor = metrics.sensor("batch-split-rate")?;
+        batch_split_sensor.add_compound(Box::new(Meter::new(
+            metrics.batch_split_rate.clone(),
+            metrics.batch_split_total.clone(),
+        )))?;
+
+        Ok(Self {
+            retry_sensor,
+            error_sensor,
+            queue_time_sensor,
+            request_time_sensor,
+            records_per_request_sensor,
+            batch_size_sensor,
+            compression_rate_sensor,
+            max_record_size_sensor,
+            batch_split_sensor,
+            metrics,
+            time_provider,
+            log_context,
+        })
+    }
+
+    /// Lazily registers the per-topic sensors for `topic`. Idempotent: if one
+    /// sensor exists for the topic, all do. Translates
+    /// `SenderMetrics.maybeRegisterTopicMetrics`.
+    fn maybe_register_topic_metrics(&self, topic: &str) -> Result<(), Error> {
+        // If one sensor of the metrics has been registered for the topic, then
+        // all other sensors should have been registered; and vice versa.
+        let topic_records_count_name = format!("topic.{topic}.records-per-batch");
+        if self.metrics.get_sensor(&topic_records_count_name).is_some() {
+            return Ok(());
+        }
+
+        let mut metric_tags: BTreeMap<String, String> = BTreeMap::new();
+        metric_tags.insert("topic".to_string(), topic.to_string());
+
+        let topic_record_count = self.metrics.sensor(&topic_records_count_name)?;
+        let rate_metric_name = self.metrics.topic_record_send_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_record_send_total(metric_tags.clone())?;
+        topic_record_count.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        let topic_byte_rate_name = format!("topic.{topic}.bytes");
+        let topic_byte_rate = self.metrics.sensor(&topic_byte_rate_name)?;
+        let rate_metric_name = self.metrics.topic_byte_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_byte_total(metric_tags.clone())?;
+        topic_byte_rate.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
+        let topic_compression_rate = self.metrics.sensor(&topic_compression_rate_name)?;
+        let m = self.metrics.topic_compression_rate(metric_tags.clone())?;
+        topic_compression_rate.add(m, Box::new(Avg::new()))?;
+
+        let topic_retry_name = format!("topic.{topic}.record-retries");
+        let topic_retry_sensor = self.metrics.sensor(&topic_retry_name)?;
+        let rate_metric_name = self.metrics.topic_record_retry_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_record_retry_total(metric_tags.clone())?;
+        topic_retry_sensor.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        let topic_error_name = format!("topic.{topic}.record-errors");
+        let topic_error_sensor = self.metrics.sensor(&topic_error_name)?;
+        let rate_metric_name = self.metrics.topic_record_error_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_record_error_total(metric_tags)?;
+        topic_error_sensor.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        Ok(())
+    }
+
+    /// Records per-drained-batch metrics for a produce request. Translates
+    /// `SenderMetrics.updateProduceRequestMetrics(Map<Integer, List<ProducerBatch>>)`.
+    fn update_produce_request_metrics(&self, batches: &HashMap<i32, Vec<ProducerBatch>>) {
+        let now = (self.time_provider)();
+        for node_batch in batches.values() {
+            let mut records: i32 = 0;
+            for batch in node_batch {
+                // Register all per-topic metrics at once.
+                let topic = batch.topic_partition.topic();
+                // Registration only fails on a construction-time programming
+                // error (duplicate metric name); log and skip rather than
+                // aborting the whole send path.
+                if let Err(e) = self.maybe_register_topic_metrics(topic) {
+                    kafka_error!(self.log_context, "Failed to register topic metrics for {}: {}", topic, e);
+                    continue;
+                }
+
+                // Per-topic record send rate.
+                let topic_records_count_name = format!("topic.{topic}.records-per-batch");
+                if let Some(s) = self.metrics.get_sensor(&topic_records_count_name) {
+                    s.record_at(batch.record_count as f64, now);
+                }
+
+                // Per-topic bytes send rate.
+                let topic_byte_rate_name = format!("topic.{topic}.bytes");
+                if let Some(s) = self.metrics.get_sensor(&topic_byte_rate_name) {
+                    s.record_at(batch.estimated_size_in_bytes() as f64, now);
+                }
+
+                // Per-topic compression rate.
+                let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
+                if let Some(s) = self.metrics.get_sensor(&topic_compression_rate_name) {
+                    s.record_at(batch.compression_ratio(), now);
+                }
+
+                // Global metrics.
+                self.batch_size_sensor.record_at(batch.estimated_size_in_bytes() as f64, now);
+                self.queue_time_sensor.record_at(batch.queue_time_ms() as f64, now);
+                self.compression_rate_sensor.record_at(batch.compression_ratio(), now);
+                self.max_record_size_sensor.record_at(batch.max_record_size as f64, now);
+                records += batch.record_count;
+            }
+            self.records_per_request_sensor.record_at(records as f64, now);
+        }
+    }
+
+    /// Records `count` retried record sends for `topic`. Translates
+    /// `SenderMetrics.recordRetries`.
+    fn record_retries(&self, topic: &str, count: i32) {
+        let now = (self.time_provider)();
+        self.retry_sensor.record_at(count as f64, now);
+        let topic_retry_name = format!("topic.{topic}.record-retries");
+        if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
+            topic_retry_sensor.record_at(count as f64, now);
+        }
+    }
+
+    /// Records `count` errored record sends for `topic`. Translates
+    /// `SenderMetrics.recordErrors`.
+    fn record_errors(&self, topic: &str, count: i32) {
+        let now = (self.time_provider)();
+        self.error_sensor.record_at(count as f64, now);
+        let topic_error_name = format!("topic.{topic}.record-errors");
+        if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
+            topic_error_sensor.record_at(count as f64, now);
+        }
+    }
+
+    /// Records a produce request's latency against the client-level sensor and,
+    /// if it exists, the per-node latency sensor. Translates
+    /// `SenderMetrics.recordLatency`.
+    fn record_latency(&self, node: &str, latency: i64) {
+        let now = (self.time_provider)();
+        self.request_time_sensor.record_at(latency as f64, now);
+        if !node.is_empty() {
+            let node_time_name = format!("node-{node}.latency");
+            if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
+                node_request_time.record_at(latency as f64, now);
+            }
+        }
+    }
+
+    /// Records one batch split. Translates `SenderMetrics.recordBatchSplit`
+    /// (Java's no-arg `Sensor.record()` records the value `1.0`).
+    fn record_batch_split(&self) {
+        self.batch_split_sensor.record(1.0);
+    }
+}
+
 /// The background task that handles the sending of produce requests to the Kafka cluster.
 ///
 /// This task makes metadata requests to renew its view of the cluster and then sends
@@ -214,7 +474,7 @@ struct PendingProduceRequest {
 ///
 /// Translated from `org.apache.kafka.clients.producer.internals.Sender`.
 pub struct Sender<C: KafkaClient> {
-    /// The network client for sending requests.
+    /// The client for sending requests to the Kafka cluster.
     client: C,
     /// The record accumulator that batches records.
     accumulator: Arc<RecordAccumulator>,
@@ -381,7 +641,7 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// [`Self::handle_produce_response_for`] searches this after
     /// [`Self::in_flight_batches`], so such a batch takes the ordinary response path:
-    /// `complete()` / `complete_exceptionally()` return `false` because it is already
+    /// `complete()` / `complete_with_error()` return `false` because it is already
     /// final, and the `else` arm deallocates — exactly Java's sequence. Anything still
     /// here when the Sender stops is deallocated in [`Self::run`].
     batches_awaiting_response: Vec<ProducerBatch>,
@@ -393,6 +653,8 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// Translated from Java's `LogContext logContext` field in `Sender`.
     log_context: LogContext,
+    /// A collection of sensors for the sender (Java's `SenderMetrics sensors`).
+    sensors: SenderMetrics,
 }
 
 impl<C: KafkaClient> Sender<C> {
@@ -408,6 +670,7 @@ impl<C: KafkaClient> Sender<C> {
         retries: i32,
         request_timeout_ms: i32,
         retry_backoff_ms: i64,
+        metrics: SenderMetricsRegistry,
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
@@ -415,6 +678,19 @@ impl<C: KafkaClient> Sender<C> {
         pending_requests: Arc<Mutex<PendingRequests>>,
         log_context: LogContext,
     ) -> Self {
+        // Java builds `new SenderMetrics(metrics, metadata, client, time)` in the
+        // constructor. The gauge over `requests-in-flight` reads a shared handle
+        // over the client's in-flight counter (the client moves into this task).
+        let in_flight_count = client.in_flight_count_handle();
+        let sensors = SenderMetrics::new(
+            metrics,
+            Arc::clone(&metadata),
+            in_flight_count,
+            Arc::clone(&time_provider),
+            log_context.clone(),
+        )
+        .expect("registering sender sensors");
+
         Self {
             client,
             accumulator,
@@ -437,6 +713,7 @@ impl<C: KafkaClient> Sender<C> {
             pending_produce_responses: HashMap::new(),
             time_provider,
             log_context,
+            sensors,
         }
     }
 
@@ -467,7 +744,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Propagates [`CoordinatorNodes::coordinator`]'s error for
     /// [`CoordinatorType::Share`], which is Java's `default:` throw.
-    pub fn coordinator(&self, coordinator_type: CoordinatorType) -> Result<Option<&Node>, KafkaError> {
+    pub fn coordinator(&self, coordinator_type: CoordinatorType) -> Result<Option<&Node>, Error> {
         self.coordinators.coordinator(coordinator_type)
     }
 
@@ -515,7 +792,7 @@ impl<C: KafkaClient> Sender<C> {
         &mut self,
         handler: TxnRequestHandler,
         response: &ClientResponse,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let transaction_manager = match &self.transaction_manager {
             Some(transaction_manager) => Arc::clone(transaction_manager),
             // Unreachable: a handler only exists when a manager does.
@@ -523,10 +800,16 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         if response.request_header().correlation_id() != self.in_flight_request_correlation_id {
-            let error = KafkaError::with_message(
-                Errors::UnknownServerError,
-                "Detected more than one in-flight transactional request.",
-            );
+            // Java `TransactionManager.java:1407` throws a plain
+            // `RuntimeException` — NOT a `KafkaException`, so `is_kafka_error()`
+            // and `is_api_error()` must both answer `false`.
+            // `Error::with_message(Errors::UnknownServerError, ..)` resolves the code
+            // to `UnknownServerException` and turns both `true`. The crate has no
+            // generic `RuntimeException` carrier; `LocalIllegalState` is the closest
+            // available one (Java's `IllegalStateException` is itself a plain
+            // `RuntimeException`) and answers `false` to every §10.4 predicate, so
+            // the hierarchy is faithful even though the class name is narrower.
+            let error = Error::local_illegal_state("Detected more than one in-flight transactional request.");
             return transaction_manager.lock().unwrap().fatal_error(&handler, error);
         }
 
@@ -550,7 +833,7 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(());
         }
         if let Some(version_mismatch) = response.version_mismatch() {
-            let error = KafkaError::unsupported_version(version_mismatch.to_string());
+            let error = Error::unsupported_version(version_mismatch.to_string());
             return transaction_manager.lock().unwrap().fatal_error(&handler, error);
         }
         match response.response_body() {
@@ -572,10 +855,11 @@ impl<C: KafkaClient> Sender<C> {
                 )
             },
             None => {
-                let error = KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    "Could not execute transactional request for unknown reasons",
-                );
+                // Java `TransactionManager.java:1424`:
+                // `new KafkaException("Could not execute transactional request for
+                // unknown reasons")` — a BARE `KafkaException`, so `is_api_error()`
+                // must answer `false`.
+                let error = Error::kafka("Could not execute transactional request for unknown reasons");
                 transaction_manager.lock().unwrap().fatal_error(&handler, error)
             },
         }
@@ -709,9 +993,31 @@ impl<C: KafkaClient> Sender<C> {
     /// Runs one iteration and logs any failure, translating `Sender.run`'s three
     /// `catch (Exception e) { log.error("Uncaught error in kafka producer I/O
     /// thread: ", e); }` blocks (Java 248-250, 261-263, 282-284).
+    ///
+    /// Java's catch is *blanket*, so it also covers the throws Rust spells as
+    /// panics — `ProducerBatch`'s state-machine violations
+    /// (`ProducerBatch.java:292`, `"A {} batch must not attempt another state
+    /// change to {}"`, and `abort`'s `"Batch has already been completed in final
+    /// state"`). Handling only `Result::Err` here left those aborting the whole I/O
+    /// task, after which nothing drains the accumulator or completes futures and
+    /// every outstanding `send().await` hangs. `catch_unwind` restores Java's
+    /// "log it and keep the loop running" behaviour; it is the same mechanism
+    /// `NetworkClient::complete_responses` uses for the same Java idiom.
+    ///
+    /// `AssertUnwindSafe` is required because `&mut Sender` is not `UnwindSafe`.
+    /// The state a caught unwind leaves behind is exactly what Java's thread is
+    /// left holding after its own catch, so this does not widen the exposure.
     async fn run_once_logging_errors(&mut self) {
-        if let Err(error) = self.run_once().await {
-            kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {}", error);
+        use futures_util::FutureExt;
+
+        match std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => {
+                kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {}", error);
+            },
+            Err(payload) => {
+                kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {:?}", payload);
+            },
         }
     }
 
@@ -747,7 +1053,7 @@ impl<C: KafkaClient> Sender<C> {
     /// caller below does with the error.
     ///
     /// [`TransactionalRequestResult`]: crate::producer::internals::TransactionalRequestResult
-    fn begin_abort(&mut self) -> Result<(), KafkaError> {
+    fn begin_abort(&mut self) -> Result<(), Error> {
         match &self.transaction_manager {
             Some(transaction_manager) => {
                 let transaction_manager = Arc::clone(transaction_manager);
@@ -779,25 +1085,35 @@ impl<C: KafkaClient> Sender<C> {
     /// Java's `runOnce` throws and `Sender.run` catches-and-logs; the Rust
     /// equivalent returns the error and [`Self::run_once_logging_errors`] logs it
     /// at the same point.
-    pub(crate) async fn run_once(&mut self) -> Result<(), KafkaError> {
+    pub(crate) async fn run_once(&mut self) -> Result<(), Error> {
         if self.transaction_manager.is_some() {
             match self.run_transaction_phase().await {
                 // Java 322 / 326 / 334 — `runOnce` returns without producing.
                 Ok(true) => return Ok(()),
                 Ok(false) => {},
-                Err(TransactionPhaseError::Authentication(error)) => {
-                    // Java 336-340. This is already logged as an error, but
-                    // propagated here to perform any clean ups. Note Java's `catch`
-                    // does **not** return: execution continues to `sendProducerData`
-                    // at `:343`, which this `match` arm preserves by falling through.
+                // Java 336-340: `catch (AuthenticationException e)`. This is already
+                // logged as an error, but propagated here to perform any clean ups.
+                // Note Java's `catch` does **not** return: execution continues to
+                // `sendProducerData` at `:343`, which this `match` arm preserves by
+                // falling through.
+                //
+                // The test is `is_authentication_error()` — CLAUDE.md §10.4's
+                // translation of `instanceof AuthenticationException`. Java's `catch`
+                // covers the *whole* `try` block (`:308-335`), so it fires for an
+                // authentication failure raised by ANY statement in it, not just by
+                // `awaitNodeReady`; a per-site tag could only ever match the one site
+                // it was written at.
+                Err(error) if error.is_authentication_error() => {
                     kafka_trace!(
                         self.log_context,
-                        "Authentication exception while processing transactional request: {}",
+                        "Authentication error while processing transactional request: {}",
                         error
                     );
                     self.authentication_failed(&error)?;
                 },
-                Err(other) => return Err(other.into_error()),
+                // Anything else propagates to `Sender.run`'s `catch (Exception e)` at
+                // `:248`, which only logs — see `run_once_logging_errors`.
+                Err(other) => return Err(other),
             }
         }
 
@@ -808,7 +1124,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// `transactionManager.authenticationFailed(e)` (`Sender.java:339`).
-    fn authentication_failed(&mut self, error: &KafkaError) -> Result<(), KafkaError> {
+    fn authentication_failed(&mut self, error: &Error) -> Result<(), Error> {
         match self.transaction_manager.clone() {
             Some(transaction_manager) => {
                 // `pending_requests` before the manager, per its field docs.
@@ -900,7 +1216,7 @@ impl<C: KafkaClient> Sender<C> {
     /// `NetworkClient.completeResponses` (`NetworkClient.java:666-674`) — *not* by
     /// `Sender.run`. [`Self::handle_client_responses`] is that boundary and logs the
     /// error there, so the remaining responses of the same poll are still dispatched.
-    fn handle_produce_response_for(&mut self, response: &ClientResponse, now: i64) -> Result<(), KafkaError> {
+    fn handle_produce_response_for(&mut self, response: &ClientResponse, now: i64) -> Result<(), Error> {
         {
             let correlation_id = response.request_header().correlation_id();
             if let Some(pending) = self.pending_produce_responses.remove(&correlation_id) {
@@ -946,8 +1262,14 @@ impl<C: KafkaClient> Sender<C> {
                     if let Some(batch) = batches.remove(&tp) {
                         match action {
                             BatchAction::Reenqueue => {
+                                // Java's `reenqueueBatch` records retries after
+                                // re-enqueuing (`Sender.java:753`). Capture the
+                                // topic/count before the batch is moved.
+                                let topic = batch.topic_partition.topic().to_string();
+                                let count = batch.record_count;
                                 // RecordAccumulator::reenqueue calls batch.reenqueued() internally.
                                 self.accumulator.reenqueue(batch, now)?;
+                                self.sensors.record_retries(&topic, count);
                             },
                             BatchAction::SplitAndReenqueue => {
                                 // split_and_reenqueue takes ownership, splits the batch,
@@ -956,6 +1278,9 @@ impl<C: KafkaClient> Sender<C> {
                                 // produce future is completed with RECORD_BATCH_TOO_LARGE
                                 // by ProducerBatch::split → finalize_split_batches.
                                 self.accumulator.split_and_reenqueue(batch)?;
+                                // Java records the split in `completeBatch` right
+                                // after `splitAndReenqueue` (`Sender.java:689`).
+                                self.sensors.record_batch_split();
                             },
                             BatchAction::Done => {},
                         }
@@ -989,17 +1314,13 @@ impl<C: KafkaClient> Sender<C> {
     /// is looser than Java, where the Sender thread's view is stable simply because
     /// it is the only writer — every re-acquire below is a place where that implicit
     /// consistency could break, which is why each one reads the minimum it needs.
-    async fn run_transaction_phase(&mut self) -> Result<bool, TransactionPhaseError> {
+    async fn run_transaction_phase(&mut self) -> Result<bool, Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(false);
         };
 
         // Sender.java:313
-        transaction_manager
-            .lock()
-            .unwrap()
-            .maybe_resolve_sequences(Caller::Sender)
-            .map_err(TransactionPhaseError::Other)?;
+        transaction_manager.lock().unwrap().maybe_resolve_sequences(Caller::Sender)?;
 
         // Sender.java:315-318 — read `lastError` and the error state together, so
         // the two cannot disagree the way separate acquisitions could.
@@ -1030,14 +1351,13 @@ impl<C: KafkaClient> Sender<C> {
             && let Some(error) = &last_error
             && is_authorization_error_handled_by_sender(error)
         {
-            self.handle_authorization_error(error).map_err(TransactionPhaseError::Other)?;
+            self.handle_authorization_error(error)?;
             return Ok(true);
         }
 
         // Sender.java:329-331 — check whether we need a new producerId. If so, we
         // will enqueue an InitProducerId request which will be sent below.
-        self.bump_idempotent_epoch_and_reset_id_if_needed()
-            .map_err(TransactionPhaseError::Other)?;
+        self.bump_idempotent_epoch_and_reset_id_if_needed()?;
 
         // Sender.java:333-335
         if self.maybe_send_and_poll_transactional_request().await? {
@@ -1054,18 +1374,25 @@ impl<C: KafkaClient> Sender<C> {
     /// `AuthenticationException` wrapping the cause, abort the batches, then
     /// transition to `UNINITIALIZED` so the user does not need to instantiate the
     /// producer again (`Sender.java:348-350`).
-    fn handle_authorization_error(&mut self, error: &KafkaError) -> Result<(), KafkaError> {
+    fn handle_authorization_error(&mut self, error: &Error) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
         };
         // Java wraps the cause in `new AuthenticationException(exception)`
-        // (`Sender.java:354`). Java's `AuthenticationException` base class carries no
-        // wire code — only its subclasses do — so it maps to
-        // `Errors::UnknownServerError`, the convention `maybe_fail_with_error` and
-        // `TransactionManager::close` already use for a codeless Java exception. NOT
-        // `SaslAuthenticationFailed`: the cause here is a cluster or transactional-id
-        // authorization failure and nothing about it is SASL.
-        let authentication_error = KafkaError::fatal(Errors::UnknownServerError, error.message());
+        // (`Sender.java:354`), so the class is `AuthenticationException` and the
+        // cause is carried, not stringified. NOT `SaslAuthenticationFailed`: the
+        // cause here is a cluster or transactional-id authorization failure and
+        // nothing about it is SASL.
+        //
+        // This used to be a codeless `Errors::UnknownServerError`, on the grounds
+        // that `AuthenticationException` carries no wire code of its own. But
+        // `AuthenticationError` is a class in its own right on this branch, and it
+        // is the only spelling for which `is_authentication_error()` — and hence
+        // `request_utils::is_fatal_error` — answers `true`. Reporting bad
+        // credentials as `UnknownServerError` (code -1) made a fatal condition look
+        // like a generic broker error to every caller and across the C FFI.
+        let authentication_error =
+            Error::Authentication(AuthenticationError::with_source(error.message(), error.clone()));
         {
             // `pending_requests` before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1107,7 +1434,7 @@ impl<C: KafkaClient> Sender<C> {
     /// it locks the accumulator's deques for the partitions involved. On the common
     /// path the manager is consulted once and an empty pool is passed — which the
     /// callee never reads, since its loop is over an empty set.
-    fn bump_idempotent_epoch_and_reset_id_if_needed(&mut self) -> Result<(), KafkaError> {
+    fn bump_idempotent_epoch_and_reset_id_if_needed(&mut self) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
         };
@@ -1138,7 +1465,7 @@ impl<C: KafkaClient> Sender<C> {
 
         let accumulator = Arc::clone(&self.accumulator);
         let pending_requests = Arc::clone(&self.pending_requests);
-        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, None, |pool| {
             // Deque locks are held by `with_in_flight_batch_pool` for the duration of
             // this closure, so taking the two locks here is the full
             // deque → `pending_requests` → manager order rules §3 and the
@@ -1158,7 +1485,7 @@ impl<C: KafkaClient> Sender<C> {
     /// or if a `FindCoordinator` request is enqueued — i.e. exactly when `runOnce`
     /// must return at `:334`. Java has one `return false` (`:474`, empty queue) and
     /// six `return true`.
-    async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, TransactionPhaseError> {
+    async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(false);
         };
@@ -1177,7 +1504,7 @@ impl<C: KafkaClient> Sender<C> {
             if manager.has_abortable_error() {
                 manager.last_error().cloned()
             } else if manager.is_aborting() {
-                Some(KafkaError::transaction_aborted())
+                Some(Error::transaction_aborted())
             } else {
                 None
             }
@@ -1189,7 +1516,7 @@ impl<C: KafkaClient> Sender<C> {
         // Java 472-474. `nextRequest` can throw through `resetTransactionState`'s
         // `transitionTo` on the "EndTxn for a transaction that never started" path
         // (`TransactionManager.java:923`); Java lets that escape `runOnce` to
-        // `Sender.run`'s catch-and-log, which is what `TransactionPhaseError::Other`
+        // `Sender.run`'s catch-and-log, which is what returning the error unchanged
         // reaches here.
         let has_incomplete = self.accumulator.has_incomplete();
         let next_request_handler = {
@@ -1198,8 +1525,7 @@ impl<C: KafkaClient> Sender<C> {
             match transaction_manager
                 .lock()
                 .unwrap()
-                .next_request(&mut pending_requests, has_incomplete)
-                .map_err(TransactionPhaseError::Other)?
+                .next_request(&mut pending_requests, has_incomplete)?
             {
                 Some(handler) => handler,
                 None => return Ok(false),
@@ -1212,11 +1538,7 @@ impl<C: KafkaClient> Sender<C> {
         // routed to the coordinator this Sender has discovered.
         let coordinator_type = transaction_manager.lock().unwrap().coordinator_type(&next_request_handler);
         let target_node = match coordinator_type {
-            Some(coordinator_type) => self
-                .coordinators
-                .coordinator(coordinator_type)
-                .map_err(TransactionPhaseError::Other)?
-                .cloned(),
+            Some(coordinator_type) => self.coordinators.coordinator(coordinator_type)?.cloned(),
             None => {
                 let now = (self.time_provider)();
                 self.client.least_loaded_node(now).node().cloned()
@@ -1268,14 +1590,19 @@ impl<C: KafkaClient> Sender<C> {
             // Java's `awaitNodeReady` throws `IOException`, caught at :511, and
             // `AuthenticationException`, which escapes to `runOnce`'s catch at :336.
             // `network_client_utils::await_ready` folds both into `io::Error`; the
-            // authentication case is the one it builds with
-            // `ErrorKind::PermissionDenied` from `client.authentication_error`
-            // (`network_client_utils.rs:96-98`).
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err(TransactionPhaseError::Authentication(KafkaError::fatal(
-                    Errors::UnknownServerError,
-                    error.to_string(),
-                )));
+            // authentication case carries a typed `AuthenticationError` payload,
+            // which is what `is_authentication_error` tests — the crate's documented
+            // carrier, mirroring Java's `instanceof AuthenticationException`
+            // (`common/network/authentication_error.rs`). Sniffing the
+            // `io::ErrorKind` instead was off-convention and would misfire the day
+            // an unrelated `PermissionDenied` arrived.
+            Err(error) if network::is_authentication_error(&error) => {
+                // Java rethrows the `AuthenticationException` itself
+                // (`NetworkClientUtils.java:86-87`), so the class must be
+                // `AuthenticationException` — not a codeless `UnknownServerError`,
+                // for which `is_authentication_error()` and therefore
+                // `request_utils::is_fatal_error` both answer `false`.
+                return Err(authentication_error_from_io(&error));
             },
             Err(error) => {
                 // Java 511-516: we break here so that we pick up the FindCoordinator
@@ -1342,10 +1669,7 @@ impl<C: KafkaClient> Sender<C> {
     /// re-enqueues the request either way.
     ///
     /// Translated from `Sender.maybeFindCoordinatorAndRetry()` (Java 520-530).
-    async fn maybe_find_coordinator_and_retry(
-        &mut self,
-        next_request_handler: TxnRequestHandler,
-    ) -> Result<(), TransactionPhaseError> {
+    async fn maybe_find_coordinator_and_retry(&mut self, next_request_handler: TxnRequestHandler) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
         };
@@ -1353,11 +1677,11 @@ impl<C: KafkaClient> Sender<C> {
         if needs_coordinator {
             // Java 522. `pending_requests` before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager
-                .lock()
-                .unwrap()
-                .lookup_coordinator_for(&mut self.coordinators, &mut pending_requests, &next_request_handler)
-                .map_err(TransactionPhaseError::Other)?;
+            transaction_manager.lock().unwrap().lookup_coordinator_for(
+                &mut self.coordinators,
+                &mut pending_requests,
+                &next_request_handler,
+            )?;
         } else {
             // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
             // loop when no node is available.
@@ -1393,9 +1717,28 @@ impl<C: KafkaClient> Sender<C> {
         coordinator_type: Option<CoordinatorType>,
     ) -> std::io::Result<bool> {
         let request_timeout_ms = self.request_timeout_ms as i64;
-        if !crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
-            .await?
-        {
+        let (responses, result) =
+            crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
+                .await;
+        // Route the responses collected while awaiting readiness through the same
+        // path `poll_and_dispatch` uses, **before** propagating any error. This
+        // crate's `NetworkClient::poll` does not self-dispatch (PLAN §9.28) —
+        // `await_ready` only collects — so a produce/transactional response for a
+        // *different* in-flight request that arrived on the shared selector during
+        // the readiness poll would otherwise be dropped, hanging that batch's
+        // futures forever. `await_ready` now surfaces the responses alongside its
+        // `io::Result` on every exit (success, timeout, connection-failed,
+        // auth-failed), and we dispatch them here before the `?` propagates a
+        // connection/auth error — mirroring Java, whose `client.poll()`
+        // self-dispatches before it throws (`NetworkClientUtils.java:43,70-71,85-87`),
+        // so it loses nothing on the error paths either. No manager guard is held
+        // across the await above or this dispatch (rules §4).
+        if !responses.is_empty() {
+            let now = (self.time_provider)();
+            self.handle_client_responses(&responses, now);
+        }
+        let ready = result?;
+        if !ready {
             return Ok(false);
         }
         if coordinator_type == Some(CoordinatorType::Transaction)
@@ -1412,7 +1755,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Must not be called while the `TransactionManager` guard is held: it takes the
     /// accumulator's per-partition deque locks, and rules §3 fixes the order as
     /// deque → manager.
-    fn maybe_abort_batches(&mut self, error: &KafkaError) {
+    fn maybe_abort_batches(&mut self, error: &Error) {
         if !self.accumulator.has_incomplete() {
             return;
         }
@@ -1440,7 +1783,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Called from [`Self::maybe_abort_batches`] (`Sender.java:536`) and from
     /// [`Self::run`]'s force-close branch (`Sender.java:294-295`).
-    fn abort_in_flight_batches(&mut self, reason: &KafkaError) {
+    fn abort_in_flight_batches(&mut self, reason: &Error) {
         let accumulator = Arc::clone(&self.accumulator);
         for (_, batches) in self.in_flight_batches.drain() {
             for mut batch in batches {
@@ -1534,7 +1877,7 @@ impl<C: KafkaClient> Sender<C> {
     /// ids, epochs and sequence numbers when idempotence is enabled. Java lets the
     /// corresponding `IllegalStateException` escape `runOnce` to `Sender.run`'s
     /// catch-and-log; [`Self::run_once_logging_errors`] is the same boundary.
-    async fn send_producer_data(&mut self, now: i64) -> Result<i64, KafkaError> {
+    async fn send_producer_data(&mut self, now: i64) -> Result<i64, Error> {
         let metadata_snapshot = self.metadata.fetch_metadata_snapshot();
 
         // Get the list of partitions with data ready to send
@@ -1599,6 +1942,15 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
+        // Java records `sensors.updateProduceRequestMetrics(batches)` at
+        // `Sender.java:434` — after `addToInflightBatches`, using the same
+        // `batches` references (Java's `addToInflightBatches` does not remove
+        // them from the map). In Rust, `add_to_inflight_batches` MOVES the
+        // batches out of the map, so we record here (before the move) instead;
+        // the recorded values (estimated size, queue time, compression ratio,
+        // max record size, record count) are unchanged by the reorder.
+        self.sensors.update_produce_request_metrics(&batches);
+
         // Move batches into in-flight tracking (takes ownership)
         self.add_to_inflight_batches(&mut batches);
 
@@ -1636,12 +1988,13 @@ impl<C: KafkaClient> Sender<C> {
         }
         for mut expired_batch in expired_batches {
             let error_message = format!(
-                "Expiring {} record(s) for {}:{} ms has passed since batch creation",
+                "Expiring {} record(s) for {}:{} ms has passed since batch creation. \
+                 The request has not been sent, or no server response has been received yet.",
                 expired_batch.record_count,
                 expired_batch.topic_partition,
                 now - expired_batch.created_ms
             );
-            let error = KafkaError::with_message(Errors::RequestTimedOut, error_message);
+            let error = Error::with_message(Errors::RequestTimedOut, error_message);
             let retain = self.fail_batch_with_error(&mut expired_batch, error, false, deallocate_buffer);
             if let Some(transaction_manager) = self.transaction_manager.clone()
                 && expired_batch.in_retry()
@@ -1706,7 +2059,7 @@ impl<C: KafkaClient> Sender<C> {
         batches: &mut HashMap<TopicPartition, ProducerBatch>,
         topic_names: &HashMap<Uuid, String>,
         now: i64,
-    ) -> Result<Vec<(TopicPartition, BatchAction)>, KafkaError> {
+    ) -> Result<Vec<(TopicPartition, BatchAction)>, Error> {
         let request_header = response.request_header();
         let correlation_id = request_header.correlation_id();
         let mut deferred_actions: Vec<(TopicPartition, BatchAction)> = Vec::new();
@@ -1734,7 +2087,7 @@ impl<C: KafkaClient> Sender<C> {
                 response.destination()
             );
             let part_resp = PartitionResponse::from_error_with_message(
-                Errors::NetworkException,
+                Errors::NetworkError,
                 Some(format!("Disconnected from node {}", response.destination())),
             );
             for (tp, batch) in batches.iter_mut() {
@@ -1838,6 +2191,11 @@ impl<C: KafkaClient> Sender<C> {
                         }
                     }
                 }
+                // Java: sensors.recordLatency(response.destination(),
+                // response.requestLatencyMs()) at the end of the hasResponse()
+                // branch (`Sender.java:651`).
+                self.sensors
+                    .record_latency(response.destination(), response.request_latency_ms());
             } else {
                 // acks = 0 case, just complete all requests
                 let part_resp = PartitionResponse::from_error(Errors::None);
@@ -1864,7 +2222,7 @@ impl<C: KafkaClient> Sender<C> {
         correlation_id: i32,
         now: i64,
         mut partitions_with_updated_leader_info: Option<&mut HashMap<TopicPartition, LeaderIdAndEpoch>>,
-    ) -> Result<BatchAction, KafkaError> {
+    ) -> Result<BatchAction, Error> {
         batch.set_inflight(false);
         let error = response.error;
 
@@ -1932,7 +2290,7 @@ impl<C: KafkaClient> Sender<C> {
             BatchAction::Done
         };
 
-        if error != Errors::None && error.is_invalid_metadata() {
+        if error != Errors::None && error.error().is_some_and(|e| e.is_invalid_metadata_error()) {
             if error == Errors::UnknownTopicOrPartition {
                 kafka_warn!(
                     self.log_context,
@@ -1941,12 +2299,26 @@ impl<C: KafkaClient> Sender<C> {
                     batch.topic_partition
                 );
             } else {
+                // Java interpolates `error.exception(response.errorMessage).toString()`
+                // (`Sender.java:719`) — the exception *object*, whose `toString()` is
+                // "<class>: <message>" — not the `Errors` constant. `Errors.exception`
+                // falls back to the cached default instance when the response carries
+                // no message (`Errors.java:462-469`), which is `Errors::error()` here.
+                let rendered = match response.error_message.as_deref() {
+                    Some(message) => error.error_with_message(message),
+                    None => error.error(),
+                }
+                .map(|e| e.to_string())
+                .unwrap_or_default();
                 kafka_warn!(
                     self.log_context,
-                    "Received invalid metadata error in produce request on partition {} due to {}. \
+                    // Java's format string has no separator after the interpolated
+                    // exception, whose message already ends in a period
+                    // (`Sender.java:718`); keep the text byte-identical.
+                    "Received invalid metadata error in produce request on partition {} due to {} \
                      Going to request metadata update now",
                     batch.topic_partition,
-                    error
+                    rendered
                 );
             }
 
@@ -1993,11 +2365,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Complete a batch successfully.
     ///
     /// Translated from `Sender.completeBatch()` (the 2-argument version).
-    fn complete_batch_success(
-        &mut self,
-        batch: &mut ProducerBatch,
-        response: &PartitionResponse,
-    ) -> Result<(), KafkaError> {
+    fn complete_batch_success(&mut self, batch: &mut ProducerBatch, response: &PartitionResponse) -> Result<(), Error> {
         if let Some(transaction_manager) = self.transaction_manager.clone() {
             transaction_manager.lock().unwrap().handle_completed_batch(batch, response)?;
         }
@@ -2012,7 +2380,7 @@ impl<C: KafkaClient> Sender<C> {
         Ok(())
     }
 
-    /// See [`Self::fail_batch_with_record_exceptions`] for the return value.
+    /// See [`Self::fail_batch_with_record_errors`] for the return value.
     #[must_use]
     fn fail_batch(
         &mut self,
@@ -2022,16 +2390,21 @@ impl<C: KafkaClient> Sender<C> {
         deallocate_batch: bool,
     ) -> bool {
         let top_level_error = if response.error == Errors::TopicAuthorizationFailed {
-            KafkaError::with_message(Errors::TopicAuthorizationFailed, batch.topic_partition.topic().to_string())
+            // Java `:775`: `new TopicAuthorizationException(Collections.singleton(topic))`.
+            // The single-set constructor formats the message as
+            // "Not authorized to access topics: [<topics>]" AND populates
+            // `unauthorizedTopics()`. Passing the topic as the *message* instead left
+            // the topic set empty and the message a bare topic name.
+            Error::topic_authorization(HashSet::from([batch.topic_partition.topic().to_string()]))
         } else if response.error == Errors::ClusterAuthorizationFailed {
-            KafkaError::with_message(
+            Error::with_message(
                 Errors::ClusterAuthorizationFailed,
                 "The producer is not authorized to do idempotent sends",
             )
         } else {
             match &response.error_message {
-                Some(msg) => KafkaError::with_message(response.error, msg),
-                None => KafkaError::new(response.error),
+                Some(msg) => Error::with_message(response.error, msg),
+                None => Error::new(response.error),
             }
         };
 
@@ -2039,35 +2412,44 @@ impl<C: KafkaClient> Sender<C> {
             self.fail_batch_with_error(batch, top_level_error, adjust_sequence_numbers, deallocate_batch)
         } else {
             // Build per-record error map
-            let mut record_error_map: HashMap<i32, KafkaError> = HashMap::with_capacity(response.record_errors.len());
+            let mut record_error_map: HashMap<i32, Error> = HashMap::with_capacity(response.record_errors.len());
             for record_error in &response.record_errors {
+                // Java falls back to `response.error.message()` — the code's default
+                // human description (`Sender.java:796`) — not the enum constant that
+                // `Display` renders.
                 let error_message = record_error
                     .message
                     .clone()
                     .or_else(|| response.error_message.clone())
-                    .unwrap_or_else(|| response.error.to_string());
+                    .unwrap_or_else(|| response.error.message().to_string());
 
                 if response.record_errors.len() == 1 {
-                    record_error_map.insert(
-                        record_error.batch_index,
-                        KafkaError::with_message(response.error, error_message),
-                    );
+                    record_error_map
+                        .insert(record_error.batch_index, Error::with_message(response.error, error_message));
                 } else {
                     record_error_map.insert(
                         record_error.batch_index,
-                        KafkaError::with_message(Errors::InvalidRecord, error_message),
+                        Error::with_message(Errors::InvalidRecord, error_message),
                     );
                 }
             }
 
-            let default_error = KafkaError::with_message(
-                Errors::InvalidRecord,
-                "Failed to append record because it was part of a batch which had one or more invalid records",
+            // Java `:812-815`: a BARE `KafkaException`, deliberately a different class
+            // from the `InvalidRecordException` the named records get above — the Java
+            // comment states the intent, "To avoid confusion for the remaining records,
+            // we return a generic exception". A caller must be able to tell "my record
+            // was rejected" (`InvalidRecordException`, code 87) from "my record was
+            // collateral damage" (no code, `is_api_error() == false`).
+            //
+            // The message reproduces Java's literal string, typo included
+            // ("one more more"): the text is part of the contract.
+            let default_error = Error::kafka(
+                "Failed to append record because it was part of a batch which had one more more invalid records",
             );
 
             // Complete with per-record exceptions
-            let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-                Arc::new(move |batch_index: i32| -> Option<KafkaError> {
+            let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+                Arc::new(move |batch_index: i32| -> Option<Error> {
                     Some(
                         record_error_map
                             .get(&batch_index)
@@ -2076,32 +2458,32 @@ impl<C: KafkaClient> Sender<C> {
                     )
                 });
 
-            self.fail_batch_with_record_exceptions(
+            self.fail_batch_with_record_errors(
                 batch,
                 top_level_error,
-                record_exceptions,
+                record_errors,
                 adjust_sequence_numbers,
                 deallocate_batch,
             )
         }
     }
 
-    /// See [`Self::fail_batch_with_record_exceptions`] for the return value.
+    /// See [`Self::fail_batch_with_record_errors`] for the return value.
     #[must_use]
     fn fail_batch_with_error(
         &mut self,
         batch: &mut ProducerBatch,
-        top_level_exception: KafkaError,
+        top_level_error: Error,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) -> bool {
-        let exception_clone = top_level_exception.clone();
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-            Arc::new(move |_| Some(exception_clone.clone()));
-        self.fail_batch_with_record_exceptions(
+        let error_clone = top_level_error.clone();
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(move |_| Some(error_clone.clone()));
+        self.fail_batch_with_record_errors(
             batch,
-            top_level_exception,
-            record_exceptions,
+            top_level_error,
+            record_errors,
             adjust_sequence_numbers,
             deallocate_batch,
         )
@@ -2112,18 +2494,24 @@ impl<C: KafkaClient> Sender<C> {
     /// branch (`Sender.java:861`) and the pooled buffer has *not* been returned. See
     /// [`Self::batches_awaiting_response`].
     #[must_use]
-    fn fail_batch_with_record_exceptions(
+    fn fail_batch_with_record_errors(
         &mut self,
         batch: &mut ProducerBatch,
-        top_level_exception: KafkaError,
-        record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>,
+        top_level_error: Error,
+        record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) -> bool {
+        // Java records errors at the top of `failBatch(...)` (`Sender.java:841`),
+        // before completing the batch. Both the response-failure path and the
+        // expired-batch path route through here, matching Java's single
+        // `recordErrors` site.
+        self.sensors.record_errors(batch.topic_partition.topic(), batch.record_count);
+
         // The batch has already been removed from `in_flight_batches` by the caller
         // (either `handle_produce_responses` or `get_expired_inflight_batches`).
-        let error_for_manager = top_level_exception.clone();
-        if batch.complete_exceptionally(top_level_exception, record_exceptions) {
+        let error_for_manager = top_level_error.clone();
+        if batch.complete_with_error(top_level_error, record_errors) {
             if let Some(transaction_manager) = self.transaction_manager.clone() {
                 // `handleFailedBatch` needs the partition's *remaining* tracked
                 // batches for the transactional sequence adjustment
@@ -2143,18 +2531,19 @@ impl<C: KafkaClient> Sender<C> {
                 // it before adjusting, so the pool aliases nothing.
                 let partitions = [batch.topic_partition.clone()];
                 let accumulator = Arc::clone(&self.accumulator);
-                let handled = accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
-                    let pool_batches = pool
-                        .get_mut(&batch.topic_partition)
-                        .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
-                    transaction_manager.lock().unwrap().handle_failed_batch(
-                        batch,
-                        &error_for_manager,
-                        adjust_sequence_numbers,
-                        pool_batches,
-                        Caller::Sender,
-                    )
-                });
+                let handled =
+                    accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, None, |pool| {
+                        let pool_batches = pool
+                            .get_mut(&batch.topic_partition)
+                            .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+                        transaction_manager.lock().unwrap().handle_failed_batch(
+                            batch,
+                            &error_for_manager,
+                            adjust_sequence_numbers,
+                            pool_batches,
+                            Caller::Sender,
+                        )
+                    });
                 // This call can return an error in the rare case that there's an
                 // invalid state transition attempted. Log it so as not to interfere
                 // with the rest of the logic — Java catches and logs at debug for the
@@ -2188,40 +2577,57 @@ impl<C: KafkaClient> Sender<C> {
     /// Check if a batch can be retried.
     ///
     /// Translated from `Sender.canRetry()`.
-    fn can_retry(&self, batch: &ProducerBatch, response: &PartitionResponse, now: i64) -> Result<bool, KafkaError> {
+    fn can_retry(&mut self, batch: &mut ProducerBatch, response: &PartitionResponse, now: i64) -> Result<bool, Error> {
         if batch.has_reached_delivery_timeout(self.accumulator.delivery_timeout_ms() as i64, now)
             || batch.attempts() >= self.retries
             || batch.is_done()
         {
             return Ok(false);
         }
-        match &self.transaction_manager {
-            // `batches` is empty, and that is a **defect** — PLAN §9.25. It supplies the
-            // partition's in-flight batches for the transactional log-truncation rewrite
-            // (`TransactionManager.java:1042-1050`), and a *transactional* producer does
-            // reach that branch: an earlier revision of this comment claimed only the
-            // idempotent path did, which is false — the idempotent path takes the
-            // `requestIdempotentEpochBumpForPartition` arm beside it.
-            //
-            // With an empty pool `start_sequences_at_beginning` errors on the tracked
-            // in-flight batch it was not given, and the `?` on this call fires **before**
-            // `BatchAction::Reenqueue` can be produced. The error propagates out of
-            // `handle_produce_response_for`, whose local `batches` map already owns the
-            // batch, and that map is dropped — so the batch is abandoned un-completed: its
-            // record futures never resolve and its pooled buffer is never returned to
-            // `BufferPool`. `run_once` still returns `Ok` (the per-response handler logs
-            // and continues), which is why this is silent. Not "a stale sequence counter":
-            // a hang and a leak.
-            //
-            // Not fixed here: `can_retry` takes the failing batch by `&` *and* the pool by
-            // `&mut`, and the failing batch is still tracked at this point (unlike at
-            // `handle_failed_batch`, which removes it first), so including it in the pool
-            // aliases. That needs a signature change on the produce-response path plus its
-            // own allocation audit — see §9.25. Reproducer:
-            // `test_transactional_unknown_producer_handling_when_retention_limit_reached`.
-            Some(transaction_manager) => transaction_manager.lock().unwrap().can_retry(response, batch, &mut []),
-            None => Ok(response.error.is_retriable()),
-        }
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(response.error.error().is_some_and(|e| e.is_retriable_error()));
+        };
+
+        // `TransactionManager::can_retry`'s transactional `UNKNOWN_PRODUCER_ID`
+        // log-truncation arm (`TransactionManager.java:1042-1050`) rewrites the
+        // partition's in-flight sequences from zero via `start_sequences_at_beginning`,
+        // which — per `.claude/rules/producer-transactions.md` §7 — errors unless every
+        // batch it still tracks is supplied in the pool. The failing batch is still
+        // tracked here (`can_retry` runs before any `remove_in_flight_batch`), yet it
+        // lives in *neither* owner the pool draws from: it was moved into
+        // `handle_produce_response_for`'s local `batches` map and reaches us as
+        // `&mut batch`. So assemble the three-source pool — accumulator deques +
+        // `Sender::in_flight_batches` (via `with_in_flight_batch_pool`) + the failing
+        // batch injected below — and identify the failing batch by its ordering key
+        // (§6) rather than by a separate `&ProducerBatch` that would alias the `&mut`
+        // the pool holds. Without the pool the rewrite errored, the `?` fired before a
+        // `BatchAction::Reenqueue` could be produced, and the batch was dropped
+        // un-completed: a hang (record futures never resolve) and a leak (pooled buffer
+        // never returned). See PLAN §9.25.
+        let topic_partition = batch.topic_partition.clone();
+        let batch_key = (batch.producer_id(), batch.producer_epoch(), batch.base_sequence());
+        let sequence_has_been_reset = batch.sequence_has_been_reset();
+        let partitions = [topic_partition.clone()];
+        let accumulator = Arc::clone(&self.accumulator);
+        // The failing batch is injected as `extra_batch` (not pushed inside the closure)
+        // because the pool's element lifetime is higher-ranked there — see
+        // `with_in_flight_batch_pool`.
+        let extra_batch = Some((topic_partition.clone(), batch));
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, extra_batch, |pool| {
+            // `with_in_flight_batch_pool` holds the deque locks for the closure's
+            // duration, so taking the manager lock here observes the deque → manager
+            // order (rules §3). The whole region is CPU-bound with no `.await`, so
+            // `std::sync::Mutex` is correct and no guard is held across an await
+            // (rules §4).
+            let pool_batches = pool.get_mut(&topic_partition).map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+            transaction_manager.lock().unwrap().can_retry(
+                response,
+                &topic_partition,
+                batch_key,
+                sequence_has_been_reset,
+                pool_batches,
+            )
+        })
     }
 
     /// Transfer the record batches into a list of produce requests on a per-node basis.
@@ -2263,10 +2669,19 @@ impl<C: KafkaClient> Sender<C> {
         for mut info in batch_infos {
             let topic_id = topic_ids.get(info.tp.topic()).copied().unwrap_or(Uuid::ZERO_UUID);
 
-            // Find or create topic data
+            // Find or create topic data.
+            //
+            // Both `name` and `topic_id` are `mapKey` fields on `TopicProduceData`
+            // (`ProduceRequest.json`), so Java's generated
+            // `TopicProduceDataCollection.find(name, topicId)` matches on the
+            // conjunction of both keys (`elementKeysAreEqual` returns `false` on the
+            // first differing `mapKey`). The match must therefore be `&&`, not `||`:
+            // when two different topics both lack a resolved topic id and fall back to
+            // `Uuid::ZERO_UUID`, an `||` would merge the second topic's partitions into
+            // the first topic's entry purely because both share the placeholder id.
             let topic_data = topic_data_list
                 .iter_mut()
-                .find(|td| td.name == *info.tp.topic() || td.topic_id == topic_id);
+                .find(|td| td.name == *info.tp.topic() && td.topic_id == topic_id);
 
             // Take ownership of the record data instead of cloning.
             let records_bytes = info.records_data.take();
@@ -2417,12 +2832,13 @@ mod tests {
     use crate::common::Node;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::metrics::Metrics;
     use crate::common::protocol::ApiKeys;
-    use crate::common::record::CompressionType;
-    use crate::common::record::MemoryRecordsBuilder;
-    use crate::common::record::RecordBatch;
     use crate::common::record::TimestampType;
-    use crate::common::record::compression_ratio_estimator::{
+    use crate::common::record::internal::CompressionType;
+    use crate::common::record::internal::MemoryRecordsBuilder;
+    use crate::common::record::internal::RecordBatch;
+    use crate::common::record::internal::compression_ratio_estimator::{
         COMPRESSION_RATIO_IMPROVING_STEP, CompressionRatioEstimator,
     };
     use crate::common::requests::ConcreteResponse;
@@ -2586,6 +3002,9 @@ mod tests {
         time: Arc<MockTime>,
         tp0: TopicPartition,
         tp1: TopicPartition,
+        /// The shared metrics registry the sender records into. Exposed for the
+        /// metric-template parity test (`test_sender_metrics_templates`).
+        metrics: Arc<Metrics>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     }
 
@@ -2692,7 +3111,7 @@ mod tests {
                 ClusterResourceListeners::new(),
             ));
 
-            let accumulator = Arc::new(RecordAccumulator::new(
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 batch_size,
                 Compression::none(),
                 linger_ms,
@@ -2700,7 +3119,8 @@ mod tests {
                 accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-                buffer_pool.unwrap_or_else(|| Arc::new(BufferPool::new(total_size as i64, batch_size as usize))),
+                buffer_pool
+                    .unwrap_or_else(|| Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize))),
                 transaction_manager.clone(),
             ));
 
@@ -2709,6 +3129,15 @@ mod tests {
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
+
+            // Build metrics with a `client-id` tag, matching Java's
+            // `SenderTest.testSenderMetricsTemplates` (`clientA`).
+            let mut client_tags = std::collections::BTreeMap::new();
+            client_tags.insert("client-id".to_string(), "clientA".to_string());
+            let metrics = Arc::new(Metrics::with_config(Arc::new(
+                crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+            )));
+            let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
 
             let sender = Sender::new(
                 client,
@@ -2720,6 +3149,7 @@ mod tests {
                 retries,
                 request_timeout_ms,
                 sender_retry_backoff_ms,
+                sender_metrics_registry,
                 running,
                 force_close,
                 time_provider,
@@ -2745,7 +3175,7 @@ mod tests {
             );
             metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
 
-            Self { sender, accumulator, metadata, time, tp0, tp1, transaction_manager }
+            Self { sender, accumulator, metadata, time, tp0, tp1, metrics, transaction_manager }
         }
 
         /// Re-publishes the topic metadata with `tp0` at `tp0_leader_epoch` and `tp1` at
@@ -2787,7 +3217,7 @@ mod tests {
         /// `transactionManager.initializeTransactions(false)`, with both guards
         /// taken in the mandated `pending_requests` → `TransactionManager` order
         /// (see [`Sender::pending_requests`]).
-        fn initialize_transactions(&self) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+        fn initialize_transactions(&self) -> Result<Arc<TransactionalRequestResult>, Error> {
             let pending_requests = self.pending_requests();
             let mut pending_requests = pending_requests.lock().unwrap();
             self.transaction_manager()
@@ -2959,47 +3389,294 @@ mod tests {
         ProducerBatch::new(tp, records_builder, created_ms)
     }
 
+    /// Builds a minimal valid v2 record batch (one record) as a serialized
+    /// buffer, so `ProduceRequest::validate_records` accepts it when the produce
+    /// request is built for inspection.
+    fn single_record_batch_bytes() -> bytes::Bytes {
+        let mut builder = MemoryRecordsBuilder::new(
+            Vec::with_capacity(256),
+            0, // initial_position
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0, // base_offset
+            0, // log_append_time
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            256,
+            -1, // delete_horizon_ms
+        );
+        builder.append(0, Some("key".as_bytes()), Some("value".as_bytes()), &[]);
+        builder.build().into_buffer()
+    }
+
+    /// Regression test: two different topics that both lack a resolved topic id
+    /// must NOT be merged into a single `TopicProduceData` entry.
+    ///
+    /// Java's `Sender.sendProduceRequest` (Java 902-913) groups partitions with
+    /// the generated `TopicProduceDataCollection.find(name, topicId)`, whose
+    /// collection key is the conjunction of *both* `mapKey` fields — `Name` AND
+    /// `TopicId` (`ProduceRequest.json`: both are `"mapKey": true`, and the
+    /// generated `elementKeysAreEqual` returns `false` on the first differing
+    /// key). So two topics with different names never merge, even when both topic
+    /// ids fall back to `Uuid::ZERO_UUID` because metadata has not resolved them
+    /// yet. A `||` match here merged topic B's partitions into topic A's entry,
+    /// so the broker received B's records addressed as A.
+    #[tokio::test]
+    async fn test_send_produce_request_does_not_merge_topics_with_unresolved_ids() {
+        use crate::common::requests::ConcreteRequest;
+
+        let mut ctx = SenderTestContext::new();
+        let now = ctx.time.milliseconds();
+
+        // Ready node 0 so `MockClient::send` accepts the produce request.
+        let node = Node::new(0, "localhost".to_string(), 1969);
+        assert!(ctx.sender.client_mut().ready(&node, now).await, "node 0 should be ready");
+
+        // Two DIFFERENT topics, neither present in metadata — so both resolve to
+        // `Uuid::ZERO_UUID` in `topic_ids_for_partitions`, which is the exact
+        // condition that triggered the merge bug.
+        let tp_a = TopicPartition::new("topic-a".to_string(), 0);
+        let tp_b = TopicPartition::new("topic-b".to_string(), 0);
+        let batch_infos = vec![
+            RequestBatchInfo { tp: tp_a.clone(), records_data: Some(single_record_batch_bytes()) },
+            RequestBatchInfo { tp: tp_b.clone(), records_data: Some(single_record_batch_bytes()) },
+        ];
+
+        ctx.sender
+            .send_produce_request(now, node.id(), ACKS_ALL, REQUEST_TIMEOUT, batch_infos);
+
+        // Exactly one produce request should be enqueued; build it and inspect
+        // its topic data.
+        let requests = ctx.sender.client_mut().requests_mut();
+        assert_eq!(requests.len(), 1, "exactly one produce request enqueued");
+        let built = requests
+            .front_mut()
+            .expect("produce request")
+            .request_builder_mut()
+            .build()
+            .expect("produce request builds");
+        let ConcreteRequest::Produce(produce_request) = built else {
+            panic!("expected a Produce request");
+        };
+        let topic_data = &produce_request.data().topic_data;
+
+        assert_eq!(
+            topic_data.len(),
+            2,
+            "two distinct topics must produce two TopicProduceData entries, not one merged entry"
+        );
+        let mut names: Vec<&str> = topic_data.iter().map(|td| td.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["topic-a", "topic-b"]);
+        // Each entry holds only its own single partition — no cross-topic bleed.
+        for td in topic_data {
+            assert_eq!(td.partition_data.len(), 1, "topic {} must keep only its own partition", td.name);
+        }
+    }
+
     // =====================================================================
     // Unit tests (non-async, matching earlier test coverage)
     // =====================================================================
 
-    /// Test that format_err_msg produces the expected string.
+    /// `Sender.formatErrMsg` renders `String.format("%s%s", response.error, suffix)`
+    /// (`Sender.java:747`), and `Errors` overrides no `toString()`, so the leading
+    /// token is the **enum constant** — not the code's long description. Java's own
+    /// javadoc spells the expected output for the network-disconnect code
+    /// (`Sender.java:742`); this client renders that constant as `NETWORK_ERROR`,
+    /// because Java's spelling carries the word CLAUDE.md §2 bans from Rust code
+    /// (see the arm comment in `Errors::enum_name`).
     #[test]
     fn test_format_err_msg() {
-        let resp = PartitionResponse::from_error(Errors::NetworkException);
-        let msg = format_partition_response_err(&resp);
-        assert!(!msg.is_empty());
+        // No response-level message: Java's suffix is "", so the whole string is
+        // the constant.
+        let resp = PartitionResponse::from_error(Errors::NetworkError);
+        assert_eq!(format_partition_response_err(&resp), "NETWORK_ERROR");
 
+        // The javadoc example, verbatim apart from the §2 rename.
         let resp_with_msg = PartitionResponse::from_error_with_message(
-            Errors::NetworkException,
+            Errors::NetworkError,
             Some("Disconnected from node 0".to_string()),
         );
-        let msg2 = format_partition_response_err(&resp_with_msg);
-        assert!(msg2.contains("Disconnected from node 0"));
-        assert!(msg2.contains("Error Message"));
+        assert_eq!(
+            format_partition_response_err(&resp_with_msg),
+            "NETWORK_ERROR. Error Message: Disconnected from node 0"
+        );
+
+        // Java treats an empty `errorMessage` as absent (`errorMessage.isEmpty()`).
+        let resp_empty = PartitionResponse::from_error_with_message(Errors::CorruptMessage, Some(String::new()));
+        assert_eq!(format_partition_response_err(&resp_empty), "CORRUPT_MESSAGE");
+    }
+
+    /// Java rethrows the `AuthenticationException` object `awaitNodeReady` threw,
+    /// with its message untouched (`NetworkClientUtils.java:86-87`), and
+    /// `Sender.runOnce` catches it at `Sender.java:336`.
+    ///
+    /// The Rust transport carries that class as an `AuthenticationError` payload
+    /// inside an `io::Error`, whose own `Display` is already the Java `toString()`
+    /// form (`"AuthenticationError: <message>"`). Rebuilding the typed error from
+    /// `error.to_string()` therefore showed the application the class prefix twice;
+    /// the payload's bare message is what Java propagates.
+    #[test]
+    fn test_authentication_error_from_io_keeps_a_single_class_prefix() {
+        let reason = "Authentication failed due to invalid credentials";
+        let io_error = network::auth_io_error(reason);
+        // The input already carries the prefix — this is what made `to_string()`
+        // the wrong source.
+        assert_eq!(io_error.to_string(), format!("AuthenticationError: {reason}"));
+
+        let error = authentication_error_from_io(&io_error);
+        assert_eq!(error.message(), reason);
+        assert_eq!(error.to_string(), format!("AuthenticationError: {reason}"));
+        // The class must be the one `run_once`'s `is_authentication_error()` arm
+        // tests for, so `is_fatal_error` agrees with Java's `instanceof`.
+        assert!(error.is_authentication_error());
+        assert!(crate::common::requests::request_utils::is_fatal_error(&error));
+
+        // Defensive fallback: an `io::Error` with no `AuthenticationError` payload
+        // has no bare message to read, so its `Display` is used — and it carries no
+        // crate class prefix to duplicate. Production never reaches this branch,
+        // because the call site is guarded by `network::is_authentication_error`.
+        let plain = std::io::Error::new(std::io::ErrorKind::TimedOut, "connection setup timed out");
+        assert_eq!(authentication_error_from_io(&plain).message(), "connection setup timed out");
     }
 
     /// Test that can_retry returns true for retriable errors within limits.
     #[test]
     fn test_can_retry_logic() {
         let resp_retriable = PartitionResponse::from_error(Errors::NotLeaderOrFollower);
-        assert!(resp_retriable.error.is_retriable());
+        assert!(resp_retriable.error.error().is_some_and(|x| x.is_retriable_error()));
 
         let resp_non_retriable = PartitionResponse::from_error(Errors::TopicAuthorizationFailed);
-        assert!(!resp_non_retriable.error.is_retriable());
+        assert!(!resp_non_retriable.error.error().is_some_and(|x| x.is_retriable_error()));
     }
 
-    /// Test is_invalid_metadata on various error codes.
+    /// Test is_invalid_metadata_error on various error codes.
     #[test]
-    fn test_is_invalid_metadata() {
-        assert!(Errors::UnknownTopicOrPartition.is_invalid_metadata());
-        assert!(Errors::LeaderNotAvailable.is_invalid_metadata());
-        assert!(Errors::NotLeaderOrFollower.is_invalid_metadata());
-        assert!(Errors::FencedLeaderEpoch.is_invalid_metadata());
-        assert!(Errors::NetworkException.is_invalid_metadata());
-        assert!(!Errors::RequestTimedOut.is_invalid_metadata());
-        assert!(!Errors::None.is_invalid_metadata());
-        assert!(!Errors::TopicAuthorizationFailed.is_invalid_metadata());
+    fn test_is_invalid_metadata_error() {
+        assert!(
+            Errors::UnknownTopicOrPartition
+                .error()
+                .is_some_and(|x| x.is_invalid_metadata_error())
+        );
+        assert!(
+            Errors::LeaderNotAvailable
+                .error()
+                .is_some_and(|x| x.is_invalid_metadata_error())
+        );
+        assert!(
+            Errors::NotLeaderOrFollower
+                .error()
+                .is_some_and(|x| x.is_invalid_metadata_error())
+        );
+        assert!(Errors::FencedLeaderEpoch.error().is_some_and(|x| x.is_invalid_metadata_error()));
+        assert!(Errors::NetworkError.error().is_some_and(|x| x.is_invalid_metadata_error()));
+        assert!(!Errors::RequestTimedOut.error().is_some_and(|x| x.is_invalid_metadata_error()));
+        assert!(!Errors::None.error().is_some_and(|x| x.is_invalid_metadata_error()));
+        assert!(
+            !Errors::TopicAuthorizationFailed
+                .error()
+                .is_some_and(|x| x.is_invalid_metadata_error())
+        );
+    }
+
+    /// `Sender.shouldHandleAuthorizationError` passes
+    /// `new AuthenticationException(exception)` to `failPendingRequests`
+    /// (`Sender.java:354`), so what a user awaiting `init_transactions()` /
+    /// `commit_transaction()` receives is an `AuthenticationException`.
+    ///
+    /// It used to be rebuilt as a codeless `Errors::UnknownServerError`, for which
+    /// `is_authentication_error()` — and therefore
+    /// `request_utils::is_fatal_error` — answers `false`, so bad credentials were
+    /// indistinguishable from a generic broker error (code -1, including across the
+    /// C FFI) and no longer counted as fatal. `src/common/protocol/errors.rs`
+    /// asserts `is_fatal_error(&Error::Authentication(..)) == true`, so the two
+    /// halves of the crate disagreed.
+    #[tokio::test]
+    async fn handle_authorization_error_fails_pending_requests_with_an_authentication_error() {
+        let mut ctx = SenderTestContext::idempotent();
+        let manager = ctx.transaction_manager();
+
+        // Queue a handler for `fail_pending_requests` to fail, and reach a state its
+        // `abortableError` transition accepts.
+        let queued_result = {
+            let mut pending = ctx.sender.pending_requests.lock().unwrap();
+            let mut manager = manager.lock().unwrap();
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
+                .expect("the initial InitProducerId is enqueued, leaving INITIALIZING");
+            manager
+                .transition_to_abortable_error(Error::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
+                .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
+            manager.force_enqueue_init_producer_id_for_test(&mut pending)
+        };
+
+        // The cause `awaitReady` surfaces: a cluster-authorization failure.
+        let cause = Error::new(Errors::ClusterAuthorizationFailed);
+        ctx.sender
+            .handle_authorization_error(&cause)
+            .expect("the ABORTABLE_ERROR self-loop is valid");
+
+        assert!(queued_result.is_completed());
+        let error = queued_result.error().expect("the pending request must be failed");
+        assert!(
+            matches!(error, Error::Authentication(_)),
+            "expected the authentication error Java builds from the cause, got {error:?}"
+        );
+        assert!(error.is_authentication_error(), "got {error:?}");
+        // Java: `AuthenticationException extends ApiException`.
+        assert!(error.is_api_error(), "an authentication error is an API error: {error:?}");
+        assert!(
+            crate::common::requests::request_utils::is_fatal_error(&error),
+            "an authentication failure is fatal: {error:?}"
+        );
+        // Java's `(Throwable cause)` constructor: the cause is carried, not
+        // stringified into the message.
+        assert_eq!(
+            error.source().expect("the cause must be carried").error(),
+            Errors::ClusterAuthorizationFailed
+        );
+    }
+
+    /// `Sender.run`'s blanket `catch (Exception e) { log.error("Uncaught error in
+    /// kafka producer I/O thread: ", e); }` (Java 246-250, 261, 282) also covers the
+    /// throws Rust spells as panics: `getExpiredInflightBatches`'s
+    /// `IllegalStateException("<tp> batch created at <ms> gets unexpected final
+    /// state <state>")`, and `ProducerBatch`'s two state-machine violations
+    /// (`ProducerBatch.java:292` and `abort`).
+    ///
+    /// Here an already-completed batch reaches the delivery-timeout sweep, which is
+    /// the first of those. Java logs it and the I/O thread keeps running; the Rust
+    /// boundary handled only `Result::Err`, so the unwind aborted the Sender task —
+    /// after which nothing drains the accumulator or completes futures and every
+    /// outstanding `send().await` hangs.
+    #[tokio::test]
+    async fn run_once_logging_errors_survives_a_batch_state_machine_panic() {
+        let mut ctx = SenderTestContext::new();
+        let delivery_timeout_ms = ctx.accumulator.delivery_timeout_ms() as i64;
+
+        // A batch created "now" that has already been completed, parked in the
+        // sender's in-flight map as if its request were outstanding.
+        let mut batch = make_batch(ctx.tp0.clone(), ctx.time.milliseconds());
+        batch.set_inflight(true);
+        assert!(batch.complete(0, RecordBatch::NO_TIMESTAMP), "the batch must complete once");
+        ctx.sender.in_flight_batches.entry(ctx.tp0.clone()).or_default().push(batch);
+
+        // Push the clock past the delivery timeout so `run_once` expires it and
+        // attempts a second final-state transition, which panics.
+        ctx.time.sleep(delivery_timeout_ms + 1);
+
+        // Must return normally rather than unwinding out of the loop body.
+        ctx.sender.run_once_logging_errors().await;
+
+        // And the sender is still usable afterwards, which is the whole point of
+        // Java's catch.
+        ctx.sender.run_once_logging_errors().await;
     }
 
     /// Test that initiate_close and force_close set flags correctly.
@@ -3069,7 +3746,7 @@ mod tests {
     /// Test that expired batches are collected correctly.
     #[test]
     fn test_get_expired_inflight_batches() {
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             1024 * 1024,
             Compression::none(),
             0,
@@ -3077,7 +3754,7 @@ mod tests {
             RETRY_BACKOFF_MS * 10,
             120000, // use long delivery timeout for this test
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(1024 * 1024, 16384)),
+            Arc::new(BufferPool::new_for_test(1024 * 1024, 16384)),
             None,
         ));
         let tp = TopicPartition::new("test".to_string(), 0);
@@ -3091,16 +3768,16 @@ mod tests {
         assert!(in_flight[&tp][0].has_reached_delivery_timeout(delivery_timeout_ms, 120001));
     }
 
-    /// Test KafkaError construction matches expected patterns.
+    /// Test Error construction matches expected patterns.
     #[test]
     fn test_kafka_error_construction() {
-        let err = KafkaError::with_message(Errors::RequestTimedOut, "timed out");
+        let err = Error::with_message(Errors::RequestTimedOut, "timed out");
         assert_eq!(err.error(), Errors::RequestTimedOut);
-        assert!(err.is_retriable());
+        assert!(err.is_retriable_error());
 
-        let err2 = KafkaError::new(Errors::TopicAuthorizationFailed);
+        let err2 = Error::new(Errors::TopicAuthorizationFailed);
         assert_eq!(err2.error(), Errors::TopicAuthorizationFailed);
-        assert!(!err2.is_retriable());
+        assert!(!err2.is_retriable_error());
     }
 
     /// Test RequestBatchInfo construction.
@@ -3155,6 +3832,145 @@ mod tests {
         assert_eq!(metadata.offset(), offset);
     }
 
+    /// Regression test for the B1 response-drop race: a response that lands on the
+    /// shared selector *while `await_node_ready` is polling for a node to become
+    /// ready* must still be routed, not silently discarded.
+    ///
+    /// This crate's `NetworkClient::poll` does **not** self-dispatch responses the
+    /// way Java's does — it only collects them, and `Sender::handle_client_responses`
+    /// routes them by correlation id afterwards (PLAN §9.28). Before the fix,
+    /// `network_client_utils::is_ready` / `await_ready` (the sole production caller of
+    /// the latter is `await_node_ready`) threw away the `Vec<ClientResponse>` returned
+    /// by their internal `client.poll(..)`, so a produce response for a *different*
+    /// in-flight request fetched during the readiness wait vanished and its batch's
+    /// future hung until `delivery.timeout.ms`. The fix returns those responses and
+    /// dispatches them in `await_node_ready`.
+    ///
+    /// Discriminating: without the fix the two drain assertions below stay at their
+    /// pre-poll values (the response is polled and dropped), so the test fails.
+    #[tokio::test]
+    async fn test_await_node_ready_dispatches_responses_polled_during_readiness() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+        // Node 0 is the only node in the test cluster (see `with_transaction_state`).
+        let node = Node::new(0, "localhost".to_string(), 1969);
+
+        // Put a produce request in flight for tp0: connect, then send.
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(
+            ctx.sender.pending_produce_responses.len(),
+            1,
+            "the produce request's routing entry must be installed"
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!future.is_done(), "the future must not resolve before its response");
+
+        // Queue the produce response WITHOUT running a Sender poll. It now waits on
+        // the shared MockClient to be drained by the *next* poll — which will be the
+        // readiness poll inside `await_node_ready`, not a `run_once`/`poll_and_dispatch`.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Await node readiness. Node 0 is already connected, so `is_ready`'s poll is
+        // the one that drains the queued produce response; the fix routes it.
+        let ready = ctx.sender.await_node_ready(&node, None).await.expect("await_node_ready");
+        assert!(ready, "node 0 is already connected");
+
+        // The response polled during readiness was dispatched: the future resolves and
+        // both the routing entry and the in-flight batch drain. These are the
+        // assertions that fail if the response is discarded instead of routed.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "the response polled during readiness must be routed, not discarded"
+        );
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the in-flight batch must drain once its response is handled"
+        );
+        assert!(
+            future.is_done(),
+            "the produce future must resolve from the response polled during readiness"
+        );
+        assert_eq!(future.get().await.expect("the future succeeds").offset(), 0);
+    }
+
+    /// Regression test for the B1 **error-path** response-drop (Critic 52 Issue 2):
+    /// a response collected during the readiness poll must still be routed even when
+    /// `await_node_ready` ultimately returns an error because the awaited node has
+    /// failed. Before the fix, `await_ready` returned `io::Result<(bool, Vec)>` and
+    /// its two error early-returns dropped the accumulated `Vec`, so the awaited node
+    /// failing lost an unrelated in-flight request's response, hanging that batch to
+    /// `delivery.timeout.ms`.
+    ///
+    /// Java loses nothing here because `client.poll()` self-dispatches before it
+    /// throws (`NetworkClientUtils.java:43,70-71,85-87`). The fix moves the responses
+    /// *outside* the `Result` so `await_node_ready` dispatches them before propagating
+    /// the error.
+    ///
+    /// The auth-error early-return is the same class, but `MockClient::authentication_error`
+    /// always returns `None`, so it cannot be exercised through this harness — the
+    /// connection-failed return covers the shared shape (the `Vec` now rides alongside
+    /// the `io::Result` on every exit, both error returns included).
+    ///
+    /// Discriminating: without the fix the produce response is polled during readiness
+    /// and then dropped when the connection-failed error propagates, so the future
+    /// hangs and both drain assertions stay non-empty.
+    #[tokio::test]
+    async fn test_await_node_ready_dispatches_responses_polled_before_error_return() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Put a produce request in flight for tp0 against node 0 (the test cluster's
+        // only broker), exactly as the success-path sibling test does.
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.pending_produce_responses.len(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!future.is_done(), "the future must not resolve before its response");
+
+        // Queue node 0's produce response WITHOUT running a Sender poll: it waits for
+        // the next poll of the shared MockClient, which will be the readiness poll
+        // inside `await_node_ready`.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Await readiness for a *different* node that is in connection backoff, so
+        // `await_ready` takes its `connection_failed` error return. Its readiness poll
+        // still drains node 0's queued produce response into the collected Vec.
+        let failed_node = Node::new(1, "localhost".to_string(), 1970);
+        ctx.sender.client_mut().backoff(&failed_node, i64::from(REQUEST_TIMEOUT) * 10);
+
+        let result = ctx.sender.await_node_ready(&failed_node, None).await;
+        assert!(
+            result.is_err(),
+            "the awaited node is in connection backoff, so await_node_ready must error"
+        );
+
+        // Despite the error return, the response polled during readiness was dispatched:
+        // the future resolves and both the routing entry and the in-flight batch drain.
+        // These are the assertions that fail if the Vec is dropped on the error path.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "a response polled before the error return must still be routed, not discarded"
+        );
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the in-flight batch must drain once its response is handled"
+        );
+        assert!(
+            future.is_done(),
+            "the produce future must resolve from the response polled before the error return"
+        );
+        assert_eq!(future.get().await.expect("the future succeeds").offset(), 0);
+    }
+
     /// Translated from Java `SenderTest.testCanRetryWithoutIdempotence()`.
     ///
     /// Verifies that a non-retriable error (TOPIC_AUTHORIZATION_FAILED) completes
@@ -3183,6 +3999,20 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
+        // Java `Sender.java:775` builds
+        // `new TopicAuthorizationException(Collections.singleton(topic))`, whose
+        // single-set constructor formats the message and populates the topic set.
+        assert_eq!(err.message(), format!("Not authorized to access topics: [{}]", tp0.topic()));
+        match &err {
+            Error::TopicAuthorization(e) => {
+                assert_eq!(
+                    e.unauthorized_topics(),
+                    &std::collections::HashSet::from([tp0.topic().to_string()]),
+                    "the unauthorized topic set must name the batch's topic"
+                );
+            },
+            other => panic!("expected Error::TopicAuthorization, got {other:?}"),
+        }
     }
 
     /// Translated from Java `SenderTest.testExpiredBatchDoesNotRetry()`.
@@ -3643,14 +4473,43 @@ mod tests {
             let err = result.unwrap_err();
 
             if index == 0 || index == 2 {
-                // Per-record errors with messages "0" and "2"
+                // Java: `assertInstanceOf(InvalidRecordException.class, ..)` plus
+                // `assertEquals(index.toString(), exception.getMessage())`.
+                assert!(
+                    matches!(err, Error::InvalidRecord(_)),
+                    "Future {index} should carry InvalidRecord, got {err:?}"
+                );
                 assert_eq!(err.error(), Errors::InvalidRecord);
+                assert_eq!(err.message(), index.to_string());
             } else if index == 3 {
-                // Per-record error without message, defaults to InvalidRecord message
+                // Per-record error without a message: Java falls back to
+                // `Errors.INVALID_RECORD.message()`.
+                assert!(
+                    matches!(err, Error::InvalidRecord(_)),
+                    "Future {index} should carry InvalidRecord, got {err:?}"
+                );
                 assert_eq!(err.error(), Errors::InvalidRecord);
+                assert_eq!(err.message(), Errors::InvalidRecord.message());
             } else {
-                // Records 1, 4 get the default error
-                assert_eq!(err.error(), Errors::InvalidRecord);
+                // Records 1 and 4 were collateral damage. Java asserts the class is
+                // *exactly* `KafkaException` (`assertEquals(KafkaException.class,
+                // exception.getClass())`) — NOT the `InvalidRecordException` the named
+                // records get, so that a caller can tell "my record was rejected" from
+                // "my record was in a bad batch".
+                assert!(
+                    matches!(err, Error::KafkaError(_)),
+                    "Future {index} should carry a bare KafkaError, got {err:?}"
+                );
+                assert!(err.is_kafka_error(), "Java throws KafkaException here");
+                assert!(
+                    !err.is_api_error(),
+                    "a bare KafkaException is not an ApiException, unlike InvalidRecordException"
+                );
+                // Java's literal text, typo included (`Sender.java:814`).
+                assert_eq!(
+                    err.message(),
+                    "Failed to append record because it was part of a batch which had one more more invalid records"
+                );
             }
         }
     }
@@ -3749,7 +4608,7 @@ mod tests {
         let result = future.get().await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.error(), Errors::NetworkException);
+        assert_eq!(err.error(), Errors::NetworkError);
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
     }
 
@@ -3885,7 +4744,7 @@ mod tests {
     async fn test_no_buffer_reuse_when_batch_expires() {
         // Java 3606-3608: `batchSize` is 16 KiB (Java 171), `totalSize` 1 MiB.
         const BATCH_SIZE: usize = 16 * 1024;
-        let pool = Arc::new(BufferPool::new(1024 * 1024, BATCH_SIZE));
+        let pool = Arc::new(BufferPool::new_for_test(1024 * 1024, BATCH_SIZE));
 
         // Java 3610-3612: allocate and store a poolable buffer, then return it to the
         // pool so the Sender can pick it up.
@@ -3969,7 +4828,7 @@ mod tests {
             ClusterResourceListeners::new(),
         ));
 
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             0, // linger_ms
@@ -3977,7 +4836,7 @@ mod tests {
             0,
             DELIVERY_TIMEOUT_MS,
             PartitionerConfig { enable_adaptive_partitioning: false, partition_availability_timeout_ms: 42 },
-            Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             None,
         ));
 
@@ -3986,6 +4845,9 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
+
+        let metrics = Arc::new(Metrics::new());
+        let sender_metrics_registry = SenderMetricsRegistry::new(metrics);
 
         let mut sender = Sender::new(
             client,
@@ -3997,6 +4859,7 @@ mod tests {
             1,
             REQUEST_TIMEOUT,
             1000,
+            sender_metrics_registry,
             running,
             force_close,
             time_provider,
@@ -4141,6 +5004,147 @@ mod tests {
         }
     }
 
+    /// A canonical, hash-stable key for a metric-name-template comparison:
+    /// `(name, group, sorted tag keys)`. Java compares `MetricNameTemplate`s
+    /// (which ignore description) via a `HashSet`; we avoid relying on
+    /// `MetricNameTemplate`'s tag-order-sensitive hash by using a `BTreeSet`.
+    type TemplateKey = (String, String, std::collections::BTreeSet<String>);
+
+    /// Translated from Java `SenderTest.testSenderMetricsTemplates()`.
+    ///
+    /// Appends a record, runs the sender, creates the throttle-time sensor, then
+    /// verifies every registered metric (except `kafka-metrics-count`) has a
+    /// matching template in `SenderMetricsRegistry.all_templates()`.
+    #[tokio::test]
+    async fn test_sender_metrics_templates() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Append a message so that topic metrics are created.
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Create throttle time metrics (over the same shared `Metrics`).
+        let registry = SenderMetricsRegistry::new(Arc::clone(&ctx.metrics));
+        throttle_time_sensor(&registry).expect("throttle sensor");
+
+        let all_metrics: std::collections::HashSet<TemplateKey> = ctx
+            .metrics
+            .metrics()
+            .keys()
+            .filter(|n| n.group() != "kafka-metrics-count")
+            .map(|n| (n.name().to_string(), n.group().to_string(), n.tags().keys().cloned().collect()))
+            .collect();
+
+        let templates: std::collections::HashSet<TemplateKey> = registry
+            .all_templates()
+            .iter()
+            .map(|t| (t.name().to_string(), t.group().to_string(), t.tags().iter().cloned().collect()))
+            .collect();
+
+        assert_eq!(all_metrics, templates, "every registered metric must have a matching template");
+    }
+
+    /// `maybe_register_topic_metrics` is idempotent and registers the per-topic
+    /// sensors under the Java-identical internal names with the `topic` tag.
+    #[test]
+    fn test_maybe_register_topic_metrics() {
+        let mut client_tags = std::collections::BTreeMap::new();
+        client_tags.insert("client-id".to_string(), "clientA".to_string());
+        let metrics = Arc::new(Metrics::with_config(Arc::new(
+            crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+        )));
+        let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+        let sensors = SenderMetrics::new(
+            registry,
+            metadata,
+            Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            Arc::new(|| 0),
+            LogContext::empty(),
+        )
+        .expect("sender metrics");
+
+        // Not registered yet.
+        assert!(metrics.get_sensor("topic.my-topic.records-per-batch").is_none());
+
+        sensors.maybe_register_topic_metrics("my-topic").expect("register");
+
+        // All five per-topic sensors exist under the Java internal names.
+        for name in [
+            "topic.my-topic.records-per-batch",
+            "topic.my-topic.bytes",
+            "topic.my-topic.compression-rate",
+            "topic.my-topic.record-retries",
+            "topic.my-topic.record-errors",
+        ] {
+            assert!(metrics.get_sensor(name).is_some(), "sensor {name} should exist");
+        }
+
+        // The per-topic byte-rate metric carries the `topic` tag.
+        let has_topic_tag = metrics
+            .metrics()
+            .keys()
+            .any(|n| n.group() == "producer-topic-metrics" && n.tags().get("topic") == Some(&"my-topic".to_string()));
+        assert!(has_topic_tag, "per-topic metrics must carry the topic tag");
+
+        // Idempotent: a second call does not error or duplicate.
+        let metric_count_before = metrics.metrics().len();
+        sensors.maybe_register_topic_metrics("my-topic").expect("idempotent register");
+        assert_eq!(metric_count_before, metrics.metrics().len(), "second call must not add metrics");
+    }
+
+    /// `update_produce_request_metrics` registers per-topic metrics for each
+    /// drained batch and records without panicking.
+    #[test]
+    fn test_update_produce_request_metrics_registers_topic_metrics() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+        let sensors = SenderMetrics::new(
+            registry,
+            metadata,
+            Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            Arc::new(|| 0),
+            LogContext::empty(),
+        )
+        .expect("sender metrics");
+
+        let tp = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+        let batch = make_batch(tp, 0);
+        let mut batches: HashMap<i32, Vec<ProducerBatch>> = HashMap::new();
+        batches.insert(0, vec![batch]);
+
+        sensors.update_produce_request_metrics(&batches);
+
+        // The per-topic metrics for TOPIC_NAME were registered.
+        assert!(
+            metrics.get_sensor(&format!("topic.{TOPIC_NAME}.records-per-batch")).is_some(),
+            "per-topic sensor should be registered by update_produce_request_metrics"
+        );
+        // Global sensors got their metrics too.
+        assert!(
+            metrics.metrics().keys().any(|n| n.name() == "batch-size-avg"),
+            "batch-size-avg metric should exist"
+        );
+    }
+
     // =====================================================================
     // `TxnRequestHandler.onComplete` — the unsynchronized half
     // (`TransactionManager.java:1406-1420`)
@@ -4210,9 +5214,17 @@ mod tests {
         let manager = ctx.transaction_manager();
         let manager = manager.lock().unwrap();
         assert!(manager.has_fatal_error());
-        assert_eq!(
-            manager.last_error().expect("recorded").message(),
-            "Detected more than one in-flight transactional request."
+        let last_error = manager.last_error().expect("recorded");
+        assert_eq!(last_error.message(), "Detected more than one in-flight transactional request.");
+        // Java `TransactionManager.java:1407` throws a plain `RuntimeException`, which is
+        // outside the `KafkaException` hierarchy entirely.
+        assert!(
+            !last_error.is_kafka_error(),
+            "Java's RuntimeException is not a KafkaException: {last_error:?}"
+        );
+        assert!(
+            !last_error.is_api_error(),
+            "Java's RuntimeException is not an ApiException: {last_error:?}"
         );
         assert!(
             ctx.sender.has_in_flight_request(),
@@ -4549,7 +5561,7 @@ mod tests {
         assert_eq!(
             manager.last_error().expect("recorded").error(),
             Errors::UnsupportedVersion,
-            "Java asserts an UnsupportedVersionException"
+            "Java asserts an unsupported-version error"
         );
     }
 
@@ -4894,7 +5906,7 @@ mod tests {
         assert_eq!(
             manager.last_error().expect("recorded").error(),
             Errors::UnsupportedVersion,
-            "Java asserts an UnsupportedVersionException"
+            "Java asserts an unsupported-version error"
         );
     }
 
@@ -4907,7 +5919,7 @@ mod tests {
         let future = ctx.append_to_accumulator(&tp0).await;
         assert!(ctx.accumulator.has_incomplete());
 
-        let fatal_error = KafkaError::with_message(Errors::UnknownServerError, "fatal for the test");
+        let fatal_error = Error::with_message(Errors::UnknownServerError, "fatal for the test");
         ctx.transaction_manager()
             .lock()
             .unwrap()
@@ -5098,7 +6110,7 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once"); // produce
 
         assert!(
-            !Errors::OutOfOrderSequenceNumber.is_retriable(),
+            !Errors::OutOfOrderSequenceNumber.error().is_some_and(|e| e.is_retriable_error()),
             "a producer without a transaction manager would fail this batch"
         );
         let response = ctx.produce_response(&tp0, -1, Errors::OutOfOrderSequenceNumber, 0);
@@ -5284,7 +6296,7 @@ mod tests {
         let sequence = manager.sequence_number(tp);
         manager.increment_sequence_number(tp, 1).expect("the entry exists");
 
-        let builder = crate::common::record::memory_records::MemoryRecords::builder(
+        let builder = crate::common::record::internal::memory_records::MemoryRecords::builder(
             64,
             Compression::none(),
             TimestampType::CreateTime,
@@ -5347,9 +6359,15 @@ mod tests {
             ctx.time.sleep(5_000);
             ctx.sender.run_once().await.expect("run_once");
             assert!(future1.is_done());
-            assert_eq!(
-                future1.get().await.expect_err("delivery timeout").error(),
-                Errors::RequestTimedOut
+            let delivery_error = future1.get().await.expect_err("delivery timeout");
+            assert_eq!(delivery_error.error(), Errors::RequestTimedOut);
+            // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException,
+            // responseFuture1, SENDER_TIMEOUT_MSG)`.
+            assert!(
+                delivery_error
+                    .message()
+                    .contains("The request has not been sent, or no server response has been received yet."),
+                "expected the expiry reason in the message, got {delivery_error}"
             );
             assert!(!ctx.sender.has_in_flight_request());
             assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -5446,7 +6464,13 @@ mod tests {
             transaction_manager
                 .lock()
                 .unwrap()
-                .can_retry(&t0b2_response, &tp0b2, &mut [])
+                .can_retry(
+                    &t0b2_response,
+                    &tp0b2.topic_partition,
+                    (tp0b2.producer_id(), tp0b2.producer_epoch(), tp0b2.base_sequence()),
+                    tp0b2.sequence_has_been_reset(),
+                    &mut [],
+                )
                 .expect("the retry decision is made")
         );
 
@@ -5517,7 +6541,13 @@ mod tests {
             transaction_manager
                 .lock()
                 .unwrap()
-                .can_retry(&t1b2_response, &tp1b2, &mut [])
+                .can_retry(
+                    &t1b2_response,
+                    &tp1b2.topic_partition,
+                    (tp1b2.producer_id(), tp1b2.producer_epoch(), tp1b2.base_sequence()),
+                    tp1b2.sequence_has_been_reset(),
+                    &mut [],
+                )
                 .expect("the retry decision is made")
         );
         let tp1b2_base_sequence = tp1b2.base_sequence();
@@ -5723,7 +6753,7 @@ mod tests {
         offset: i64,
         log_start_offset: i64,
     ) {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         {
@@ -5811,7 +6841,7 @@ mod tests {
         ctx.sender.client_mut().respond(response);
         ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done());
-        future.get().await.expect("Future should not have raised an exception");
+        future.get().await.expect("Future should not have raised an error");
     }
 
     /// Appends one record and asserts the send fails immediately with `expected`.
@@ -6047,7 +7077,7 @@ mod tests {
         assert_eq!(
             request1.get().await.expect_err("fatal").error(),
             Errors::MessageTooLarge,
-            "Java asserts RecordTooLargeException, which is MESSAGE_TOO_LARGE's exception"
+            "Java asserts a record-too-large error, which is MESSAGE_TOO_LARGE's class"
         );
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
@@ -6769,7 +7799,7 @@ mod tests {
     /// authorization failure on `InitProducerId` is *abortable*, so the producer
     /// recovers to `UNINITIALIZED`, retries and works again.
     #[tokio::test]
-    async fn test_cluster_authorization_exception_in_init_producer_id_request() {
+    async fn test_cluster_authorization_error_in_init_producer_id_request() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent();
         ctx.sender
@@ -6827,7 +7857,7 @@ mod tests {
     /// (Java 2159-2179): a cluster authorization failure on a *produce* request is
     /// fatal, and stays fatal for later sends.
     #[tokio::test]
-    async fn test_cluster_authorization_exception_in_produce_request() {
+    async fn test_cluster_authorization_error_in_produce_request() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
@@ -7429,7 +8459,7 @@ mod tests {
     /// offset, so the idempotent producer still bumps the epoch and retries rather than
     /// failing the batch.
     #[tokio::test]
-    async fn test_should_raise_out_of_order_sequence_exception_to_user_if_log_was_not_truncated() {
+    async fn test_should_raise_out_of_order_sequence_error_to_user_if_log_was_not_truncated() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
@@ -7645,7 +8675,7 @@ mod tests {
 
         // Java 2417-2419: `deliveryTimeoutMs = 3000`, gzip, `lingerMs = 0`, both
         // retry backoffs `0`.
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
             Compression::gzip(),
             0,
@@ -7653,7 +8683,7 @@ mod tests {
             0,
             3000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             Some(Arc::clone(&transaction_manager)),
         ));
 
@@ -7664,6 +8694,15 @@ mod tests {
             Node::new(1, "localhost".to_string(), 1970),
         ];
         let client = MockClient::new(nodes, Arc::clone(&time_provider));
+
+        // Build metrics with a `client-id` tag, matching Java's
+        // `SenderTest.testSenderMetricsTemplates` (`clientA`) and the default rig.
+        let mut client_tags = std::collections::BTreeMap::new();
+        client_tags.insert("client-id".to_string(), "clientA".to_string());
+        let metrics = Arc::new(Metrics::with_config(Arc::new(
+            crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+        )));
+        let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
 
         // Java 2421-2422: `guaranteeOrder = true`, `maxRetries = 1`,
         // `retryBackoffMs = 1000`.
@@ -7677,6 +8716,7 @@ mod tests {
             1,
             REQUEST_TIMEOUT,
             1000,
+            sender_metrics_registry,
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(false)),
             time_provider,
@@ -7710,6 +8750,7 @@ mod tests {
             time,
             tp0,
             tp1,
+            metrics,
             transaction_manager: Some(transaction_manager),
         }
     }
@@ -7928,7 +8969,7 @@ mod tests {
         sequence: i32,
         is_transactional: bool,
     ) -> crate::mock_client::RequestMatcher {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let tp = tp.clone();
@@ -8749,7 +9790,7 @@ mod tests {
     //   2932 testForceShutdownWithIncompleteTransaction
     //          -> test_force_shutdown_with_incomplete_transaction
     //   2966 testTransactionAbortedExceptionOnAbortWithoutError
-    //          -> test_transaction_aborted_exception_on_abort_without_error
+    //          -> test_transaction_aborted_error_on_abort_without_error
     //
     // TRANSLATED IN PHASE 8 (10) — the "STILL OWED (11)" list this block carried until
     // Phase 8, minus the one still blocked. Each was owed rather than blocked: what they
@@ -8797,7 +9838,7 @@ mod tests {
     //   3176 testInvalidTxnStateIsAnAbortableError
     //          -> test_invalid_txn_state_is_an_abortable_error
     //   3215 testTransactionAbortableExceptionIsAnAbortableError
-    //          -> test_transaction_abortable_exception_is_an_abortable_error
+    //          -> test_transaction_abortable_error_is_an_abortable_error
     //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort
     //          -> test_abortable_error_is_converted_to_fatal_error_during_abort
     //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
@@ -9289,7 +10330,7 @@ mod tests {
     /// (`Sender.java:468-470`) must fail the undrained batch with
     /// `TransactionAbortedException` rather than send it.
     #[tokio::test]
-    async fn test_transaction_aborted_exception_on_abort_without_error() {
+    async fn test_transaction_aborted_error_on_abort_without_error() {
         let mut ctx = SenderTestContext::transactional();
         run_init_transactions(&mut ctx).await;
         let tp = ctx.tp0.clone();
@@ -9465,7 +10506,7 @@ mod tests {
         epoch: i16,
         tp: &TopicPartition,
     ) -> crate::mock_client::RequestMatcher {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let tp = tp.clone();
@@ -9526,7 +10567,7 @@ mod tests {
         tp: &TopicPartition,
         expected_base_sequence: i32,
     ) {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let response = txn_produce_response(ctx, tp, 0, error);
@@ -10069,7 +11110,7 @@ mod tests {
 
     /// `assertAbortableError(Class)` (Java 4409-4421).
     ///
-    /// Java asserts on `e.getCause()`'s class; `KafkaError` is flat here, so the cause
+    /// Java asserts on `e.getCause()`'s class; `Error` is flat here, so the cause
     /// is asserted on [`TransactionManager::last_error`]'s wire code — the same
     /// convention `transaction_manager.rs`'s own `assert_abortable_error` uses.
     fn assert_abortable_error(ctx: &SenderTestContext, cause: Errors) {
@@ -10173,7 +11214,7 @@ mod tests {
         ctx: &mut SenderTestContext,
         first_transaction_result: TransactionResult,
         retry_transaction_result: TransactionResult,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         use crate::producer::internals::producer_test_utils::run_until;
 
         do_init_transactions(ctx).await;
@@ -10204,13 +11245,13 @@ mod tests {
         assert!(!result.is_completed());
         // Java: `assertThrows(TimeoutException.class, () -> result.await(MAX_BLOCK_TIMEOUT, MILLISECONDS))`.
         let timeout = result
-            .await_result_timeout(Duration::from_millis(MAX_BLOCK_TIMEOUT as u64))
+            .await_result_timeout(
+                Duration::from_millis(MAX_BLOCK_TIMEOUT as u64),
+                "Unexpected time out during the test.",
+            )
             .await
             .expect_err("the disconnected EndTxn leaves the result pending");
-        assert!(
-            matches!(timeout, KafkaError::Timeout(_)),
-            "expected a TimeoutException, got {timeout}"
-        );
+        assert!(matches!(timeout, Error::Timeout(_)), "expected a timeout error, got {timeout}");
 
         prepare_find_coordinator_response(ctx, Errors::None, false, CoordinatorType::Transaction, TRANSACTIONAL_ID);
         run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
@@ -10273,7 +11314,7 @@ mod tests {
     /// (Java 3705-3707).
     ///
     /// Java asserts `IllegalStateException`; the Rust equivalent is the
-    /// `Errors::UnknownServerError`-coded `KafkaError::illegal_state`
+    /// `Errors::UnknownServerError`-coded `Error::local_illegal_state`
     /// `handle_cached_transaction_request_result` returns when the cached operation does
     /// not match the requested one.
     #[tokio::test]
@@ -10487,13 +11528,14 @@ mod tests {
         {
             let manager = manager.lock().unwrap();
             let error = manager.last_error().expect("an error is recorded");
-            let KafkaError::TopicAuthorization(topic_authorization) = error else {
-                panic!("expected a TopicAuthorizationException, got {error}");
+            let Error::TopicAuthorization(topic_authorization) = error else {
+                // Java asserts a `TopicAuthorizationException` here.
+                panic!("expected a topic-authorization error, got {error}");
             };
             // Java: `assertEquals(singleton(tp0.topic()), exception.unauthorizedTopics())`
             // — only the `TOPIC_AUTHORIZATION_FAILED` topic is listed, not the
             // `OPERATION_NOT_ATTEMPTED` one.
-            assert_eq!(topic_authorization.unauthorized_topics, HashSet::from(["foo".to_string()]));
+            assert_eq!(topic_authorization.unauthorized_topics(), &HashSet::from(["foo".to_string()]));
             assert!(!manager.is_partition_pending_add(&foo0));
             assert!(!manager.is_partition_pending_add(&bar0));
             assert!(!manager.transaction_contains_partition(&foo0));
@@ -10508,10 +11550,10 @@ mod tests {
             let error = append
                 .get()
                 .await
-                .expect_err("the append must fail with TransactionAbortedException");
+                .expect_err("the append must fail with a transaction-aborted error");
             assert!(
-                matches!(error, KafkaError::TransactionAborted(_)),
-                "expected a TransactionAbortedException, got {error}"
+                matches!(error, Error::TransactionAborted(_)),
+                "expected a transaction-aborted error, got {error}"
             );
             assert_eq!(error.message(), "Failing batch since transaction was aborted");
         }
@@ -10684,12 +11726,14 @@ mod tests {
 
         let result = begin_abort(&ctx);
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("the abort has not been sent yet");
+        assert!(matches!(timeout, Error::Timeout(_)), "expected a timeout error, got {timeout}");
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
         assert!(
-            matches!(timeout, KafkaError::Timeout(_)),
-            "expected a TimeoutException, got {timeout}"
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
@@ -10742,12 +11786,14 @@ mod tests {
 
         let result = begin_commit(&ctx);
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("the commit has not been sent yet");
+        assert!(matches!(timeout, Error::Timeout(_)), "expected a timeout error, got {timeout}");
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
         assert!(
-            matches!(timeout, KafkaError::Timeout(_)),
-            "expected a TimeoutException, got {timeout}"
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
@@ -11520,8 +12566,8 @@ mod tests {
 
         let error = response_future.get().await.expect_err("the unsent batch is aborted");
         assert!(
-            matches!(error, KafkaError::TransactionAborted(_)),
-            "expected a TransactionAbortedException, got {error}"
+            matches!(error, Error::TransactionAborted(_)),
+            "expected a transaction-aborted error, got {error}"
         );
     }
 
@@ -11566,8 +12612,8 @@ mod tests {
 
         let error = response_future.get().await.expect_err("the unsent batch is aborted");
         assert!(
-            matches!(error, KafkaError::TransactionAborted(_)),
-            "expected a TransactionAbortedException, got {error}"
+            matches!(error, Error::TransactionAborted(_)),
+            "expected a transaction-aborted error, got {error}"
         );
     }
 
@@ -11989,12 +13035,12 @@ mod tests {
         {
             // Java's `new KafkaException()` carries no wire code; `UnknownServerError` is
             // this crate's spelling for that, the convention `transaction_manager.rs`'s
-            // `kafka_exception()` helper already uses.
+            // `bare_kafka_error()` helper already uses.
             let manager = ctx.transaction_manager();
             manager
                 .lock()
                 .unwrap()
-                .transition_to_abortable_error(KafkaError::with_message(Errors::UnknownServerError, ""), Caller::App)
+                .transition_to_abortable_error(Error::with_message(Errors::UnknownServerError, ""), Caller::App)
                 .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
         }
         prepare_produce_response(&mut ctx, Errors::None, TXN_PRODUCER_ID, TXN_EPOCH, &tp0);
@@ -12027,9 +13073,11 @@ mod tests {
 
     /// The exact `Sender::fail_expired_batches` message for a single expired record on
     /// `test-0`, after the 10 s sleep every batch-expiry test performs.
-    const EXPIRED_BATCH_MESSAGE_TP0: &str = "Expiring 1 record(s) for test-0:10000 ms has passed since batch creation";
+    const EXPIRED_BATCH_MESSAGE_TP0: &str = "Expiring 1 record(s) for test-0:10000 ms has passed since batch creation. \
+         The request has not been sent, or no server response has been received yet.";
     /// As [`EXPIRED_BATCH_MESSAGE_TP0`], for `test-1`.
-    const EXPIRED_BATCH_MESSAGE_TP1: &str = "Expiring 1 record(s) for test-1:10000 ms has passed since batch creation";
+    const EXPIRED_BATCH_MESSAGE_TP1: &str = "Expiring 1 record(s) for test-1:10000 ms has passed since batch creation. \
+         The request has not been sent, or no server response has been received yet.";
 
     /// Asserts a produce future failed with a `TimeoutException`, the
     /// `assertInstanceOf(TimeoutException.class, assertThrows(ExecutionException.class,
@@ -12038,9 +13086,9 @@ mod tests {
     ///
     /// Java's `TimeoutException` has **two** spellings in this crate and the batch-expiry
     /// path uses the wire one: [`Sender::fail_expired_batches`] builds
-    /// `KafkaError::with_message(Errors::RequestTimedOut, ..)`, `REQUEST_TIMED_OUT` being
+    /// `Error::with_message(Errors::RequestTimedOut, ..)`, `REQUEST_TIMED_OUT` being
     /// the wire code Java's `TimeoutException` carries. The other spelling,
-    /// `KafkaError::Timeout`, is the codeless client-local timeout that
+    /// `Error::Timeout`, is the codeless client-local timeout that
     /// `TransactionalRequestResult::await_result_timeout` returns — that one is asserted
     /// by [`verify_commit_or_abort_transaction_retriable`]. Both are Java
     /// `TimeoutException`; only the wire form can reach a record future.
@@ -12052,7 +13100,7 @@ mod tests {
         assert_eq!(
             error.error(),
             Errors::RequestTimedOut,
-            "Expected to get a TimeoutException since the queued ProducerBatch should have been expired, got {error}"
+            "Expected to get a timeout error since the queued ProducerBatch should have been expired, got {error}"
         );
         assert_eq!(error.message(), expected_message);
     }
@@ -12220,11 +13268,37 @@ mod tests {
         assert!(!commit_result.is_successful());
         // Java: `assertInstanceOf(TimeoutException.class,
         // assertThrows(TransactionAbortableException.class, commitResult::await).getCause())`
-        // — the abortable wrapper carries the timeout as its cause. `KafkaError` is flat
-        // here, so the wrapper's code is asserted and the cause's message is checked
-        // inside it.
+        // — the abortable wrapper carries the timeout as its cause, so only the
+        // wrapper's own code is asserted here.
+        //
+        // AK 4.3.1 `TransactionManagerTest.java:2986` additionally asserts the commit
+        // result's cause message contains `SENDER_TIMEOUT_MSG`
+        // (`timeoutEx2.getMessage().contains(SENDER_TIMEOUT_MSG)`). The wrapper's *own*
+        // message cannot carry it: batch expiry flows through
+        // `maybe_transition_to_error_state`, whose retriable arm replaces the original
+        // batch-expiry message with the fixed "Transaction Request was aborted after
+        // exhausting retries." (`RequestTimedOut` is retriable). The original expiry
+        // error survives as the wrapper's `Error::source()` — see
+        // `TransactionAbortableError::with_source` at that site — and the same message is
+        // asserted directly on the record future above, by
+        // `assert_produce_future_expired(&response_future, EXPIRED_BATCH_MESSAGE_TP0)`.
         let error = commit_result.await_result().await.expect_err("the commit was dropped");
         assert_eq!(error.error(), Errors::TransactionAbortable);
+        // Java's `assertInstanceOf(TimeoutException.class, ..getCause())` and AK
+        // 4.3.1's `timeoutEx2.getMessage().contains(SENDER_TIMEOUT_MSG)` are both
+        // assertable here: the redesign gives every error a `source()`, so the
+        // wrapper's fixed message does not lose the original expiry cause.
+        let cause = error.source().expect("the abortable wrapper must carry the expiry cause");
+        assert_eq!(
+            cause.error(),
+            Errors::RequestTimedOut,
+            "the cause must be the batch-expiry timeout"
+        );
+        assert!(
+            cause.message().contains(EXPIRED_BATCH_MESSAGE_TP0),
+            "the cause must carry the expiry message, got {:?}",
+            cause.message()
+        );
 
         assert!(manager.lock().unwrap().has_abortable_error());
         assert!(manager.lock().unwrap().has_ongoing_transaction());
@@ -12820,7 +13894,7 @@ mod tests {
     /// `TransactionManagerTest.testTransactionAbortableExceptionInEndTxn`
     /// (Java 3925-3947).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_end_txn() {
+    async fn test_transaction_abortable_error_in_end_txn() {
         use crate::producer::internals::producer_test_utils::run_until;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -12878,10 +13952,10 @@ mod tests {
     /// an empty batch pool to `handle_failed_batch`, so the follow-up kept
     /// its stale sequence and retried `OUT_OF_ORDER_SEQUENCE_NUMBER` forever.
     ///
-    /// Also pins the librdkafka-style flag (CLAUDE.md §10.3): the commit
-    /// error surfaced from the `ABORTABLE_ERROR` state carries
-    /// `txn_requires_abort()`, and the documented recovery branch —
-    /// `abort_transaction` — is accepted afterwards.
+    /// Also pins the recovery contract: the pending commit fails from the
+    /// `ABORTABLE_ERROR` state (read through `has_abortable_error()`, where Java
+    /// keeps it), and the documented recovery branch — `abort_transaction` — is
+    /// accepted afterwards.
     #[tokio::test]
     async fn test_failed_batch_adjusts_following_sequences_and_fails_pending_commit() {
         use crate::producer::internals::producer_test_utils::run_until;
@@ -12958,8 +14032,8 @@ mod tests {
             .expect_err("the pending commit fails with the batch's error instead of timing out");
         assert_eq!(commit_error.error(), Errors::MessageTooLarge);
         assert!(
-            commit_error.txn_requires_abort(),
-            "the commit error from ABORTABLE_ERROR carries txn_requires_abort() (CLAUDE.md §10.3)"
+            ctx.transaction_manager().lock().unwrap().has_abortable_error(),
+            "the pending commit fails from the ABORTABLE_ERROR state (Java: hasAbortableError())"
         );
         {
             let manager = ctx.transaction_manager();
@@ -13165,18 +14239,16 @@ mod tests {
     /// `SenderTest.testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`
     /// (Java 1820-1881).
     ///
-    /// **`#[ignore]`d on PLAN §9.25.** This is the only test in the tree that drives the
-    /// *transactional* log-truncation branch of `TransactionManager.canRetry`
-    /// (`TransactionManager.java:1042-1050`), and `Sender::can_retry` hands that branch an
-    /// **empty** batch pool. `start_sequences_at_beginning` then fails on the tracked
-    /// in-flight batch it was not given, `last_acked_sequence` is never cleared, and the
-    /// error is swallowed by the per-response error handling — so the assertion that
-    /// fails is `last_acked_sequence(tp0) == None`, four lines after the response.
-    ///
-    /// Left in place as the reproducer, exactly as §9.18's
-    /// `test_too_large_batches_are_safely_removed` is.
+    /// This is the only test in the tree that drives the *transactional* log-truncation
+    /// branch of `TransactionManager.canRetry` (`TransactionManager.java:1042-1050`).
+    /// It was `#[ignore]`d on PLAN §9.25 while `Sender::can_retry` handed that branch an
+    /// **empty** batch pool — `start_sequences_at_beginning` then failed on the tracked
+    /// in-flight batch it was not given, the error was swallowed by the per-response
+    /// error handling, and the batch was dropped un-completed. `Sender::can_retry` now
+    /// assembles the partition's full in-flight pool (accumulator deques,
+    /// `Sender::in_flight_batches`, and the failing batch) so the rewrite succeeds and
+    /// the batch is retried, so the test is un-ignored.
     #[tokio::test]
-    #[ignore = "PLAN §9.25: Sender::can_retry passes an empty batch pool to the transactional log-truncation branch"]
     async fn test_transactional_unknown_producer_handling_when_retention_limit_reached() {
         const PRODUCER_ID: i64 = 343434;
 
@@ -13357,7 +14429,8 @@ mod tests {
     async fn run_transaction_should_transition_to_abortable_for_sender_api(error: Errors) {
         // Java builds the manager with `RETRY_BACKOFF_MS` here rather than the usual 100,
         // and `setupWithTransactionState(txnManager, false, null, 1)` — a single retry.
-        let mut ctx = sender_test_transactional_context("testRetriableException", RETRY_BACKOFF_MS, 0, 1, 6);
+        // Java's transactional id here is spelled `"testRetriableException"`.
+        let mut ctx = sender_test_transactional_context("testRetriableError", RETRY_BACKOFF_MS, 0, 1, 6);
         run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
 
         // Begin the transaction and add the partition.
@@ -13402,7 +14475,7 @@ mod tests {
         // Java asserts `e.getCause()`'s class, not `e`'s: `maybeFailWithError` throws a
         // plain `KafkaException("Cannot execute transactional method because we are in an
         // error state", lastError)`, so the *cause* is the `TransactionAbortableException`.
-        // `KafkaError` has no cause chain (PLAN §10.5 deviation 5), so the wrapper's
+        // `Error` has no cause chain (PLAN §10.5 deviation 5), so the wrapper's
         // message is pinned here and the cause is asserted on `last_error()` — the same
         // convention `assert_abortable_error` uses.
         let pending_requests = ctx.pending_requests();
@@ -13582,14 +14655,15 @@ mod tests {
     /// Translated from `SenderTest.testTransactionAbortableExceptionIsAnAbortableError`
     /// (Java 3215-3251).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_is_an_abortable_error() {
-        run_abortable_produce_error(Errors::TransactionAbortable, "textTransactionAbortableException").await;
+    async fn test_transaction_abortable_error_is_an_abortable_error() {
+        run_abortable_produce_error(Errors::TransactionAbortable, "textTransactionAbortableError").await;
     }
 
     /// The shared body of `testInvalidTxnStateIsAnAbortableError` and
     /// `testTransactionAbortableExceptionIsAnAbortableError`, which differ only in the
     /// produce error and the transactional id (Java's second one is spelled
-    /// `"textTransactionAbortableException"`, kept verbatim).
+    /// `"textTransactionAbortableException"`; the Rust fixture drops the word per
+    /// CLAUDE.md §2).
     async fn run_abortable_produce_error(error: Errors, transactional_id: &str) {
         let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
         let mut ctx = sender_test_transactional_context(transactional_id, 100, 0, i32::MAX, 3);
@@ -13649,7 +14723,7 @@ mod tests {
         let commit_result = begin_commit(&ctx);
         ctx.sender.run_once().await.expect("run_once");
         let commit_error = commit_result
-            .await_result_timeout(Duration::from_millis(1000))
+            .await_result_timeout(Duration::from_millis(1000), "Unexpected time out during the test.")
             .await
             .expect_err("Expected abortable error to be thrown for commit");
         let manager = ctx.transaction_manager();
@@ -13667,9 +14741,9 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
 
         let abort_error = abort_result
-            .await_result_timeout(Duration::from_millis(1000))
+            .await_result_timeout(Duration::from_millis(1000), "Unexpected time out during the test.")
             .await
-            .expect_err("Expected KafkaException to be thrown");
+            .expect_err("Expected a Kafka error to be returned");
         assert!(manager.lock().unwrap().has_fatal_error());
         // Java: `assertFalse(e instanceof TransactionAbortableException)` and
         // `assertEquals(KafkaException.class, abortResult.error().getClass())`. A bare
@@ -13694,9 +14768,15 @@ mod tests {
         let manager = ctx.transaction_manager();
         let manager = manager.lock().unwrap();
         assert!(manager.has_fatal_error());
+        let last_error = manager.last_error().expect("recorded");
         assert_eq!(
-            manager.last_error().expect("recorded").message(),
+            last_error.message(),
             "Could not execute transactional request for unknown reasons"
         );
+        // Java `TransactionManager.java:1424` throws a BARE `KafkaException`, so
+        // `is_kafka_error()` is `true` and `is_api_error()` is `false`.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
     }
 }

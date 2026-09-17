@@ -25,9 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 
 /// The inner result data set when a produce request completes.
 #[derive(Clone)]
@@ -42,7 +42,7 @@ pub struct ProduceResult {
     /// In Java, this is `Function<Integer, RuntimeException>` which returns a typed
     /// exception preserving error code information needed by
     /// `FutureRecordMetadata.valueOrError()`.
-    pub error: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+    pub error: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
 }
 
 impl std::fmt::Debug for ProduceResult {
@@ -123,7 +123,7 @@ impl ProduceRequestResult {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        errors_by_index: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+        errors_by_index: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) {
         let mut guard = self.result.lock().unwrap();
         *guard = Some(ProduceResult { base_offset, log_append_time, error: errors_by_index });
@@ -234,9 +234,9 @@ impl ProduceRequestResult {
     /// The error thrown (generally on the server) while processing this request.
     ///
     /// Returns `None` if there was no error for the given batch index.
-    /// Returns a typed [`KafkaError`] preserving error code information
+    /// Returns a typed [`Error`] preserving error code information
     /// needed by `FutureRecordMetadata.value_or_error()`.
-    pub fn error(&self, batch_index: i32) -> Option<KafkaError> {
+    pub fn error(&self, batch_index: i32) -> Option<Error> {
         let guard = self.result.lock().unwrap();
         match guard.as_ref() {
             Some(result) => match &result.error {
@@ -320,9 +320,9 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let result = ProduceRequestResult::new(tp);
 
-        let errors_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|idx| {
+        let errors_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|idx| {
             if idx == 0 {
-                Some(KafkaError::new(Errors::RecordListTooLarge))
+                Some(Error::new(Errors::RecordListTooLarge))
             } else {
                 None
             }

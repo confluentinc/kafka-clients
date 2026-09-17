@@ -64,7 +64,7 @@ mod tests {
     use crate::admin::internals::coordinator_key::CoordinatorKey;
     use crate::common::protocol::Errors;
     use crate::common::requests::{ConcreteResponse, DeleteGroupsResponse, RequestBuilder};
-    use crate::common::{KafkaError, Node};
+    use crate::common::{Error, Node};
     use crate::delete_groups_response_data::{DeletableGroupResult, DeleteGroupsResponseData};
 
     const GROUP_ID1: &str = "group-id1";
@@ -123,7 +123,7 @@ mod tests {
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
         assert_eq!(result.failed_keys.keys().cloned().collect::<HashSet<_>>(), keys());
-        assert_eq!(result.failed_keys.get(&key()).map(KafkaError::error), Some(expected_error));
+        assert_eq!(result.failed_keys.get(&key()).map(Error::error), Some(expected_error));
     }
 
     /// Translated from `testBuildRequest`.

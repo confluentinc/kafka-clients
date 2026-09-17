@@ -29,8 +29,9 @@ use tokio::sync::oneshot;
 use crate::client_response::ClientResponse;
 use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 use crate::consumer::internals::events::background_event::BackgroundEvent;
 use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 use crate::kafka_client::KafkaClient;
@@ -151,7 +152,7 @@ pub(crate) struct UnsentRequest {
     /// failure arrives. `Option<...>` so that callers wiring up a
     /// `whenComplete`-equivalent can `take()` it (Phase 6 (6/7) does this
     /// inside [`super::coordinator_request_manager::CoordinatorRequestManager`]).
-    response_rx: Option<oneshot::Receiver<Result<ClientResponse, KafkaError>>>,
+    response_rx: Option<oneshot::Receiver<Result<ClientResponse, Error>>>,
     node: Option<Node>,
     /// Absolute wall-clock millisecond deadline at which the request
     /// expires. Set by the delegate on `add` to `now + request_timeout_ms`.
@@ -193,7 +194,7 @@ impl UnsentRequest {
     /// Java pattern of registering a `whenComplete` callback on the
     /// `handler.future()`: the manager / bg task takes ownership of the
     /// receiver so it can `.await` the completion.
-    pub(crate) fn take_response_receiver(&mut self) -> Option<oneshot::Receiver<Result<ClientResponse, KafkaError>>> {
+    pub(crate) fn take_response_receiver(&mut self) -> Option<oneshot::Receiver<Result<ClientResponse, Error>>> {
         self.response_rx.take()
     }
 
@@ -289,7 +290,7 @@ struct FutureCompletionInner {
     /// Idempotent sender slot. Synchronous `Mutex` because the critical
     /// section is a single `Option::take` and is never held across an
     /// `.await`.
-    sender: Mutex<Option<oneshot::Sender<Result<ClientResponse, KafkaError>>>>,
+    sender: Mutex<Option<oneshot::Sender<Result<ClientResponse, Error>>>>,
     /// Time (ms) at which `on_complete` / `on_failure` was first called.
     /// Recorded with `set_completion_time_ms` regardless of whether the
     /// receiver is still alive (Java: `responseCompletionTimeMs`).
@@ -303,7 +304,7 @@ impl FutureCompletionHandler {
     /// results off the receiver; the manager calls `on_complete` /
     /// `on_failure` on the handle. Each `UnsentRequest` owns the
     /// receiver inside `UnsentRequest::new`.
-    pub(crate) fn new_with_receiver() -> (Self, oneshot::Receiver<Result<ClientResponse, KafkaError>>) {
+    pub(crate) fn new_with_receiver() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
         let (tx, rx) = oneshot::channel();
         let inner = Arc::new(FutureCompletionInner { sender: Mutex::new(Some(tx)), completion_time_ms: Mutex::new(0) });
         (Self { inner }, rx)
@@ -312,7 +313,7 @@ impl FutureCompletionHandler {
     /// Java: `onFailure(long currentTimeMs, RuntimeException e)`. Records
     /// the completion time and completes the receiver with `Err(error)`.
     /// Idempotent — only the first call wins.
-    pub(crate) fn on_failure(&self, current_time_ms: i64, error: KafkaError) {
+    pub(crate) fn on_failure(&self, current_time_ms: i64, error: Error) {
         self.set_completion_time(current_time_ms);
         let sender_opt = {
             let mut guard = match self.inner.sender.lock() {
@@ -336,22 +337,22 @@ impl FutureCompletionHandler {
     /// Sends the owned `ClientResponse` through the receiver on success.
     pub(crate) fn on_complete(&self, response: ClientResponse) {
         let completion_time_ms = response.received_time_ms();
-        if let Some(msg) = response.authentication_error() {
-            self.on_failure(
-                completion_time_ms,
-                KafkaError::with_message(crate::common::protocol::Errors::SaslAuthenticationFailed, msg.to_string()),
-            );
+        if let Some(auth_error) = response.authentication_error() {
+            // Java: `onFailure(completionTimeMs, response.authenticationException())`
+            // (`NetworkClientDelegate.java:443-444`) — the object, unchanged. The
+            // response now carries the typed error, so the class the channel raised
+            // is what the request's future completes with; hardcoding
+            // `SASL_AUTHENTICATION_FAILED` reported code 58 for a TLS certificate
+            // rejection on a connection that never performed a SASL exchange.
+            self.on_failure(completion_time_ms, auth_error.clone());
             return;
         }
         if response.was_disconnected() {
-            self.on_failure(
-                completion_time_ms,
-                KafkaError::new(crate::common::protocol::Errors::NetworkException),
-            );
+            self.on_failure(completion_time_ms, Error::new(crate::common::protocol::Errors::NetworkError));
             return;
         }
         if let Some(msg) = response.version_mismatch() {
-            self.on_failure(completion_time_ms, KafkaError::unsupported_version(msg.to_string()));
+            self.on_failure(completion_time_ms, Error::unsupported_version(msg.to_string()));
             return;
         }
         self.set_completion_time(completion_time_ms);
@@ -384,7 +385,7 @@ impl FutureCompletionHandler {
         let disconnected = response.was_disconnected();
         let timed_out = response.was_timed_out();
         let version_mismatch = response.version_mismatch().map(|s| s.to_string());
-        let authentication_error = response.authentication_error().map(|s| s.to_string());
+        let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
         let owned = ClientResponse::with_timeout(
             request_header,
@@ -469,8 +470,12 @@ pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
     request_timeout_ms: i32,
     retry_backoff_ms: i64,
     unsent_requests: VecDeque<UnsentRequest>,
-    metadata_error: Option<KafkaError>,
+    metadata_error: Option<Error>,
     notify_metadata_errors_via_error_queue: bool,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent);
+    /// tests leave it unset and the record points become no-ops.
+    async_consumer_metrics: Option<Arc<AsyncConsumerMetrics>>,
 }
 
 impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
@@ -478,8 +483,9 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     ///
     /// Java: `NetworkClientDelegate(Time, ConsumerConfig, LogContext,
     /// KafkaClient, Metadata, BackgroundEventHandler, boolean,
-    /// AsyncConsumerMetrics)`. The `AsyncConsumerMetrics` parameter is
-    /// dropped per the Phase-6 plan ("Out of scope: metrics").
+    /// AsyncConsumerMetrics)`. The `AsyncConsumerMetrics` is wired
+    /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6,
+    /// M4/M5 setter precedent) rather than passed to the constructor.
     pub(crate) fn new(
         config: &ConsumerConfig,
         client: K,
@@ -497,7 +503,15 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             unsent_requests: VecDeque::new(),
             metadata_error: None,
             notify_metadata_errors_via_error_queue,
+            async_consumer_metrics: None,
         }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` post-construction (M4/M5 setter
+    /// precedent — keeps the existing `new` signature and test call sites
+    /// untouched). Java passes `AsyncConsumerMetrics` to the constructor.
+    pub(crate) fn set_async_consumer_metrics(&mut self, metrics: Arc<AsyncConsumerMetrics>) {
+        self.async_consumer_metrics = Some(metrics);
     }
 
     /// Visible-for-testing accessor for the unsent-requests queue.
@@ -540,10 +554,14 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
 
     /// Returns an authentication error for the given node, if any.
     ///
-    /// Java: `maybeThrowAuthFailure(Node)` (throws on auth failure).
-    pub(crate) fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), KafkaError> {
+    /// Java: `maybeThrowAuthFailure(Node)` (throws on auth failure), which
+    /// delegates to `NetworkClientUtils.maybeThrowAuthFailure` and rethrows
+    /// `client.authenticationException(node)` verbatim
+    /// (`NetworkClientUtils.java:141-145`) — so the class is returned unchanged
+    /// rather than rebuilt as a SASL failure.
+    pub(crate) fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error> {
         match self.client.authentication_error(node) {
-            Some(msg) => Err(KafkaError::with_message(Errors::SaslAuthenticationFailed, msg)),
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -567,7 +585,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Returns and clears the most recent metadata error.
     ///
     /// Java: `getAndClearMetadataError()`.
-    pub(crate) fn get_and_clear_metadata_error(&mut self) -> Option<KafkaError> {
+    pub(crate) fn get_and_clear_metadata_error(&mut self) -> Option<Error> {
         self.metadata_error.take()
     }
 
@@ -587,10 +605,20 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     }
 
     /// Returns a lock-free handle to the underlying selector's wakeup
-    /// primitive. The bg task grabs this once (under the delegate lock it
-    /// already holds) and fires it from `select!` arms to wake an in-progress
-    /// `poll()` without cancelling it. See
-    /// `design/current/consumer-join-stall-rootcause.md`.
+    /// primitive — Java's `Selector.wakeup()`.
+    ///
+    /// This is the consumer's single "make the background task stop waiting"
+    /// channel. Firing it returns an in-progress `poll()` at a safe boundary
+    /// WITHOUT cancelling it, which matters because the poll is not
+    /// cancellation-safe (see
+    /// `design/current/consumer-join-stall-rootcause.md`). Being an `Arc<Notify>`
+    /// it needs no lock, so the app side can fire it while the bg task holds the
+    /// delegate mutex for the whole poll.
+    ///
+    /// Held by `ApplicationEventHandler` (event enqueue + the §31 ack path),
+    /// `FetchRequestManager` (fetch-completion signal), and the close handle
+    /// (`wakeup` / `signal_close`). Unlike [`WakeupTrigger`], it has no
+    /// user-visible effect and no disabled state.
     pub(crate) fn wakeup_handle(&self) -> std::sync::Arc<tokio::sync::Notify> {
         self.client.wakeup_handle()
     }
@@ -606,7 +634,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Close the underlying client.
     ///
     /// Java: `close()` (declared `throws IOException`).
-    pub(crate) async fn close(&mut self) -> Result<(), KafkaError> {
+    pub(crate) async fn close(&mut self) -> Result<(), Error> {
         self.client.close().await;
         Ok(())
     }
@@ -675,6 +703,11 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         // `Time` source plumbed in; callers thread `current_time_ms`.
         self.maybe_propagate_metadata_error(current_time_ms);
         self.check_disconnects(current_time_ms, on_close);
+        // Java NCD:169 — record the unsent-requests queue size at the end of
+        // poll (per bg poll, not per-record).
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_unsent_requests_queue_size(self.unsent_requests.len() as i32, current_time_ms);
+        }
     }
 
     /// Convenience: `poll(timeout_ms, current_time_ms, false)`.
@@ -689,7 +722,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
 
     /// Iterates the unsent-requests queue and dispatches every request
     /// whose target node is ready. Expired requests are pulled out and
-    /// completed with a [`KafkaError::Timeout`].
+    /// completed with a [`Error::Timeout`].
     ///
     /// Java: package-private `trySend(long currentTimeMs)`.
     async fn try_send(&mut self, current_time_ms: i64) {
@@ -703,18 +736,39 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             // Java: `unsent.timer.update(currentTimeMs)` then `isExpired`.
             if unsent.deadline_ms() >= 0 && current_time_ms >= unsent.deadline_ms() {
                 let timeout_ms = unsent.deadline_ms().saturating_sub(unsent.enqueue_time_ms());
+                // Java NCD:203 — record the queue time when an expired request
+                // is removed. Java uses `time.milliseconds()`; the Rust
+                // delegate threads `current_time_ms` (its `updatedNow`
+                // approximation), so use that for the removal timestamp.
+                self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                 unsent.handler().on_failure(
                     current_time_ms,
-                    KafkaError::timeout(format!("Failed to send request after {timeout_ms} ms.")),
+                    Error::timeout(format!("Failed to send request after {timeout_ms} ms.")),
                 );
                 continue;
             }
             if !self.do_send(&mut unsent, current_time_ms).await {
                 // Not ready yet — re-queue and retry next poll.
                 requeue.push_back(unsent);
+            } else {
+                // Java NCD:214 — record the queue time when a request is
+                // successfully sent and removed from the queue.
+                self.record_unsent_requests_queue_time(&unsent, current_time_ms);
             }
         }
         self.unsent_requests = requeue;
+    }
+
+    /// Records the time a request spent in the unsent-requests queue, when
+    /// it is removed (sent, expired, or disconnected). Java computes
+    /// `time.milliseconds() - unsent.enqueueTimeMs()`. A request that was
+    /// never stamped (`enqueue_time_ms == -1`) is skipped.
+    fn record_unsent_requests_queue_time(&self, unsent: &UnsentRequest, current_time_ms: i64) {
+        if let Some(metrics) = &self.async_consumer_metrics
+            && unsent.enqueue_time_ms() >= 0
+        {
+            metrics.record_unsent_requests_queue_time(current_time_ms - unsent.enqueue_time_ms());
+        }
     }
 
     /// Attempt to dispatch one request. Returns `true` if the request was
@@ -781,17 +835,23 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         while let Some(unsent) = queue.pop_front() {
             match unsent.node() {
                 Some(n) if self.client.connection_failed(n) => {
+                    // Java NCD:243-244 hands `client.authenticationException(node)`
+                    // to `onFailure` unchanged, and `onFailure` substitutes
+                    // `DisconnectException.INSTANCE` when it is null
+                    // (`NetworkClientDelegate.java:427-434`).
                     let err = match self.client.authentication_error(n) {
-                        Some(msg) => KafkaError::with_message(Errors::SaslAuthenticationFailed, msg),
-                        None => KafkaError::new(Errors::NetworkException),
+                        Some(error) => error,
+                        None => Error::new(Errors::NetworkError),
                     };
+                    // Java NCD:242 — record queue time on disconnect removal.
+                    self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                     unsent.handler().on_failure(current_time_ms, err);
                 },
                 None if on_close => {
                     log::debug!("Removing unsent request because the client is closing: {unsent:?}");
-                    unsent
-                        .handler()
-                        .on_failure(current_time_ms, KafkaError::new(Errors::NetworkException));
+                    // Java NCD:248 — record queue time on close removal.
+                    self.record_unsent_requests_queue_time(&unsent, current_time_ms);
+                    unsent.handler().on_failure(current_time_ms, Error::new(Errors::NetworkError));
                 },
                 _ => requeue.push_back(unsent),
             }
@@ -926,7 +986,7 @@ mod tests {
     fn test_ensure_correct_completion_time_on_failure() {
         let unsent = new_unsent_find_coordinator_request();
         let handler = unsent.handler();
-        handler.on_failure(0, KafkaError::timeout("x"));
+        handler.on_failure(0, Error::timeout("x"));
         // Subsequent "sleeps" must not advance the completion time.
         assert_eq!(0, handler.completion_time_ms());
     }
@@ -1015,16 +1075,13 @@ mod tests {
     async fn test_propagate_metadata_error() {
         let time = Arc::new(AtomicI64::new(0));
         let (mut ncd, meta, _rx) = new_delegate(Arc::clone(&time), false);
-        meta.fatal_error(KafkaError::timeout("Test Auth Exception"));
+        meta.fatal_error(Error::timeout("Test auth failure"));
         assert!(ncd.get_and_clear_metadata_error().is_none());
 
         ncd.poll(0, time.load(Ordering::SeqCst), false).await;
 
         let metadata_error = ncd.get_and_clear_metadata_error().expect("error captured");
-        assert!(
-            metadata_error.message().contains("Test Auth Exception"),
-            "got: {metadata_error}"
-        );
+        assert!(metadata_error.message().contains("Test auth failure"), "got: {metadata_error}");
     }
 
     /// Translated from `NetworkClientDelegateTest.testPropagateMetadataErrorWithErrorEvent`.
@@ -1035,14 +1092,14 @@ mod tests {
     async fn test_propagate_metadata_error_with_error_event() {
         let time = Arc::new(AtomicI64::new(0));
         let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
-        meta.fatal_error(KafkaError::timeout("Test Auth Exception"));
+        meta.fatal_error(Error::timeout("Test auth failure"));
 
         ncd.poll(0, time.load(Ordering::SeqCst), false).await;
 
         let envelope = bg_rx.try_recv().expect("metadata error delivered to bg queue");
         match envelope.event {
             BackgroundEvent::Error { error } => {
-                assert!(error.message().contains("Test Auth Exception"), "got: {error}");
+                assert!(error.message().contains("Test auth failure"), "got: {error}");
             },
             other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
         }
@@ -1053,19 +1110,19 @@ mod tests {
         let (handle, rx) = FutureCompletionHandler::new_with_receiver();
         assert!(!handle.is_done());
 
-        handle.on_failure(123, KafkaError::timeout("boom"));
+        handle.on_failure(123, Error::timeout("boom"));
         assert!(handle.is_done());
         assert_eq!(handle.completion_time_ms(), 123);
 
         // Second call must not double-send; matches Java's
         // CompletableFuture.completeExceptionally idempotence.
-        handle.on_failure(456, KafkaError::timeout("again"));
+        handle.on_failure(456, Error::timeout("again"));
 
         // Receiver resolves with the *first* error only (the second
         // send into the consumed sender slot is dropped).
         let received = rx.blocking_recv().expect("sender alive until first send");
         match received {
-            Err(KafkaError::Timeout(msg)) => assert_eq!(msg, "boom"),
+            Err(Error::Timeout(msg)) => assert_eq!(msg.message(), "boom"),
             Err(other) => panic!("expected timeout error, got: {other}"),
             Ok(_) => panic!("expected error variant, got Ok"),
         }
@@ -1108,7 +1165,7 @@ mod tests {
     /// Translated from `NetworkClientDelegateTest.testTimeoutBeforeSend`.
     /// Marks the only node unreachable so `do_send` never succeeds, then
     /// advances time past `request_timeout_ms`; the expiry branch of
-    /// `try_send` fires `on_failure(KafkaError::Timeout)` and the
+    /// `try_send` fires `on_failure(Error::Timeout)` and the
     /// receiver resolves with that error.
     #[tokio::test(flavor = "current_thread")]
     async fn test_timeout_before_send() {
@@ -1135,13 +1192,13 @@ mod tests {
         time.fetch_add(REQUEST_TIMEOUT_MS as i64, Ordering::SeqCst);
 
         // Second poll: try_send sees `current_time_ms >= deadline_ms`
-        // and fires `on_failure(KafkaError::timeout(...))`.
+        // and fires `on_failure(Error::timeout(...))`.
         ncd.poll(0, time.load(Ordering::SeqCst), false).await;
         assert!(ncd.unsent_requests().is_empty(), "expired request was removed");
 
         let received = rx.try_recv().expect("response delivered");
         match received {
-            Err(KafkaError::Timeout(_)) => {},
+            Err(Error::Timeout(_)) => {},
             Err(other) => panic!("expected Timeout, got: {other}"),
             Ok(_) => panic!("expected error variant, got Ok"),
         }
@@ -1151,7 +1208,7 @@ mod tests {
     /// Sends a request successfully, then advances time past
     /// `request_timeout_ms` so the underlying `MockClient::poll` times
     /// the in-flight request out (Java: `DisconnectException`; Rust:
-    /// `KafkaError` carrying `Errors::NetworkException`).
+    /// `Error` carrying `Errors::NetworkError`).
     #[tokio::test(flavor = "current_thread")]
     async fn test_timeout_after_send() {
         let time = Arc::new(AtomicI64::new(1));
@@ -1171,18 +1228,15 @@ mod tests {
         // detect the expired in-flight request, disconnect the node,
         // and synthesise a `disconnected=true` `ClientResponse` — the
         // FutureCompletionHandler then routes that to
-        // `on_failure(KafkaError::new(Errors::NetworkException))`.
+        // `on_failure(Error::new(Errors::NetworkError))`.
         time.fetch_add(REQUEST_TIMEOUT_MS as i64, Ordering::SeqCst);
         ncd.poll(0, time.load(Ordering::SeqCst), false).await;
 
         let received = rx.try_recv().expect("response delivered");
         match received {
             Err(err) => {
-                assert_eq!(
-                    Errors::NetworkException,
-                    err.error(),
-                    "expected NetworkException (Java DisconnectException), got: {err}"
-                );
+                // Java surfaces a `DisconnectException` here.
+                assert_eq!(Errors::NetworkError, err.error(), "expected a network error, got: {err}");
             },
             Ok(_) => panic!("expected disconnect error, got Ok"),
         }
@@ -1250,17 +1304,14 @@ mod tests {
         // Poll with on_close = true: `check_disconnects` matches
         // `None if on_close` (the unsent never had a node assigned to
         // its `UnsentRequest` field) and fires
-        // `on_failure(KafkaError::new(Errors::NetworkException))`.
+        // `on_failure(Error::new(Errors::NetworkError))`.
         ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
         assert!(!ncd.has_any_pending_requests(), "unsent dropped on close");
 
         let received = rx.try_recv().expect("response delivered");
         match received {
-            Err(err) => assert_eq!(
-                Errors::NetworkException,
-                err.error(),
-                "expected NetworkException (Java DisconnectException), got: {err}"
-            ),
+            // Java surfaces a `DisconnectException` here.
+            Err(err) => assert_eq!(Errors::NetworkError, err.error(), "expected a network error, got: {err}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
     }

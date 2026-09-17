@@ -19,9 +19,9 @@
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::record::BatchIterator;
-use crate::common::record::CompressionType;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::BatchIterator;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::RecordBatch;
 use crate::produce_request_data::ProduceRequestData;
 use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
 

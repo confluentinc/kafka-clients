@@ -1,0 +1,44 @@
+# The two admin dispatch patterns.
+#
+# Source of truth for design/current/admin-dispatch.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: both patterns run on the SAME single background
+# task; the difference is whether the target node is known up front (Call) or
+# has to be looked up first (AdminApiDriver).
+
+direction: down
+
+api: "Admin trait — 46 sync fn (+ async fn close)\neach returns a *Result holding one KafkaFuture<T> per key" {
+  style.fill: "#eef6ff"
+}
+
+task: "AdminClientRunnable<C: KafkaClient> — one tokio::spawn" {
+  style.fill: "#fff7e6"
+
+  pattern1: "Pattern 1 — Call / NodeProvider\nsingle request, node known up front\ntries + deadline_ms retry unit" {
+    style.fill: "#e8f5e9"
+  }
+
+  pattern2: "Pattern 2 — AdminApiDriver\nfor RPCs needing a lookup first" {
+    style.fill: "#e3f2fd"
+
+    lookup: "stage 1: lookup\nAdminApiLookupStrategy"
+    fulfill: "stage 2: fulfillment\nbatched per node by AdminApiHandler"
+
+    lookup -> fulfill: "mapped_keys"
+    fulfill -> lookup: "unmap + re-lookup on\nstale-leader / disconnect" {style.stroke-dash: 3}
+  }
+}
+
+providers: "NodeProvider (call.rs) variants:\nController, LeastLoaded, MetadataUpdate,\nConstantNodeId(i32),\nLeastLoadedBrokerOrActiveKController"
+strategies: "Lookup strategies:\nPartitionLeaderStrategy (+ PartitionLeaderCache),\nCoordinatorStrategy (GROUP | TRANSACTION),\nAllBrokersStrategy, StaticBrokerStrategy"
+
+api -> task: "enqueue (channel) + poke wakeup"
+task.pattern1 -> providers: "picks the node via" {style.stroke-dash: 3}
+task.pattern2.lookup -> strategies: "one of" {style.stroke-dash: 3}
+
+net: "NetworkClient (shared by both patterns)"
+task.pattern1 -> net
+task.pattern2.fulfill -> net
+net -> api: "completes KafkaFuture<T> per key" {style.stroke-dash: 3}

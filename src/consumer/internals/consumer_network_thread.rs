@@ -65,12 +65,15 @@
 //!
 //! # Metrics
 //!
-//! `AsyncConsumerMetrics` is not yet translated into Rust. Java's
-//! `recordTimeBetweenNetworkThreadPoll`, `recordApplicationEventQueueSize`,
-//! and `recordApplicationEventExpiredSize` call sites are replaced with
-//! log-only equivalents. The Java metric tests are intentionally NOT
-//! translated here — they will be added alongside the metrics framework
-//! in a future milestone.
+//! `AsyncConsumerMetrics` (Phase M6) is wired into the bg loop via the
+//! optional [`ConsumerNetworkThread::set_async_consumer_metrics`] setter
+//! (M4/M5 precedent). `recordTimeBetweenNetworkThreadPoll` fires per
+//! `run_once`, `recordApplicationEventQueueSize`/`...QueueTime`/
+//! `...QueueProcessingTime` in `process_application_events`, and
+//! `recordApplicationEventExpiredSize` at both reap sites (run_once +
+//! cleanup). When the metrics are not wired (tests that don't care), these
+//! sites are no-ops. The `AsyncConsumerMetrics` value-parity tests live in
+//! `async_consumer_metrics.rs`.
 //!
 //! # Metadata-error notification on uncompleted events
 //!
@@ -100,8 +103,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::kafka_client::KafkaClient;
 
@@ -130,10 +132,33 @@ pub(crate) const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 30_000;
 /// `FetchCollectorTime` (`fetch_collector.rs`).
 pub(crate) trait ThreadTime: Send + Sync + 'static {
     fn milliseconds(&self) -> i64;
+
+    /// Monotonic nanoseconds. Mirrors Java's `Time.nanoseconds()`, which is
+    /// `System.nanoTime()` (`SystemTime.java:41`) — monotonic, with an arbitrary
+    /// origin, so only differences between two readings are meaningful.
+    ///
+    /// Used by `KafkaConsumerMetrics` for the `commit-sync-time-ns-total` /
+    /// `committed-time-ns-total` sensors, both of which are computed as
+    /// `nanoseconds() - start`. The default derives from `milliseconds()`
+    /// (sufficient for mock clocks in tests, which do not assert nanosecond
+    /// precision); `SystemThreadTime` overrides it with a real monotonic
+    /// reading.
+    fn nanoseconds(&self) -> i64 {
+        self.milliseconds().saturating_mul(1_000_000)
+    }
 }
 
-/// Production implementation of [`ThreadTime`] — wraps
-/// `std::time::SystemTime::now()`.
+/// Process-wide origin for [`SystemThreadTime::nanoseconds`], the analog of the
+/// arbitrary origin `System.nanoTime()` counts from.
+///
+/// `Instant` deliberately exposes no epoch, so a fixed reference is needed to
+/// turn it into an `i64`. Captured once on first use; only differences between
+/// readings are meaningful, which is all any caller uses.
+static NANO_ORIGIN: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Production implementation of [`ThreadTime`]. `milliseconds()` is wall-clock
+/// (Java's `Time.milliseconds()` is `System.currentTimeMillis()`);
+/// `nanoseconds()` is monotonic (Java's is `System.nanoTime()`).
 #[derive(Debug, Default)]
 pub(crate) struct SystemThreadTime;
 
@@ -144,6 +169,17 @@ impl ThreadTime for SystemThreadTime {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0)
+    }
+
+    /// Monotonic, via `Instant` — NOT `SystemTime`.
+    ///
+    /// This used to read `SystemTime::now().duration_since(UNIX_EPOCH)`, which is
+    /// wall-clock: an NTP step backwards makes a later reading smaller than an
+    /// earlier one, so `nanoseconds() - start` goes negative and the *monotonic*
+    /// `commit-sync-time-ns-total` / `committed-time-ns-total` counters run
+    /// backwards. `Instant` cannot regress.
+    fn nanoseconds(&self) -> i64 {
+        NANO_ORIGIN.elapsed().as_nanos() as i64
     }
 }
 
@@ -184,22 +220,12 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// `run_once`) lock briefly with `std::sync::Mutex`. The lock is
     /// never held across an `.await` per `consumer-threading.md` §16.
     request_managers: Arc<std::sync::Mutex<RequestManagers>>,
-    /// Wakeup primitive. The app side calls `wakeup.wakeup()`; the bg
-    /// task `select!`s on `wakeup_rx.borrow().clone().cancelled()` at
-    /// the top of each loop.
+    /// Wakeup primitive, retained only for [`Self::signal_close`]. The bg
+    /// task does NOT observe the wakeup token: interrupting the network poll
+    /// goes through the selector's own wakeup handle instead (see Phase 4 of
+    /// [`Self::run_once`]), matching Java, where `KafkaConsumer.wakeup()`
+    /// completes the app-side future and never touches the network thread.
     wakeup: WakeupTrigger,
-    /// Watch-channel subscription used to re-read the current wakeup
-    /// token at the top of every iteration.
-    wakeup_rx: watch::Receiver<CancellationToken>,
-    /// Wake signal fired by the app side whenever an application event is
-    /// enqueued (the same `Arc<Notify>` held by
-    /// [`super::events::application_event_handler::ApplicationEventHandler`]).
-    /// The `run_once` network-poll `select!` has a `notified()` arm so a
-    /// freshly enqueued event preempts the (up to `MAX_POLL_TIMEOUT_MS`)
-    /// blocking poll immediately — the Rust analog of Java's
-    /// `add()` → `wakeupNetworkThread()` → `Selector.wakeup()`. Without it
-    /// fetches would only be issued on the `MAX_POLL_TIMEOUT_MS` cadence.
-    event_notify: Arc<Notify>,
     /// Shutdown signal — flipped to `true` by [`Self::signal_close`].
     /// The bg-task loop exits cleanly the next iteration.
     running: Arc<AtomicBool>,
@@ -210,9 +236,9 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Close timeout (millis). Set by [`Self::set_close_timeout_ms`]
     /// before `close()`.
     close_timeout_ms: AtomicI64,
-    /// Wall-clock timestamp of the last `run_once` call. Used by Java's
-    /// `recordTimeBetweenNetworkThreadPoll` metric — kept here as a
-    /// log-only equivalent.
+    /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
+    /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
+    /// metric (wired in `run_once` when `async_consumer_metrics` is set).
     last_poll_time_ms: i64,
     /// Time source — `SystemThreadTime` in production, mock in tests.
     time: Arc<dyn ThreadTime>,
@@ -239,13 +265,23 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     poll_results_before_scratch: Vec<super::network_client_delegate::PollResult>,
     poll_results_after_scratch: Vec<super::network_client_delegate::PollResult>,
     app_event_drain_scratch: Vec<ApplicationEventEnvelope>,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent);
+    /// tests leave it unset and the bg-loop record points are no-ops.
+    async_consumer_metrics: Option<Arc<super::async_consumer_metrics::AsyncConsumerMetrics>>,
+    /// Shared mirror of the application-event queue depth, written by
+    /// [`super::events::application_event_handler::ApplicationEventHandler::add`]
+    /// and reset to 0 by `process_application_events` (Java's
+    /// `recordApplicationEventQueueSize(0)` after `drainTo`). `None` when
+    /// metrics are not wired.
+    application_event_queue_size: Option<Arc<AtomicI64>>,
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
-    /// Java constructor. Drops `LogContext` (Rust uses `log`),
-    /// `AsyncConsumerMetrics` (no metrics yet — see module docstring),
-    /// and the three `Supplier<...>` indirections (Rust takes the
-    /// already-constructed values directly).
+    /// Java constructor. Drops `LogContext` (Rust uses `log`) and the three
+    /// `Supplier<...>` indirections (Rust takes the already-constructed
+    /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
+    /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         time: Arc<dyn ThreadTime>,
@@ -257,7 +293,6 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         membership: Option<Arc<ConsumerMembershipManager>>,
         wakeup: WakeupTrigger,
         cached_max_time_to_wait_ms: Arc<AtomicI64>,
-        event_notify: Arc<Notify>,
     ) -> Self {
         // Seed the shared slot with `MAX_POLL_TIMEOUT_MS` — Java's
         // `ApplicationEventHandler.maximumTimeToWait()` returns
@@ -266,7 +301,6 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // seed with `MAX_POLL_TIMEOUT_MS` (the safer "wake at least this
         // often" default).
         cached_max_time_to_wait_ms.store(MAX_POLL_TIMEOUT_MS, Ordering::Release);
-        let wakeup_rx = wakeup.subscribe();
         Self {
             application_event_rx,
             application_event_reaper,
@@ -274,8 +308,6 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             network_client_delegate,
             request_managers,
             wakeup,
-            wakeup_rx,
-            event_notify,
             running: Arc::new(AtomicBool::new(true)),
             cached_max_time_to_wait_ms,
             close_timeout_ms: AtomicI64::new(DEFAULT_CLOSE_TIMEOUT_MS),
@@ -286,7 +318,22 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             poll_results_before_scratch: Vec::new(),
             poll_results_after_scratch: Vec::new(),
             app_event_drain_scratch: Vec::new(),
+            async_consumer_metrics: None,
+            application_event_queue_size: None,
         }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` and the shared application-event
+    /// queue-depth counter post-construction (M4/M5 setter precedent —
+    /// keeps the no-arg `new` and all existing test call sites untouched).
+    /// Java passes `AsyncConsumerMetrics` to the constructor.
+    pub(crate) fn set_async_consumer_metrics(
+        &mut self,
+        metrics: Arc<super::async_consumer_metrics::AsyncConsumerMetrics>,
+        application_event_queue_size: Arc<AtomicI64>,
+    ) {
+        self.async_consumer_metrics = Some(metrics);
+        self.application_event_queue_size = Some(application_event_queue_size);
     }
 
     /// Java: `isRunning()`.
@@ -365,11 +412,14 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let mut delegate_guard = delegate_arc.lock().await;
 
         let current_time_ms = self.time.milliseconds();
-        if self.last_poll_time_ms != 0 {
-            log::trace!(
-                "time-between-network-thread-poll: {} ms",
-                current_time_ms.saturating_sub(self.last_poll_time_ms)
-            );
+        // Java CNT:216 — record the time between network-thread polls. Only
+        // recorded once a prior poll has happened (Java's `lastPollTimeMs != 0`
+        // guard). `current_time_ms` is already computed for the iteration, so
+        // there is no extra clock read here.
+        if self.last_poll_time_ms != 0
+            && let Some(metrics) = &self.async_consumer_metrics
+        {
+            metrics.record_time_between_network_thread_poll(current_time_ms.saturating_sub(self.last_poll_time_ms));
         }
         self.last_poll_time_ms = current_time_ms;
 
@@ -504,57 +554,30 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
         }
 
-        // ──── Phase 2.4: drive pending fenced/fatal transitions ────
+        // ──── Phase 2.4: drive a pending §31 assignment release ────
         //
-        // Java's `AbstractHeartbeatRequestManager` calls
-        // `membershipManager().transitionToFenced()` / `transitionToFatal()`
-        // synchronously inside its `whenComplete` lambda
-        // (`AbstractHeartbeatRequestManager.java:415,424,457`). Rust's
-        // membership transitions are `async` (they await §31's
-        // onPartitionsLost listener) and the heartbeat manager's
-        // `poll(now)` is sync, so the heartbeat pushes the
-        // classification onto a side-channel
-        // ([`PendingMembershipTransition`]) and the bg-task drains
-        // and `await`s it here — AFTER `entries().poll(now)` (so the
-        // heartbeat's drain has had a chance to classify any pending
-        // responses) and BEFORE `membership.reconcile(now)` (so the
-        // membership state machine observes the fence / fatal before
-        // reconciliation runs).
-        //
-        // Failures from the transition `await` are logged and
-        // swallowed — mirrors Java's `whenComplete` lambda which logs
-        // errors thrown by transitionToFenced / transitionToFatal but
-        // does not rethrow.
+        // The fence / fatal / stale transitions themselves are applied by
+        // the heartbeat manager inline in its response handler, where Java
+        // applies them (`AbstractHeartbeatRequestManager.java:415,424,457`
+        // — synchronously inside the `whenComplete` lambda). What CAN'T be
+        // finished there is the §31 `onPartitionsLost` callback each one
+        // enqueues: the app task runs the listener and acks, so the release
+        // tail resumes here, mirroring Java's
+        // `signalPartitionsLost(...).whenComplete(...)` resuming on the
+        // network thread.
         if let Some(membership) = self.membership.as_ref() {
-            let pending = {
-                let mut rm_guard = match self.request_managers.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                rm_guard.take_pending_membership_transitions()
-            };
-            for transition in pending {
-                use super::consumer_heartbeat_request_manager::PendingMembershipTransition;
-                match transition {
-                    PendingMembershipTransition::Fenced => {
-                        if let Err(e) = membership.transition_to_fenced(current_time_ms).await {
-                            log::warn!("transition_to_fenced (driven from heartbeat) failed: {}", e);
-                        }
-                    },
-                    PendingMembershipTransition::Fatal(err) => {
-                        log::error!(
-                            "Driving membership.transition_to_fatal from heartbeat fatal classification: {}",
-                            err
-                        );
-                        if let Err(e) = membership.transition_to_fatal(current_time_ms).await {
-                            log::warn!("transition_to_fatal (driven from heartbeat) failed: {}", e);
-                        }
-                    },
-                    PendingMembershipTransition::Stale => {
-                        if let Err(e) = membership.transition_to_stale(current_time_ms).await {
-                            log::warn!("transition_to_stale (driven from heartbeat) failed: {}", e);
-                        }
-                    },
+            // Phase 41 (Issue 2): an `onPartitionsLost` release callback fired
+            // by a fence/fatal/stale transition may still be awaiting its
+            // app-side ack. `has_pending_release()` is a single lock-free
+            // atomic load; in steady state (no release in flight) it is
+            // `false` and this whole block is skipped — Perf Contract item 1
+            // adds exactly one atomic load per iteration here.
+            if membership.has_pending_release() {
+                // Drive it non-blockingly (Java's
+                // `callbackResult.whenComplete(...)` resuming on the network
+                // thread).
+                if let Err(e) = membership.drive_pending_release().await {
+                    log::warn!("drive_pending_release failed: {}", e);
                 }
             }
         }
@@ -602,48 +625,33 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // `design/current/consumer-join-stall-rootcause.md`).
         //
         // Instead we run the poll to completion and deliver wakeups the way
-        // Java does (`Selector.wakeup()`): the wakeup token and the
-        // application-event notify *poke the selector's wakeup primitive*,
-        // which makes the in-progress poll return at a safe boundary. The poll
-        // future is pinned and driven by `&mut`, so the signal arms run their
-        // body and loop without ever dropping it.
-        let token = self.wakeup_rx.borrow().clone();
-        {
-            // Lock-free handle to the selector's wakeup `Notify`, grabbed under
-            // the lock we already hold. `poll_fut` borrows the guard for its
-            // whole duration, so we cannot call `delegate.wakeup()` while it
-            // runs — but firing this `Arc<Notify>` needs no lock.
-            let network_wakeup = delegate_guard.wakeup_handle();
-            let poll_fut = delegate_guard.poll_default(poll_wait_time_ms, current_time_ms);
-            tokio::pin!(poll_fut);
-            // After the first poke we only await the poll to finish: the guards
-            // disable the signal arms so we neither busy-spin on the (still
-            // cancelled, until rotated) token nor rebuild the consumed
-            // event-notify permit.
-            let mut poked = false;
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut poll_fut => break,
-                    // Wakeup or shutdown fired. Java analog: `Selector.wakeup()`.
-                    _ = token.cancelled(), if !poked => {
-                        log::trace!("Network-client poll woken by wakeup");
-                        network_wakeup.notify_one();
-                        poked = true;
-                    }
-                    // An application event was enqueued (Java:
-                    // `add()` → `wakeupNetworkThread()`). `notify_one()` stores a
-                    // permit even if `run_once` was not yet parked here, so an
-                    // event enqueued in the gap between the top-of-loop drain and
-                    // this `select!` is not lost.
-                    _ = self.event_notify.notified(), if !poked => {
-                        log::trace!("Network-client poll woken by application-event notify");
-                        network_wakeup.notify_one();
-                        poked = true;
-                    }
-                }
-            }
-        }
+        // Java does: everything that wants to interrupt the poll pokes the
+        // selector's own wakeup primitive, and the poll returns at a safe
+        // boundary. That primitive is `KafkaClient::wakeup_handle()` — an
+        // `Arc<Notify>` the app side holds a clone of — so this phase is a
+        // plain `.await` with nothing to race:
+        //
+        //   * `ApplicationEventHandler::add` pokes it after enqueuing
+        //     (Java: `add()` -> `wakeupNetworkThread()` ->
+        //     `networkClientDelegate.wakeup()` -> `Selector.wakeup()`);
+        //   * the §31 rebalance-ack path and `FetchRequestManager`'s completion
+        //     signal poke the same handle;
+        //   * `wakeup()` pokes it alongside cancelling the user-facing token,
+        //     and `signal_close()` pokes it after clearing the running flag.
+        //
+        // `notify_one()` stores a permit when nobody is parked, so a poke that
+        // lands in the gap between the top-of-loop drain and this await still
+        // returns the poll immediately — the same semantics as a
+        // `Selector.wakeup()` issued just before `select()` (see
+        // `selector.rs`, and `CountingClient::poll` in this file's tests,
+        // which awaits the handle it hands out).
+        //
+        // There used to be a `select!` here with two extra arms — one on the
+        // wakeup token, one on a separate application-event `Notify` — whose
+        // bodies both did nothing but forward the signal to this same handle.
+        // They were pure indirection, and being able to poke the wrong one of
+        // three primitives is what produced several silent-latency bugs.
+        delegate_guard.poll_default(poll_wait_time_ms, current_time_ms).await;
 
         // ──── Phase 5: refresh cached maximumTimeToWait ────
         let mut max_time_to_wait_ms: i64 = i64::MAX;
@@ -660,6 +668,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.cached_max_time_to_wait_ms.store(max_time_to_wait_ms, Ordering::Release);
 
         // ──── Phase 6: reap expired application events ────
+        // Java CNT:282 — `recordApplicationEventExpiredSize(reaper.reap(now))`,
+        // recorded unconditionally (the Value stat tracks the latest count,
+        // which is 0 when nothing expired).
         let expired = {
             let mut reaper = match self.application_event_reaper.lock() {
                 Ok(g) => g,
@@ -667,8 +678,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap(current_time_ms)
         };
-        if expired > 0 {
-            log::trace!("application-event-expired-size: {}", expired);
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_application_event_expired_size(expired as i64);
         }
 
         // ──── Phase 7: maybeFailOnMetadataError(uncompletedEvents) ────
@@ -722,7 +733,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         };
 
-        // Step 3: notify every live handle. KafkaError is Clone so we
+        // Step 3: notify every live handle. Error is Clone so we
         // can fan it out faithfully (Java passes the same exception
         // instance to each `onMetadataError` call).
         for handle in &self.notifiable_handles {
@@ -733,7 +744,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // `tx.send(Err(err))` on the inner oneshot — identical
             // semantics. The method is misnamed in Rust for historical
             // reasons (it was originally only used by the reaper); the
-            // generic implementation accepts any `KafkaError`.
+            // generic implementation accepts any `Error`.
             handle.fail_with_timeout(err.clone());
         }
         // The handles will be pruned on the next iteration's
@@ -771,7 +782,47 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         }
 
+        // Java CNT:253 records a literal 0 here, which is exact for Java because
+        // `LinkedBlockingQueue.drainTo` calls `fullyLock()` — it holds both the
+        // put and take locks, so nothing can arrive during the drain.
+        //
+        // The `try_recv` loop above (mandated by consumer-threading.md §10) does
+        // NOT block senders, so a `store(0)` would be wrong: an `add` racing the
+        // loop has its `fetch_add(1)` overwritten even though its event is still
+        // queued, and the gauge then under-reports until the next drain.
+        //
+        // Subtract exactly what was drained instead. The counter is then
+        // conserved — `+1` per successful send in `ApplicationEventHandler::add`,
+        // `-1` per event actually dequeued here — so it equals the true depth at
+        // every observation point regardless of interleaving, and can never go
+        // negative. Recording the post-drain value rather than 0 reports events
+        // that arrived mid-loop, which is what Java's `0` means when its drain
+        // really did empty the queue.
+        //
+        // Clone the metrics `Arc` up front so `&mut self` stays available to the
+        // dispatch body below.
+        let metrics = self.async_consumer_metrics.clone();
+        if let Some(metrics) = &metrics {
+            let remaining = match &self.application_event_queue_size {
+                Some(queue_size) => {
+                    queue_size.fetch_sub(envelopes.len() as i64, Ordering::SeqCst) - envelopes.len() as i64
+                },
+                None => 0,
+            };
+            // Floor at 0: a negative depth is never meaningful, and publishing one
+            // would turn a pairing bug into a nonsense gauge. Production cannot go
+            // negative -- `ApplicationEventHandler::add` is the only sender -- but a
+            // test pushing onto the raw channel can.
+            metrics.record_application_event_queue_size(remaining.max(0) as i32);
+        }
+        // Java CNT:273 — measure the time to process all available events.
+        let start_ms = self.time.milliseconds();
+
         for env in envelopes.drain(..) {
+            // Java CNT:256 — record the time this event spent in the queue.
+            if let Some(metrics) = &metrics {
+                metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
+            }
             // 1. Register with the reaper if completable. The Java
             // `CompletableEvent` interface check is replaced by the
             // `erased_handle()` accessor on [`ApplicationEvent`].
@@ -826,6 +877,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // event)`) — any panic would unwind the bg task. The
             // surrounding tokio::spawn entry point owns the catch.
             self.application_event_processor.process(env.event);
+        }
+        // Java CNT:273 — record the total processing time for the batch.
+        if let Some(metrics) = &metrics {
+            metrics.record_application_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
@@ -953,7 +1008,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap_on_close(&mut leftover_erased)
         };
-        log::trace!("application-event-expired-size (close): {}", expired);
+        // Java CNT:427 — record the expired count during close, same as
+        // run_once's reap site.
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_application_event_expired_size(expired as i64);
+        }
 
         // ──── 4. Close managers + delegate ────
         {
@@ -988,14 +1047,45 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::Notify;
+    /// Regression: `SystemThreadTime::nanoseconds()` must be monotonic.
+    ///
+    /// It previously read `SystemTime::now().duration_since(UNIX_EPOCH)` —
+    /// wall-clock — so an NTP step backwards made
+    /// `nanoseconds() - commit_start_ns` negative, driving the monotonic
+    /// `commit-sync-time-ns-total` / `committed-time-ns-total` counters backwards
+    /// (`async_kafka_consumer.rs:4079`, `:4519`). Java uses `System.nanoTime()`.
+    #[test]
+    fn system_thread_time_nanoseconds_is_monotonic_and_not_epoch_based() {
+        use super::{SystemThreadTime, ThreadTime};
+
+        let t = SystemThreadTime;
+        let mut previous = t.nanoseconds();
+        for _ in 0..1_000 {
+            let current = t.nanoseconds();
+            assert!(current >= previous, "nanoseconds() went backwards: {current} < {previous}");
+            previous = current;
+        }
+
+        // An elapsed count from process start, not a Unix-epoch timestamp
+        // (~1.7e18). Fails loudly if this reverts to wall-clock.
+        assert!(
+            t.nanoseconds() < 1_577_836_800_000_000_000,
+            "nanoseconds() looks like a Unix-epoch timestamp, not an elapsed count"
+        );
+
+        // milliseconds() stays wall-clock, matching System.currentTimeMillis().
+        assert!(t.milliseconds() > 1_577_836_800_000, "milliseconds() should remain wall-clock");
+    }
+
     use std::collections::{HashSet, VecDeque};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize};
     use std::time::Duration;
 
     use crate::api_versions::ApiVersions;
+    use crate::common::Error;
     use crate::common::IsolationLevel;
-    use crate::common::KafkaError;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::ConsumerConfig;
@@ -1163,7 +1253,7 @@ mod tests {
         fn connection_failed(&self, node: &Node) -> bool {
             self.inner.connection_failed(node)
         }
-        fn authentication_error(&self, node: &Node) -> Option<String> {
+        fn authentication_error(&self, node: &Node) -> Option<Error> {
             self.inner.authentication_error(node)
         }
         fn send(&mut self, request: crate::ClientRequest, now: i64) {
@@ -1174,9 +1264,10 @@ mod tests {
             self.poll_timeouts.lock().unwrap().push(timeout);
             if self.poll_block.load(Ordering::SeqCst) {
                 // Block until explicitly released — emulates a socket poll
-                // waiting on I/O readiness. The notify regression test
-                // never releases this, so the only way out of `run_once`'s
-                // poll phase is the `event_notify.notified()` `select!` arm.
+                // waiting on I/O readiness. `wakeup_handle()` hands out this
+                // same `Notify`, so poking the handle releases the poll exactly
+                // as `Selector.wakeup()` does for the real client. That is what
+                // the preempt regression test relies on.
                 self.poll_release.notified().await;
             }
             self.inner.poll(timeout, now).await
@@ -1342,7 +1433,6 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::new(Notify::new()),
         );
         (
             CountingFixture { thread, time, delegate, reaper, tx },
@@ -1351,19 +1441,27 @@ mod tests {
             has_in_flight_script,
         )
     }
-
-    /// Regression test for the ~5-second fetch-latency bug: an application
-    /// event enqueued while the bg task is parked in `poll_default` must
-    /// preempt the (up to `MAX_POLL_TIMEOUT_MS`) network poll immediately,
-    /// via the `event_notify.notified()` arm of `run_once`'s `select!`.
+    /// An application event enqueued while the bg task is parked in the network
+    /// poll must preempt that poll, rather than waiting out
+    /// `MAX_POLL_TIMEOUT_MS`. Java: `add()` -> `wakeupNetworkThread()` ->
+    /// `networkClientDelegate.wakeup()` -> `Selector.wakeup()`.
     ///
-    /// The fixture's `CountingClient` is put into blocking mode so its
-    /// `poll(...)` never returns on its own (emulates waiting on socket
-    /// readiness with no data). Pre-fix, `run_once`'s `select!` had only
-    /// the wakeup token and the (now-blocked) poll, so it would hang here;
-    /// the `tokio::time::timeout` guard turns that hang into a test
-    /// failure. With the fix, the stored `notify_one()` permit drives the
-    /// `notified()` arm and `run_once` returns promptly.
+    /// The app side pokes the client's own wakeup handle
+    /// (`KafkaClient::wakeup_handle()`), which is exactly what the poll awaits —
+    /// so there is no `select!` arm in `run_once` to forward anything, and this
+    /// test drives the same handle the production `ApplicationEventHandler`
+    /// holds. (It previously poked a separate `event_notify` that a `select!`
+    /// arm forwarded here; the arm was pure indirection and is gone.)
+    ///
+    /// `CountingClient` is put in blocking mode so its `poll(...)` never returns
+    /// on its own, emulating a socket wait with no data — and, like the real
+    /// selector, it awaits the handle it hands out. Without a working poke this
+    /// hangs, which the `timeout` guard turns into a failure.
+    ///
+    /// The poke lands BEFORE `run_once` reaches the poll, so this also covers
+    /// the stored-permit case: `notify_one()` with nobody parked must still
+    /// return the next poll immediately (Java NIO's semantics for a
+    /// `Selector.wakeup()` issued just before `select()`).
     #[tokio::test]
     async fn application_event_notify_preempts_blocking_network_poll() {
         let config = make_config();
@@ -1376,6 +1474,9 @@ mod tests {
             .client_for_test_ref()
             .poll_block()
             .store(true, Ordering::SeqCst);
+        // The one nudge primitive, taken from the delegate exactly as the
+        // production ctor does.
+        let event_notify = counting_delegate.wakeup_handle();
         let delegate = Arc::new(AsyncMutex::new(counting_delegate));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor =
@@ -1383,7 +1484,6 @@ mod tests {
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
-        let event_notify = Arc::new(Notify::new());
         let mut thread = ConsumerNetworkThread::new(
             time.clone() as Arc<dyn ThreadTime>,
             rx,
@@ -1394,17 +1494,15 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::clone(&event_notify),
         );
 
-        // Mirror the app side's `ApplicationEventHandler::add`, which fires
-        // `event_notify.notify_one()` after enqueuing. The permit is stored
-        // even though `run_once` is not yet parked on `notified()`.
+        // Mirror `ApplicationEventHandler::add`, which pokes this handle after
+        // enqueuing. The permit is stored even though nothing is parked yet.
         event_notify.notify_one();
 
         tokio::time::timeout(Duration::from_secs(2), thread.run_once())
             .await
-            .expect("run_once must be preempted by the application-event notify, not block on the poll");
+            .expect("run_once must be preempted by the application-event nudge, not block on the poll");
     }
 
     fn make_offsets_manager(
@@ -1468,7 +1566,6 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::new(Notify::new()),
         );
         (thread, tx, reaper, time, request_managers)
     }
@@ -1493,6 +1590,8 @@ mod tests {
             metadata.clone(),
             beh,
             false,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
 
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(
@@ -1521,7 +1620,6 @@ mod tests {
             Some(membership.clone()),
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::new(Notify::new()),
         );
         (thread, membership)
     }
@@ -1731,7 +1829,7 @@ mod tests {
         // The reaper observed the tracked event and timed it out —
         // proves `reap_on_close(...)` was called inside `cleanup()`.
         assert!(
-            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "reaper.reap(...) must complete tracked event with Timeout"
         );
     }
@@ -1754,7 +1852,7 @@ mod tests {
         thread.run_once().await;
 
         assert!(
-            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "runOnce must call reaper.reap(now) and expire the past-due event"
         );
     }
@@ -1823,12 +1921,10 @@ mod tests {
     //   so the initialize-error path lives at the call site (Phase 11
     //   consumer constructor). Mirrors commit 7's deferral.
     //
-    // - `testRunOnceRecordTimeBetweenNetworkThreadPoll` and
-    //   `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`:
-    //   assert against `AsyncConsumerMetrics` histogram values. That
-    //   class is not yet translated. The bg-task currently emits
-    //   `log::trace!` equivalents at the same call sites. When the
-    //   metrics framework lands these tests will be added alongside it.
+    // (`testRunOnceRecordTimeBetweenNetworkThreadPoll` and
+    //  `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`
+    //  are translated below — see `run_once_records_time_between_network_thread_poll`
+    //  and `run_once_records_application_event_queue_size_and_time`.)
 
     /// Drain-events path: an enqueued completable event is registered
     /// with the reaper during `process_application_events`. We call
@@ -1979,7 +2075,6 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::new(Notify::new()),
         );
 
         // 1. Notifiable handle with a large deadline so the reaper
@@ -1991,9 +2086,7 @@ mod tests {
         // 2. Plant the metadata error on the cluster.
         metadata
             .metadata_arc()
-            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
-                "t".to_string()
-            ])));
+            .fatal_error(Error::topic_authorization(std::collections::HashSet::from(["t".to_string()])));
 
         // 3. Drive one runOnce iteration.
         thread.run_once().await;
@@ -2003,7 +2096,7 @@ mod tests {
         let received = event_rx.try_recv().expect("sender used");
         let err = received.expect_err("post-poll arm must fail the handle");
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got: {err:?}"
         );
     }
@@ -2046,15 +2139,12 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::new(Notify::new()),
         );
 
         // Plant the metadata error.
         metadata
             .metadata_arc()
-            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
-                "t".to_string()
-            ])));
+            .fatal_error(Error::topic_authorization(std::collections::HashSet::from(["t".to_string()])));
 
         // No notifiable handles tracked. run_once must NOT consume the
         // delegate's metadata_error.
@@ -2083,6 +2173,174 @@ mod tests {
         thread.process_application_events();
         let r = reaper.lock().unwrap();
         assert!(r.contains(&erased_external), "LeaveGroupOnClose must be tracked");
+    }
+
+    // ─── Java `ConsumerNetworkThreadTest` metric tests (Phase M6) ───
+
+    use crate::common::metric::Metric;
+    use crate::common::metrics::Metrics;
+    use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+    use crate::consumer::internals::consumer_utils::{CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP};
+    use crate::consumer::internals::events::application_event::AsyncPollState;
+
+    /// Java parameterizes both metric tests over
+    /// `AsyncConsumerMetricsTest#groupNameProvider`; we loop the same two groups.
+    fn metric_group_name_provider() -> [&'static str; 2] {
+        [CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP]
+    }
+
+    /// Read a registered metric's value as `f64`.
+    fn read_metric(metrics: &Metrics, name: &str, group: &str) -> f64 {
+        let mn = metrics.metric_name_group(name, group);
+        metrics
+            .metric(&mn)
+            .expect("metric present")
+            .metric_value()
+            .as_double()
+            .expect("double-valued metric")
+    }
+
+    /// Java `ConsumerNetworkThreadTest#testRunOnceRecordTimeBetweenNetworkThreadPoll`.
+    /// Drives two `run_once` iterations 10ms apart on the mock clock and
+    /// asserts `time-between-network-thread-poll-{avg,max}` both equal 10.
+    /// `@ParameterizedTest` over the two metric groups is unrolled into a
+    /// loop (DoD §3). No public `metrics()` accessor is needed: the test
+    /// constructs the `Metrics` registry directly and reads via
+    /// `metrics.metric(metrics.metric_name_group(...))`, exactly like Java.
+    #[tokio::test]
+    async fn run_once_records_time_between_network_thread_poll() {
+        for group_name in metric_group_name_provider() {
+            let (mut thread, _tx, _reaper, time, _rm) = make_thread_no_membership();
+            let metrics = Arc::new(Metrics::new());
+            let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), group_name));
+            thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::new(AtomicI64::new(0)));
+
+            // First poll: Java's `lastPollTimeMs == 0` guard skips the
+            // record; it only stamps `last_poll_time_ms`.
+            thread.run_once().await;
+            time.sleep(10);
+            // Second poll, 10ms later: records the 10ms gap.
+            thread.run_once().await;
+
+            assert_eq!(
+                read_metric(&metrics, "time-between-network-thread-poll-avg", group_name),
+                10.0,
+                "time-between-network-thread-poll-avg must be 10 ({group_name})"
+            );
+            assert_eq!(
+                read_metric(&metrics, "time-between-network-thread-poll-max", group_name),
+                10.0,
+                "time-between-network-thread-poll-max must be 10 ({group_name})"
+            );
+        }
+    }
+
+    /// Java
+    /// `ConsumerNetworkThreadTest#testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`.
+    /// Enqueues one application event stamped at the current mock time,
+    /// pre-bumps the queue-size gauge to 1, advances the clock 10ms, then
+    /// runs one iteration. `run_once` drains the queue (resetting size to 0)
+    /// and records the per-event queue time (`now - enqueued_ms == 10`).
+    /// `@ParameterizedTest` over the two groups is unrolled into a loop.
+    ///
+    /// NOTE: this asserts the size gauge reads 0 after the drain, which it does
+    /// because the counter is floored at 0 and this test pushes onto the raw
+    /// channel without the `fetch_add(1)` that `ApplicationEventHandler::add`
+    /// performs. It is therefore NOT a check of the conservation invariant — see
+    /// `drain_subtracts_dequeued_events_rather_than_zeroing_the_gauge` for that.
+    /// The queue-*time* assertions below are the meaningful part here.
+    /// Regression: the drain must SUBTRACT what it dequeued, not overwrite the
+    /// depth counter with 0.
+    ///
+    /// The counter is a shadow of the channel — tokio's `UnboundedSender` has no
+    /// `len()`, so `ApplicationEventHandler::add` cannot read the real depth the
+    /// way Java's `queue.size()` does. Java can then afford a literal
+    /// `recordApplicationEventQueueSize(0)` after `drainTo`, because `drainTo`
+    /// calls `fullyLock()` and nothing can arrive mid-drain. The `try_recv` loop
+    /// does not block senders, so `store(0)` wiped the `fetch_add(1)` of any `add`
+    /// racing the loop whose event was still queued.
+    ///
+    /// Made deterministic by desynchronising the two by one: the counter says 3
+    /// events are enqueued while only 2 have reached the receiver — exactly the
+    /// state an `add` that has incremented but whose send the receiver has not yet
+    /// observed leaves behind. The old code reported 0, losing the third event;
+    /// the conserved counter reports 3 - 2 = 1.
+    #[tokio::test]
+    async fn drain_subtracts_dequeued_events_rather_than_zeroing_the_gauge() {
+        let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
+        let metrics = Arc::new(Metrics::new());
+        let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), "consumer-metrics"));
+        let queue_size = Arc::new(AtomicI64::new(0));
+        thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::clone(&queue_size));
+
+        let enqueued_ms = time.milliseconds();
+        for _ in 0..2 {
+            let event = ApplicationEvent::AsyncPoll {
+                deadline_ms: enqueued_ms + 60_000,
+                poll_time_ms: enqueued_ms,
+                state: Arc::new(AsyncPollState::new()),
+            };
+            tx.send(ApplicationEventEnvelope { event, enqueued_ms }).expect("send ok");
+        }
+        // Three `add`s incremented; only two sends are visible to the receiver.
+        queue_size.store(3, Ordering::SeqCst);
+
+        thread.run_once().await;
+
+        assert_eq!(
+            queue_size.load(Ordering::SeqCst),
+            1,
+            "the drain must subtract the 2 it dequeued, leaving the 1 still in flight"
+        );
+        assert_eq!(
+            read_metric(&metrics, "application-event-queue-size", "consumer-metrics"),
+            1.0,
+            "the gauge must report the event still queued, not 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_once_records_application_event_queue_size_and_time() {
+        for group_name in metric_group_name_provider() {
+            let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
+            let metrics = Arc::new(Metrics::new());
+            let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), group_name));
+            let queue_size = Arc::new(AtomicI64::new(0));
+            thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::clone(&queue_size));
+
+            // Java: `AsyncPollEvent` enqueued with `setEnqueuedMs(time.milliseconds())`.
+            let enqueued_ms = time.milliseconds();
+            let event = ApplicationEvent::AsyncPoll {
+                deadline_ms: enqueued_ms + 60_000,
+                poll_time_ms: enqueued_ms,
+                state: Arc::new(AsyncPollState::new()),
+            };
+            tx.send(ApplicationEventEnvelope { event, enqueued_ms }).expect("send ok");
+            // Java: `asyncConsumerMetrics.recordApplicationEventQueueSize(1)`.
+            async_metrics.record_application_event_queue_size(1);
+
+            // Advance 10ms, then drain the queue in one iteration.
+            time.sleep(10);
+            thread.run_once().await;
+
+            // Drain resets the size gauge to 0 (Java CNT:253).
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-size", group_name),
+                0.0,
+                "application-event-queue-size must reset to 0 after drain ({group_name})"
+            );
+            // The event spent 10ms in the queue (`now - enqueued_ms`).
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-time-avg", group_name),
+                10.0,
+                "application-event-queue-time-avg must be 10 ({group_name})"
+            );
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-time-max", group_name),
+                10.0,
+                "application-event-queue-time-max must be 10 ({group_name})"
+            );
+        }
     }
 
     /// Phase-12 Issue 1 regression: `run_once` drives
@@ -2123,6 +2381,7 @@ mod tests {
             subs.clone(),
             "g".to_string(),
             None,
+            Arc::new(crate::common::metrics::time::SystemTime),
             0,
         ));
 
@@ -2160,7 +2419,6 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
-            Arc::new(Notify::new()),
         );
 
         // Drive one iteration. `run_once` must call

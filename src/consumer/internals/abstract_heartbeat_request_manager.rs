@@ -36,15 +36,46 @@
 
 use std::sync::Arc;
 
-use crate::common::KafkaError;
+use crate::common::Error;
+use crate::common::errors::GroupAuthorizationError;
+use crate::common::kafka_error::ErrorMessage;
 use crate::common::protocol::Errors;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::events::background_event::BackgroundEvent;
 use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 
 use super::coordinator_request_manager::CoordinatorRequestManager;
+use super::heartbeat_metrics_manager::HeartbeatMetricsManager;
 use super::heartbeat_request_state::HeartbeatRequestState;
 use super::network_client_delegate::{PollResult, UnsentRequest};
+
+/// Java's abstract `heartbeatRequestName()`. Hard-wired to the single
+/// implementation (`ConsumerHeartbeatRequestManager.java:180-182`) because the
+/// Share / Streams subclasses that supply the other names are out of scope
+/// (`consumer-threading.md` §20), the same reason the response type is
+/// hard-wired to [`ConsumerGroupHeartbeatResponse`].
+pub(crate) const HEARTBEAT_REQUEST_NAME: &str = "ConsumerGroupHeartbeatRequest";
+
+/// Java's `Errors.exception(String message)` (`Errors.java:462-469`): a null
+/// broker-supplied message yields the code's own default message, a non-null
+/// one replaces it.
+///
+/// ```java
+/// public ApiException exception(String message) {
+///     if (message == null) {
+///         // If no error message was specified, return an exception with the default error message.
+///         return exception;
+///     }
+///     // Return an exception with the given error message.
+///     return builder.apply(message);
+/// }
+/// ```
+fn error_or_default_message(error: Errors, message: Option<&str>) -> Error {
+    match message {
+        Some(message) => Error::with_message(error, message),
+        None => Error::new(error),
+    }
+}
 
 /// Exponent base used by `RequestState`'s exponential-backoff machinery.
 /// Mirrors Java's `RequestState.RETRY_BACKOFF_JITTER` (0.2 jitter; the
@@ -79,6 +110,16 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// Channel for surfacing errors and rebalance-listener callback
     /// events back to the application thread.
     pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
+    /// `HeartbeatMetricsManager` recording per-heartbeat-send time
+    /// (`recordHeartbeatSentMs`) and per-heartbeat-response latency
+    /// (`recordRequestLatency`). Java passes it into the constructor
+    /// (`AbstractHeartbeatRequestManager.java:110`) and records in
+    /// `makeHeartbeatRequest(currentTimeMs, …)` (`:285`) and the
+    /// `whenComplete` lambda (`:299,311`). In Rust it shares the consumer's
+    /// `Arc<Metrics>` registry and is wired post-construction (like the
+    /// commit manager's metrics manager); `None` for tests that don't
+    /// exercise metrics (recording is then a no-op, value-neutral).
+    pub(crate) metrics_manager: Option<Arc<HeartbeatMetricsManager>>,
     /// Absolute wall-clock millisecond expiration for the poll timer, or
     /// [`i64::MAX`] as a sentinel meaning "not armed yet".
     ///
@@ -141,6 +182,7 @@ impl AbstractHeartbeatRequestManager {
             coordinator_request_manager,
             heartbeat_request_state,
             background_event_handler,
+            metrics_manager: None,
             // Deviation from Java: poll timer is NOT armed at
             // construction. It is armed by the first
             // `reset_poll_timer` call from the AsyncPoll event
@@ -165,6 +207,7 @@ impl AbstractHeartbeatRequestManager {
             coordinator_request_manager,
             heartbeat_request_state,
             background_event_handler,
+            metrics_manager: None,
             // See [`Self::poll_timer_expires_at_ms`] doc-comment — the
             // timer is armed by the first `reset_poll_timer` call, not
             // at construction.
@@ -242,30 +285,42 @@ impl AbstractHeartbeatRequestManager {
     ///   member fatal with the supplied error event.
     /// - `HeartbeatErrorAction::DelegateToSpecific` — error is not in
     ///   the abstract dispatch; the caller's
-    ///   `handle_specific_exception_in_response` runs.
+    ///   `handle_specific_error_in_response` runs.
     ///
     /// Java: `onErrorResponse(R response, long currentTimeMs)`. Rust
     /// splits the "advise the membership manager" half off because the
     /// abstract layer cannot mutate the membership state directly
     /// (the membership manager is held by the composing consumer).
+    /// `error_message` is the broker-supplied `ErrorMessage` field of the
+    /// heartbeat response (Java's `errorMessageForResponse(response)` →
+    /// `response.data().errorMessage()`), and is `None` when the broker left it
+    /// null. Java threads that nullable string through the switch and passes it
+    /// to `Errors.exception(String)`, which falls back to the code's own
+    /// default message when it is null (`Errors.java:462-469`) —
+    /// [`Error::with_message`] / [`Error::new`] are the two halves of that.
+    ///
+    /// `group_id` is Java's `membershipManager().groupId()`, needed by the
+    /// `GROUP_AUTHORIZATION_FAILED` arm. The Rust split keeps the membership
+    /// manager out of this layer, so it is passed in.
     pub(crate) fn classify_response_error(
         &mut self,
         error: Errors,
-        error_message: &str,
+        error_message: Option<&str>,
+        group_id: &str,
         current_time_ms: i64,
     ) -> HeartbeatErrorAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
         match error {
             Errors::NotCoordinator => {
                 self.coordinator_request_manager
-                    .mark_coordinator_unknown(error_message, current_time_ms);
+                    .mark_coordinator_unknown(error_message.unwrap_or_default(), current_time_ms);
                 // Skip backoff so the next HB targets the new coordinator
                 self.heartbeat_request_state.reset();
                 HeartbeatErrorAction::Handled
             },
             Errors::CoordinatorNotAvailable => {
                 self.coordinator_request_manager
-                    .mark_coordinator_unknown(error_message, current_time_ms);
+                    .mark_coordinator_unknown(error_message.unwrap_or_default(), current_time_ms);
                 self.heartbeat_request_state.reset();
                 HeartbeatErrorAction::Handled
             },
@@ -276,38 +331,89 @@ impl AbstractHeartbeatRequestManager {
             // Note: `Errors::GroupIdNotFound` is intentionally NOT
             // handled at the abstract layer — it falls through to
             // `DelegateToSpecific` so the consumer-specific layer
-            // (`ConsumerHeartbeatRequestManager::handle_specific_exception_in_response`)
+            // (`ConsumerHeartbeatRequestManager::handle_specific_error_in_response`)
             // can branch on the current `memberEpoch`. See that
             // method's `GROUP_ID_NOT_FOUND` arm for the rationale and
             // Issue 9 in
             // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
-            Errors::GroupAuthorizationFailed => HeartbeatErrorAction::Fatal(KafkaError::with_message(
-                Errors::GroupAuthorizationFailed,
-                error_message.to_string(),
-            )),
+            Errors::GroupAuthorizationFailed => {
+                // Java does NOT pass the broker's `errorMessage` here: it
+                // builds `GroupAuthorizationException.forGroupId(groupId)` and
+                // hands *that* message to `error.exception(...)`
+                // (`AbstractHeartbeatRequestManager.java:388-393`), so the
+                // application sees "Not authorized to access group: <groupId>".
+                // The resulting class carries no group id of its own, because
+                // Java rebuilds it through `Errors.GROUP_AUTHORIZATION_FAILED
+                // .exception(message)` — `Error::with_message` matches that.
+                let auth_error = GroupAuthorizationError::for_group_id(group_id);
+                log::error!(
+                    "{} failed due to group authorization failure: {}",
+                    HEARTBEAT_REQUEST_NAME,
+                    auth_error.message()
+                );
+                HeartbeatErrorAction::Fatal(Error::with_message(
+                    Errors::GroupAuthorizationFailed,
+                    auth_error.message().to_string(),
+                ))
+            },
             Errors::TopicAuthorizationFailed => {
                 // Surface the auth error via the background-event
                 // channel so it's returned on the next poll. The member
                 // stays in its current state to allow recovery if ACLs
                 // are added.
-                let _ = self.background_event_handler.add(
-                    BackgroundEvent::Error { error: KafkaError::with_message(error, error_message.to_string()) },
-                    current_time_ms,
+                //
+                // Java calls `error.exception()` with NO argument here
+                // (`AbstractHeartbeatRequestManager.java:401`) — the code's
+                // default "Topic authorization failed." — even though
+                // `errorMessage` is in scope and is used in the log line
+                // immediately above. That asymmetry with the arms below is
+                // deliberate in Java, so it is reproduced rather than tidied.
+                log::error!(
+                    "{} failed due to {:?}: {}",
+                    HEARTBEAT_REQUEST_NAME,
+                    error,
+                    error_message.unwrap_or_default()
                 );
+                let _ = self
+                    .background_event_handler
+                    .add(BackgroundEvent::Error { error: Error::new(error) }, current_time_ms);
                 HeartbeatErrorAction::Handled
             },
             Errors::InvalidRequest | Errors::GroupMaxSizeReached | Errors::UnsupportedAssignor => {
-                HeartbeatErrorAction::Fatal(KafkaError::with_message(error, error_message.to_string()))
+                log::error!(
+                    "{} failed due to {:?}: {}",
+                    HEARTBEAT_REQUEST_NAME,
+                    error,
+                    error_message.unwrap_or_default()
+                );
+                HeartbeatErrorAction::Fatal(error_or_default_message(error, error_message))
             },
             Errors::FencedMemberEpoch | Errors::UnknownMemberId => {
                 // Skip backoff so the next rejoin heartbeat is sent ASAP.
                 self.heartbeat_request_state.reset();
                 HeartbeatErrorAction::Fenced
             },
-            Errors::InvalidRegularExpression => HeartbeatErrorAction::Fatal(KafkaError::with_message(
-                Errors::InvalidRegularExpression,
-                format!("Invalid RE2J SubscriptionPattern provided in the call to subscribe. {error_message}"),
-            )),
+            Errors::InvalidRegularExpression => {
+                log::error!(
+                    "{} failed due to {:?}: {}",
+                    HEARTBEAT_REQUEST_NAME,
+                    error,
+                    error_message.unwrap_or_default()
+                );
+                // Java concatenates the broker text onto its own prefix
+                // (`AbstractHeartbeatRequestManager.java:428-432`), so the
+                // message is never null here and `exception(String)` never
+                // falls back. A null broker message concatenates as "null" in
+                // Java; Rust renders the empty string, which is the same
+                // information without the misleading literal.
+                HeartbeatErrorAction::Fatal(Error::with_message(
+                    Errors::InvalidRegularExpression,
+                    format!(
+                        "Invalid RE2J SubscriptionPattern provided in the call to subscribe. {}",
+                        error_message.unwrap_or_default()
+                    ),
+                ))
+            },
             _ => HeartbeatErrorAction::DelegateToSpecific,
         }
     }
@@ -329,13 +435,13 @@ impl AbstractHeartbeatRequestManager {
     /// `membership_manager().on_heartbeat_failure(retriable)` to mirror
     /// Java's `membershipManager().onHeartbeatFailure(...)` at the tail
     /// of `onFailure`.
-    pub(crate) fn on_failure(&mut self, error: &KafkaError, current_time_ms: i64) -> HeartbeatFailureAction {
+    pub(crate) fn on_failure(&mut self, error: &Error, current_time_ms: i64) -> HeartbeatFailureAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             self.coordinator_request_manager
                 .handle_coordinator_disconnect(error, current_time_ms);
             log::debug!(
-                "ConsumerGroupHeartbeatRequest failed because of the retriable exception. \
+                "ConsumerGroupHeartbeatRequest failed because of the retriable error. \
                  Will retry in {} ms: {}",
                 self.heartbeat_request_state.remaining_backoff_ms(current_time_ms),
                 error
@@ -359,7 +465,7 @@ pub(crate) enum HeartbeatErrorAction {
     Fenced,
     /// Caller must mark the member fatal and propagate the supplied
     /// error to the background-event channel.
-    Fatal(KafkaError),
+    Fatal(Error),
     /// Error was not in the abstract layer's dispatch table — caller's
     /// subclass-specific handler must run.
     DelegateToSpecific,
@@ -396,6 +502,11 @@ pub(crate) fn make_heartbeat_poll_result(
     current_time_ms: i64,
 ) -> PollResult {
     state.heartbeat_request_state.on_send_attempt(current_time_ms);
+    // Java: `metricsManager.recordHeartbeatSentMs(currentTimeMs)`
+    // (`AbstractHeartbeatRequestManager.java:285`).
+    if let Some(metrics_manager) = state.metrics_manager.as_ref() {
+        metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+    }
     state.heartbeat_request_state.reset_timer();
     PollResult::new(state.heartbeat_request_state.heartbeat_interval_ms(), vec![request])
 }
@@ -453,7 +564,7 @@ mod tests {
     #[test]
     fn not_coordinator_resets_heartbeat_state() {
         let mut mgr = make_state(0);
-        let action = mgr.classify_response_error(Errors::NotCoordinator, "x", 100);
+        let action = mgr.classify_response_error(Errors::NotCoordinator, Some("x"), "test-group", 100);
         assert!(matches!(action, HeartbeatErrorAction::Handled));
         // After reset, no in-flight request and zero backoff.
         assert!(!mgr.heartbeat_request_state.request_in_flight());
@@ -464,7 +575,7 @@ mod tests {
     #[test]
     fn group_authorization_failed_is_fatal() {
         let mut mgr = make_state(0);
-        let action = mgr.classify_response_error(Errors::GroupAuthorizationFailed, "msg", 0);
+        let action = mgr.classify_response_error(Errors::GroupAuthorizationFailed, Some("msg"), "test-group", 0);
         match action {
             HeartbeatErrorAction::Fatal(err) => {
                 assert_eq!(err.error(), Errors::GroupAuthorizationFailed);
@@ -478,14 +589,14 @@ mod tests {
     #[test]
     fn fenced_member_epoch_is_fenced() {
         let mut mgr = make_state(0);
-        let action = mgr.classify_response_error(Errors::FencedMemberEpoch, "fenced", 0);
+        let action = mgr.classify_response_error(Errors::FencedMemberEpoch, Some("fenced"), "test-group", 0);
         assert!(matches!(action, HeartbeatErrorAction::Fenced));
     }
 
     #[test]
     fn unknown_member_id_is_fenced() {
         let mut mgr = make_state(0);
-        let action = mgr.classify_response_error(Errors::UnknownMemberId, "unknown", 0);
+        let action = mgr.classify_response_error(Errors::UnknownMemberId, Some("unknown"), "test-group", 0);
         assert!(matches!(action, HeartbeatErrorAction::Fenced));
     }
 
@@ -494,7 +605,7 @@ mod tests {
     #[test]
     fn unknown_error_defers_to_specific() {
         let mut mgr = make_state(0);
-        let action = mgr.classify_response_error(Errors::UnsupportedVersion, "msg", 0);
+        let action = mgr.classify_response_error(Errors::UnsupportedVersion, Some("msg"), "test-group", 0);
         assert!(matches!(action, HeartbeatErrorAction::DelegateToSpecific));
     }
 
@@ -510,9 +621,147 @@ mod tests {
     #[test]
     fn on_failure_retriable() {
         let mut mgr = make_state(0);
-        let err = KafkaError::new(Errors::NetworkException);
-        assert!(err.is_retriable());
+        let err = Error::new(Errors::NetworkError);
+        assert!(err.is_retriable_error());
         let action = mgr.on_failure(&err, 0);
         assert_eq!(action, HeartbeatFailureAction::Retriable);
+    }
+
+    /// Like [`make_state`] but keeps the background-event receiver so a test
+    /// can inspect the `ErrorEvent` an arm emits.
+    fn make_state_capturing_events(
+        now: i64,
+    ) -> (
+        AbstractHeartbeatRequestManager,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(tx));
+        (AbstractHeartbeatRequestManager::new(now, &config, coord, beh), rx)
+    }
+
+    /// `GROUP_AUTHORIZATION_FAILED` ignores the broker's `ErrorMessage` and
+    /// uses `GroupAuthorizationException.forGroupId(groupId)`'s text
+    /// (`AbstractHeartbeatRequestManager.java:388-393`), so the application
+    /// learns WHICH group it lacks access to.
+    #[test]
+    fn group_authorization_failed_uses_for_group_id_message() {
+        let mut mgr = make_state(0);
+        let action = mgr.classify_response_error(
+            Errors::GroupAuthorizationFailed,
+            Some("broker text that Java does not use here"),
+            "my-group",
+            0,
+        );
+        match action {
+            HeartbeatErrorAction::Fatal(err) => {
+                assert_eq!(err.error(), Errors::GroupAuthorizationFailed);
+                assert_eq!("Not authorized to access group: my-group", err.message());
+            },
+            other => panic!("expected fatal, got {other:?}"),
+        }
+    }
+
+    /// `TOPIC_AUTHORIZATION_FAILED` calls `error.exception()` with NO argument
+    /// (`AbstractHeartbeatRequestManager.java:401`), i.e. the code's default
+    /// message — even though `errorMessage` is in scope. The asymmetry with the
+    /// `INVALID_REQUEST` family below is deliberate in Java.
+    #[test]
+    fn topic_authorization_failed_uses_the_default_message() {
+        let (mut mgr, mut rx) = make_state_capturing_events(0);
+        let action = mgr.classify_response_error(
+            Errors::TopicAuthorizationFailed,
+            Some("broker text that Java does not use here"),
+            "my-group",
+            0,
+        );
+        assert!(matches!(action, HeartbeatErrorAction::Handled));
+        let envelope = rx.try_recv().expect("an ErrorEvent is enqueued");
+        match envelope.event {
+            BackgroundEvent::Error { error } => {
+                assert_eq!(error.error(), Errors::TopicAuthorizationFailed);
+                assert_eq!("Topic authorization failed.", error.message());
+            },
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    /// `INVALID_REQUEST` / `GROUP_MAX_SIZE_REACHED` / `UNSUPPORTED_ASSIGNOR`
+    /// DO carry the broker's `ErrorMessage`
+    /// (`AbstractHeartbeatRequestManager.java:404-408`,
+    /// `error.exception(errorMessage)`). For `UNSUPPORTED_ASSIGNOR` it is the
+    /// only way to learn which assignor the broker rejected.
+    #[test]
+    fn invalid_request_family_carries_the_broker_error_message() {
+        for error in [
+            Errors::InvalidRequest,
+            Errors::GroupMaxSizeReached,
+            Errors::UnsupportedAssignor,
+        ] {
+            let mut mgr = make_state(0);
+            let action = mgr.classify_response_error(error, Some("server-side detail"), "my-group", 0);
+            match action {
+                HeartbeatErrorAction::Fatal(err) => {
+                    assert_eq!(err.error(), error);
+                    assert_eq!("server-side detail", err.message(), "for {error:?}");
+                },
+                other => panic!("expected fatal for {error:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// A NULL broker `ErrorMessage` falls back to the code's own default
+    /// message, mirroring `Errors.exception(String)`
+    /// (`Errors.java:462-469`) — not to the literal text `"None"`.
+    #[test]
+    fn invalid_request_family_falls_back_to_the_default_message() {
+        let mut mgr = make_state(0);
+        let action = mgr.classify_response_error(Errors::UnsupportedAssignor, None, "my-group", 0);
+        match action {
+            HeartbeatErrorAction::Fatal(err) => {
+                assert_eq!(err.error(), Errors::UnsupportedAssignor);
+                assert_eq!(Errors::UnsupportedAssignor.message(), err.message());
+            },
+            other => panic!("expected fatal, got {other:?}"),
+        }
+    }
+
+    /// `INVALID_REGULAR_EXPRESSION` concatenates the broker's text onto Java's
+    /// own prefix (`AbstractHeartbeatRequestManager.java:428-432`). The broker
+    /// text is the only actionable part — it says why the regex did not
+    /// compile.
+    #[test]
+    fn invalid_regular_expression_appends_the_broker_error_message() {
+        let mut mgr = make_state(0);
+        let action = mgr.classify_response_error(
+            Errors::InvalidRegularExpression,
+            Some("regex 'foo[' failed to compile: missing ]"),
+            "my-group",
+            0,
+        );
+        match action {
+            HeartbeatErrorAction::Fatal(err) => {
+                assert_eq!(
+                    "Invalid RE2J SubscriptionPattern provided in the call to subscribe. \
+                     regex 'foo[' failed to compile: missing ]",
+                    err.message()
+                );
+            },
+            other => panic!("expected fatal, got {other:?}"),
+        }
+    }
+
+    /// `NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE` pass the broker's text
+    /// to `markCoordinatorUnknown(errorMessage, ...)`
+    /// (`AbstractHeartbeatRequestManager.java:365`, `:375`), which logs it as
+    /// the rediscovery cause. A null message must not become the literal
+    /// `"None"`.
+    #[test]
+    fn not_coordinator_accepts_a_null_error_message() {
+        let mut mgr = make_state(0);
+        let action = mgr.classify_response_error(Errors::NotCoordinator, None, "my-group", 100);
+        assert!(matches!(action, HeartbeatErrorAction::Handled));
     }
 }

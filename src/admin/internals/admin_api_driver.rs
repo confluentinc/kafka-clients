@@ -31,7 +31,7 @@ use std::hash::Hash;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::kafka_debug;
 
 use super::admin_api_future::AdminApiFuture;
@@ -211,18 +211,18 @@ where
     /// Completes the given keys exceptionally and removes them from both stages.
     ///
     /// Mirrors `completeExceptionally`.
-    fn complete_exceptionally(&mut self, errors: HashMap<K, KafkaError>) {
+    fn complete_with_error(&mut self, errors: HashMap<K, Error>) {
         if !errors.is_empty() {
             let keys: Vec<K> = errors.keys().cloned().collect();
-            self.future.complete_exceptionally(errors);
+            self.future.complete_with_error(errors);
             self.clear(keys);
         }
     }
 
-    fn complete_lookup_exceptionally(&mut self, errors: HashMap<K, KafkaError>) {
+    fn complete_lookup_with_error(&mut self, errors: HashMap<K, Error>) {
         if !errors.is_empty() {
             let keys: Vec<K> = errors.keys().cloned().collect();
-            self.future.complete_lookup_exceptionally(errors);
+            self.future.complete_lookup_with_error(errors);
             self.clear(keys);
         }
     }
@@ -231,6 +231,49 @@ where
         for key in keys {
             self.unmap(&key);
         }
+    }
+
+    /// Sends the keys of a fulfillment request back to the Lookup stage. This is
+    /// invoked when a fulfillment request cannot be routed because its target
+    /// broker is no longer present in the cluster metadata, for example when a
+    /// stale entry in the partition leader cache pointed at a broker that has
+    /// since left the cluster. Re-running the lookup gives us a chance to
+    /// discover the current leader. Without this, such a request would remain
+    /// unassignable until the request deadline expires.
+    ///
+    /// This is a no-op for lookup strategies that target a fixed broker (i.e.
+    /// the lookup scope carries a destination broker id, as with
+    /// `StaticBrokerStrategy`), since [`unmap`](Self::unmap) would simply remap
+    /// the keys straight back to the same fulfillment broker without making any
+    /// progress. In that case this returns `false` and the request is left
+    /// untouched, so the caller can leave it pending rather than retrying in a
+    /// loop and exhausting the retry budget.
+    ///
+    /// Returns `true` if the keys were moved back to the Lookup stage, `false`
+    /// if no lookup is possible.
+    ///
+    /// Mirrors `maybeRetryLookup`. Java takes the whole `RequestSpec`; the Rust
+    /// caller has already destructured it, so the scope and keys are passed
+    /// directly.
+    pub(crate) fn maybe_retry_lookup(
+        &mut self,
+        current_time_ms: i64,
+        scope: &ApiRequestScope,
+        keys: &HashSet<K>,
+    ) -> bool {
+        let can_lookup = keys.iter().any(|key| {
+            self.handler
+                .lookup_strategy()
+                .lookup_scope(key)
+                .destination_broker_id()
+                .is_none()
+        });
+        if !can_lookup {
+            return false;
+        }
+        self.clear_inflight_request(current_time_ms, scope);
+        self.retry_lookup(keys.iter().cloned());
+        true
     }
 
     /// Completes the given keys and removes them from both stages.
@@ -273,7 +316,7 @@ where
                 continue;
             }
             let request = self.handler.lookup_strategy().build_request(&keys);
-            let name = format!("{}(api={})", self.handler.api_name(), request.api_key().name());
+            let name = format!("{}(api={})", self.handler.api_name(), request.api_key());
             let state = self.request_states.entry(scope.clone()).or_insert_with(RequestState::new);
             let spec = RequestSpec {
                 name,
@@ -309,7 +352,7 @@ where
             // Only the first request is issued per broker per cycle.
             let new_request = new_requests.remove(0);
             let request = new_request.request;
-            let name = format!("{}(api={})", self.handler.api_name(), request.api_key().name());
+            let name = format!("{}(api={})", self.handler.api_name(), request.api_key());
             let state = self.request_states.entry(scope.clone()).or_insert_with(RequestState::new);
             let spec = RequestSpec {
                 name,
@@ -341,7 +384,7 @@ where
         if matches!(scope, ApiRequestScope::Fulfillment(_)) {
             let result = self.handler.handle_response(node, keys, response);
             self.complete(result.completed_keys);
-            self.complete_exceptionally(result.failed_keys);
+            self.complete_with_error(result.failed_keys);
             self.retry_lookup(result.unmapped_keys);
         } else {
             let result = self.handler.lookup_strategy().handle_response(keys, response);
@@ -349,21 +392,25 @@ where
                 self.lookup_map.remove(key);
             }
             self.complete_lookup(result.mapped_keys);
-            self.complete_lookup_exceptionally(result.failed_keys);
+            self.complete_lookup_with_error(result.failed_keys);
         }
     }
 
     /// Callback invoked when a `Call` fails.
     ///
-    /// Mirrors `onFailure`. `is_disconnect` reports whether the failure was a
-    /// node disconnect (Java's `DisconnectException`), signalled by the admin
-    /// runnable as [`Errors::NetworkException`].
-    pub(crate) fn on_failure(&mut self, now: i64, scope: &ApiRequestScope, keys: &HashSet<K>, error: &KafkaError) {
+    /// Mirrors `onFailure`.
+    ///
+    /// The first branch is Java's `t instanceof DisconnectException`
+    /// (`AdminApiDriver.java:265`), which the admin runnable raises as
+    /// [`Error::Disconnect`]. It used to key off [`Errors::NetworkError`] instead —
+    /// the wrong class the runnable happened to build, which also matched a genuine
+    /// broker-reported `NETWORK_EXCEPTION` (code 13).
+    pub(crate) fn on_failure(&mut self, now: i64, scope: &ApiRequestScope, keys: &HashSet<K>, error: &Error) {
         self.clear_inflight_request(now, scope);
 
         let is_fulfillment = matches!(scope, ApiRequestScope::Fulfillment(_));
 
-        if error.error() == Errors::NetworkException {
+        if matches!(error, Error::Disconnect(_)) {
             kafka_debug!(
                 self.log_context,
                 "Node disconnected before response could be received for request. Will attempt retry"
@@ -390,20 +437,20 @@ where
         } else if error.error() == Errors::UnsupportedVersion {
             if is_fulfillment {
                 let broker_id = scope.destination_broker_id().unwrap_or(-1);
-                let unrecoverable = self.handler.handle_unsupported_version_exception(broker_id, error, keys);
-                self.complete_exceptionally(unrecoverable);
+                let unrecoverable = self.handler.handle_unsupported_version_error(broker_id, error, keys);
+                self.complete_with_error(unrecoverable);
             } else {
-                let unrecoverable = self.handler.lookup_strategy().handle_unsupported_version_exception(error, keys);
+                let unrecoverable = self.handler.lookup_strategy().handle_unsupported_version_error(error, keys);
                 let to_unmap: Vec<K> = keys.iter().filter(|k| !unrecoverable.contains_key(*k)).cloned().collect();
-                self.complete_lookup_exceptionally(unrecoverable);
+                self.complete_lookup_with_error(unrecoverable);
                 self.retry_lookup(to_unmap);
             }
         } else {
-            let errors: HashMap<K, KafkaError> = keys.iter().map(|k| (k.clone(), error.clone())).collect();
+            let errors: HashMap<K, Error> = keys.iter().map(|k| (k.clone(), error.clone())).collect();
             if is_fulfillment {
-                self.complete_exceptionally(errors);
+                self.complete_with_error(errors);
             } else {
-                self.complete_lookup_exceptionally(errors);
+                self.complete_lookup_with_error(errors);
             }
         }
     }
@@ -452,13 +499,13 @@ where
 /// subclasses thrown by the request builders at build time).
 ///
 /// Rust flattens a build-time `UnsupportedVersion` failure into a
-/// `KafkaError::Generic(UnsupportedVersion)` carrying the builder's message
+/// `Error::KafkaError(UnsupportedVersion)` carrying the builder's message
 /// (see `NetworkClient`'s version-mismatch path), losing Java's exception type.
 /// The two request builders emit distinctive messages, so we recover the
 /// distinction by matching them. These substrings mirror
 /// `FindCoordinatorRequest.Builder.build` and
 /// `OffsetFetchRequest.Builder.throwIfBatchingIsUnsupported`.
-fn is_no_batched_support(error: &KafkaError) -> bool {
+fn is_no_batched_support(error: &Error) -> bool {
     if error.error() != Errors::UnsupportedVersion {
         return false;
     }
@@ -514,7 +561,7 @@ pub(crate) mod test_support {
     use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
     use crate::common::utils::{ExponentialBackoff, LogContext};
-    use crate::common::{KafkaError, Node};
+    use crate::common::{Error, Node};
     use crate::metadata_response_data::MetadataResponseData;
 
     use super::{AdminApiDriver, RequestSpec};
@@ -545,14 +592,14 @@ pub(crate) mod test_support {
     #[derive(Clone, Default)]
     pub(crate) struct ExpectedLookup {
         pub(crate) mapped_keys: HashMap<String, i32>,
-        pub(crate) failed_keys: HashMap<String, KafkaError>,
+        pub(crate) failed_keys: HashMap<String, Error>,
     }
 
     /// Cloneable expectation for a fulfillment response (`ApiResult` is not `Clone`).
     #[derive(Clone, Default)]
     pub(crate) struct ExpectedApiResult {
         pub(crate) completed_keys: HashMap<String, i64>,
-        pub(crate) failed_keys: HashMap<String, KafkaError>,
+        pub(crate) failed_keys: HashMap<String, Error>,
         pub(crate) unmapped_keys: Vec<String>,
     }
 
@@ -565,7 +612,7 @@ pub(crate) mod test_support {
     }
 
     /// Mirrors Java `failedLookup(...)`.
-    pub(crate) fn failed_lookup(key: &str, error: KafkaError) -> ExpectedLookup {
+    pub(crate) fn failed_lookup(key: &str, error: Error) -> ExpectedLookup {
         ExpectedLookup {
             mapped_keys: HashMap::new(),
             failed_keys: HashMap::from([(key.to_string(), error)]),
@@ -587,7 +634,7 @@ pub(crate) mod test_support {
     }
 
     /// Mirrors Java `failed(...)`.
-    pub(crate) fn failed(key: &str, error: KafkaError) -> ExpectedApiResult {
+    pub(crate) fn failed(key: &str, error: Error) -> ExpectedApiResult {
         ExpectedApiResult {
             completed_keys: HashMap::new(),
             failed_keys: HashMap::from([(key.to_string(), error)]),
@@ -614,7 +661,7 @@ pub(crate) mod test_support {
 
     type LookupTable = Arc<Mutex<HashMap<BTreeSet<String>, ExpectedLookup>>>;
     type RequestTable = Arc<Mutex<HashMap<BTreeSet<String>, ExpectedApiResult>>>;
-    type StateTable = Arc<Mutex<HashMap<String, Option<Result<i64, KafkaError>>>>>;
+    type StateTable = Arc<Mutex<HashMap<String, Option<Result<i64, Error>>>>>;
 
     /// Fake lookup strategy: returns each key's fixed scope and replays the
     /// programmed lookup results. Mirrors Java `MockLookupStrategy`.
@@ -726,7 +773,7 @@ pub(crate) mod test_support {
             }
         }
 
-        fn complete_exceptionally(&self, errors: HashMap<String, KafkaError>) {
+        fn complete_with_error(&self, errors: HashMap<String, Error>) {
             let mut states = self.states.lock().unwrap();
             for (key, error) in errors {
                 states.insert(key, Some(Err(error)));
@@ -810,7 +857,7 @@ pub(crate) mod test_support {
             self.requests.lock().unwrap().insert(key_set(keys), result);
         }
 
-        fn key_state(&self, key: &str) -> Option<Result<i64, KafkaError>> {
+        fn key_state(&self, key: &str) -> Option<Result<i64, Error>> {
             self.states.lock().unwrap().get(key).cloned().flatten()
         }
 
@@ -834,7 +881,7 @@ pub(crate) mod test_support {
             }
         }
 
-        fn assert_failed_key(&self, key: &str, expected: &KafkaError) {
+        fn assert_failed_key(&self, key: &str, expected: &Error) {
             match self.key_state(key) {
                 Some(Err(error)) => assert_eq!(error.error(), expected.error(), "unexpected failure error for {key}"),
                 other => panic!("expected {key} failed with {:?}, got {other:?}", expected.error()),
@@ -929,13 +976,13 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::*;
-    use crate::common::protocol::Errors;
-    use crate::common::{KafkaError, Node};
+    use crate::common::{Error, Node};
 
-    fn network_exception() -> KafkaError {
-        // Java's `DisconnectException`; the admin runnable signals disconnects as
-        // `NetworkException`, which the driver treats as the retry-lookup trigger.
-        KafkaError::new(Errors::NetworkException)
+    fn disconnect_error() -> Error {
+        // Java's `DisconnectException`, which the driver treats as the retry-lookup
+        // trigger (`AdminApiDriver.java:265`). This is what the admin runnable now
+        // raises on `response.was_disconnected()`.
+        Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected"))
     }
 
     // Mirrors `AdminApiDriverTest.testCoalescedLookup`.
@@ -1027,7 +1074,7 @@ mod tests {
 
         // Disconnect -> the key is unmapped and returns to the lookup stage.
         ctx.driver
-            .on_failure(ctx.now, &specs[0].scope, &specs[0].keys, &network_exception());
+            .on_failure(ctx.now, &specs[0].scope, &specs[0].keys, &disconnect_error());
         ctx.assert_unmapped_key("foo");
 
         // The retry lookup is issued immediately (no backoff for lookups) and the
@@ -1051,6 +1098,27 @@ mod tests {
         // The fulfillment against the new leader completes the key (poll asserts
         // the terminal completion value).
         ctx.poll(&[], &[(&["foo"], completed(&[("foo", 30)]))]);
+    }
+
+    // KAFKA-20673. For a lookup strategy that targets a fixed broker, a
+    // fulfillment request whose broker has left the cluster cannot be
+    // re-resolved by another lookup. `maybe_retry_lookup` must report it made no
+    // progress (return false) and leave the key mapped, so the caller does not
+    // spin retrying it and exhaust the retry budget. Mirrors
+    // `AdminApiDriverTest.testRetryLookupIsNoOpForFixedBrokerStrategy`.
+    #[test]
+    fn retry_lookup_is_no_op_for_fixed_broker_strategy() {
+        let mut ctx = TestContext::static_mapped(&[("foo", 1)]);
+        ctx.expect_request(&["foo"], completed(&[("foo", 1)]));
+
+        let request_specs = ctx.driver.poll();
+        assert_eq!(request_specs.len(), 1);
+        let spec = &request_specs[0];
+        assert_eq!(spec.scope.destination_broker_id(), Some(1));
+
+        assert!(!ctx.driver.maybe_retry_lookup(ctx.now, &spec.scope, &spec.keys));
+        // The key remains mapped to its fixed broker.
+        ctx.assert_mapped_key("foo", 1);
     }
 
     // Mirrors `AdminApiDriverTest.testLookupRetryBookkeeping`: an empty lookup

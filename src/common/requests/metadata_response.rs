@@ -191,7 +191,7 @@ impl MetadataResponse {
             self.brokers().to_vec(),
             partitions,
             self.topics_by_error(Errors::TopicAuthorizationFailed),
-            self.topics_by_error(Errors::InvalidTopicException),
+            self.topics_by_error(Errors::InvalidTopicError),
             internal_topics,
             self.controller().cloned(),
             topic_ids,

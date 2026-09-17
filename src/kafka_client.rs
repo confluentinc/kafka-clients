@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::common::Node;
 use crate::common::requests::RequestBuilder;
+use crate::common::{Error, Node};
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -98,8 +98,29 @@ pub trait KafkaClient {
     ///
     /// * `node` - The node to check
     ///
-    /// Returns an authentication error message if authentication has failed, `None` otherwise.
-    fn authentication_error(&self, node: &Node) -> Option<String>;
+    /// Returns the authentication failure if authentication has failed, `None`
+    /// otherwise.
+    ///
+    /// Translated from `KafkaClient.authenticationException(Node)`
+    /// (`KafkaClient.java:88`), which returns the `AuthenticationException`
+    /// **object**. The whole [`Error`] is returned for the same reason: a caller
+    /// such as `KafkaAdminClient` (`KafkaAdminClient.java:1373-1376`) fails the
+    /// call with whichever subclass the channel raised —
+    /// [`SaslAuthenticationError`](crate::common::errors::SaslAuthenticationError),
+    /// [`SslAuthenticationError`](crate::common::errors::SslAuthenticationError),
+    /// or the base
+    /// [`AuthenticationError`](crate::common::errors::AuthenticationError) — and
+    /// with only the reason text every caller had to rebuild the base class, so a
+    /// TLS certificate rejection was reported as a SASL failure.
+    ///
+    /// Java's return type is the narrower `AuthenticationException`; Rust's flat
+    /// [`Error`] cannot name that intermediate class in a type, so the guarantee
+    /// is instead that whatever is returned answers `true` to
+    /// [`is_authentication_error`](Error::is_authentication_error) (CLAUDE.md
+    /// §10.4). The value originates in
+    /// [`ChannelState::error`](crate::common::network::ChannelState::error), which
+    /// only carries one in the `AuthenticationFailed` state.
+    fn authentication_error(&self, node: &Node) -> Option<Error>;
 
     /// Queue up the given request for sending. Requests can only be sent on ready connections.
     ///
@@ -152,6 +173,17 @@ pub trait KafkaClient {
     /// The number of currently in-flight requests for which we have not yet returned
     /// a response.
     fn in_flight_request_count(&self) -> i32;
+
+    /// Returns a shared, read-only handle to the total in-flight-request count,
+    /// used by the producer's `requests-in-flight` metric gauge (Java's gauge
+    /// captures the `KafkaClient` and calls `inFlightRequestCount()`).
+    ///
+    /// The default returns a fresh always-zero handle; implementations that
+    /// track in-flight requests (e.g. `NetworkClient`) override it to return a
+    /// live shared counter.
+    fn in_flight_count_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicI32> {
+        std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0))
+    }
 
     /// Return `true` if there is at least one in-flight request and `false` otherwise.
     fn has_in_flight_requests(&self) -> bool;

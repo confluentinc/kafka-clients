@@ -1,0 +1,49 @@
+# Component & ownership structure of the client.
+#
+# Source of truth for design/current/component-ownership.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: each of the three clients owns its own
+# background task and its own NetworkClient; nothing is shared between
+# a producer, a consumer and an admin client.
+
+direction: down
+
+app: "Application task(s)" {
+  style.fill: "#eef6ff"
+
+  producer: "KafkaProducer<K, V>\nsrc/producer/kafka_producer.rs"
+  consumer: "AsyncKafkaConsumer<K, V>\nsrc/consumer/async_kafka_consumer.rs"
+  admin: "KafkaAdminClient\nsrc/admin/kafka_admin_client.rs"
+}
+
+bg: "Background tasks (one tokio::spawn per client instance)" {
+  style.fill: "#fff7e6"
+
+  sender: "Sender<C>\nproducer/internals/sender.rs"
+  cnt: "ConsumerNetworkThread\nconsumer/internals/consumer_network_thread.rs"
+  runnable: "AdminClientRunnable<C>\nadmin/internals/admin_client_runnable.rs"
+}
+
+net: "Shared client layer (one instance per client, not shared across clients)" {
+  style.fill: "#f3f0ff"
+
+  client: "KafkaClient (trait)\nNetworkClient<S, H>\nsrc/kafka_client.rs, src/network_client.rs"
+  sel: "Selector (Selectable)\ncommon/network/selector.rs"
+  chan: "KafkaChannel per connection\n+ Box<dyn TransportLayer>"
+
+  client -> sel: "poll(timeout)"
+  sel -> chan: "readiness-driven I/O"
+}
+
+app.producer -> bg.sender: "RecordAccumulator\n+ wakeup Notify"
+app.consumer -> bg.cnt: "application events\n+ wakeup Notify"
+app.admin -> bg.runnable: "new-Call channel\n+ wakeup Notify"
+
+bg.sender -> net.client
+bg.cnt -> net.client
+bg.runnable -> net.client
+
+bg.sender -> app.producer: "KafkaFuture<RecordMetadata>" {style.stroke-dash: 3}
+bg.cnt -> app.consumer: "background events\n+ FetchBuffer" {style.stroke-dash: 3}
+bg.runnable -> app.admin: "KafkaFuture<T> per key" {style.stroke-dash: 3}
