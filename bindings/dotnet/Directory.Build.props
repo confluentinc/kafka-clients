@@ -1,0 +1,43 @@
+<Project>
+
+  <!--
+    Shared MSBuild properties for every project in the Confluent.Kafka
+    .NET binding. Applied to the library and the unit-test project alike.
+    See bindings/dotnet/CLAUDE.md §4 (decisions) and §7.2 (build/style).
+  -->
+
+  <PropertyGroup>
+    <!-- Language + nullability (CLAUDE.md §4: #nullable enable project-wide). -->
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Style + warnings enforced at build (CLAUDE.md §7.2). -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!-- Common package metadata (Authors/Company = Confluent Inc.). -->
+  <PropertyGroup>
+    <Authors>Confluent Inc.</Authors>
+    <Company>Confluent Inc.</Company>
+    <Product>Confluent.Kafka</Product>
+    <Copyright>Copyright 2025 Confluent Inc.</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+  </PropertyGroup>
+
+  <!-- Strong-name signing. Applied to EVERY project (library + tests): a
+       strong-named library can only grant internals to a strong-named friend
+       (InternalsVisibleTo, see the library csproj). One shared key keeps the
+       identity consistent (ckd uses a separate key per project; a single key
+       is simpler for this binding). Decided early on purpose — adding a strong
+       name after the first published package would be a binary-breaking change
+       for consumers. The .snk is committed: a strong name is an identity, not
+       a security secret (publisher trust is NuGet/Authenticode signing). -->
+  <PropertyGroup>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)Confluent.Kafka.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+
+</Project>
