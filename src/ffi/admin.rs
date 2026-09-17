@@ -5818,9 +5818,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
 /// Unlike the synchronous entry point, the callback fires **once per
 /// resource, as that resource's future resolves**, not once for the whole
 /// batch — a fast or already-resolved resource is not held up by a slow or
-/// failing one. It is called exactly `count` times (once per requested
-/// resource, minus entries skipped for a NULL name), but not always on the
-/// same thread. Per key, it normally runs on the handle's dispatcher thread.
+/// failing one. It is called exactly once per **distinct** requested resource
+/// (entries skipped for a NULL name, and duplicate `(type, name)` resources
+/// collapsed to one — Java keys the result on `ConfigResource`), but not always
+/// on the same thread. Per key, it normally runs on the handle's dispatcher thread.
 /// It runs **synchronously on the calling thread, before this function
 /// returns, for every key**, when the RPC cannot be submitted at all (a NULL
 /// `admin` handle). And it runs on a **tokio worker thread** if the
@@ -5851,7 +5852,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     user_data: *mut c_void,
 ) {
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
-    let keys = resources.clone();
+    // Deduplicated to DISTINCT resources (first-occurrence order): Java's
+    // `describeConfigs` result map is keyed by `ConfigResource`
+    // (`Map<ConfigResource, KafkaFuture<Config>>`), so two occurrences of the
+    // same resource collapse to ONE outcome future — the shape
+    // `submit_describe_configs_entries` returns (via `describe_configs().values()`,
+    // itself a `HashMap`). If `keys` kept one raw entry per input row instead,
+    // the second occurrence of a repeated resource would find no unclaimed entry
+    // and `admin_async_per_key_op` would fire its synthetic "not present" error,
+    // which — racing ahead of the real per-resource outcome — would win the
+    // caller's (per-resource) Future and hand back a spurious error. The C incref
+    // count must match: it is the distinct-resource count too
+    // (`count_distinct_config_resources`, shared with the Configs alter family).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        resources
+            .iter()
+            .filter(|r| seen.insert((*r).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
     unsafe {
         admin_async_per_key_op(
@@ -6801,7 +6821,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     user_data: *mut c_void,
 ) {
     let broker_ids = unsafe { read_i32s(brokers, count) };
-    let keys = broker_ids.clone();
+    // Deduplicated to DISTINCT broker ids (first-occurrence order): Java's
+    // `describeLogDirs` result map is keyed by broker id
+    // (`Map<Integer, KafkaFuture<..>>`), so a repeated broker id collapses to
+    // ONE outcome future — the shape `submit_describe_log_dirs_entries` returns
+    // (via `descriptions()`, a `HashMap`). A raw `keys` with duplicates would
+    // make the second occurrence find no unclaimed entry and fire
+    // `admin_async_per_key_op`'s synthetic "not present" error, racing ahead of
+    // and winning the caller's real per-broker outcome. The C incref count must
+    // match: distinct broker ids (`count_distinct_i32s`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        broker_ids.iter().copied().filter(|b| seen.insert(*b)).collect::<Vec<_>>()
+    };
     let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_per_key_op(
@@ -7493,7 +7525,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
     user_data: *mut c_void,
 ) {
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
-    let keys = replicas.clone();
+    // Deduplicated to DISTINCT replicas (first-occurrence order): Java's
+    // `describeReplicaLogDirs` result map is keyed by `TopicPartitionReplica`
+    // (`Map<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>`), so a
+    // repeated replica collapses to ONE outcome future — the shape
+    // `submit_describe_replica_log_dirs_entries` returns (via `values()`, a
+    // `HashMap`). A raw `keys` with duplicates would make the second occurrence
+    // find no unclaimed entry and fire `admin_async_per_key_op`'s synthetic
+    // "not present" error, racing ahead of and winning the caller's real
+    // per-replica outcome. This dedup does NOT affect the *genuinely-omitted*
+    // key case (a replica of an unknown topic, which the mock's own
+    // `continue`-before-creating-a-future guard drops from `entries`): a distinct
+    // key with no matching entry still gets its explicit synthetic error, exactly
+    // as before. The C incref count must match: distinct replicas
+    // (`count_distinct_replicas`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        replicas
+            .iter()
+            .filter(|r| seen.insert((*r).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     unsafe {
         admin_async_per_key_op(
@@ -13558,10 +13611,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // empty-members branch), so `keys` is empty and `group_instance_ids` /
     // `member_count` are ignored, exactly as the synchronous entry point
     // documents.
+    // Deduplicated to DISTINCT group instance ids (first-occurrence order): the
+    // Rust core keys the removal on `HashSet<MemberToRemove>` (Java's
+    // `Set<MemberToRemove>`), so two members naming the same instance id collapse
+    // to ONE outcome future — the shape
+    // `submit_remove_members_from_consumer_group_entries` returns. A raw `keys`
+    // with duplicates would make the second occurrence find no unclaimed entry
+    // and fire `admin_async_per_key_op`'s synthetic "not present" error, racing
+    // ahead of and winning the caller's real per-member outcome. The Python
+    // binding already dedups the ids it passes (`dict.fromkeys`), so this also
+    // keeps the C incref count (the passed member array length) matched to the
+    // firing count for that path.
     let keys = if remove_all {
         Vec::new()
     } else {
+        let mut seen = std::collections::HashSet::new();
         unsafe { read_strings(group_instance_ids, member_count) }
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect::<Vec<_>>()
     };
     let group = unsafe { read_required_string(group_id, "group_id") };
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
@@ -15822,17 +15890,33 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     // (see `AclBindingKey`), so every requested row still gets its own
     // callback via `admin_async_per_key_op`'s fan-out even when that parse
     // fails.
-    let keys = unsafe {
-        read_acl_binding_keys(
-            resource_types,
-            resource_names,
-            pattern_types,
-            principals,
-            hosts,
-            operations,
-            permission_types,
-            count,
-        )
+    //
+    // Deduplicated to DISTINCT bindings (first-occurrence order): the Rust core's
+    // `create_acls` dedups its result map via `Entry::Vacant`
+    // (Java keys `createAcls` on the `AclBinding`), so two equal bindings
+    // collapse to ONE outcome future — the shape `submit_create_acls_entries`
+    // returns. A raw `keys` with duplicates would make the second occurrence find
+    // no unclaimed entry and fire `admin_async_per_key_op`'s synthetic
+    // "not present" error, racing ahead of and winning the caller's real
+    // per-binding outcome. The C incref count must match: distinct bindings
+    // (`count_distinct_acls`).
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        unsafe {
+            read_acl_binding_keys(
+                resource_types,
+                resource_names,
+                pattern_types,
+                principals,
+                hosts,
+                operations,
+                permission_types,
+                count,
+            )
+        }
+        .into_iter()
+        .filter(|k| seen.insert(k.clone()))
+        .collect::<Vec<_>>()
     };
     let acls = unsafe {
         read_acl_bindings(
@@ -16160,7 +16244,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
             count,
         )
     };
-    let keys = filters.clone();
+    // Deduplicated to DISTINCT filters (first-occurrence order): the Rust core's
+    // `delete_acls` dedups its result map via `Entry::Vacant` (Java keys
+    // `deleteAcls` on the `AclBindingFilter`), so two equal filters collapse to
+    // ONE outcome future — the shape `submit_delete_acls_entries` returns. A raw
+    // `keys` with duplicates would make the second occurrence find no unclaimed
+    // entry and fire `admin_async_per_key_op`'s synthetic "not present" error,
+    // racing ahead of and winning the caller's real per-filter outcome. The C
+    // incref count must match: distinct filters (`count_distinct_acls`).
+    // `AclBindingFilter` compares NULL (match-any) distinct from an empty string.
+    let keys = {
+        let mut seen = std::collections::HashSet::new();
+        filters
+            .iter()
+            .filter(|f| seen.insert((*f).clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let options = delete_acls_options(timeout_ms);
     unsafe {
         admin_async_per_key_op(
@@ -27465,6 +27565,441 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("the filter must get exactly one callback");
         assert_eq!(message.as_deref(), Some("Not implemented yet"));
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    // -- Opus re-review: per-key entry points must dedup keys to DISTINCT so a
+    // caller passing a duplicate/collapsing key gets exactly ONE (real)
+    // callback, never a spurious "not present" error racing the real outcome.
+    // Each RPC below collapses duplicate keys in its Rust result map (Java's
+    // Map/Set semantics), so `keys` MUST be deduped to match, or
+    // `admin_async_per_key_op`'s claimed-mask fires the synthetic error for the
+    // second occurrence. See the dedup comment at each `_async` entry point.
+
+    /// `describe_log_dirs_async` with a repeated broker id fires exactly one
+    /// callback (Java keys `describeLogDirs` on broker id), never a spurious
+    /// "not present" error.
+    #[test]
+    fn describe_log_dirs_async_dedups_a_repeated_broker_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        // Broker 0 requested twice.
+        let brokers = [0i32, 0i32];
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, bool)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, bool)>);
+        extern "C" fn on_describe(
+            broker_id: i32,
+            value: *mut kafka_admin_LogDirDescriptionMap_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_LogDirDescriptionMap_destroy(value) };
+            }
+            ctx.0.send((broker_id, had_error)).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_log_dirs_async(
+                admin,
+                brokers.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (broker_id, had_error) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped broker must get exactly one callback, not hang");
+        assert_eq!(broker_id, 0);
+        assert!(
+            !had_error,
+            "the real describe_log_dirs outcome succeeds, not a spurious 'not present' error"
+        );
+        // No spurious SECOND callback for the collapsed duplicate.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated broker id must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describe_replica_log_dirs_async` with a repeated replica fires exactly
+    /// one callback (Java keys on `TopicPartitionReplica`), never a spurious
+    /// "not present" error — while a genuinely-unknown replica still gets its
+    /// explicit error (covered by the sibling test above).
+    #[test]
+    fn describe_replica_log_dirs_async_dedups_a_repeated_replica() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe {
+            let topic = kafka_admin_NewTopic_new(c"drld-dup".as_ptr(), 1, 1);
+            let mut result: *mut kafka_admin_CreateTopicsResult_t = std::ptr::null_mut();
+            let topics = [topic as *const kafka_admin_NewTopic_t];
+            let err = kafka_admin_AdminClient_create_topics(admin, topics.as_ptr(), 1, -1, false, false, &mut result);
+            assert!(err.is_null());
+            kafka_admin_CreateTopicsResult_destroy(result);
+            kafka_admin_NewTopic_destroy(topic);
+        }
+
+        // Same (topic, partition, broker) replica requested twice.
+        let (_topics_owned, topic_ptrs) = c_array(&["drld-dup", "drld-dup"]);
+        let partitions = [0i32, 0i32];
+        let broker_ids = [0i32, 0i32];
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        struct Ctx(std::sync::mpsc::Sender<bool>);
+        extern "C" fn on_describe(
+            _topic: *const c_char,
+            _partition: i32,
+            _broker_id: i32,
+            value: *mut kafka_admin_ReplicaLogDirInfo_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_ReplicaLogDirInfo_destroy(value) };
+            }
+            ctx.0.send(had_error).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_replica_log_dirs_async(
+                admin,
+                topic_ptrs.as_ptr(),
+                partitions.as_ptr(),
+                broker_ids.as_ptr(),
+                2,
+                -1,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let had_error = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped replica must get exactly one callback, not hang");
+        assert!(
+            !had_error,
+            "the known replica resolves successfully, not with a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated replica must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `create_acls_async` with a repeated (equal) binding fires exactly one
+    /// callback carrying the REAL per-binding outcome (`MockAdminClient` throws
+    /// "Not implemented yet"), never a spurious "not present" error racing it.
+    #[test]
+    fn create_acls_async_dedups_a_repeated_binding() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let pattern_id = i32::from(PatternType::Literal.code());
+        let op_id = i32::from(AclOperation::All.code());
+        let perm_id = i32::from(AclPermissionType::Allow.code());
+        // Two IDENTICAL bindings.
+        let resource_types = [topic_id, topic_id];
+        let pattern_types = [pattern_id, pattern_id];
+        let operations = [op_id, op_id];
+        let permission_types = [perm_id, perm_id];
+        let (_names_owned, name_ptrs) = c_array(&["ca-dup", "ca-dup"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice", "User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*", "*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBinding_destroy(key) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped binding must get exactly one callback, not hang");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the real per-binding outcome must win, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated binding must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `delete_acls_async` with a repeated (equal) filter fires exactly one
+    /// callback carrying the REAL per-filter outcome, never a spurious
+    /// "not present" error racing it.
+    #[test]
+    fn delete_acls_async_dedups_a_repeated_filter() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let topic_id = i32::from(ResourceType::Topic.code());
+        let any_pattern = i32::from(PatternType::Any.code());
+        let any_op = i32::from(AclOperation::Any.code());
+        let any_perm = i32::from(AclPermissionType::Any.code());
+        // Two IDENTICAL filters (same NULL principal/host so they compare equal).
+        let resource_types = [topic_id, topic_id];
+        let pattern_types = [any_pattern, any_pattern];
+        let operations = [any_op, any_op];
+        let permission_types = [any_perm, any_perm];
+        let (_names_owned, name_ptrs) = c_array(&["da-dup", "da-dup"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        struct Ctx(std::sync::mpsc::Sender<Option<String>>);
+        extern "C" fn on_delete(
+            key: *mut kafka_common_AclBindingFilter_t,
+            value: *mut kafka_admin_DeleteAclsFilterResults_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_AclBindingFilter_destroy(key) };
+            unsafe { kafka_admin_DeleteAclsFilterResults_destroy(value) };
+            ctx.0.send(message).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_delete_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                2,
+                -1,
+                on_delete,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let message = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped filter must get exactly one callback, not hang");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the real per-filter outcome must win, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated filter must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `describe_configs_async` with a repeated resource fires exactly one
+    /// callback carrying the REAL per-resource outcome (Java keys
+    /// `describeConfigs` on `ConfigResource`), never a spurious "not present"
+    /// error racing it. Uses a BROKER resource, which `MockAdminClient`
+    /// resolves successfully.
+    #[test]
+    fn describe_configs_async_dedups_a_repeated_resource() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        let broker_id = i32::from(ConfigResourceType::Broker.id());
+        // Broker "0" requested twice.
+        let resource_types = [broker_id, broker_id];
+        let (_names_owned, name_ptrs) = c_array(&["0", "0"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        struct Ctx(std::sync::mpsc::Sender<bool>);
+        extern "C" fn on_describe(
+            _resource_type: i32,
+            _resource_name: *const c_char,
+            value: *mut kafka_admin_Config_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let had_error = !error.is_null();
+            if had_error {
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+            } else {
+                unsafe { kafka_admin_Config_destroy(value) };
+            }
+            ctx.0.send(had_error).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_describe_configs_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                2,
+                -1,
+                false,
+                false,
+                on_describe,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let had_error = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped resource must get exactly one callback, not hang");
+        assert!(
+            !had_error,
+            "the real describe_configs outcome succeeds, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated resource must not produce a second (spurious) callback"
+        );
+
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
+    }
+
+    /// `remove_members_from_consumer_group_async` with two members naming the
+    /// SAME group instance id fires exactly one callback carrying the REAL
+    /// per-member outcome (Java keys the removal on `Set<MemberToRemove>`),
+    /// never a spurious "not present" error racing it.
+    #[test]
+    fn remove_members_from_consumer_group_async_dedups_a_repeated_instance_id() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+
+        // Same instance id twice.
+        let (_ids_owned, id_ptrs) = c_array(&["dup-instance", "dup-instance"]);
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(String, Option<String>)>);
+        extern "C" fn on_remove(
+            group_instance_id: *const c_char,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let id = unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().into_owned();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            ctx.0.send((id, message)).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+
+        unsafe {
+            kafka_admin_AdminClient_remove_members_from_consumer_group_async(
+                admin,
+                c"rmfcg-dup-group".as_ptr(),
+                false,
+                id_ptrs.as_ptr(),
+                2,
+                std::ptr::null(),
+                -1,
+                on_remove,
+                ctx_ptr as *mut c_void,
+            );
+        }
+
+        let (id, message) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the deduped member must get exactly one callback, not hang");
+        assert_eq!(id, "dup-instance");
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the real per-member outcome must win, not a spurious 'not present' error"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a repeated instance id must not produce a second (spurious) callback"
+        );
 
         unsafe {
             drop(Box::from_raw(ctx_ptr));

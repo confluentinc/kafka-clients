@@ -375,8 +375,26 @@ class ConfigResource:
 
     __slots__ = ("resource_type", "name")
 
+    # The wire ids the native layer round-trips to themselves. Any other id is
+    # normalized to ``UNKNOWN`` (0) below.
+    _KNOWN_TYPE_IDS = frozenset((
+        ConfigResourceType.UNKNOWN, ConfigResourceType.TOPIC, ConfigResourceType.BROKER,
+        ConfigResourceType.BROKER_LOGGER, ConfigResourceType.CLIENT_METRICS,
+        ConfigResourceType.GROUP))
+
     def __init__(self, resource_type, name):
-        self.resource_type = int(resource_type)
+        # Normalize an out-of-enum type id to UNKNOWN(0), exactly as the native
+        # layer does (`ConfigResourceType::for_id` -> Unknown -> id() == 0,
+        # Java's `ConfigResource.Type.forId`). Without this the futures dict is
+        # keyed by the raw id (e.g. 64) while the per-key callback reconstructs
+        # its key from the NORMALIZED id the native layer sent back (0), so the
+        # lookup KeyErrors and that resource's Future never resolves (and the
+        # native handle + callback leak). Normalizing on BOTH the dict-build and
+        # callback-lookup sides (this one constructor serves both) keeps the key
+        # canonical so the Future always resolves. This mirrors Java's forgiving
+        # `forId` (unknown -> UNKNOWN) rather than rejecting the id.
+        rt = int(resource_type)
+        self.resource_type = rt if rt in ConfigResource._KNOWN_TYPE_IDS else ConfigResourceType.UNKNOWN
         self.name = str(name)
 
     def is_default(self):
@@ -3071,8 +3089,17 @@ class _AdminBase:
         if members_list is not None and not members_list:
             raise KafkaError._from_parts(
                 -1, "Invalid empty members has been provided", False, False)
+        # De-duplicate the group-instance ids by first occurrence: Java keys the
+        # removal on ``Set<MemberToRemove>`` (``MemberToRemove`` equals by
+        # ``group.instance.id``), so two members naming the same id collapse to
+        # ONE outcome future. Without this, the native layer's claimed-key mask
+        # fires a spurious "not present" error for the second occurrence, racing
+        # ahead of and winning the real result on that member's single Future.
+        # ``dict.fromkeys`` preserves first-occurrence order, matching the
+        # sibling helpers (``_string_keyed_names`` / ``_describe_log_dirs_...``).
         ids = ([] if remove_all
-               else [str(getattr(m, "group_instance_id", m)) for m in members_list])
+               else list(dict.fromkeys(
+                   str(getattr(m, "group_instance_id", m)) for m in members_list)))
         keys = [] if remove_all else ids
         return keys, (remove_all, ids)
 

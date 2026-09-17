@@ -4350,6 +4350,61 @@ static int build_int_array(PyObject* seq, int32_t** out_values, Py_ssize_t* out_
     return 0;
 }
 
+// Distinct-key counters for the per-key async ops whose Rust result map
+// collapses duplicate keys (Java's Map/Set semantics). The native FFI fires the
+// per-key callback once per DISTINCT key, so the Py_INCREF(cb) count must be the
+// distinct count too, not the raw row count - a raw count over-increfs and leaks
+// `cb`. The native side deduplicates its `keys` to match (see each `_async`
+// entry point's dedup comment in `src/ffi/admin.rs`). `n` is one admin call's
+// worth of keys, so the O(n^2) scans are not worth a hash set. Mirrors
+// `count_distinct_config_resources` / `count_distinct_scram_users`.
+
+// Distinct `(resource_type, resource_name)` pairs. Used by describe_configs and
+// incremental_alter_configs (both keyed on `ConfigResource` in Java).
+static Py_ssize_t count_distinct_config_resources(const int32_t* types, const char* const* names, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (types[i] == types[j] && strcmp(names[i], names[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
+// Distinct broker ids, for describe_log_dirs (keyed on broker id in Java).
+static Py_ssize_t count_distinct_i32s(const int32_t* values, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (values[i] == values[j]) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
+// Distinct `(topic, partition, broker)` replicas, for describe_replica_log_dirs
+// (keyed on `TopicPartitionReplica` in Java). The native `read_replicas` drops
+// a NULL-topic row entirely (it produces no key and no future), so such a row
+// is skipped here too, keeping the incref count matched to the firing count.
+static Py_ssize_t count_distinct_replicas(const char* const* topics, const int32_t* partitions,
+                                          const int32_t* brokers, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (topics[i] == NULL) continue;  // dropped by the native layer -> no firing
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (topics[j] != NULL && partitions[i] == partitions[j] && brokers[i] == brokers[j]
+                && strcmp(topics[i], topics[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
 // ---- submits ---------------------------------------------------------------
 
 static PyObject* py_Admin_describe_cluster_async(PyObject* self, PyObject* args) {
@@ -4369,9 +4424,12 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
         return NULL;
 
     // spec is a sequence of (resource_type:int, resource_name:str), one row
-    // per resource (already deduplicated by the Python caller, which builds it
-    // from a Set<ConfigResource>-shaped input) - so the row count is exactly
-    // the number of times the per-key callback will fire.
+    // per resource. The Python caller normally deduplicates it (it builds it
+    // from a Set<ConfigResource>-shaped input), but the native FFI keys the
+    // per-resource callback on `ConfigResource` and fires once per DISTINCT
+    // resource regardless, so the incref count is the distinct count too - not
+    // the raw row count - so a direct or non-deduplicating caller cannot leak
+    // `cb`. Mirrors incremental_alter_configs' own count_distinct_config_resources.
     Py_ssize_t n = PySequence_Size(spec);
     if (n < 0) return NULL;
     int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
@@ -4387,9 +4445,10 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
         if (!ok) { PyMem_Free(types); PyMem_Free(names); return NULL; }
         types[i] = (int32_t)t; names[i] = name;
     }
-    // One callback invocation per resource (Java's per-key KafkaFuture), not
-    // one for the whole batch - see admin_describe_configs_trampoline.
-    admin_incref_n(cb, n);
+    // One callback invocation per DISTINCT resource (Java's per-key
+    // KafkaFuture), not one for the whole batch - see
+    // admin_describe_configs_trampoline.
+    admin_incref_n(cb, count_distinct_config_resources(types, names, n));
     kafka_admin_AdminClient_describe_configs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         types, names, (int32_t)n, timeout_ms, synonyms ? true : false,
         documentation ? true : false, admin_describe_configs_trampoline, cb);
@@ -4397,23 +4456,10 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
     Py_RETURN_NONE;
 }
 
-// Counts the distinct (resource_type, resource_name) pairs among the first
-// `n` rows, mirroring the Rust FFI's `distinct_config_resources`: the C rows
-// are one per *operation*, but Java's incrementalAlterConfigs future is one
-// per *resource*, so the Py_INCREF(cb) count must match the resource count,
-// not the row count. `n` is small (one alter_configs call's worth of
-// operations), so the O(n^2) scan is not worth avoiding with a hash set.
-static Py_ssize_t count_distinct_config_resources(const int32_t* types, const char* const* names, Py_ssize_t n) {
-    Py_ssize_t distinct = 0;
-    for (Py_ssize_t i = 0; i < n; i++) {
-        int seen = 0;
-        for (Py_ssize_t j = 0; j < i; j++) {
-            if (types[i] == types[j] && strcmp(names[i], names[j]) == 0) { seen = 1; break; }
-        }
-        if (!seen) distinct++;
-    }
-    return distinct;
-}
+// `count_distinct_config_resources` is defined once near `build_int_array`,
+// shared by describe_configs and incremental_alter_configs. For the latter the
+// C rows are one per *operation*, but Java's incrementalAlterConfigs future is
+// one per *resource*, so the Py_INCREF(cb) count must match the resource count.
 
 static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int timeout_ms; int validate_only; PyObject* cb;
@@ -4496,12 +4542,12 @@ static PyObject* py_Admin_describe_log_dirs_async(PyObject* self, PyObject* args
 
     int32_t* brokers = NULL; Py_ssize_t n = 0;
     if (build_int_array(brokers_seq, &brokers, &n) < 0) return NULL;
-    // One callback invocation per broker (Java's per-key KafkaFuture), not one
-    // for the whole batch - see admin_describe_log_dirs_trampoline. The Python
-    // caller is responsible for `brokers_seq` already being deduplicated (as
-    // for the Topics/Configs families), so the row count matches the number of
-    // times the native callback will actually fire.
-    admin_incref_n(cb, n);
+    // One callback invocation per DISTINCT broker (Java's per-key KafkaFuture),
+    // not one for the whole batch - see admin_describe_log_dirs_trampoline. The
+    // native FFI keys the per-broker callback on broker id and fires once per
+    // distinct broker, so the incref count is the distinct count too (not the
+    // raw row count) - so a duplicate broker id cannot leak `cb`.
+    admin_incref_n(cb, count_distinct_i32s(brokers, n));
     kafka_admin_AdminClient_describe_log_dirs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         brokers, (int32_t)n, timeout_ms, admin_describe_log_dirs_trampoline, cb);
     PyMem_Free(brokers);
@@ -4573,12 +4619,11 @@ static PyObject* py_Admin_describe_replica_log_dirs_async(PyObject* self, PyObje
         topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b;
     }
     // One callback invocation per DISTINCT replica (Java's per-key
-    // KafkaFuture). The Python caller is responsible for `spec` already being
-    // deduplicated by `TopicPartitionReplica` (as for the Topics family's
-    // `_string_keyed_names`), so the row count matches the number of times the
-    // native callback will actually fire - see
-    // admin_describe_replica_log_dirs_trampoline.
-    admin_incref_n(cb, n);
+    // KafkaFuture). The native FFI keys the per-replica callback on
+    // `TopicPartitionReplica` and fires once per distinct replica, so the incref
+    // count is the distinct count too (not the raw row count) - so a duplicate
+    // replica cannot leak `cb` - see admin_describe_replica_log_dirs_trampoline.
+    admin_incref_n(cb, count_distinct_replicas(topics, partitions, brokers, n));
     kafka_admin_AdminClient_describe_replica_log_dirs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, (int32_t)n,
         timeout_ms, admin_describe_replica_log_dirs_trampoline, cb);
@@ -6339,6 +6384,38 @@ static int build_acl_arrays(PyObject* seq, int nullable, acl_arrays_t* a) {
     return 0;
 }
 
+// NULL-aware string equality mirroring how the native ACL key types compare:
+// for a filter (nullable form) NULL is Java's "match any", distinct from "";
+// for a binding the strings are never NULL (`s`, non-nullable). Two NULLs are
+// equal; a NULL and a non-NULL differ; otherwise strcmp.
+static int acl_str_eq(const char* a, const char* b) {
+    if (a == NULL || b == NULL) return a == b;
+    return strcmp(a, b) == 0;
+}
+
+// Distinct ACL bindings/filters among the seven parallel arrays, for
+// createAcls (keyed on `AclBinding`) and deleteAcls (keyed on
+// `AclBindingFilter`), both of which the Rust core collapses. The native FFI
+// fires the per-key callback once per DISTINCT key, so the Py_INCREF(cb) count
+// must be the distinct count too, or a duplicate binding/filter leaks `cb`.
+static Py_ssize_t count_distinct_acls(const acl_arrays_t* a) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < a->count; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (a->resource_types[i] == a->resource_types[j]
+                && a->pattern_types[i] == a->pattern_types[j]
+                && a->operations[i] == a->operations[j]
+                && a->permission_types[i] == a->permission_types[j]
+                && acl_str_eq(a->resource_names[i], a->resource_names[j])
+                && acl_str_eq(a->principals[i], a->principals[j])
+                && acl_str_eq(a->hosts[i], a->hosts[j])) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
 // (resource_type, resource_name, pattern_type, principal, host, operation,
 //  permission_type) — the field order `_to_acl_binding` unpacks.
 static PyObject* acl_binding_to_py(const kafka_common_AclBinding_t* b) {
@@ -6446,9 +6523,12 @@ static PyObject* py_Admin_create_acls_async(PyObject* self, PyObject* args) {
 
     acl_arrays_t a;
     if (build_acl_arrays(acls, 0, &a) < 0) return NULL;
-    // One callback invocation per binding (Java's per-key KafkaFuture), not
-    // one for the whole batch - see admin_create_acls_trampoline.
-    admin_incref_n(cb, a.count);
+    // One callback invocation per DISTINCT binding (Java's per-key
+    // KafkaFuture), not one for the whole batch - see
+    // admin_create_acls_trampoline. The native FFI keys on `AclBinding` and
+    // fires once per distinct binding, so the incref count is the distinct
+    // count too (not the raw row count) - a duplicate binding cannot leak `cb`.
+    admin_incref_n(cb, count_distinct_acls(&a));
     kafka_admin_AdminClient_create_acls_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
         a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
@@ -6476,9 +6556,12 @@ static PyObject* py_Admin_delete_acls_async(PyObject* self, PyObject* args) {
 
     acl_arrays_t a;
     if (build_acl_arrays(filters, 1, &a) < 0) return NULL;
-    // One callback invocation per filter (Java's per-key KafkaFuture), not
-    // one for the whole batch - see admin_delete_acls_trampoline.
-    admin_incref_n(cb, a.count);
+    // One callback invocation per DISTINCT filter (Java's per-key
+    // KafkaFuture), not one for the whole batch - see
+    // admin_delete_acls_trampoline. The native FFI keys on `AclBindingFilter`
+    // and fires once per distinct filter, so the incref count is the distinct
+    // count too (not the raw row count) - a duplicate filter cannot leak `cb`.
+    admin_incref_n(cb, count_distinct_acls(&a));
     kafka_admin_AdminClient_delete_acls_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
         a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,

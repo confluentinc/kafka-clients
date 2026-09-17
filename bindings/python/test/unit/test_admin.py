@@ -756,6 +756,39 @@ def test_describe_configs_empty_batch():
         assert admin.describe_configs([]) == {}
 
 
+def test_config_resource_normalizes_out_of_enum_type_id():
+    """An out-of-enum type id collapses to UNKNOWN(0), exactly as the native
+    layer's `ConfigResource.Type.forId` does. Both the futures-dict key and the
+    per-key callback's reconstructed key go through this one constructor, so
+    they stay canonical and agree."""
+    weird = ConfigResource(64, "x")
+    assert weird.resource_type == ConfigResourceType.UNKNOWN
+    assert weird == ConfigResource(ConfigResourceType.UNKNOWN, "x")
+    assert weird == ConfigResource(0, "x")
+    assert hash(weird) == hash(ConfigResource(ConfigResourceType.UNKNOWN, "x"))
+    # A known type id is preserved unchanged.
+    assert ConfigResource(ConfigResourceType.TOPIC, "x").resource_type == ConfigResourceType.TOPIC
+
+
+def test_describe_configs_out_of_enum_resource_type_resolves_not_hangs():
+    """Opus re-review (Phase B finding 1): a resource whose type id is outside
+    the known enum set previously hung + leaked - the futures dict was keyed by
+    the raw id (64) while the callback reconstructed the key from the NORMALIZED
+    id the native layer sent back (0), so the lookup KeyErrored and that Future
+    never resolved. With `ConfigResource` normalizing the id on both sides, the
+    key is canonical and the Future resolves within a bounded timeout."""
+    with MockAdminClient(1) as admin:
+        weird = ConfigResource(64, "weird")
+        futures = admin.describe_configs([weird])
+        assert set(futures) == {weird}
+        # Must RESOLVE (the mock rejects an UNKNOWN resource type with
+        # "Not implemented yet") - not hang until the timeout, and never the
+        # synthetic "not present" error.
+        with pytest.raises(KafkaError) as excinfo:
+            futures[weird].result(timeout=5.0)
+        assert str(excinfo.value) == "Not implemented yet"
+
+
 def test_incremental_alter_configs_set_then_delete():
     with MockAdminClient(1) as admin:
         _created(admin, "alter-topic")
@@ -1872,6 +1905,25 @@ def test_remove_members_keys_by_group_instance_id():
         assert set(futures) == {"instance-a", "instance-b"}
         for future in futures.values():
             assert str(future.exception(timeout=5.0)) == "Not implemented yet"
+
+
+def test_remove_members_dedups_same_group_instance_id():
+    """Opus re-review (Phase E finding): two members naming the SAME
+    group.instance.id collapse to ONE outcome future - Java keys the removal on
+    `Set<MemberToRemove>`. Before the fix the ids were passed raw, so the native
+    claimed-key mask fired a spurious "not present" error for the second
+    occurrence, racing the real outcome on that member's single Future. After
+    the fix exactly one Future, keyed by that id, resolves to the REAL outcome
+    (the mock's "Not implemented yet"), never the synthetic error."""
+    with MockAdminClient(1) as admin:
+        futures = admin.remove_members_from_consumer_group(
+            "rm-group",
+            [MemberToRemove("dup-instance"), MemberToRemove("dup-instance")])
+        # Exactly one Future, keyed by the single distinct instance id.
+        assert set(futures) == {"dup-instance"}
+        # The REAL per-member outcome, never the synthetic
+        # "the requested key was not present in the admin RPC's response".
+        assert str(futures["dup-instance"].exception(timeout=5.0)) == "Not implemented yet"
 
 
 def test_remove_all_members_has_no_per_member_outcome():

@@ -2301,6 +2301,32 @@ static void test_mock_admin_describe_log_dirs_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
+/* Opus re-review (Phase C finding): a duplicate broker id collapses to ONE
+ * per-broker future in the Rust core (Java keys describeLogDirs on broker id),
+ * so the callback must fire exactly ONCE with the real outcome - never a
+ * spurious "not present" error for the second occurrence (which, before the
+ * dedup of `keys`, raced ahead of and won the real result). */
+static void test_mock_admin_describe_log_dirs_async_dedups_duplicate_broker(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "ld-dup", 1, 1);
+
+    const int32_t brokers[2] = {0, 0}; /* broker 0 twice */
+    describe_log_dirs_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_log_dirs_async(admin, brokers, 2, -1,
+                                                    on_describe_log_dirs, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    /* Settle so a spurious SECOND callback (the pre-fix bug) would be observed. */
+    struct timespec ts = {0, 200000000}; /* 200ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));       /* exactly distinct */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count)); /* the real outcome */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count)); /* no spurious error */
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 // ---- alterReplicaLogDirs / describeReplicaLogDirs --------------------------
 
 static void test_mock_admin_alter_replica_log_dirs_partial_failure(void) {
@@ -2599,6 +2625,37 @@ static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolv
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Opus re-review (Phase C finding): a duplicate replica collapses to ONE
+ * per-replica future in the Rust core (Java keys describeReplicaLogDirs on
+ * TopicPartitionReplica), so the callback must fire exactly ONCE with the real
+ * outcome - never a spurious "not present" error for the second occurrence.
+ * This is distinct from the unknown-topic case above (a genuinely-omitted key,
+ * which still gets its explicit error): a duplicate of a KNOWN replica must NOT
+ * error. */
+static void test_mock_admin_describe_replica_log_dirs_async_dedups_duplicate_replica(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    create_one(admin, "drld-dup-async", 1, 1);
+
+    /* Same (topic, partition, broker) replica twice. */
+    const char *topics[2] = {"drld-dup-async", "drld-dup-async"};
+    const int32_t partitions[2] = {0, 0};
+    const int32_t broker_ids[2] = {0, 0};
+
+    describe_replica_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_describe_replica_log_dirs_async(
+        admin, topics, partitions, broker_ids, 2, -1, on_describe_replica_log_dirs, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    struct timespec ts = {0, 200000000}; /* 200ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));       /* exactly distinct */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count)); /* the real outcome */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count)); /* no spurious error */
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -5091,6 +5148,38 @@ static void test_mock_admin_create_acls_async(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* Opus re-review (Phase F finding): two EQUAL bindings collapse to ONE
+ * per-binding future in the Rust core (`create_acls` dedups via Entry::Vacant;
+ * Java keys createAcls on the AclBinding), so the callback must fire exactly
+ * ONCE with the real outcome ("Not implemented yet") - never a spurious
+ * "not present" error for the second occurrence racing the real result. */
+static void test_mock_admin_create_acls_async_dedups_duplicate_binding(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    /* Two IDENTICAL bindings. */
+    const int32_t rt[2] = {ACL_RESOURCE_TYPE_TOPIC, ACL_RESOURCE_TYPE_TOPIC};
+    const char *names[2] = {"ca-dup", "ca-dup"};
+    const int32_t pt[2] = {ACL_PATTERN_TYPE_LITERAL, ACL_PATTERN_TYPE_LITERAL};
+    const char *principals[2] = {"User:a", "User:a"};
+    const char *hosts[2] = {"*", "*"};
+    const int32_t op[2] = {ACL_OPERATION_READ, ACL_OPERATION_READ};
+    const int32_t pm[2] = {ACL_PERMISSION_ALLOW, ACL_PERMISSION_ALLOW};
+
+    create_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.ok_count, 0);
+    kafka_admin_AdminClient_create_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 2,
+                                              -1, on_create_acls, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    struct timespec ts = {0, 200000000}; /* 200ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));       /* exactly distinct */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count)); /* the real per-binding outcome */
+    /* The real outcome, not the synthetic "not present" error. */
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 static void test_mock_admin_create_acls_async_reports_marshaling_failure(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const int32_t rt[1] = {ACL_RESOURCE_TYPE_ANY};
@@ -5382,6 +5471,38 @@ static void test_mock_admin_delete_acls_async(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
 
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Opus re-review (Phase F finding): two EQUAL filters collapse to ONE
+ * per-filter future in the Rust core (`delete_acls` dedups via Entry::Vacant;
+ * Java keys deleteAcls on the AclBindingFilter), so the callback must fire
+ * exactly ONCE with the real outcome ("Not implemented yet") - never a spurious
+ * "not present" error for the second occurrence racing the real result. The two
+ * filters share the same NULL principal/host, so they compare equal. */
+static void test_mock_admin_delete_acls_async_dedups_duplicate_filter(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const int32_t rt[2] = {ACL_RESOURCE_TYPE_ANY, ACL_RESOURCE_TYPE_ANY};
+    const char *names[2] = {NULL, NULL};
+    const int32_t pt[2] = {ACL_PATTERN_TYPE_ANY, ACL_PATTERN_TYPE_ANY};
+    const char *principals[2] = {NULL, NULL};
+    const char *hosts[2] = {NULL, NULL};
+    const int32_t op[2] = {ACL_OPERATION_ANY, ACL_OPERATION_ANY};
+    const int32_t pm[2] = {ACL_PERMISSION_ANY, ACL_PERMISSION_ANY};
+
+    delete_acls_async_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    atomic_init(&r.error_count, 0);
+    atomic_init(&r.value_count, 0);
+    kafka_admin_AdminClient_delete_acls_async(admin, rt, names, pt, principals, hosts, op, pm, 2,
+                                              -1, on_delete_acls, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    struct timespec ts = {0, 200000000}; /* 200ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));       /* exactly distinct */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count)); /* the real per-filter outcome */
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
+    TEST_ASSERT_EQUAL_STRING("Not implemented yet", r.message);
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -7136,12 +7257,14 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_log_dirs_async);
     RUN_TEST(test_mock_admin_describe_log_dirs_async_two_brokers);
     RUN_TEST(test_mock_admin_describe_log_dirs_async_null_handle);
+    RUN_TEST(test_mock_admin_describe_log_dirs_async_dedups_duplicate_broker);
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_partial_failure);
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_async);
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error);
+    RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_dedups_duplicate_replica);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_b2_null_out_result);
     RUN_TEST(test_mock_admin_elect_leaders_reports_unsupported);
@@ -7210,6 +7333,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_create_acls_reports_unsupported_per_binding);
     RUN_TEST(test_mock_admin_create_acls_rejects_what_javas_constructors_reject);
     RUN_TEST(test_mock_admin_create_acls_async);
+    RUN_TEST(test_mock_admin_create_acls_async_dedups_duplicate_binding);
     RUN_TEST(test_mock_admin_create_acls_async_reports_marshaling_failure);
     RUN_TEST(test_mock_admin_create_acls_async_null_handle);
     RUN_TEST(test_mock_admin_create_acls_async_null_handle_with_bindings);
@@ -7219,6 +7343,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_acls_async_null_handle);
     RUN_TEST(test_mock_admin_delete_acls_reports_unsupported_per_filter);
     RUN_TEST(test_mock_admin_delete_acls_async);
+    RUN_TEST(test_mock_admin_delete_acls_async_dedups_duplicate_filter);
     RUN_TEST(test_mock_admin_delete_acls_async_null_handle);
     RUN_TEST(test_mock_admin_delete_acls_async_null_handle_with_filters);
     RUN_TEST(test_mock_admin_describe_client_quotas_fails_the_whole_call);
