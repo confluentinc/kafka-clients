@@ -46,15 +46,18 @@ from soakclient import (
     EXIT_TRANSIENT_STARTUP,
     NON_RETRIABLE_POLL_FAILURE_LIMIT,
     PRODUCER_CONFIG_KEYS,
+    FatalStartupError,
     HighWaterMarks,
     LastValueGauges,
     SoakClient,
     SoakMetrics,
     SoakRecord,
+    check_admin_credentials,
     error_code,
     error_is_retriable,
     error_message,
     filter_config,
+    jaas_credentials,
     parse_config_file,
     route_shared_config,
     stringify_config,
@@ -399,6 +402,102 @@ def test_parse_config_file_skips_comments_and_blanks():
 def test_parse_config_file_rejects_a_line_without_a_separator():
     with pytest.raises(ValueError):
         parse_config_file(io.StringIO("bootstrap.servers\n"))
+
+
+# ---------------------------------------------------------------------------
+# JAAS credential parsing + startup credential check
+# ---------------------------------------------------------------------------
+def test_jaas_credentials_extraction():
+    jaas = ("org.apache.kafka.common.security.plain.PlainLoginModule required \n\t"
+            'username="API_KEY" \n\tpassword="API_SECRET";')
+    assert jaas_credentials(jaas) == ("API_KEY", "API_SECRET")
+
+
+@pytest.mark.parametrize("jaas", [
+    # The spacing and quoting variants a JAAS string legally carries. The
+    # original hand-rolled scanner accepted only the first of these and returned
+    # (None, None) for the rest, which produced an admin client with no
+    # credentials at all.
+    'PlainLoginModule required username="k" password="s";',
+    'PlainLoginModule required username = "k" password = "s";',
+    "PlainLoginModule required username='k' password='s';",
+    'PlainLoginModule required username=k password=s;',
+    'PlainLoginModule required\n\tusername="k"\n\tpassword="s";',
+    'PlainLoginModule required password="s" username="k";',
+    'PlainLoginModule required serviceName="kafka" username="k" password="s";',
+])
+def test_jaas_credentials_tolerates_spacing_and_quoting(jaas):
+    assert jaas_credentials(jaas) == ("k", "s")
+
+
+def test_jaas_credentials_does_not_match_a_longer_field_name():
+    # `serviceName=` must not satisfy a search for `name=`, and a dotted or
+    # prefixed key must not satisfy `username=`.
+    jaas = 'PlainLoginModule required myusername="wrong" username="right" password="s";'
+    assert jaas_credentials(jaas)[0] == "right"
+
+
+def test_jaas_credentials_absent():
+    assert jaas_credentials("org.apache...PlainLoginModule required;") == (None, None)
+
+
+def test_jaas_credentials_preserves_special_characters_in_the_secret():
+    # Confluent Cloud secrets contain '+', '/' and '='.
+    jaas = 'PlainLoginModule required username="K/EY+1" password="a+b/c=d==";'
+    assert jaas_credentials(jaas) == ("K/EY+1", "a+b/c=d==")
+
+
+def test_check_admin_credentials_refuses_sasl_without_credentials():
+    """A SASL config whose credentials cannot be recovered must fail loudly at
+    startup — the one outcome worth refusing turns a typo into an opaque broker
+    auth error minutes later, or a two-week soak against the wrong thing."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "SASL_SSL",
+            "sasl.mechanism": "PLAIN",
+            # `sasl.jaas.config` is absent, so no credentials can be recovered.
+        })
+    message = str(exc.value)
+    assert "sasl.jaas.config" in message
+    assert "username and password" in message
+
+
+def test_check_admin_credentials_refuses_a_half_parsed_jaas():
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "SASL_SSL",
+            "sasl.mechanism": "PLAIN",
+            "sasl.jaas.config": 'PlainLoginModule required username="k";',
+        })
+    assert "password" in str(exc.value)
+
+
+def test_check_admin_credentials_triggers_on_sasl_mechanism_alone():
+    # SASL implied by sasl.mechanism even when security.protocol is unset.
+    with pytest.raises(FatalStartupError):
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "sasl.mechanism": "PLAIN",
+        })
+
+
+def test_check_admin_credentials_passes_with_valid_jaas():
+    # A jaas with an extractable user+pass is accepted (no exception).
+    check_admin_credentials({
+        "bootstrap.servers": "host:9092",
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
+                             'PlainLoginModule required username="u" '
+                             'password="p";'),
+    })
+
+
+def test_check_admin_credentials_allows_plaintext_without_credentials():
+    # No SASL configured: absent credentials are correct, not an error.
+    check_admin_credentials({"bootstrap.servers": "host:9092"})
 
 
 # ---------------------------------------------------------------------------

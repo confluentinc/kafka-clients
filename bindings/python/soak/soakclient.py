@@ -534,6 +534,84 @@ def parse_config_file(fileobj):
     return conf
 
 
+def jaas_field(jaas_config, name):
+    """Extract one field's value from a Java JAAS login-module string.
+
+    Accepts the spacing and quoting variants a JAAS string legally carries:
+    ``username="k"``, ``username = "k"``, ``username='k'`` and bare
+    ``username=k``. Returns ``None`` only when the field is genuinely absent.
+
+    The previous hand-rolled scanner required ``name="`` with no space and double
+    quotes, so ``username = "k"`` silently yielded no credentials at all — the
+    admin client then attempted SASL PLAIN unauthenticated and the failure
+    surfaced as an opaque broker error. Hence both the tolerance here and the
+    hard failure in :func:`check_admin_credentials`.
+    """
+    # (?<![\w.]) so `serviceName=` / `foo.username=` cannot match `username=`.
+    pattern = re.compile(
+        r'(?<![\w.])' + re.escape(name) + r'\s*=\s*'
+        r'(?:"([^"]*)"|\'([^\']*)\'|([^\s;]+))')
+    match = pattern.search(jaas_config)
+    if match is None:
+        return None
+    for group in match.groups():
+        if group is not None:
+            return group
+    return None
+
+
+def jaas_credentials(jaas_config):
+    """Extract ``(username, password)`` from a Java JAAS login-module string.
+
+    Either element is ``None`` when that field is absent. Used only to *validate*
+    the soak's admin credentials at startup (:func:`check_admin_credentials`) —
+    the Rust admin client takes ``sasl.jaas.config`` verbatim and parses it
+    itself, so these values are never forwarded anywhere.
+    """
+    return jaas_field(jaas_config, "username"), jaas_field(jaas_config, "password")
+
+
+def check_admin_credentials(conf):
+    """Fail fast at startup when SASL is configured but credentials cannot be
+    recovered from ``sasl.jaas.config``.
+
+    The Rust admin client parses ``sasl.jaas.config`` itself, so this does NOT
+    translate the config — it only *validates* that a username and password are
+    present. Silently proceeding with no usable credentials is the one outcome
+    worth refusing: it turns a typo into an authentication error from the broker
+    minutes later, or — with an unauthenticated listener — into a soak that runs
+    for two weeks against the wrong thing. PLAINTEXT (no SASL) requires no
+    credentials and passes untouched.
+
+    Raises :class:`FatalStartupError` (mapped to ``EXIT_FATAL``: a restart cannot
+    fix a bad credential), naming the missing piece.
+    """
+    sasl_expected = ("SASL" in conf.get("security.protocol", "").upper()
+                     or bool(conf.get("sasl.mechanism")))
+    if not sasl_expected:
+        return
+
+    jaas = conf.get("sasl.jaas.config")
+    username, password = jaas_credentials(jaas) if jaas else (None, None)
+    if username is not None and password is not None:
+        return
+
+    missing = [
+        name
+        for name, value in (("username", username), ("password", password))
+        if value is None
+    ]
+    raise FatalStartupError(
+        "security.protocol={!r} / sasl.mechanism={!r} require credentials, but "
+        "sasl.jaas.config {}: could not extract {}. Expected Java JAAS form: "
+        "sasl.jaas.config=org.apache.kafka.common.security.plain."
+        "PlainLoginModule required username=\"KEY\" password=\"SECRET\"; "
+        "Restarting will not fix this.".format(
+            conf.get("security.protocol", ""), conf.get("sasl.mechanism", ""),
+            "is not set" if not jaas else "is set but unparseable",
+            " and ".join(missing)))
+
+
 class LastValueGauges(object):
     """The most recent observation per (metric, tag-set), retained.
 
@@ -1077,6 +1155,11 @@ class SoakClient(object):
         # restarts the client repeatedly and a restart must never discard the
         # topic.
         admin_conf = stringify_config(aconf)
+        # Fail fast — before the long run begins — if SASL is configured but no
+        # credentials can be recovered from sasl.jaas.config, so a typo surfaces
+        # here rather than as a broker auth error minutes later (or a two-week
+        # soak against the wrong thing). PLAINTEXT passes untouched.
+        check_admin_credentials(admin_conf)
         if admin_conf.get("sasl.mechanism"):
             # Log the mechanism — never the secret — so a SASL misconfiguration
             # is visible in the first lines of the log rather than as an
