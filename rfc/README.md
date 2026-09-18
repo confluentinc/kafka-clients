@@ -19,13 +19,13 @@ The proposals below break that effort into focused pieces that can be reviewed o
 
 | Proposal | Summary | Status |
 | --- | --- | --- |
-| [GitHub repository structure](repository-structure.md) | One `confluentinc/kafka-clients` monorepo, mirrored to read-only per-language repositories. | Draft |
+| [GitHub repository structure](repository-structure.md) | One `confluentinc/kafka-clients` monorepo, mirrored to read-only per-language repositories. | Proposed |
 | [Client versioning](versioning.md) | Semantic versioning aligned to Apache Kafka `MAJOR.MINOR`, with a patch encoding. | Proposed |
 | [Client APIs](apis/README.md) | Align each client's API with the Java client. Proposal: [Rust](apis/rust.md). | Draft |
 | [Source code licensing](licensing.md) | Apache 2.0 for the Rust core and language bindings (the CCL plugins are out of scope). | Proposed |
 | [Community contributions](contributions.md) | Where issues and pull requests are raised, the contribution model, and licensing/CLA terms. | Proposed |
-| [Client release and distribution](release-and-distribution.md) | Release cadence aligned to Apache Kafka, per-registry publishing, prebuilt binaries, and supply-chain integrity. | Draft |
-| [AI-assisted migration](ai-assisted-migration.md) | An agentskills.io skill, model-agnostic, with a deterministic config mapping plus AI for API and behavioral changes. | Draft |
+| [Client release and distribution](release-and-distribution.md) | Release cadence aligned to Apache Kafka, per-registry publishing, prebuilt binaries, and supply-chain integrity. | Proposed |
+| [AI-assisted migration](ai-assisted-migration.md) | An agentskills.io skill, model-agnostic, with a deterministic config mapping plus AI for API and behavioral changes. | Proposed |
 
 ## Status values
 
