@@ -548,6 +548,71 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         AlterPartitionReassignmentsOptions? options = null);
 
     /// <summary>
+    /// Alters the committed offsets for a consumer group — Java's
+    /// <c>alterConsumerGroupOffsets(String, Map&lt;TopicPartition, OffsetAndMetadata&gt;,
+    /// AlterConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
+    /// for the broker.
+    /// </summary>
+    /// <param name="groupId">The consumer group id.</param>
+    /// <param name="offsets">Topic partition → the offset (and metadata) to commit it to.</param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole request, and a per-partition failure is a
+    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="AlterConsumerGroupOffsetsResult"/>;
+    /// the task itself faults only when the request could not be run at all.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="groupId"/> or <paramref name="offsets"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="offsets"/> contains a topic partition with a null topic, or a null
+    /// <see cref="OffsetAndMetadata"/> value.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        AlterConsumerGroupOffsetsOptions? options = null);
+
+    /// <summary>
+    /// Deletes the committed offsets for a set of partitions in a consumer group — Java's
+    /// <c>deleteConsumerGroupOffsets(String, Set&lt;TopicPartition&gt;,
+    /// DeleteConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
+    /// for the broker.
+    /// </summary>
+    /// <param name="groupId">The consumer group id.</param>
+    /// <param name="partitions">The partitions whose committed offsets should be deleted.</param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole request, and a per-partition failure is a
+    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="DeleteConsumerGroupOffsetsResult"/>;
+    /// the task itself faults only when the request could not be run at all.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="groupId"/> or <paramref name="partitions"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="partitions"/> contains a topic partition with a null topic.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyCollection<TopicPartition> partitions,
+        DeleteConsumerGroupOffsetsOptions? options = null);
+
+    /// <summary>
     /// Lists the cluster's ongoing partition reassignments — Java's
     /// <c>listPartitionReassignments(Optional&lt;Set&lt;TopicPartition&gt;&gt;,
     /// ListPartitionReassignmentsOptions)</c>. Returns <b>immediately</b>, without waiting
@@ -619,6 +684,288 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options = null);
+
+    /// <summary>
+    /// Lists the groups available in the cluster — Java's
+    /// <c>listGroups(ListGroupsOptions)</c>. Returns <b>immediately</b>, without waiting for
+    /// the broker.
+    /// </summary>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults. ⚠ Its three filters
+    /// are <b>independent axes</b>, and each one left empty — the default — means "do not
+    /// filter on that axis", never "match nothing"; so the no-options call lists groups of
+    /// every state, protocol type and type.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable carrying <em>two independent</em> collections: the listings
+    /// that were returned, and the failures of the brokers that could not be queried. They
+    /// are not parallel — one listing beside three errors is a legitimate outcome — so
+    /// <see cref="ListGroupsResult.Valid"/> and <see cref="ListGroupsResult.Errors"/> each
+    /// have their own length, and only <see cref="ListGroupsResult.All"/> turns the first
+    /// error into a fault.
+    /// </returns>
+    /// <remarks>
+    /// Java also declares a no-argument <c>listGroups()</c> convenience overload, collapsed
+    /// here into the optional parameter — the same treatment the other RPCs give Java's
+    /// <c>default</c> overloads, and for the same reason (C# default interface methods need
+    /// .NET Standard 2.1, above this binding's floor).
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/> — or a filter
+    /// holds a <see cref="GroupState"/> / <see cref="GroupType"/> value no member defines,
+    /// which Java's enum-typed <c>Set</c> cannot express but a C# cast can.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListGroupsResult ListGroups(ListGroupsOptions? options = null);
+
+    /// <summary>
+    /// Lists the consumer groups available in the cluster — Java's
+    /// <c>listConsumerGroups(ListConsumerGroupsOptions)</c>. Returns <b>immediately</b>,
+    /// without waiting for the broker.
+    /// </summary>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults. ⚠ <b>Two filter axes,
+    /// not three</b> — this is the generation-older sibling of <see cref="ListGroups"/> and
+    /// <c>ListConsumerGroupsOptions.java</c> carries no protocol-type filter. Each axis left
+    /// empty — the default — means "do not filter on that axis", never "match nothing"; so
+    /// the no-options call lists consumer groups of every state and type.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable carrying <em>two independent</em> collections — the listings
+    /// that were returned and the failures of the brokers that could not be queried, exactly
+    /// as <see cref="ListGroups"/> does. They are not parallel, so
+    /// <see cref="ListConsumerGroupsResult.Valid"/> and
+    /// <see cref="ListConsumerGroupsResult.Errors"/> each have their own length, and only
+    /// <see cref="ListConsumerGroupsResult.All"/> turns the first error into a fault.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Deprecated in Kafka since 4.1, and the deprecation is carried through rather than
+    /// dropped</b> (<c>Admin.java:889-890</c>: <c>@Deprecated(since = "4.1", forRemoval =
+    /// true)</c>). Java deprecates the result, options and listing types on the same grounds,
+    /// so all four carry <see cref="ObsoleteAttribute"/> here. Prefer
+    /// <see cref="ListGroups"/>.
+    /// </para>
+    /// <para>
+    /// Java also declares a no-argument <c>listConsumerGroups()</c> convenience overload
+    /// (<c>Admin.java:902-903</c>, deprecated alike), collapsed here into the optional
+    /// parameter — the same treatment the other RPCs give Java's <c>default</c> overloads,
+    /// and for the same reason (C# default interface methods need .NET Standard 2.1, above
+    /// this binding's floor).
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/> — or a filter holds
+    /// a <see cref="GroupState"/> / <see cref="GroupType"/> value no member defines, which
+    /// Java's enum-typed <c>Set</c> cannot express but a C# cast can.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    [Obsolete(
+        "Deprecated in Kafka since 4.1. Use ListGroups instead.")]
+    ListConsumerGroupsResult ListConsumerGroups(ListConsumerGroupsOptions? options = null);
+
+    /// <summary>
+    /// Describes some consumer groups in the cluster — Java's
+    /// <c>describeConsumerGroups(Collection&lt;String&gt;, DescribeConsumerGroupsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries
+    /// one awaitable per group id.
+    /// </summary>
+    /// <remarks>
+    /// Java also declares a <c>describeConsumerGroups(Collection&lt;String&gt;)</c>
+    /// convenience overload (<c>Admin.java:878-879</c>), collapsed here into the optional
+    /// parameter — the same treatment the other RPCs give Java's <c>default</c> overloads,
+    /// and for the same reason (C# default interface methods need .NET Standard 2.1, above
+    /// this binding's floor).
+    /// </remarks>
+    /// <param name="groupIds">
+    /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
+    /// result holds one awaitable per distinct id.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults. Note
+    /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations"/> defaults to
+    /// <see langword="false"/>, which leaves
+    /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
+    /// </param>
+    /// <returns>
+    /// One awaitable per group id, each carrying that group's own
+    /// <see cref="ConsumerGroupDescription"/> or its own failure.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="groupIds"/> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
+    /// would silently substitute a default.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeConsumerGroupsResult DescribeConsumerGroups(
+        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null);
+
+    /// <summary>
+    /// Describes some classic (non-KIP-848) groups in the cluster — Java's
+    /// <c>describeClassicGroups(Collection&lt;String&gt;, DescribeClassicGroupsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries
+    /// one awaitable per group id.
+    /// </summary>
+    /// <remarks>
+    /// Java also declares a <c>describeClassicGroups(Collection&lt;String&gt;)</c>
+    /// convenience overload (<c>Admin.java:2098-2099</c>), collapsed here into the optional
+    /// parameter — the same treatment the other RPCs give Java's <c>default</c> overloads,
+    /// and for the same reason (C# default interface methods need .NET Standard 2.1, above
+    /// this binding's floor).
+    /// </remarks>
+    /// <param name="groupIds">
+    /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
+    /// result holds one awaitable per distinct id.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults. Note
+    /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations"/> defaults to
+    /// <see langword="false"/>, which leaves
+    /// <see cref="ClassicGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
+    /// </param>
+    /// <returns>
+    /// One awaitable per group id, each carrying that group's own
+    /// <see cref="ClassicGroupDescription"/> or its own failure.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="groupIds"/> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
+    /// would silently substitute a default.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeClassicGroupsResult DescribeClassicGroups(
+        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null);
+
+    /// <summary>
+    /// Lists the committed offsets of a single consumer group — Java's
+    /// <c>listConsumerGroupOffsets(String, ListConsumerGroupOffsetsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries
+    /// one awaitable, keyed by <paramref name="groupId"/>.
+    /// </summary>
+    /// <remarks>
+    /// Java also declares a <c>listConsumerGroupOffsets(String)</c> convenience overload
+    /// (<c>Admin.java:928-930</c>), collapsed here into the optional parameter — the same
+    /// treatment the other RPCs give Java's <c>default</c> overloads, and for the same
+    /// reason (C# default interface methods need .NET Standard 2.1, above this binding's
+    /// floor). Like Java (<c>Admin.java:912-918</c>) this delegates to the batched form
+    /// with a fresh <see cref="ListConsumerGroupOffsetsSpec"/>, so every committed
+    /// partition of the group is returned and any topic partitions set on
+    /// <paramref name="options"/> are ignored.
+    /// </remarks>
+    /// <param name="groupId">The ID of the group whose committed offsets to list.</param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable, keyed by <paramref name="groupId"/>, carrying that group's
+    /// committed offsets or its own failure.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
+    /// would silently substitute a default.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        string groupId, ListConsumerGroupOffsetsOptions? options = null);
+
+    /// <summary>
+    /// Lists the committed offsets of several consumer groups — Java's
+    /// <c>listConsumerGroupOffsets(Map&lt;String, ListConsumerGroupOffsetsSpec&gt;,
+    /// ListConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
+    /// for the broker; the result carries one awaitable per group id.
+    /// </summary>
+    /// <remarks>
+    /// Java also declares a
+    /// <c>listConsumerGroupOffsets(Map&lt;String, ListConsumerGroupOffsetsSpec&gt;)</c>
+    /// convenience overload (<c>Admin.java:951-953</c>), collapsed here into the optional
+    /// parameter, for the same netstandard2.0 reason as above.
+    /// </remarks>
+    /// <param name="groupSpecs">
+    /// The groups to query, each with the partitions to restrict its result to. A spec
+    /// whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> is
+    /// <see langword="null"/> returns every committed partition of that group; an
+    /// <b>empty</b> collection returns nothing for it. The two are distinct.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per group id, each carrying that group's committed offsets or its
+    /// own failure.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="groupSpecs"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="groupSpecs"/> contains a null group id, a null spec, a null
+    /// selected topic, or a repeated group id.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — the ABI reads a negative as "unset" and
+    /// would silently substitute a default.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
+        ListConsumerGroupOffsetsOptions? options = null);
+
+    /// <summary>
+    /// Deletes consumer groups from the cluster — Java's
+    /// <c>deleteConsumerGroups(Collection&lt;String&gt;, DeleteConsumerGroupsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="groupIds">The consumer group ids to delete. Duplicates collapse.</param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per group id — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>.
+    /// See <see cref="DeleteConsumerGroupsResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DeleteConsumerGroupsResult DeleteConsumerGroups(
+        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null);
+
+    /// <summary>
+    /// Removes members from a consumer group by their static member identity — Java's
+    /// <c>removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="groupId">The id of the group to remove members from.</param>
+    /// <param name="options">
+    /// The members to remove, or a no-argument
+    /// <see cref="RemoveMembersFromConsumerGroupOptions"/> to remove every member of the
+    /// group. Unlike every other RPC on this interface, Java has <b>no</b> options-free
+    /// overload for this one (<c>Admin.java:1269</c>) — <paramref name="options"/> is
+    /// therefore required here too, not optional.
+    /// </param>
+    /// <returns>
+    /// ⚠ <b>One</b> awaitable over the whole request, and a per-member failure is a
+    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// <c>Map&lt;MemberIdentity, Errors&gt;</c>. See
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/>; the task itself faults only
+    /// when the request could not be run at all.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="groupId"/> or <paramref name="options"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
+        string groupId, RemoveMembersFromConsumerGroupOptions options);
 
     /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background

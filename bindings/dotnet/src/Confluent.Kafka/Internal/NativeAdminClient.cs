@@ -347,6 +347,47 @@ internal sealed class NativeAdminClient : IDisposable
         IntPtr userData);
 
     /// <summary>
+    /// The <c>alter_consumer_group_offsets_async</c> submit shape — <b>six</b> parallel
+    /// arrays plus the group id, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="hasLeaderEpoch"/>[i] is Java's <c>OffsetAndMetadata.leaderEpoch()</c>
+    /// <c>Optional&lt;Integer&gt;</c> presence flag; when false, <paramref name="leaderEpochs"/>[i]
+    /// is not read (<c>NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync</c>).
+    /// </remarks>
+    internal delegate void NativeAlterConsumerGroupOffsetsSubmit(
+        IntPtr admin,
+        IntPtr groupId,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        IntPtr[] metadata,
+        int[] leaderEpochs,
+        bool[] hasLeaderEpoch,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.AlterConsumerGroupOffsetsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>delete_consumer_group_offsets_async</c> submit shape — <b>two</b> parallel
+    /// arrays plus the group id, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>. Simpler than
+    /// <see cref="NativeAlterConsumerGroupOffsetsSubmit"/>: deleting a committed offset
+    /// carries no per-partition value, so there is no offset/metadata/leader-epoch array.
+    /// </summary>
+    internal delegate void NativeDeleteConsumerGroupOffsetsSubmit(
+        IntPtr admin,
+        IntPtr groupId,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteConsumerGroupOffsetsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
     /// The <c>list_partition_reassignments_async</c> submit shape, injectable for the same
     /// reason as <see cref="NativeCreateTopicsSubmit"/>. ⚠ <c>allPartitions</c> is Java's
     /// <c>Optional.empty()</c> — every ongoing reassignment in the cluster — and is not an
@@ -382,6 +423,164 @@ internal sealed class NativeAdminClient : IDisposable
         int timeoutMs,
         int isolationLevel,
         AdminCallbacks.ListOffsetsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_groups_async</c> submit shape — <b>three</b> name arrays, each with its
+    /// own count, injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>The three arrays are NOT parallel.</b> They are three independent filter axes,
+    /// so their counts are unrelated and every axis is read against its own — never against
+    /// the first. An axis whose count is <c>0</c> is Java's empty <c>Set</c>, "do not filter
+    /// on this one", not "match nothing".
+    /// </remarks>
+    internal delegate void NativeListGroupsSubmit(
+        IntPtr admin,
+        IntPtr[] groupStates,
+        int groupStateCount,
+        IntPtr[] protocolTypes,
+        int protocolTypeCount,
+        IntPtr[] types,
+        int typeCount,
+        int timeoutMs,
+        AdminCallbacks.ListGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_consumer_groups_async</c> submit shape — <b>two</b> name arrays, each with
+    /// its own count, injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Two axes, not three.</b> The deprecated predecessor of <c>listGroups</c> filters on
+    /// group state and group type only — there is no protocol-type axis
+    /// (<c>ListConsumerGroupsOptions.java</c> carries no such filter). Copying
+    /// <see cref="NativeListGroupsSubmit"/>'s argument list here would feed <c>types</c> into the
+    /// ABI's second array and shift every argument after it, including the callback pointer.
+    /// <br/>
+    /// ⚠ <b>The two arrays are NOT parallel</b>, exactly as in the three-axis case: their counts
+    /// are unrelated and each axis is read against its own. An axis whose count is <c>0</c> is
+    /// Java's empty <c>Set</c>, "do not filter on this one", not "match nothing".
+    /// </remarks>
+    internal delegate void NativeListConsumerGroupsSubmit(
+        IntPtr admin,
+        IntPtr[] groupStates,
+        int groupStateCount,
+        IntPtr[] types,
+        int typeCount,
+        int timeoutMs,
+        AdminCallbacks.ListConsumerGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_consumer_groups_async</c> submit shape — one name array and
+    /// <b>one</b> flag, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>One flag, not the two of <see cref="NativeDescribeTopicsSubmit"/>.</b> There is
+    /// no <c>partitionSizeLimitPerResponse</c> axis here — Java's
+    /// <c>DescribeConsumerGroupsOptions</c> declares none — so the flag is immediately
+    /// followed by the callback pointer. Reusing the topic shape would shift every argument
+    /// after the flag, including the callback, which is why this gets its own declaration
+    /// rather than borrowing one that merely looks close enough.
+    /// </remarks>
+    internal delegate void NativeDescribeConsumerGroupsSubmit(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        int count,
+        int timeoutMs,
+        bool includeAuthorizedOperations,
+        AdminCallbacks.DescribeConsumerGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_classic_groups_async</c> submit shape — argument-for-argument
+    /// <see cref="NativeDescribeConsumerGroupsSubmit"/>, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Its own declaration despite being identical in layout, because the callback
+    /// parameter is not: an <see cref="AdminCallbacks.DescribeClassicGroupsCallback"/>
+    /// carries a <c>DescribeClassicGroupsResult_t</c> root, and sharing the consumer
+    /// delegate would make it a compile-time option to hand that root to the wrong RPC's
+    /// destroy.
+    /// </remarks>
+    internal delegate void NativeDescribeClassicGroupsSubmit(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        int count,
+        int timeoutMs,
+        bool includeAuthorizedOperations,
+        AdminCallbacks.DescribeClassicGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The native <c>listConsumerGroupOffsets</c> submit, injectable for tests.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>The only jagged submit on this surface.</b> Per group id it carries a
+    /// topic-partition selection as two parallel inner arrays — <paramref name="topics"/>
+    /// (UTF-8 <c>char*</c> per pair) and <paramref name="partitions"/> — sized by
+    /// <paramref name="partitionCounts"/>. <paramref name="allPartitions"/> is the
+    /// discriminant: <see langword="true"/> means "every partition the group has committed",
+    /// and the inner pair for that index is never read. An <em>empty explicit</em> selection
+    /// is the opposite request and must therefore cross with the flag
+    /// <see langword="false"/> and a count of 0 — which is why the flag is a separate array
+    /// and not inferable from the count.
+    /// </remarks>
+    internal delegate void NativeListConsumerGroupOffsetsSubmit(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        bool[] allPartitions,
+        IntPtr[] topics,
+        IntPtr[] partitions,
+        int[] partitionCounts,
+        int groupCount,
+        int timeoutMs,
+        bool requireStable,
+        AdminCallbacks.ListConsumerGroupOffsetsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>delete_consumer_groups_async</c> submit shape — a flat group-id array, no
+    /// options fields at all (<see cref="DeleteConsumerGroupsOptions"/> carries only the
+    /// timeout), injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    internal delegate void NativeDeleteConsumerGroupsSubmit(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteConsumerGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>remove_members_from_consumer_group_async</c> submit shape — one group id, a
+    /// <c>removeAll</c> discriminant, and a group-instance-id array read only when that flag
+    /// is <see langword="false"/>, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>The discriminant, not the array, decides removeAll mode.</b> When
+    /// <paramref name="removeAll"/> is <see langword="true"/>, <paramref name="groupInstanceIds"/>
+    /// is <see langword="null"/> and <paramref name="memberCount"/> is 0 — Java's
+    /// <c>RemoveMembersFromConsumerGroupOptions()</c> no-arg constructor
+    /// (<c>removeAll = members.isEmpty()</c>). The ABI's result carries zero rows in that mode
+    /// (there is no per-member outcome model at the wire level for "remove everyone"), so
+    /// success/failure travels entirely through the callback's own <c>error</c> parameter — see
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/>'s remarks for the resulting
+    /// <c>All()</c> deviation.
+    /// </remarks>
+    internal delegate void NativeRemoveMembersFromConsumerGroupSubmit(
+        IntPtr admin,
+        IntPtr groupId,
+        [MarshalAs(UnmanagedType.I1)] bool removeAll,
+        IntPtr[]? groupInstanceIds,
+        int memberCount,
+        IntPtr reason,
+        int timeoutMs,
+        AdminCallbacks.RemoveMembersFromConsumerGroupCallback callback,
         IntPtr userData);
 
     internal SafeAdminHandle Handle => _handle;
@@ -672,7 +871,7 @@ internal sealed class NativeAdminClient : IDisposable
         {
             case TopicCollection.TopicNameCollection names:
                 {
-                    List<string> keys = DistinctNames(names.TopicNames(), nameof(topics));
+                    List<string> keys = DistinctNames(names.TopicNames(), "topic names", nameof(topics));
                     VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
                         "deleteTopics", keys, StringComparer.Ordinal);
 
@@ -764,7 +963,7 @@ internal sealed class NativeAdminClient : IDisposable
         {
             case TopicCollection.TopicNameCollection names:
                 {
-                    List<string> keys = DistinctNames(names.TopicNames(), nameof(topics));
+                    List<string> keys = DistinctNames(names.TopicNames(), "topic names", nameof(topics));
                     KeyedAdminOperation<string, TopicDescription> operation =
                         new KeyedAdminOperation<string, TopicDescription>(
                             "describeTopics", keys, StringComparer.Ordinal);
@@ -2329,6 +2528,486 @@ internal sealed class NativeAdminClient : IDisposable
         return new AlterPartitionReassignmentsResult(operation.Tasks, operation.KeyComparer);
     }
 
+    internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        AlterConsumerGroupOffsetsOptions? options) =>
+        AlterConsumerGroupOffsets(
+            groupId, offsets, options, NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync);
+
+    /// <summary>
+    /// Submits <c>alterConsumerGroupOffsets</c> and returns immediately with the
+    /// <b>single</b> awaitable Java's <c>AlterConsumerGroupOffsetsResult</c> wraps (result
+    /// shape 3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
+    /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>), so this uses
+    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge even though
+    /// the ABI result declares a <c>get_error</c> — the same shape as
+    /// <see cref="ElectLeaders(ElectionType, IReadOnlyCollection{TopicPartition}?, ElectLeadersOptions?, NativeElectLeadersSubmit)"/>.
+    /// </para>
+    /// </remarks>
+    internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        AlterConsumerGroupOffsetsOptions? options,
+        NativeAlterConsumerGroupOffsetsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (groupId is null)
+        {
+            throw new ArgumentNullException(nameof(groupId));
+        }
+
+        if (offsets is null)
+        {
+            throw new ArgumentNullException(nameof(offsets));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterConsumerGroupOffsetsOptions));
+        }
+
+        List<TopicPartition> keys = new List<TopicPartition>(offsets.Count);
+        int[] partitions = new int[offsets.Count];
+        long[] offsetValues = new long[offsets.Count];
+        int[] leaderEpochs = new int[offsets.Count];
+        bool[] hasLeaderEpoch = new bool[offsets.Count];
+        string[] metadataValues = new string[offsets.Count];
+        int next = 0;
+        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
+        {
+            if (entry.Key.Topic is null)
+            {
+                throw new ArgumentException(
+                    "The offsets map must not contain a topic partition with a null topic.",
+                    nameof(offsets));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException("Offset value must not be null.", nameof(offsets));
+            }
+
+            keys.Add(entry.Key);
+            partitions[next] = entry.Key.Partition;
+            offsetValues[next] = entry.Value.Offset;
+            hasLeaderEpoch[next] = entry.Value.LeaderEpoch.HasValue;
+            leaderEpochs[next] = entry.Value.LeaderEpoch ?? -1;
+            metadataValues[next] = entry.Value.Metadata ?? string.Empty;
+            next++;
+        }
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
+                "alterConsumerGroupOffsets");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        Utf8Marshal.PinnedUtf8String? pinnedGroupId = null;
+        List<Utf8Marshal.PinnedUtf8String>? pinnedTopics = null;
+        List<Utf8Marshal.PinnedUtf8String>? pinnedMetadata = null;
+        try
+        {
+            pinnedTopics = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+            pinnedMetadata = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinnedGroupId = Utf8Marshal.Pin(groupId);
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            IntPtr[] metadataPointers = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinnedTopics.Add(topic);
+                topics[i] = topic.Pointer;
+
+                Utf8Marshal.PinnedUtf8String metadata = Utf8Marshal.Pin(metadataValues[i]);
+                pinnedMetadata.Add(metadata);
+                metadataPointers[i] = metadata.Pointer;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                pinnedGroupId.Pointer,
+                topics,
+                partitions,
+                offsetValues,
+                metadataPointers,
+                leaderEpochs,
+                hasLeaderEpoch,
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.AlterConsumerGroupOffsets,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // The group id / topic / metadata strings are pinned only for the call
+            // (ffi §A4's call-scoped rule): the ABI copies them out during the submit.
+            pinnedGroupId?.Dispose();
+
+            if (pinnedTopics is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinnedTopics)
+                {
+                    topic.Dispose();
+                }
+            }
+
+            if (pinnedMetadata is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String metadata in pinnedMetadata)
+                {
+                    metadata.Dispose();
+                }
+            }
+        }
+
+        return new AlterConsumerGroupOffsetsResult(operation.Task);
+    }
+
+    internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyCollection<TopicPartition> partitions,
+        DeleteConsumerGroupOffsetsOptions? options) =>
+        DeleteConsumerGroupOffsets(
+            groupId, partitions, options, NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync);
+
+    /// <summary>
+    /// Submits <c>deleteConsumerGroupOffsets</c> and returns immediately with the
+    /// <b>single</b> awaitable Java's <c>DeleteConsumerGroupOffsetsResult</c> wraps (result
+    /// shape 3) — plus the original request's partition set, the second stored field Java
+    /// carries (<c>DeleteConsumerGroupOffsetsResult.java:34</c>) that
+    /// <c>AlterConsumerGroupOffsetsResult</c> does not.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
+    /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>), so this uses
+    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge even though
+    /// the ABI result declares a <c>get_error</c> — the same shape as
+    /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
+    /// </remarks>
+    internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyCollection<TopicPartition> partitions,
+        DeleteConsumerGroupOffsetsOptions? options,
+        NativeDeleteConsumerGroupOffsetsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (groupId is null)
+        {
+            throw new ArgumentNullException(nameof(groupId));
+        }
+
+        if (partitions is null)
+        {
+            throw new ArgumentNullException(nameof(partitions));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteConsumerGroupOffsetsOptions));
+        }
+
+        List<TopicPartition> keys = new List<TopicPartition>(partitions.Count);
+        int[] partitionValues = new int[partitions.Count];
+        int next = 0;
+        foreach (TopicPartition partition in partitions)
+        {
+            if (partition.Topic is null)
+            {
+                throw new ArgumentException(
+                    "The partitions collection must not contain a topic partition with a null topic.",
+                    nameof(partitions));
+            }
+
+            keys.Add(partition);
+            partitionValues[next] = partition.Partition;
+            next++;
+        }
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
+                "deleteConsumerGroupOffsets");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        Utf8Marshal.PinnedUtf8String? pinnedGroupId = null;
+        List<Utf8Marshal.PinnedUtf8String>? pinnedTopics = null;
+        try
+        {
+            pinnedTopics = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinnedGroupId = Utf8Marshal.Pin(groupId);
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinnedTopics.Add(topic);
+                topics[i] = topic.Pointer;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                pinnedGroupId.Pointer,
+                topics,
+                partitionValues,
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.DeleteConsumerGroupOffsets,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // The group id / topic strings are pinned only for the call (ffi §A4's
+            // call-scoped rule): the ABI copies them out during the submit.
+            pinnedGroupId?.Dispose();
+
+            if (pinnedTopics is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String topic in pinnedTopics)
+                {
+                    topic.Dispose();
+                }
+            }
+        }
+
+        return new DeleteConsumerGroupOffsetsResult(operation.Task, keys);
+    }
+
+    internal DeleteConsumerGroupsResult DeleteConsumerGroups(
+        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options) =>
+        DeleteConsumerGroups(groupIds, options, NativeMethods.AdminClientDeleteConsumerGroupsAsync);
+
+    /// <summary>
+    /// Submits <c>deleteConsumerGroups</c> and returns immediately with one awaitable per
+    /// requested group id — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>
+    /// (<c>DeleteConsumerGroupsResult.java:30</c>, result shape 2).
+    /// </summary>
+    /// <remarks>
+    /// Argument-for-argument <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?, NativeDeleteTopicsSubmit, NativeDeleteTopicsSubmit)"/>'s
+    /// by-name branch — a flat group-id array, no per-key options flag — so this reuses the
+    /// same <see cref="Submit"/> helper and <see cref="VoidKeyedAdminOperation{TKey}"/> bridge
+    /// rather than hand-rolling a pin/<c>GCHandle</c> sequence. The group ids cross as a pinned
+    /// <c>IntPtr[]</c> of UTF-8 plus a separate count, never a <c>string[]</c> (ffi §A2); the
+    /// pins are call-scoped (§A4) — the core copies every id out during the submit.
+    /// </remarks>
+    /// <param name="groupIds">The consumer group ids to delete. Duplicates collapse.</param>
+    /// <param name="options">The options, or <see langword="null"/> for the defaults.</param>
+    /// <param name="submit">The native submit, injectable for tests.</param>
+    internal DeleteConsumerGroupsResult DeleteConsumerGroups(
+        IReadOnlyCollection<string> groupIds,
+        DeleteConsumerGroupsOptions? options,
+        NativeDeleteConsumerGroupsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (groupIds is null)
+        {
+            throw new ArgumentNullException(nameof(groupIds));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteConsumerGroupsOptions));
+        }
+
+        List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
+
+        VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+            "deleteConsumerGroups", keys, StringComparer.Ordinal);
+
+        Submit(
+            operation,
+            keys,
+            (admin, pinned, count, callbackUserData) => submit(
+                admin,
+                pinned,
+                count,
+                timeoutMs,
+                AdminCallbacks.DeleteConsumerGroups,
+                callbackUserData));
+
+        return new DeleteConsumerGroupsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
+        string groupId, RemoveMembersFromConsumerGroupOptions options) =>
+        RemoveMembersFromConsumerGroup(
+            groupId, options, NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync);
+
+    /// <summary>
+    /// Submits <c>removeMembersFromConsumerGroup</c> and returns immediately with the
+    /// <b>single</b> awaitable Java's <c>RemoveMembersFromConsumerGroupResult</c> wraps
+    /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 3) —
+    /// plus the original request's member collection, the second stored field Java carries
+    /// (<c>memberInfos</c>, <c>:36</c>), the same two-field pattern as
+    /// <see cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions?, NativeDeleteConsumerGroupOffsetsSubmit)"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>One awaitable, and the per-member outcomes are its map's VALUES</b> — Java's future
+    /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>, so this uses
+    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge, the same shape
+    /// as <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>removeAll mode passes no member array at all.</b> When
+    /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> is <see langword="true"/>,
+    /// Java has no per-member request to send — the broker removes every member — so
+    /// <paramref name="submit"/> is called with a <see langword="null"/> group-instance-id array
+    /// and a count of 0. See <see cref="NativeRemoveMembersFromConsumerGroupSubmit"/> and
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/> for the resulting zero-row / <c>All()</c>
+    /// deviation this forces at the ABI.
+    /// </para>
+    /// </remarks>
+    internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
+        string groupId,
+        RemoveMembersFromConsumerGroupOptions options,
+        NativeRemoveMembersFromConsumerGroupSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (groupId is null)
+        {
+            throw new ArgumentNullException(nameof(groupId));
+        }
+
+        if (options is null)
+        {
+            throw new ArgumentNullException(nameof(options));
+        }
+
+        int timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(RemoveMembersFromConsumerGroupOptions));
+        bool removeAll = options.RemoveAll;
+        IReadOnlyCollection<MemberToRemove> members = options.Members;
+
+        List<MemberToRemove>? keys = null;
+        if (!removeAll)
+        {
+            keys = new List<MemberToRemove>(members.Count);
+            foreach (MemberToRemove member in members)
+            {
+                keys.Add(member);
+            }
+        }
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<IReadOnlyDictionary<string, KafkaException?>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<string, KafkaException?>>(
+                "removeMembersFromConsumerGroup");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        Utf8Marshal.PinnedUtf8String? pinnedGroupId = null;
+        Utf8Marshal.PinnedUtf8String? pinnedReason = null;
+        List<Utf8Marshal.PinnedUtf8String>? pinnedGroupInstanceIds = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinnedGroupId = Utf8Marshal.Pin(groupId);
+            pinnedReason = options.Reason is null ? null : Utf8Marshal.Pin(options.Reason);
+
+            IntPtr[]? groupInstanceIds = null;
+            int memberCount = 0;
+            if (keys is not null)
+            {
+                pinnedGroupInstanceIds = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+                groupInstanceIds = new IntPtr[keys.Count];
+                for (int i = 0; i < keys.Count; i++)
+                {
+                    Utf8Marshal.PinnedUtf8String groupInstanceId = Utf8Marshal.Pin(keys[i].GroupInstanceId);
+                    pinnedGroupInstanceIds.Add(groupInstanceId);
+                    groupInstanceIds[i] = groupInstanceId.Pointer;
+                }
+
+                memberCount = keys.Count;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                pinnedGroupId.Pointer,
+                removeAll,
+                groupInstanceIds,
+                memberCount,
+                pinnedReason?.Pointer ?? IntPtr.Zero,
+                timeoutMs,
+                AdminCallbacks.RemoveMembersFromConsumerGroup,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // The group id / reason / group-instance-id strings are pinned only for the call
+            // (ffi §A4's call-scoped rule): the ABI copies them out during the submit.
+            pinnedGroupId?.Dispose();
+            pinnedReason?.Dispose();
+
+            if (pinnedGroupInstanceIds is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String groupInstanceId in pinnedGroupInstanceIds)
+                {
+                    groupInstanceId.Dispose();
+                }
+            }
+        }
+
+        return new RemoveMembersFromConsumerGroupResult(operation.Task, members);
+    }
+
     internal ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options) =>
         ListPartitionReassignments(
@@ -2592,6 +3271,726 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         return new ListOffsetsResult(operation.Tasks);
+    }
+
+    internal ListGroupsResult ListGroups(ListGroupsOptions? options) =>
+        ListGroups(options, NativeMethods.AdminClientListGroupsAsync);
+
+    /// <summary>
+    /// Submits <c>listGroups</c> and returns immediately with the <b>single</b> awaitable
+    /// Java's <c>ListGroupsResult</c> wraps over its two independent collections (result
+    /// sub-shape 3c).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Three independent filter axes, never parallel arrays.</b> Each travels with its
+    /// own count, and an axis left empty is Java's empty <c>Set</c> — "do not filter on this
+    /// one" — not "match nothing". So the no-options call submits three empty arrays and
+    /// three zero counts, which the ABI reads as an unfiltered listing; sizing any axis from
+    /// another's count would silently narrow or widen the request.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The enums cross as Java's <c>toString()</c> names, not as ordinals</b> — neither
+    /// <see cref="GroupState"/> nor <see cref="GroupType"/> has a numeric id in Java, which
+    /// the header restates at every accessor. A value no member defines is reachable in C#
+    /// only by a cast; it is rejected here, before anything is pinned, rather than encoded,
+    /// because <see cref="GroupMarshal"/>'s encode direction is deliberately partial and the
+    /// caller's parameter is what names the blame (ffi §B5).
+    /// </para>
+    /// <para>
+    /// Every name is pinned only for the call (ffi §A4): the core copies each one out during
+    /// the submit, so nothing native holds them afterwards and the <c>finally</c> unpins on
+    /// every path — including the inline-callback one, which has already run to completion by
+    /// the time the P/Invoke returns.
+    /// </para>
+    /// </remarks>
+    internal ListGroupsResult ListGroups(ListGroupsOptions? options, NativeListGroupsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        IReadOnlyCollection<GroupState> groupStates = Array.Empty<GroupState>();
+        IReadOnlyCollection<string> protocolTypes = Array.Empty<string>();
+        IReadOnlyCollection<GroupType> types = Array.Empty<GroupType>();
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListGroupsOptions));
+
+            // Each getter already hands back a de-duplicated, immutable, null-element-free
+            // copy, so there is nothing left to validate on the protocol-type axis.
+            groupStates = options.GroupStates;
+            protocolTypes = options.ProtocolTypes;
+            types = options.Types;
+        }
+
+        // Encoded BEFORE the operation is rooted and before anything is pinned (ffi §B5), so
+        // an undefined cast value throws with nothing to unwind.
+        List<string> stateNames = FilterNames(
+            groupStates,
+            GroupMarshal.NameFromState,
+            nameof(ListGroupsOptions),
+            nameof(ListGroupsOptions.GroupStates));
+        List<string> typeNames = FilterNames(
+            types,
+            GroupMarshal.NameFromType,
+            nameof(ListGroupsOptions),
+            nameof(ListGroupsOptions.Types));
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>
+            operation =
+                new SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
+                    "listGroups");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(
+                stateNames.Count + protocolTypes.Count + typeNames.Count);
+
+            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
+            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] statePointers = PinNames(stateNames, pinned);
+            IntPtr[] protocolPointers = PinNames(protocolTypes, pinned);
+            IntPtr[] typePointers = PinNames(typeNames, pinned);
+
+            // ⚠ Each axis carries ITS OWN length. Reusing one count for another axis is the
+            // defect this shape invites.
+            submit(
+                _handle.DangerousGetHandle(),
+                statePointers,
+                statePointers.Length,
+                protocolPointers,
+                protocolPointers.Length,
+                typePointers,
+                typePointers.Length,
+                timeoutMs,
+                AdminCallbacks.ListGroups,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Pinned only for the call (ffi §A4's call-scoped rule): the ABI copies every
+            // name out during the submit.
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String name in pinned)
+                {
+                    name.Dispose();
+                }
+            }
+        }
+
+        return new ListGroupsResult(operation.Task);
+    }
+
+#pragma warning disable CS0618 // Java deprecates this RPC and its three types; mirrored, not avoided.
+
+    internal ListConsumerGroupsResult ListConsumerGroups(ListConsumerGroupsOptions? options) =>
+        ListConsumerGroups(options, NativeMethods.AdminClientListConsumerGroupsAsync);
+
+    /// <summary>
+    /// Submits <c>listConsumerGroups</c> and returns immediately with the <b>single</b> awaitable
+    /// Java's <c>ListConsumerGroupsResult</c> wraps over its two independent collections (result
+    /// sub-shape 3c).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Two filter axes, not three.</b> This is the generation-older sibling of
+    /// <c>ListGroups</c>, and <c>ListConsumerGroupsOptions.java</c> carries no protocol-type
+    /// filter — so the ABI takes group state and group type only. Copying the three-axis argument
+    /// list across would feed the type axis into the ABI's <em>second</em> array and shift every
+    /// argument after it, including the callback pointer.
+    /// </para>
+    /// <para>
+    /// ⚠ <b><see cref="ListConsumerGroupsOptions.States"/> is not a second state axis.</b> It is
+    /// the same set of states projected into the older <see cref="ConsumerGroupState"/> spelling —
+    /// Java defines the deprecated <c>inStates(Set&lt;ConsumerGroupState&gt;)</c> in terms of
+    /// <c>inGroupStates(...)</c> — so there is nothing extra to submit, and submitting it as well
+    /// would filter one axis twice.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The two arrays are never parallel.</b> Each travels with its own count, and an axis
+    /// left empty is Java's empty <c>Set</c> — "do not filter on this one" — not "match nothing".
+    /// So the no-options call submits two empty arrays and two zero counts, which the ABI reads as
+    /// an unfiltered listing; sizing either axis from the other's count would silently narrow or
+    /// widen the request.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The enums cross as Java's <c>toString()</c> names, not as ordinals</b> — neither
+    /// <see cref="GroupState"/> nor <see cref="GroupType"/> has a numeric id in Java. A value no
+    /// member defines is reachable in C# only by a cast; it is rejected here, before the operation
+    /// is rooted and before anything is pinned, because <see cref="GroupMarshal"/>'s encode
+    /// direction is deliberately partial and the caller's parameter is what names the blame
+    /// (ffi §B5).
+    /// </para>
+    /// <para>
+    /// Every name is pinned only for the call (ffi §A4): the core copies each one out during the
+    /// submit, so nothing native holds them afterwards and the <c>finally</c> unpins on every path
+    /// — including the inline-callback one, which has already run to completion by the time the
+    /// P/Invoke returns.
+    /// </para>
+    /// </remarks>
+    internal ListConsumerGroupsResult ListConsumerGroups(
+        ListConsumerGroupsOptions? options, NativeListConsumerGroupsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        IReadOnlyCollection<GroupState> groupStates = Array.Empty<GroupState>();
+        IReadOnlyCollection<GroupType> types = Array.Empty<GroupType>();
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListConsumerGroupsOptions));
+
+            // Each getter already hands back a de-duplicated, immutable copy. States is
+            // deliberately not read — see the remarks above.
+            groupStates = options.GroupStates;
+            types = options.Types;
+        }
+
+        // Encoded BEFORE the operation is rooted and before anything is pinned (ffi §B5), so
+        // an undefined cast value throws with nothing to unwind.
+        List<string> stateNames = FilterNames(
+            groupStates,
+            GroupMarshal.NameFromState,
+            nameof(ListConsumerGroupsOptions),
+            nameof(ListConsumerGroupsOptions.GroupStates));
+        List<string> typeNames = FilterNames(
+            types,
+            GroupMarshal.NameFromType,
+            nameof(ListConsumerGroupsOptions),
+            nameof(ListConsumerGroupsOptions.Types));
+
+        // ---- Publish everything the callback needs BEFORE the call ----
+        SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>
+            operation =
+                new SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
+                    "listConsumerGroups");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(stateNames.Count + typeNames.Count);
+
+            // Span-the-op reference, INSIDE the try so a DangerousAddRef throw routes
+            // through AbandonBeforeSubmit rather than rooting the GCHandle forever.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] statePointers = PinNames(stateNames, pinned);
+            IntPtr[] typePointers = PinNames(typeNames, pinned);
+
+            // ⚠ Each axis carries ITS OWN length. Reusing one count for the other axis is the
+            // defect this shape invites.
+            submit(
+                _handle.DangerousGetHandle(),
+                statePointers,
+                statePointers.Length,
+                typePointers,
+                typePointers.Length,
+                timeoutMs,
+                AdminCallbacks.ListConsumerGroups,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback can never fire → we own the cleanup.
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Pinned only for the call (ffi §A4's call-scoped rule): the ABI copies every
+            // name out during the submit.
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String name in pinned)
+                {
+                    name.Dispose();
+                }
+            }
+        }
+
+        return new ListConsumerGroupsResult(operation.Task);
+    }
+
+#pragma warning restore CS0618
+
+    internal DescribeConsumerGroupsResult DescribeConsumerGroups(
+        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options) =>
+        DescribeConsumerGroups(groupIds, options, NativeMethods.AdminClientDescribeConsumerGroupsAsync);
+
+    /// <summary>
+    /// Submits <c>describeConsumerGroups</c> and returns immediately with one awaitable per
+    /// requested group id — Java's <c>Map&lt;String, KafkaFuture&lt;ConsumerGroupDescription&gt;&gt;</c>
+    /// (result shape 1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>The bridge must be keyed by <see cref="StringComparer.Ordinal"/>.</b>
+    /// <see cref="DescribeConsumerGroupsResult"/>'s aggregate hardcodes that comparer, and —
+    /// unlike <c>DescribeTopicsResult</c> — Java declares its constructor <b>public</b>, so
+    /// there is no internal factory through which a different comparer could be threaded.
+    /// A bridge built with the default comparer would therefore not fail loudly; it would
+    /// silently disagree with the result object it feeds, for group ids differing only by
+    /// culture-sensitive equivalence. The same warning is recorded on
+    /// <c>AdminCallbacks.DescribeConsumerGroupsKey</c>, the reader at the other end.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>One flag, not two.</b> Java's <c>DescribeConsumerGroupsOptions</c> has no
+    /// partition-size limit, so <c>includeAuthorizedOperations</c> is the last value before
+    /// the callback pointer — see <see cref="NativeDescribeConsumerGroupsSubmit"/>.
+    /// </para>
+    /// <para>
+    /// The group ids cross as a pinned <c>IntPtr[]</c> of UTF-8 plus a separate count, never
+    /// as a <c>string[]</c> whose default marshaller would emit ANSI (ffi §A2). The pins are
+    /// call-scoped (§A4) — the core copies every id out during the submit — and
+    /// <see cref="Submit"/> owns that sequence, together with the rooting of the operation
+    /// and the span-the-op client reference that keeps <c>AdminClient_destroy</c> from
+    /// running under an in-flight call.
+    /// </para>
+    /// </remarks>
+    internal DescribeConsumerGroupsResult DescribeConsumerGroups(
+        IReadOnlyCollection<string> groupIds,
+        DescribeConsumerGroupsOptions? options,
+        NativeDescribeConsumerGroupsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (groupIds is null)
+        {
+            throw new ArgumentNullException(nameof(groupIds));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool includeAuthorizedOperations = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeConsumerGroupsOptions));
+            includeAuthorizedOperations = options.IncludeAuthorizedOperations;
+        }
+
+        List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
+
+        KeyedAdminOperation<string, ConsumerGroupDescription> operation =
+            new KeyedAdminOperation<string, ConsumerGroupDescription>(
+                "describeConsumerGroups", keys, StringComparer.Ordinal);
+
+        Submit(
+            operation,
+            keys,
+            (admin, pinned, count, callbackUserData) => submit(
+                admin,
+                pinned,
+                count,
+                timeoutMs,
+                includeAuthorizedOperations,
+                AdminCallbacks.DescribeConsumerGroups,
+                callbackUserData));
+
+        return new DescribeConsumerGroupsResult(operation.Tasks);
+    }
+
+    internal DescribeClassicGroupsResult DescribeClassicGroups(
+        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options) =>
+        DescribeClassicGroups(groupIds, options, NativeMethods.AdminClientDescribeClassicGroupsAsync);
+
+    /// <summary>
+    /// Submits <c>describeClassicGroups</c> and returns immediately with one awaitable per
+    /// requested group id — Java's <c>Map&lt;String, KafkaFuture&lt;ClassicGroupDescription&gt;&gt;</c>
+    /// (result shape 1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>The bridge must be keyed by <see cref="StringComparer.Ordinal"/></b>, for the
+    /// reason spelled out on <see cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions?, NativeDescribeConsumerGroupsSubmit)"/>:
+    /// <see cref="DescribeClassicGroupsResult"/>'s aggregate hardcodes that comparer and its
+    /// constructor is public, so a bridge built with the default comparer would not fail
+    /// loudly — it would silently disagree with the result object it feeds, for group ids
+    /// differing only by culture-sensitive equivalence. The same warning is recorded on
+    /// <c>AdminCallbacks.DescribeClassicGroupsKey</c>, the reader at the other end.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>One flag, and it is the last value before the callback.</b> Java's
+    /// <c>DescribeClassicGroupsOptions</c> declares no partition-size limit — see
+    /// <see cref="NativeDescribeClassicGroupsSubmit"/>.
+    /// </para>
+    /// <para>
+    /// The group ids cross as a pinned <c>IntPtr[]</c> of UTF-8 plus a separate count, never
+    /// as a <c>string[]</c> whose default marshaller would emit ANSI (ffi §A2). The pins are
+    /// call-scoped (§A4) — the core copies every id out during the submit — and
+    /// <see cref="Submit"/> owns that sequence, together with the rooting of the operation
+    /// and the span-the-op client reference that keeps <c>AdminClient_destroy</c> from
+    /// running under an in-flight call.
+    /// </para>
+    /// </remarks>
+    /// <param name="groupIds">The classic group ids to describe. Duplicates collapse.</param>
+    /// <param name="options">The options, or <see langword="null"/> for the defaults.</param>
+    /// <param name="submit">The native submit, injectable for tests.</param>
+    internal DescribeClassicGroupsResult DescribeClassicGroups(
+        IReadOnlyCollection<string> groupIds,
+        DescribeClassicGroupsOptions? options,
+        NativeDescribeClassicGroupsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (groupIds is null)
+        {
+            throw new ArgumentNullException(nameof(groupIds));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool includeAuthorizedOperations = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClassicGroupsOptions));
+            includeAuthorizedOperations = options.IncludeAuthorizedOperations;
+        }
+
+        List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
+
+        KeyedAdminOperation<string, ClassicGroupDescription> operation =
+            new KeyedAdminOperation<string, ClassicGroupDescription>(
+                "describeClassicGroups", keys, StringComparer.Ordinal);
+
+        Submit(
+            operation,
+            keys,
+            (admin, pinned, count, callbackUserData) => submit(
+                admin,
+                pinned,
+                count,
+                timeoutMs,
+                includeAuthorizedOperations,
+                AdminCallbacks.DescribeClassicGroups,
+                callbackUserData));
+
+        return new DescribeClassicGroupsResult(operation.Tasks);
+    }
+
+    internal ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
+        ListConsumerGroupOffsetsOptions? options) =>
+        ListConsumerGroupOffsets(
+            groupSpecs, options, NativeMethods.AdminClientListConsumerGroupOffsetsAsync);
+
+    /// <summary>
+    /// Submits <c>listConsumerGroupOffsets</c> and returns immediately with one awaitable per
+    /// requested group id — Java's
+    /// <c>Map&lt;String, KafkaFuture&lt;Map&lt;TopicPartition, OffsetAndMetadata&gt;&gt;&gt;</c>
+    /// (result shape 1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>The bridge must be keyed by <see cref="StringComparer.Ordinal"/></b>, for the
+    /// reason spelled out on <see cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions?, NativeDescribeConsumerGroupsSubmit)"/>:
+    /// <see cref="ListConsumerGroupOffsetsResult"/> hardcodes that comparer, so a bridge built
+    /// with the default comparer would silently disagree with the result object it feeds.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The all-versus-empty distinction is the whole point of this argument shape.</b> A
+    /// spec whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> is
+    /// <see langword="null"/> asks for every committed partition and crosses with
+    /// <c>allPartitions[i] == true</c>; a spec carrying an <em>empty</em> collection asks for
+    /// nothing and crosses with <c>false</c> and a count of 0. Collapsing the two — for
+    /// instance by deriving the flag from the count — would turn "no partitions" into "all
+    /// partitions", which is a data-returning difference, not a cosmetic one.
+    /// </para>
+    /// <para>
+    /// A group whose selection contributes no pairs (either of the two cases above) passes a
+    /// <see cref="IntPtr.Zero"/> inner pointer with a count of 0. The core null-checks both
+    /// inner pointers before reading, so that is well defined rather than a zero-length pin.
+    /// </para>
+    /// <para>
+    /// Every string crosses as pinned UTF-8, never as a <c>string[]</c> whose default
+    /// marshaller would emit ANSI (ffi §A2), and every pin — the group ids, the per-group
+    /// topic names, and the inner <c>IntPtr[]</c> / <c>int[]</c> arrays — is call-scoped
+    /// (§A4): the core copies the whole request out during the submit. The operation is
+    /// rooted and the span-the-op client reference is taken before the P/Invoke, because the
+    /// callback may fire inline.
+    /// </para>
+    /// </remarks>
+    /// <param name="groupSpecs">The per-group partition selections, keyed by group id.</param>
+    /// <param name="options">The options, or <see langword="null"/> for the defaults.</param>
+    /// <param name="submit">The native submit, injectable for tests.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="groupSpecs"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// A group id, a spec, or a selected topic is null, or a group id repeats.
+    /// </exception>
+    internal ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
+        ListConsumerGroupOffsetsOptions? options,
+        NativeListConsumerGroupOffsetsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (groupSpecs is null)
+        {
+            throw new ArgumentNullException(nameof(groupSpecs));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool requireStable = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ListConsumerGroupOffsetsOptions));
+            requireStable = options.RequireStable;
+        }
+
+        List<string> keys = new List<string>(groupSpecs.Count);
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        bool[] allPartitions = new bool[groupSpecs.Count];
+        int[] partitionCounts = new int[groupSpecs.Count];
+        List<TopicPartition>?[] selections = new List<TopicPartition>?[groupSpecs.Count];
+        int next = 0;
+        foreach (KeyValuePair<string, ListConsumerGroupOffsetsSpec> entry in groupSpecs)
+        {
+            if (entry.Key is null)
+            {
+                throw new ArgumentException(
+                    "The group specs must not contain a null group id.", nameof(groupSpecs));
+            }
+
+            // A dictionary already guarantees this, but the parameter is an interface a caller
+            // may implement; a repeat would make the per-key bridge ambiguous about which
+            // spec won, and the core rejects it too.
+            if (!seen.Add(entry.Key))
+            {
+                throw new ArgumentException(
+                    $"The group specs must not contain the group id '{entry.Key}' more than once.",
+                    nameof(groupSpecs));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    $"The spec for group id '{entry.Key}' must not be null.", nameof(groupSpecs));
+            }
+
+            keys.Add(entry.Key);
+
+            IReadOnlyCollection<TopicPartition>? selected = entry.Value.TopicPartitions;
+            if (selected is null)
+            {
+                // "All partitions" — the inner pair at this index is never read.
+                allPartitions[next] = true;
+                next++;
+                continue;
+            }
+
+            List<TopicPartition> pairs = new List<TopicPartition>(selected.Count);
+            foreach (TopicPartition partition in selected)
+            {
+                // A `default(TopicPartition)` has a null Topic, which the ABI would read as
+                // an absent name rather than a request (ffi §B5).
+                if (partition.Topic is null)
+                {
+                    throw new ArgumentException(
+                        $"The spec for group id '{entry.Key}' must not select a topic partition "
+                        + "with a null topic.",
+                        nameof(groupSpecs));
+                }
+
+                pairs.Add(partition);
+            }
+
+            selections[next] = pairs;
+            partitionCounts[next] = pairs.Count;
+            next++;
+        }
+
+        KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation =
+            new KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
+                "listConsumerGroupOffsets", keys, StringComparer.Ordinal);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String>? pinned = null;
+        List<GCHandle>? pinnedArrays = null;
+        try
+        {
+            pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+            pinnedArrays = new List<GCHandle>(keys.Count * 2);
+
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] groupIds = new IntPtr[keys.Count];
+            IntPtr[] topics = new IntPtr[keys.Count];
+            IntPtr[] partitions = new IntPtr[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String groupId = Utf8Marshal.Pin(keys[i]);
+                pinned.Add(groupId);
+                groupIds[i] = groupId.Pointer;
+
+                List<TopicPartition>? pairs = selections[i];
+                if (pairs is null || pairs.Count == 0)
+                {
+                    // Both the all-partitions case and an empty explicit selection: a NULL
+                    // inner pointer the core never dereferences. `allPartitions[i]` alone
+                    // tells the two apart.
+                    topics[i] = IntPtr.Zero;
+                    partitions[i] = IntPtr.Zero;
+                    continue;
+                }
+
+                IntPtr[] topicPointers = new IntPtr[pairs.Count];
+                int[] partitionIds = new int[pairs.Count];
+                for (int j = 0; j < pairs.Count; j++)
+                {
+                    Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(pairs[j].Topic);
+                    pinned.Add(topic);
+                    topicPointers[j] = topic.Pointer;
+                    partitionIds[j] = pairs[j].Partition;
+                }
+
+                GCHandle topicPin = GCHandle.Alloc(topicPointers, GCHandleType.Pinned);
+                pinnedArrays.Add(topicPin);
+                topics[i] = topicPin.AddrOfPinnedObject();
+
+                GCHandle partitionPin = GCHandle.Alloc(partitionIds, GCHandleType.Pinned);
+                pinnedArrays.Add(partitionPin);
+                partitions[i] = partitionPin.AddrOfPinnedObject();
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                groupIds,
+                allPartitions,
+                topics,
+                partitions,
+                partitionCounts,
+                keys.Count,
+                timeoutMs,
+                requireStable,
+                AdminCallbacks.ListConsumerGroupOffsets,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (pinned is not null)
+            {
+                foreach (Utf8Marshal.PinnedUtf8String value in pinned)
+                {
+                    value.Dispose();
+                }
+            }
+
+            if (pinnedArrays is not null)
+            {
+                foreach (GCHandle pin in pinnedArrays)
+                {
+                    pin.Free();
+                }
+            }
+        }
+
+        return new ListConsumerGroupOffsetsResult(operation.Tasks);
+    }
+
+    /// <summary>
+    /// Encodes one enum-valued group-listing filter axis as the Java <c>toString()</c> names the
+    /// ABI reads, rejecting a value no member defines.
+    /// </summary>
+    /// <typeparam name="T">The filter's enum type.</typeparam>
+    /// <param name="values">The axis, already de-duplicated by the options object.</param>
+    /// <param name="name">
+    /// <see cref="GroupMarshal"/>'s encoder for <typeparamref name="T"/>, which returns
+    /// <see langword="null"/> for an undefined value rather than throwing — it does not know
+    /// which property to blame.
+    /// </param>
+    /// <param name="optionsName">
+    /// The options type to name in the error. Passed rather than fixed because two generations of
+    /// the same RPC share this helper — <c>listGroups</c> and its deprecated predecessor
+    /// <c>listConsumerGroups</c> — and naming the wrong one sends the caller to a property that
+    /// does not exist on the type they passed.
+    /// </param>
+    /// <param name="propertyName">The options property to name in the error.</param>
+    private static List<string> FilterNames<T>(
+        IReadOnlyCollection<T> values, Func<T, string?> name, string optionsName, string propertyName)
+        where T : struct
+    {
+        List<string> names = new List<string>(values.Count);
+        foreach (T value in values)
+        {
+            string? text = name(value);
+            if (text is null)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "options",
+                    value,
+                    $"{optionsName}.{propertyName} must contain only defined {typeof(T).Name} members.");
+            }
+
+            names.Add(text);
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Pins one filter axis's names for the duration of the submit, recording every pin in
+    /// <paramref name="pinned"/> so the caller's <c>finally</c> unpins on every path.
+    /// </summary>
+    /// <param name="names">The axis's names, possibly none.</param>
+    /// <param name="pinned">The call's pin ledger, shared by all three axes.</param>
+    /// <returns>
+    /// The pointer array for this axis. An empty axis yields an empty array, which the ABI
+    /// reads together with a count of <c>0</c> as "no filter on this axis".
+    /// </returns>
+    private static IntPtr[] PinNames(
+        IReadOnlyCollection<string> names, List<Utf8Marshal.PinnedUtf8String> pinned)
+    {
+        if (names.Count == 0)
+        {
+            return Array.Empty<IntPtr>();
+        }
+
+        IntPtr[] pointers = new IntPtr[names.Count];
+        int next = 0;
+        foreach (string name in names)
+        {
+            Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(name);
+            pinned.Add(pin);
+            pointers[next++] = pin.Pointer;
+        }
+
+        return pointers;
     }
 
     /// <summary>
@@ -2886,7 +4285,7 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// De-duplicates the requested topic names, preserving request order, and rejects a
+    /// De-duplicates a requested string key axis, preserving request order, and rejects a
     /// null element before it can reach the ABI.
     /// </summary>
     /// <remarks>
@@ -2897,7 +4296,15 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>TopicCollection.ofTopicNames</c> accepts a null element and fails later, so the
     /// check lives at the submit rather than in the collection's factory.
     /// </remarks>
-    private static List<string> DistinctNames(IReadOnlyCollection<string> names, string parameterName)
+    /// <param name="names">The requested keys, in request order.</param>
+    /// <param name="elementNoun">
+    /// What the elements are, for the error text. Passed rather than fixed because more
+    /// than one RPC family keys on plain strings — topic names and consumer group ids —
+    /// and naming the wrong kind points the caller at the wrong argument.
+    /// </param>
+    /// <param name="parameterName">The caller's parameter to blame.</param>
+    private static List<string> DistinctNames(
+        IReadOnlyCollection<string> names, string elementNoun, string parameterName)
     {
         List<string> keys = new List<string>(names.Count);
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
@@ -2905,7 +4312,8 @@ internal sealed class NativeAdminClient : IDisposable
         {
             if (name is null)
             {
-                throw new ArgumentException("The topic names must not contain a null element.", parameterName);
+                throw new ArgumentException(
+                    $"The {elementNoun} must not contain a null element.", parameterName);
             }
 
             if (seen.Add(name))

@@ -223,6 +223,36 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for
+    /// <c>kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t</c> (result
+    /// shape 3 — one aggregate future over the map, the same shape as
+    /// <see cref="ElectLeadersCallback"/>).
+    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
+    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_t</c> does declare a <c>get_error</c>:
+    /// that accessor carries the map's per-partition <em>value</em>
+    /// (<see cref="AlterConsumerGroupOffsetsOptionalError"/>), not a failure. A non-null
+    /// <paramref name="error"/> means the request could not be submitted at all, and is
+    /// <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void AlterConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t</c> (result
+    /// shape 3 — one aggregate future over the map, the same shape as
+    /// <see cref="AlterConsumerGroupOffsetsCallback"/>).
+    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
+    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_t</c> does declare a <c>get_error</c>:
+    /// that accessor carries the map's per-partition <em>value</em>
+    /// (<see cref="DeleteConsumerGroupOffsetsOptionalError"/>), not a failure. A non-null
+    /// <paramref name="error"/> means the request could not be submitted at all, and is
+    /// <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DeleteConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
     /// <c>kafka_admin_AdminClient_alter_partition_reassignments_callback_t</c> (result
     /// shape 2). ⚠ A <b>per-partition</b> failure arrives inside
     /// <paramref name="result"/>, borrowed; a non-null <paramref name="error"/> means the
@@ -253,6 +283,114 @@ internal static class AdminCallbacks
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void ListOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_list_groups_callback_t</c> (result
+    /// shape 1). ⚠ A <b>per-broker</b> listing failure arrives inside
+    /// <paramref name="result"/> (<c>kafka_admin_ListGroupsResult_get_error</c>), borrowed;
+    /// a non-null <paramref name="error"/> means the request could not be submitted at all
+    /// and is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_list_consumer_groups_callback_t</c>
+    /// (result shape 1). ⚠ A <b>per-broker</b> listing failure arrives inside
+    /// <paramref name="result"/> (<c>kafka_admin_ListConsumerGroupsResult_get_error</c>),
+    /// borrowed; a non-null <paramref name="error"/> means the request could not be
+    /// submitted at all and is <b>owned</b>.
+    /// </summary>
+    /// <remarks>
+    /// A separate delegate type from <see cref="ListGroupsCallback"/> although the three
+    /// parameters are identical: each is the managed spelling of one C typedef, and the two
+    /// result roots they carry are different types that must be destroyed by different
+    /// functions. Sharing one delegate would let a <c>listGroups</c> root reach
+    /// <c>ListConsumerGroupsResultDestroy</c>.
+    /// </remarks>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListConsumerGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_describe_consumer_groups_callback_t</c> (result shape 1).
+    /// ⚠ A <b>per-group</b> failure arrives inside <paramref name="result"/>
+    /// (<c>kafka_admin_DescribeConsumerGroupsResult_get_error</c>), borrowed; a non-null
+    /// <paramref name="error"/> means the request could not be submitted at all and is
+    /// <b>owned</b>.
+    /// </summary>
+    /// <remarks>
+    /// Its own delegate type, for the reason stated on
+    /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
+    /// typedef, and the result roots they carry are different native types destroyed by
+    /// different functions. Sharing one would let a <c>describeConsumerGroups</c> root
+    /// reach another RPC's destroy.
+    /// </remarks>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeConsumerGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_describe_classic_groups_callback_t</c> (result shape 1).
+    /// ⚠ A <b>per-group</b> failure arrives inside <paramref name="result"/>
+    /// (<c>kafka_admin_DescribeClassicGroupsResult_get_error</c>), borrowed; a non-null
+    /// <paramref name="error"/> means the request could not be submitted at all and is
+    /// <b>owned</b>.
+    /// </summary>
+    /// <remarks>
+    /// Its own delegate type, for the reason stated on
+    /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
+    /// typedef, and the result roots they carry are different native types destroyed by
+    /// different functions. Sharing the structurally identical
+    /// <see cref="DescribeConsumerGroupsCallback"/> would let a <c>describeClassicGroups</c>
+    /// root reach <c>kafka_admin_DescribeConsumerGroupsResult_destroy</c>.
+    /// </remarks>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeClassicGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_list_consumer_group_offsets_callback_t</c> (result shape 1).
+    /// ⚠ A <b>per-group</b> failure arrives inside <paramref name="result"/>
+    /// (<c>kafka_admin_ListConsumerGroupOffsetsResult_get_error</c>), borrowed; a non-null
+    /// <paramref name="error"/> means the request could not be submitted at all and is
+    /// <b>owned</b>.
+    /// </summary>
+    /// <remarks>
+    /// Its own delegate type, for the reason stated on
+    /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
+    /// typedef, and the result roots they carry are different native types destroyed by
+    /// different functions. Sharing a structurally identical sibling would let a
+    /// <c>listConsumerGroupOffsets</c> root reach some other RPC's destroy.
+    /// </remarks>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_delete_consumer_groups_callback_t</c>
+    /// (result shape 2, like <see cref="DeleteTopicsCallback"/>). ⚠ A <b>per-group</b>
+    /// failure arrives inside <paramref name="result"/>, borrowed; a non-null
+    /// <paramref name="error"/> means the request could not be submitted at all and is
+    /// <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DeleteConsumerGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t</c> (result
+    /// shape 3 — one aggregate future over the whole map, the same shape as
+    /// <see cref="AlterConsumerGroupOffsetsCallback"/>).
+    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_t</c> does declare a
+    /// <c>get_error</c>: that accessor carries the map's per-member <em>value</em>
+    /// (<see cref="RemoveMembersFromConsumerGroupOptionalError"/>), not a failure. A
+    /// non-null <paramref name="error"/> means the request could not be submitted at all,
+    /// and is <b>owned</b>. In <b>removeAll</b> mode the result handle always has zero
+    /// rows — see <see cref="NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void RemoveMembersFromConsumerGroupCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The single rooted instance passed to every <c>close_async</c> submission. Rooted
@@ -744,6 +882,79 @@ internal static class AdminCallbacks
         OnAlterPartitionReassignments;
 
     /// <summary>
+    /// The rooted instance passed to every <c>alter_consumer_group_offsets_async</c>
+    /// submission (result shape 3 — one aggregate future, the same shape as
+    /// <see cref="ElectLeaders"/>).
+    /// </summary>
+    internal static readonly AlterConsumerGroupOffsetsCallback AlterConsumerGroupOffsets =
+        OnAlterConsumerGroupOffsets;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>delete_consumer_group_offsets_async</c>
+    /// submission (result shape 3 — one aggregate future, the same shape as
+    /// <see cref="AlterConsumerGroupOffsets"/>).
+    /// </summary>
+    internal static readonly DeleteConsumerGroupOffsetsCallback DeleteConsumerGroupOffsets =
+        OnDeleteConsumerGroupOffsets;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>delete_consumer_groups_async</c> submission
+    /// (result shape 2, like <see cref="DeleteTopicsByName"/>).
+    /// </summary>
+    internal static readonly DeleteConsumerGroupsCallback DeleteConsumerGroups = OnDeleteConsumerGroups;
+
+    /// <summary>
+    /// The rooted instance passed to every
+    /// <c>remove_members_from_consumer_group_async</c> submission (result shape 3 — one
+    /// aggregate future, the same shape as <see cref="AlterConsumerGroupOffsets"/>).
+    /// </summary>
+    internal static readonly RemoveMembersFromConsumerGroupCallback RemoveMembersFromConsumerGroup =
+        OnRemoveMembersFromConsumerGroup;
+
+    /// <summary>
+    /// <c>deleteConsumerGroups</c>' universal accessors — result <b>shape 2</b>: Java's
+    /// per-group future is <c>KafkaFuture&lt;Void&gt;</c>
+    /// (<c>DeleteConsumerGroupsResult.java:30</c>), so the ABI declares no
+    /// <c>_get_value</c> and a null per-group error <em>is</em> the success value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DeleteConsumerGroupsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DeleteConsumerGroupsResultCount,
+            NativeMethods.DeleteConsumerGroupsResultGetError);
+
+    /// <summary><c>deleteConsumerGroups</c>' key reader — the group id.</summary>
+    internal static readonly Func<IntPtr, int, string> DeleteConsumerGroupsKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteConsumerGroupsResultGetGroupId(result, index));
+
+    /// <summary>
+    /// <c>removeMembersFromConsumerGroup</c>' key reader — the member's group instance id.
+    /// Java keys the resolved map by <c>MemberIdentity</c>
+    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>), whose only distinguishing
+    /// field the ABI carries back is the group instance id
+    /// (<c>MemberToRemove.java</c> has no <c>toString()</c> override, so there is no
+    /// Java-mandated string form to preserve here).
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> RemoveMembersFromConsumerGroupKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(
+                NativeMethods.RemoveMembersFromConsumerGroupResultGetGroupInstanceId(result, index));
+
+    /// <summary>
+    /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' per-member <b>VALUE</b> reader — and it
+    /// reads <c>get_error(i)</c>. Same shape as
+    /// <see cref="AlterConsumerGroupOffsetsOptionalError"/>, for the same reason: Java's
+    /// future resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>
+    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>) — one future over the whole
+    /// map, so a per-member error is an ordinary map value, not a per-member fault. Only
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.MemberResult"/> and
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult.All"/> turn a non-null entry
+    /// into a fault, mirroring Java's <c>maybeCompleteExceptionally</c> / <c>all()</c>.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, KafkaException?> RemoveMembersFromConsumerGroupOptionalError =
+        BorrowedOptionalError(NativeMethods.RemoveMembersFromConsumerGroupResultGetError);
+
+    /// <summary>
     /// <c>electLeaders</c>' <b>composite</b> key reader — this result declares no
     /// <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled into
     /// the <see cref="TopicPartition"/> Java keys the map by. Same reader shape as
@@ -793,6 +1004,77 @@ internal static class AdminCallbacks
         BorrowedOptionalError(NativeMethods.ElectLeadersResultGetError);
 
     /// <summary>
+    /// <c>alterConsumerGroupOffsets</c>' <b>composite</b> key reader — this result declares
+    /// no <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled
+    /// into the <see cref="TopicPartition"/> Java's map is keyed by. Same reader shape as
+    /// <see cref="ElectLeadersKey"/>.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartition> AlterConsumerGroupOffsetsKey =
+        TopicPartitionKey(
+            NativeMethods.AlterConsumerGroupOffsetsResultGetTopic,
+            NativeMethods.AlterConsumerGroupOffsetsResultGetPartition);
+
+    /// <summary>
+    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' per-partition <b>VALUE</b> reader — and it reads
+    /// <c>get_error(i)</c>. Same shape as <see cref="ElectLeadersOptionalError"/>, for the
+    /// same reason.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Java's future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) — <c>Errors.NONE</c> means that
+    /// partition's offset was altered successfully, any other code is that partition's own
+    /// outcome. The per-partition error <em>is</em> the map's value, so it is read by the
+    /// value reader and lands in the map — it does not fault anything on its own; only
+    /// <see cref="Admin.AlterConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/> and
+    /// <see cref="Admin.AlterConsumerGroupOffsetsResult.All"/> turn a non-null entry into a
+    /// fault, mirroring Java's <c>partitionResult</c> / <c>all()</c>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The ABI accessor set cannot tell you this.</b> This result's accessor set is
+    /// byte-identical to <see cref="NativeMethods.ElectLeadersResultGetTopic"/>'s family and
+    /// to <see cref="AlterPartitionReassignmentsAccessors"/>'s — accessor-set identity is
+    /// evidence of nothing (<c>admin-client.md</c> §1.4). Only the Java return type
+    /// separates them.
+    /// </para>
+    /// <para>
+    /// ⚠ The pointer is <b>BORROWED</b> from the result root, so it goes through
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/> and is never destroyed.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, KafkaException?> AlterConsumerGroupOffsetsOptionalError =
+        BorrowedOptionalError(NativeMethods.AlterConsumerGroupOffsetsResultGetError);
+
+    /// <summary>
+    /// <c>deleteConsumerGroupOffsets</c>' <b>composite</b> key reader — this result declares
+    /// no <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled
+    /// into the <see cref="TopicPartition"/> Java's map is keyed by. Same reader shape as
+    /// <see cref="AlterConsumerGroupOffsetsKey"/>.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartition> DeleteConsumerGroupOffsetsKey =
+        TopicPartitionKey(
+            NativeMethods.DeleteConsumerGroupOffsetsResultGetTopic,
+            NativeMethods.DeleteConsumerGroupOffsetsResultGetPartition);
+
+    /// <summary>
+    /// ⚠⚠ <c>deleteConsumerGroupOffsets</c>' per-partition <b>VALUE</b> reader — and it reads
+    /// <c>get_error(i)</c>. Same shape as <see cref="AlterConsumerGroupOffsetsOptionalError"/>,
+    /// for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// Java's future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>) — <c>Errors.NONE</c> means that
+    /// partition's offset was deleted successfully, any other code is that partition's own
+    /// outcome. The per-partition error <em>is</em> the map's value, so it is read by the
+    /// value reader and lands in the map — it does not fault anything on its own; only
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.PartitionResult(TopicPartition)"/> and
+    /// <see cref="Admin.DeleteConsumerGroupOffsetsResult.All"/> turn a non-null entry into a
+    /// fault, mirroring Java's <c>partitionResult</c> / <c>all()</c>.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, KafkaException?> DeleteConsumerGroupOffsetsOptionalError =
+        BorrowedOptionalError(NativeMethods.DeleteConsumerGroupOffsetsResultGetError);
+
+    /// <summary>
     /// <c>alterPartitionReassignments</c>' universal accessors — result <b>shape 2</b>:
     /// the ABI declares no <c>_get_value</c>, because Java's per-partition future is
     /// <c>KafkaFuture&lt;Void&gt;</c>, so a null per-partition error <em>is</em> the
@@ -822,6 +1104,40 @@ internal static class AdminCallbacks
     /// shape 1, composite key).
     /// </summary>
     internal static readonly ListOffsetsCallback ListOffsets = OnListOffsets;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_groups_async</c> submission (sub-shape
+    /// 3c — one aggregate future over two independent lists, so no accessor set).
+    /// </summary>
+    internal static readonly ListGroupsCallback ListGroups = OnListGroups;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_consumer_groups_async</c> submission
+    /// (sub-shape 3c, the same as <see cref="ListGroups"/> — one aggregate future over two
+    /// independent lists, so no accessor set).
+    /// </summary>
+    internal static readonly ListConsumerGroupsCallback ListConsumerGroups = OnListConsumerGroups;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_consumer_groups_async</c> submission
+    /// (shape 1 — a keyed map, one future per requested group id).
+    /// </summary>
+    internal static readonly DescribeConsumerGroupsCallback DescribeConsumerGroups =
+        OnDescribeConsumerGroups;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_classic_groups_async</c> submission
+    /// (shape 1 — a keyed map, one future per requested group id).
+    /// </summary>
+    internal static readonly DescribeClassicGroupsCallback DescribeClassicGroups =
+        OnDescribeClassicGroups;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>list_consumer_group_offsets_async</c>
+    /// submission (shape 1 — a keyed map, one future per requested group id).
+    /// </summary>
+    internal static readonly ListConsumerGroupOffsetsCallback ListConsumerGroupOffsets =
+        OnListConsumerGroupOffsets;
 
     /// <inheritdoc cref="ElectLeadersKey"/>
     internal static readonly Func<IntPtr, int, TopicPartition> ListPartitionReassignmentsKey =
@@ -890,6 +1206,303 @@ internal static class AdminCallbacks
                 + "reported no error.");
 
     /// <summary>
+    /// <c>listGroups</c>' <b>first</b>-list reader: <c>get_valid(i)</c> yields a borrowed
+    /// <c>GroupListing_t</c>, whose four fields are copied out before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>group_type</c> and <c>group_state</c> return <b>null for Java's
+    /// <c>Optional.empty()</c></b> — an older broker that reported neither — and
+    /// <see cref="GroupMarshal.TypeFromName"/> / <see cref="GroupMarshal.StateFromName"/>
+    /// map that to <see langword="null"/>. Null is <em>absence</em>, not failure, and it is
+    /// distinct from the <c>Unknown</c> an unrecognised name decodes to, so neither is
+    /// rejected here. <c>group_id</c> and <c>protocol</c> are the opposite case: the header
+    /// says both are non-null (<c>protocol</c> is the <em>empty string</em> for a classic
+    /// group not using one), and <see cref="GroupListing"/>'s constructor rejects null for
+    /// both, so a null from either is an ABI contract violation and faults the call.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, GroupListing> GroupListingValue =
+        static (result, index) =>
+        {
+            IntPtr listing = NativeMethods.ListGroupsResultGetValid(result, index);
+            if (listing == IntPtr.Zero)
+            {
+                throw new KafkaException(
+                    "The listGroups result produced no listing for an index within its own valid count.");
+            }
+
+            return new GroupListing(
+                Utf8Marshal.PtrToString(NativeMethods.GroupListingGroupId(listing))
+                    ?? throw new KafkaException("The listGroups result produced a listing with no group id."),
+                GroupMarshal.TypeFromName(NativeMethods.GroupListingGroupType(listing)),
+                Utf8Marshal.PtrToString(NativeMethods.GroupListingProtocol(listing))
+                    ?? throw new KafkaException("The listGroups result produced a listing with no protocol."),
+                GroupMarshal.StateFromName(NativeMethods.GroupListingGroupState(listing)));
+        };
+
+    /// <summary>
+    /// <c>listGroups</c>' <b>second</b>-list reader: one broker's failure, read from
+    /// <c>get_error(i)</c> — a value on a <b>successful</b> call, never a fault.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>BORROWED.</b> The header returns <c>const kafka_common_Error_t *</c> and says
+    /// "Do not destroy it", so this reads through
+    /// <see cref="KafkaException.FromBorrowedHandle"/>; it dies with the result root, which
+    /// the trampoline destroys exactly once. <see cref="KafkaException.FromHandle"/> here —
+    /// the reflex, since the callback's own <c>error</c> parameter a few lines away takes
+    /// exactly that — frees it a second time and aborts the host.
+    /// </para>
+    /// <para>
+    /// ⚠ It is a <em>value</em> for the same reason <see cref="ElectLeadersOptionalError"/>
+    /// is: Java publishes it through <c>ListGroupsResult.errors()</c> as an ordinary
+    /// <c>Collection&lt;Throwable&gt;</c> (<c>ListGroupsResult.java:58</c>), and only
+    /// <c>all()</c> rethrows the first of them (<c>:52-53</c>). A non-empty error list
+    /// alongside a non-empty listing list is Java's normal partial-success outcome.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, KafkaException> ListGroupsBrokerError =
+        static (result, index) =>
+            KafkaException.FromBorrowedHandle(NativeMethods.ListGroupsResultGetError(result, index))
+            ?? throw new KafkaException(
+                "The listGroups result produced no error for an index within its own error count.");
+
+#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
+
+    /// <summary>
+    /// <c>listConsumerGroups</c>' <b>first</b>-list reader: <c>get_valid(i)</c> yields a
+    /// borrowed <c>ConsumerGroupListing_t</c>, whose four fields are copied out before the
+    /// root dies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <c>group_state</c> and <c>group_type</c> return <b>null for Java's
+    /// <c>Optional.empty()</c></b> and are mapped by the same two
+    /// <see cref="GroupMarshal"/> entries <see cref="GroupListingValue"/> uses, with the
+    /// same reading: null is <em>absence</em>, distinct from the <c>Unknown</c> an
+    /// unrecognised name decodes to, and neither is rejected. <c>group_id</c> is the
+    /// opposite case — the header says it is never null and the constructor rejects null —
+    /// so a null there is an ABI contract violation and faults the call.
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>The two accessors this reads and skips are the <em>mirror image</em> of
+    /// <see cref="GroupListingValue"/>'s.</b> <c>is_simple_consumer_group</c> is read here
+    /// and deliberately not declared there; <c>state</c> is skipped here although the ABI
+    /// exports it. Both follow from which value the managed class stores and which it
+    /// derives, and the two classes differ: <c>ConsumerGroupListing</c> stores the simple
+    /// flag (it has no protocol to compute one from) and derives <c>State</c> as a lossy
+    /// projection of <c>GroupState</c>, exactly as Java does. Reading the projection back
+    /// out of the ABI would give a native-built listing and a caller-built one two ways to
+    /// disagree on one axis.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ConsumerGroupListing> ConsumerGroupListingValue =
+        static (result, index) =>
+        {
+            IntPtr listing = NativeMethods.ListConsumerGroupsResultGetValid(result, index);
+            if (listing == IntPtr.Zero)
+            {
+                throw new KafkaException(
+                    "The listConsumerGroups result produced no listing for an index within its own "
+                    + "valid count.");
+            }
+
+            return new ConsumerGroupListing(
+                Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupListingGroupId(listing))
+                    ?? throw new KafkaException(
+                        "The listConsumerGroups result produced a listing with no group id."),
+                GroupMarshal.StateFromName(NativeMethods.ConsumerGroupListingGroupState(listing)),
+                GroupMarshal.TypeFromName(NativeMethods.ConsumerGroupListingGroupType(listing)),
+                NativeMethods.ConsumerGroupListingIsSimpleConsumerGroup(listing));
+        };
+
+#pragma warning restore CS0618
+
+    /// <summary>
+    /// <c>listConsumerGroups</c>' <b>second</b>-list reader: one broker's failure, read from
+    /// <c>get_error(i)</c> — a value on a <b>successful</b> call, never a fault.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>BORROWED</b>, for the reasons stated at length on
+    /// <see cref="ListGroupsBrokerError"/>: the header returns
+    /// <c>const kafka_common_Error_t *</c> and says "Do not destroy it", so this reads
+    /// through <see cref="KafkaException.FromBorrowedHandle"/> and never
+    /// <see cref="KafkaException.FromHandle"/>, which would free a handle the result root
+    /// still owns. It is a <em>value</em> for the same reason too — Java publishes it
+    /// through <c>ListConsumerGroupsResult.errors()</c> and only <c>all()</c> rethrows the
+    /// first of them, so errors alongside listings are a normal partial success.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, KafkaException> ListConsumerGroupsBrokerError =
+        static (result, index) =>
+            KafkaException.FromBorrowedHandle(NativeMethods.ListConsumerGroupsResultGetError(result, index))
+            ?? throw new KafkaException(
+                "The listConsumerGroups result produced no error for an index within its own error count.");
+
+    /// <summary>
+    /// <c>describeConsumerGroups</c>' universal accessors — the count and the per-key
+    /// <c>get_error</c>, the two every <b>keyed</b> shape has.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A keyed map, <em>not</em> the two-independent-lists sub-shape its
+    /// <c>listConsumerGroups</c> neighbour uses: there is one count here, and index
+    /// <c>i</c> of the key, value and error walks all name the same group. So this goes
+    /// through <see cref="KeyedResultMarshal.Complete{TKey, TValue}"/> unchanged, and no
+    /// new walker is needed.
+    /// </remarks>
+    internal static readonly KeyedResultMarshal.Accessors DescribeConsumerGroupsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeConsumerGroupsResultCount,
+            NativeMethods.DescribeConsumerGroupsResultGetError);
+
+    /// <summary>
+    /// <c>describeConsumerGroups</c>' key reader: the group id at one index.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The bridge dictionary these keys resolve against must be built with
+    /// <see cref="StringComparer.Ordinal"/>. <c>DescribeConsumerGroupsResult</c>'s
+    /// aggregate hardcodes that comparer and — unlike <c>DescribeTopicsResult</c> — has a
+    /// public constructor with no internal factory to thread a different one through, so a
+    /// bridge keyed by the default comparer would silently disagree with the result it
+    /// feeds.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, string> DescribeConsumerGroupsKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(
+                NativeMethods.DescribeConsumerGroupsResultGetGroupId(result, index));
+
+    /// <summary>
+    /// <c>describeConsumerGroups</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>ConsumerGroupDescription_t</c>, copied out in full — members, their assignments
+    /// and all — before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, three
+    /// levels deep: the description from the result, each member from the description, each
+    /// assignment from its member. None of it is owned, none of it is freed here, and all
+    /// of it dangles the moment
+    /// <see cref="NativeMethods.DescribeConsumerGroupsResultDestroy"/> runs — which is why
+    /// the copy-out completes inside the walk and the destroy is in the trampoline's
+    /// <c>finally</c>, strictly after.
+    /// </para>
+    /// <para>
+    /// ⚠ <c>group_type</c> and <c>group_state</c> are <b>non-optional on this class</b>
+    /// (the header says so of <c>type()</c>), unlike their <c>ConsumerGroupListing</c>
+    /// namesakes where null is Java's <c>Optional.empty()</c>. A null here is an ABI
+    /// contract violation, and it reads as <c>Unknown</c> — the same answer an unrecognised
+    /// name gets — because the managed properties are non-nullable.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ConsumerGroupDescription> ConsumerGroupDescriptionValue =
+        static (result, index) =>
+            CopyOutConsumerGroupDescription(
+                NativeMethods.DescribeConsumerGroupsResultGetValue(result, index));
+
+    /// <summary>
+    /// <c>describeClassicGroups</c>' universal accessors — the count and the per-key
+    /// <c>get_error</c>, the two every <b>keyed</b> shape has.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A keyed map, the same shape <see cref="DescribeConsumerGroupsAccessors"/> has: one
+    /// count, and index <c>i</c> of the key, value and error walks all name the same group.
+    /// So this goes through <see cref="KeyedResultMarshal.Complete{TKey, TValue}"/>
+    /// unchanged, and no new walker callable is needed.
+    /// </remarks>
+    internal static readonly KeyedResultMarshal.Accessors DescribeClassicGroupsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeClassicGroupsResultCount,
+            NativeMethods.DescribeClassicGroupsResultGetError);
+
+    /// <summary>
+    /// <c>describeClassicGroups</c>' key reader: the group id at one index.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The bridge dictionary these keys resolve against must be built with
+    /// <see cref="StringComparer.Ordinal"/>, for the reason given on
+    /// <see cref="DescribeConsumerGroupsKey"/>: <c>DescribeClassicGroupsResult</c>'s
+    /// aggregate hardcodes that comparer and has a public constructor with no internal
+    /// factory to thread a different one through.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, string> DescribeClassicGroupsKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(
+                NativeMethods.DescribeClassicGroupsResultGetGroupId(result, index));
+
+    /// <summary>
+    /// <c>describeClassicGroups</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>ClassicGroupDescription_t</c>, copied out in full — members, their assignments and
+    /// all — before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, three
+    /// levels deep: the description from the result, each member from the description, each
+    /// assignment from its member. None of it is owned, none of it is freed here, and all of
+    /// it dangles the moment
+    /// <see cref="NativeMethods.DescribeClassicGroupsResultDestroy"/> runs — which is why
+    /// the copy-out completes inside the walk and the destroy is in the trampoline's
+    /// <c>finally</c>, strictly after.
+    /// </para>
+    /// <para>
+    /// ⚠ <c>is_simple_consumer_group</c> is <b>not read</b>, although the ABI exports it:
+    /// Java derives it from <c>protocol</c> and so does the managed class. See the comment
+    /// beside <see cref="NativeMethods.ClassicGroupDescriptionProtocol"/>.
+    /// </para>
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ClassicGroupDescription> ClassicGroupDescriptionValue =
+        static (result, index) =>
+            CopyOutClassicGroupDescription(
+                NativeMethods.DescribeClassicGroupsResultGetValue(result, index));
+
+    /// <summary>
+    /// <c>listConsumerGroupOffsets</c>' universal accessors — the count and the per-key
+    /// <c>get_error</c>, the two every <b>keyed</b> shape has.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A keyed map, the same shape <see cref="DescribeClassicGroupsAccessors"/> has: one
+    /// count, and index <c>i</c> of the key, value and error walks all name the same group.
+    /// So this goes through <see cref="KeyedResultMarshal.Complete{TKey, TValue}"/>
+    /// unchanged, and no new walker callable is needed.
+    /// </remarks>
+    internal static readonly KeyedResultMarshal.Accessors ListConsumerGroupOffsetsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.ListConsumerGroupOffsetsResultCount,
+            NativeMethods.ListConsumerGroupOffsetsResultGetError);
+
+    /// <summary>
+    /// <c>listConsumerGroupOffsets</c>' key reader: the group id at one index.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The bridge dictionary these keys resolve against must be built with
+    /// <see cref="StringComparer.Ordinal"/>, for the reason given on
+    /// <see cref="DescribeConsumerGroupsKey"/>: <c>ListConsumerGroupOffsetsResult</c>'s
+    /// aggregate hardcodes that comparer, and its <c>PartitionsToOffsetAndMetadata(groupId)</c>
+    /// lookup rejects a group id the map does not contain — so a comparer mismatch would
+    /// turn a returned group into an <see cref="ArgumentException"/>.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, string> ListConsumerGroupOffsetsKey =
+        static (result, index) =>
+            KeyedResultMarshal.ReadStringKey(
+                NativeMethods.ListConsumerGroupOffsetsResultGetGroupId(result, index));
+
+    /// <summary>
+    /// <c>listConsumerGroupOffsets</c>' value reader: <c>get_value(i)</c> yields a borrowed
+    /// <c>OffsetAndMetadataMap_t</c>, copied out entry by entry before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, two
+    /// levels deep: the map from the result, every topic and metadata string from the map.
+    /// None of it is owned, none of it is freed here, and all of it dangles the moment
+    /// <see cref="NativeMethods.ListConsumerGroupOffsetsResultDestroy"/> runs — which is why
+    /// the copy-out completes inside the walk and the destroy is in the trampoline's
+    /// <c>finally</c>, strictly after. No native-backed string or pointer is retained.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>
+        ListConsumerGroupOffsetsValue =
+            static (result, index) =>
+                CopyOutOffsetAndMetadataMap(
+                    NativeMethods.ListConsumerGroupOffsetsResultGetValue(result, index));
+
+    /// <summary>
     /// The result-root destroys, hoisted for the same reason as the accessor sets: a
     /// method group converted at the call site would allocate a delegate per completion.
     /// All are null-safe, so the trampoline's <c>finally</c> can call them
@@ -948,6 +1561,22 @@ internal static class AdminCallbacks
     private static readonly Action<IntPtr> s_destroyAlterPartitionReassignmentsResult =
         NativeMethods.AlterPartitionReassignmentsResultDestroy;
 
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyAlterConsumerGroupOffsetsResult =
+        NativeMethods.AlterConsumerGroupOffsetsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupOffsetsResult =
+        NativeMethods.DeleteConsumerGroupOffsetsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupsResult =
+        NativeMethods.DeleteConsumerGroupsResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyRemoveMembersFromConsumerGroupResult =
+        NativeMethods.RemoveMembersFromConsumerGroupResultDestroy;
+
     /// <summary>
     /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
     /// everything else here.
@@ -980,6 +1609,121 @@ internal static class AdminCallbacks
     /// <inheritdoc cref="s_listTopicsCount"/>
     private static readonly KeyedResultMarshal.CountAccessor s_listPartitionReassignmentsCount =
         NativeMethods.ListPartitionReassignmentsResultCount;
+
+    /// <inheritdoc cref="s_listTopicsCount"/>
+    private static readonly KeyedResultMarshal.CountAccessor s_alterConsumerGroupOffsetsCount =
+        NativeMethods.AlterConsumerGroupOffsetsResultCount;
+
+    /// <inheritdoc cref="s_listTopicsCount"/>
+    private static readonly KeyedResultMarshal.CountAccessor s_deleteConsumerGroupOffsetsCount =
+        NativeMethods.DeleteConsumerGroupOffsetsResultCount;
+
+    /// <inheritdoc cref="s_listTopicsCount"/>
+    private static readonly KeyedResultMarshal.CountAccessor s_removeMembersFromConsumerGroupCount =
+        NativeMethods.RemoveMembersFromConsumerGroupResultCount;
+
+    /// <summary>
+    /// The count bounding <c>listGroups</c>' <b>listing</b> walk, hoisted for the same
+    /// reason as everything else here.
+    /// </summary>
+    private static readonly KeyedResultMarshal.CountAccessor s_listGroupsValidCount =
+        NativeMethods.ListGroupsResultValidCount;
+
+    /// <summary>
+    /// The count bounding <c>listGroups</c>' <b>error</b> walk — its own, separate count.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Not <see cref="s_listGroupsValidCount"/>.</b> The header states the two lists
+    /// are not parallel and are generally of different lengths, so each walk is bounded by
+    /// the count belonging to the list it reads. They are two fields here, rather than one
+    /// reused, so that the bug is not expressible at the call site.
+    /// </remarks>
+    private static readonly KeyedResultMarshal.CountAccessor s_listGroupsErrorCount =
+        NativeMethods.ListGroupsResultErrorCount;
+
+    /// <summary>
+    /// The count bounding <c>listConsumerGroups</c>' <b>listing</b> walk, hoisted for the
+    /// same reason as everything else here.
+    /// </summary>
+    private static readonly KeyedResultMarshal.CountAccessor s_listConsumerGroupsValidCount =
+        NativeMethods.ListConsumerGroupsResultValidCount;
+
+    /// <summary>
+    /// The count bounding <c>listConsumerGroups</c>' <b>error</b> walk — its own, separate
+    /// count.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Not <see cref="s_listConsumerGroupsValidCount"/></b>, and not
+    /// <see cref="s_listGroupsErrorCount"/> either — the neighbouring RPC's count reads a
+    /// different result type through the same-shaped accessor, so a mis-wire there is a
+    /// read against a foreign root. The header states this RPC's two lists are not parallel
+    /// and are generally of different lengths, so each walk is bounded by the count
+    /// belonging to the list it reads.
+    /// </remarks>
+    private static readonly KeyedResultMarshal.CountAccessor s_listConsumerGroupsErrorCount =
+        NativeMethods.ListConsumerGroupsResultErrorCount;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDescribeConsumerGroupsResult =
+        NativeMethods.DescribeConsumerGroupsResultDestroy;
+
+    /// <summary>
+    /// <c>ConsumerGroupDescription</c>'s three authorized-operation accessors, hoisted so a
+    /// copy-out allocates no delegates. The <b>rule</b> they feed — that the boolean gate,
+    /// not the count, separates Java's null from an empty set — lives once, in
+    /// <see cref="AuthorizedOperationsMarshal"/>, so this result cannot re-derive it
+    /// differently from <c>describeTopics</c> or <c>describeCluster</c>.
+    /// </summary>
+    private static readonly Func<IntPtr, bool> s_consumerGroupHasAuthorizedOperations =
+        NativeMethods.ConsumerGroupDescriptionHasAuthorizedOperations;
+
+    /// <inheritdoc cref="s_consumerGroupHasAuthorizedOperations"/>
+    private static readonly Func<IntPtr, int> s_consumerGroupAuthorizedOperationCount =
+        NativeMethods.ConsumerGroupDescriptionAuthorizedOperationCount;
+
+    /// <inheritdoc cref="s_consumerGroupHasAuthorizedOperations"/>
+    private static readonly Func<IntPtr, int, int> s_consumerGroupAuthorizedOperation =
+        NativeMethods.ConsumerGroupDescriptionAuthorizedOperation;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyDescribeClassicGroupsResult =
+        NativeMethods.DescribeClassicGroupsResultDestroy;
+
+    /// <summary>
+    /// <c>ClassicGroupDescription</c>'s three authorized-operation accessors, hoisted so a
+    /// copy-out allocates no delegates. They feed the same single
+    /// <see cref="AuthorizedOperationsMarshal"/> rule
+    /// <see cref="s_consumerGroupHasAuthorizedOperations"/> does, so this result cannot
+    /// re-derive the absent-versus-empty discriminant differently.
+    /// </summary>
+    private static readonly Func<IntPtr, bool> s_classicGroupHasAuthorizedOperations =
+        NativeMethods.ClassicGroupDescriptionHasAuthorizedOperations;
+
+    /// <inheritdoc cref="s_classicGroupHasAuthorizedOperations"/>
+    private static readonly Func<IntPtr, int> s_classicGroupAuthorizedOperationCount =
+        NativeMethods.ClassicGroupDescriptionAuthorizedOperationCount;
+
+    /// <inheritdoc cref="s_classicGroupHasAuthorizedOperations"/>
+    private static readonly Func<IntPtr, int, int> s_classicGroupAuthorizedOperation =
+        NativeMethods.ClassicGroupDescriptionAuthorizedOperation;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyListConsumerGroupOffsetsResult =
+        NativeMethods.ListConsumerGroupOffsetsResultDestroy;
+
+    /// <summary>
+    /// The production binding of the six <c>kafka_admin_OffsetAndMetadataMap_*</c> entry
+    /// points, hoisted so copying a group's offsets out allocates no delegates.
+    /// </summary>
+    private static readonly OffsetAndMetadataMapAccessors s_offsetAndMetadataMapAccessors =
+        new OffsetAndMetadataMapAccessors(
+            NativeMethods.OffsetAndMetadataMapCount,
+            NativeMethods.OffsetAndMetadataMapGetTopic,
+            NativeMethods.OffsetAndMetadataMapGetPartition,
+            NativeMethods.OffsetAndMetadataMapHasOffset,
+            NativeMethods.OffsetAndMetadataMapGetOffset,
+            NativeMethods.OffsetAndMetadataMapGetMetadata,
+            NativeMethods.OffsetAndMetadataMapGetLeaderEpoch);
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyListPartitionReassignmentsResult =
@@ -1376,6 +2120,98 @@ internal static class AdminCallbacks
             s_destroyElectLeadersResult);
 
     /// <summary>
+    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' shape-3 trampoline — <b>the aggregate walker,
+    /// with <c>get_error(i)</c> supplied as the VALUE reader.</b> Same walker as
+    /// <see cref="OnElectLeaders"/>, for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// Java's <c>AlterConsumerGroupOffsetsResult</c> holds
+    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) — one future over the whole map, so a
+    /// per-partition <c>Errors</c> code is an ordinary map value, not a per-partition fault.
+    /// ⚠ Its accessor set is byte-identical to <see cref="OnElectLeaders"/>'s and to
+    /// <see cref="OnAlterPartitionReassignments"/>'s, which routes through
+    /// <see cref="CompleteKeyedVoid"/> instead — the Java return type, not the ABI shape,
+    /// is what decides the walker.
+    /// </remarks>
+    private static void OnAlterConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_alterConsumerGroupOffsetsCount,
+            AlterConsumerGroupOffsetsKey,
+            AlterConsumerGroupOffsetsOptionalError,
+            EqualityComparer<TopicPartition>.Default,
+            s_destroyAlterConsumerGroupOffsetsResult);
+
+    /// <summary>
+    /// ⚠⚠ <c>deleteConsumerGroupOffsets</c>' shape-3 trampoline — <b>the aggregate walker,
+    /// with <c>get_error(i)</c> supplied as the VALUE reader.</b> Same walker as
+    /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// Java's <c>DeleteConsumerGroupOffsetsResult</c> holds
+    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>) — one future over the whole map, so a
+    /// per-partition <c>Errors</c> code is an ordinary map value, not a per-partition fault.
+    /// ⚠ Its accessor set is byte-identical to <see cref="OnAlterConsumerGroupOffsets"/>'s —
+    /// the Java return type, not the ABI shape, is what decides the walker.
+    /// </remarks>
+    private static void OnDeleteConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_deleteConsumerGroupOffsetsCount,
+            DeleteConsumerGroupOffsetsKey,
+            DeleteConsumerGroupOffsetsOptionalError,
+            EqualityComparer<TopicPartition>.Default,
+            s_destroyDeleteConsumerGroupOffsetsResult);
+
+    /// <summary>
+    /// <c>deleteConsumerGroups</c>' shape-2 trampoline: one awaiter per requested group id,
+    /// the same walker as <see cref="OnCreatePartitions"/>.
+    /// </summary>
+    private static void OnDeleteConsumerGroups(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            DeleteConsumerGroupsAccessors,
+            DeleteConsumerGroupsKey,
+            s_destroyDeleteConsumerGroupsResult);
+
+    /// <summary>
+    /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' shape-3 trampoline — <b>the aggregate
+    /// walker, with <c>get_error(i)</c> supplied as the VALUE reader.</b> Same walker as
+    /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// Java's <c>RemoveMembersFromConsumerGroupResult</c> holds
+    /// <c>KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt; future</c>
+    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>) — one future over the whole
+    /// map, so a per-member <c>Errors</c> code is an ordinary map value, not a per-member
+    /// fault. In <b>removeAll</b> mode
+    /// (<c>NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync</c>) the result
+    /// handle always carries zero rows, so this walker resolves to an empty map and any
+    /// failure must have arrived through <paramref name="error"/> instead — matching
+    /// Java's <c>all()</c>, which in that mode reports only a call-level fault (see
+    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult"/>'s remarks for the
+    /// documented deviation this forces on <c>All()</c>).
+    /// </remarks>
+    private static void OnRemoveMembersFromConsumerGroup(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_removeMembersFromConsumerGroupCount,
+            RemoveMembersFromConsumerGroupKey,
+            RemoveMembersFromConsumerGroupOptionalError,
+            StringComparer.Ordinal,
+            s_destroyRemoveMembersFromConsumerGroupResult);
+
+    /// <summary>
     /// <c>listPartitionReassignments</c>' shape-3 trampoline: one awaiter over
     /// <c>Map&lt;TopicPartition, PartitionReassignment&gt;</c>.
     /// </summary>
@@ -1547,4 +2383,596 @@ internal static class AdminCallbacks
             ClientMetricsResourceListingValue,
             s_destroyListClientMetricsResourcesResult);
 #pragma warning restore CS0618
+
+    /// <summary>
+    /// <c>listGroups</c>' <b>sub-shape-3c</b> trampoline: one awaiter over two independent
+    /// lists — the listings the responding brokers returned, and the failures the others
+    /// reported.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Two errors of opposite ownership meet in this one body.</b>
+    /// <paramref name="error"/> — the callback's own parameter, non-const, meaning the RPC
+    /// could not be submitted at all — is <b>OWNED</b> and freed by
+    /// <see cref="KafkaException.FromHandle"/>. The per-broker errors reached through
+    /// <see cref="ListGroupsBrokerError"/> are <b>BORROWED</b> from the result root and must
+    /// never be freed. Swapping the two costs a leak in one direction and a double-free
+    /// process abort in the other.
+    /// </para>
+    /// <para>
+    /// It has its own body rather than a shared <c>Complete*Rpc</c> helper because it is so
+    /// far the only member of its sub-shape — the same call
+    /// <see cref="OnDescribeCluster"/> makes — and the direct
+    /// <c>ListGroupsResultDestroy</c> in the <c>finally</c> needs no hoisted
+    /// <c>Action&lt;IntPtr&gt;</c>. The <c>finally</c> discharges the usual three
+    /// obligations: destroy the owned root (null-safe, so the submit-failure branch is a
+    /// no-op) strictly after the copy-out, fault an awaiter nothing completed, and release
+    /// the <c>GCHandle</c> plus the span-the-op client reference.
+    /// </para>
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    private static void OnListGroups(IntPtr result, IntPtr error, IntPtr userData)
+    {
+        SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>?
+            context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context =
+                (SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>)
+                handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                // ⚠ OWNED — FromHandle frees it exactly once (the mirror image of the
+                // per-broker errors inside the result, which are borrowed).
+                context.SetException(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                KeyedResultMarshal.CompleteTwoLists(
+                    result,
+                    s_listGroupsValidCount,
+                    s_listGroupsErrorCount,
+                    context,
+                    GroupListingValue,
+                    ListGroupsBrokerError);
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Task.
+            context?.SetException(exception);
+        }
+        finally
+        {
+            NativeMethods.ListGroupsResultDestroy(result);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+#pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
+
+    /// <summary>
+    /// <c>listConsumerGroups</c>' <b>sub-shape-3c</b> trampoline: one awaiter over two
+    /// independent lists — the listings the responding brokers returned, and the failures
+    /// the others reported.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Two errors of opposite ownership meet in this one body</b>, exactly as they do
+    /// in <see cref="OnListGroups"/>. <paramref name="error"/> — the callback's own
+    /// parameter, non-const, meaning the RPC could not be submitted at all — is
+    /// <b>OWNED</b> and freed by <see cref="KafkaException.FromHandle"/>. The per-broker
+    /// errors reached through <see cref="ListConsumerGroupsBrokerError"/> are
+    /// <b>BORROWED</b> from the result root and must never be freed. Swapping the two costs
+    /// a leak in one direction and a double-free process abort in the other.
+    /// </para>
+    /// <para>
+    /// ⚠ The <c>finally</c> destroys <b>this</b> RPC's root — a <c>listGroups</c> result and
+    /// a <c>listConsumerGroups</c> result are different native types, so the neighbouring
+    /// <c>ListGroupsResultDestroy</c> is not interchangeable with this one although the two
+    /// bodies are otherwise line-for-line. It discharges the usual three obligations:
+    /// destroy the owned root (null-safe, so the submit-failure branch is a no-op) strictly
+    /// after the copy-out, fault an awaiter nothing completed, and release the
+    /// <c>GCHandle</c> plus the span-the-op client reference.
+    /// </para>
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    private static void OnListConsumerGroups(IntPtr result, IntPtr error, IntPtr userData)
+    {
+        SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid,
+            IReadOnlyCollection<KafkaException> Errors)>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context =
+                (SingleAdminOperation<(IReadOnlyCollection<ConsumerGroupListing> Valid,
+                    IReadOnlyCollection<KafkaException> Errors)>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                // ⚠ OWNED — FromHandle frees it exactly once (the mirror image of the
+                // per-broker errors inside the result, which are borrowed).
+                context.SetException(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                KeyedResultMarshal.CompleteTwoLists(
+                    result,
+                    s_listConsumerGroupsValidCount,
+                    s_listConsumerGroupsErrorCount,
+                    context,
+                    ConsumerGroupListingValue,
+                    ListConsumerGroupsBrokerError);
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Task.
+            context?.SetException(exception);
+        }
+        finally
+        {
+            NativeMethods.ListConsumerGroupsResultDestroy(result);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+#pragma warning restore CS0618
+
+    /// <summary>
+    /// <c>describeConsumerGroups</c>' <b>shape-1</b> trampoline: one future per requested
+    /// group id, each resolved with that group's description or faulted with that group's
+    /// own error.
+    /// </summary>
+    /// <remarks>
+    /// The two error directions meet here as in every keyed RPC:
+    /// <paramref name="error"/> is the callback's own parameter, non-const, meaning the
+    /// request could not be submitted at all — it is <b>OWNED</b> and fails every requested
+    /// key; the per-group errors <see cref="DescribeConsumerGroupsAccessors"/> reaches
+    /// through <c>get_error</c> are <b>BORROWED</b> from the result root and are read, never
+    /// freed. Both live in <see cref="CompleteKeyed{TKey, TValue}"/>, which also destroys
+    /// this RPC's own root in its <c>finally</c>, strictly after the copy-out.
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    private static void OnDescribeConsumerGroups(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeConsumerGroupsAccessors,
+            DescribeConsumerGroupsKey,
+            ConsumerGroupDescriptionValue,
+            s_destroyDescribeConsumerGroupsResult);
+
+    /// <summary>
+    /// Copies one borrowed <c>ConsumerGroupDescription_t</c> out into an owned
+    /// <see cref="ConsumerGroupDescription"/>. Frees nothing: the caller's result root owns
+    /// every pointer reached from here and destroys it after this returns.
+    /// </summary>
+    /// <param name="description">The borrowed <c>get_value(i)</c> pointer.</param>
+    private static ConsumerGroupDescription CopyOutConsumerGroupDescription(IntPtr description)
+    {
+        if (description == IntPtr.Zero)
+        {
+            // Unreachable on this path: the walker reads get_error first and only calls the
+            // value reader when that key reported no error. Faulting just this key is the
+            // safe reading if the ABI ever disagrees.
+            throw new KafkaException(
+                "The describeConsumerGroups result produced no description for a group that "
+                + "reported no error.");
+        }
+
+        string groupId =
+            Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupDescriptionGroupId(description))
+            ?? throw new KafkaException(
+                "The describeConsumerGroups result produced a description with no group id.");
+
+        int memberCount = NativeMethods.ConsumerGroupDescriptionMemberCount(description);
+        List<MemberDescription> members = new List<MemberDescription>(Math.Max(memberCount, 0));
+        for (int index = 0; index < memberCount; index++)
+        {
+            IntPtr member = NativeMethods.ConsumerGroupDescriptionGetMember(description, index);
+            if (member == IntPtr.Zero)
+            {
+                // Guarded by `member_count`, so unreachable; skipping is the safe reading.
+                continue;
+            }
+
+            members.Add(CopyOutMemberDescription(member));
+        }
+
+        // ⚠ Non-optional on this class — a null is an ABI contract violation, not an
+        // absence, and reads as Unknown because the managed properties are non-nullable.
+        GroupType type =
+            GroupMarshal.TypeFromName(NativeMethods.ConsumerGroupDescriptionGroupType(description))
+            ?? GroupType.Unknown;
+        GroupState groupState =
+            GroupMarshal.StateFromName(NativeMethods.ConsumerGroupDescriptionGroupState(description))
+            ?? GroupState.Unknown;
+
+        // Java's authorizedOperations(): null when the broker reported no set at all, a
+        // (possibly empty) owned collection when it did — the gate, not the count.
+        IReadOnlyCollection<AclOperation>? authorizedOperations = AuthorizedOperationsMarshal.CopyOut(
+            description,
+            s_consumerGroupHasAuthorizedOperations,
+            s_consumerGroupAuthorizedOperationCount,
+            s_consumerGroupAuthorizedOperation);
+
+        // ⚠ The RETURN is the presence signal; a negative epoch written to the out-param is
+        // a present value, so absence cannot be read off the value.
+        int? groupEpoch =
+            NativeMethods.ConsumerGroupDescriptionGroupEpoch(description, out int epoch)
+                ? epoch
+                : (int?)null;
+        int? targetAssignmentEpoch =
+            NativeMethods.ConsumerGroupDescriptionTargetAssignmentEpoch(description, out int targetEpoch)
+                ? targetEpoch
+                : (int?)null;
+
+        return new ConsumerGroupDescription(
+            groupId,
+            NativeMethods.ConsumerGroupDescriptionIsSimpleConsumerGroup(description),
+            members,
+            Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupDescriptionPartitionAssignor(description)),
+            type,
+            groupState,
+            NodeMarshal.CopyOut(NativeMethods.ConsumerGroupDescriptionCoordinator(description)),
+            authorizedOperations,
+            groupEpoch,
+            targetAssignmentEpoch);
+    }
+
+    /// <summary>
+    /// Copies one borrowed <c>MemberDescription_t</c> out. Frees nothing — see
+    /// <see cref="CopyOutConsumerGroupDescription"/>.
+    /// </summary>
+    /// <param name="member">The borrowed <c>get_member(i)</c> pointer.</param>
+    private static MemberDescription CopyOutMemberDescription(IntPtr member)
+    {
+        // ⚠ groupInstanceId and rackId stay null when absent — Java's accessors are
+        // nullable there, unlike consumerId / clientId / host, which the constructor
+        // coalesces to the empty string.
+        // ⚠ upgraded has two booleans of different meaning: the RETURN is presence, the
+        // out-param is the value, so Optional.of(false) and Optional.empty() are distinct.
+        return new MemberDescription(
+            Utf8Marshal.PtrToString(NativeMethods.MemberDescriptionConsumerId(member)),
+            Utf8Marshal.PtrToString(NativeMethods.MemberDescriptionGroupInstanceId(member)),
+            Utf8Marshal.PtrToString(NativeMethods.MemberDescriptionRackId(member)),
+            Utf8Marshal.PtrToString(NativeMethods.MemberDescriptionClientId(member)),
+            Utf8Marshal.PtrToString(NativeMethods.MemberDescriptionHost(member)),
+            CopyOutMemberAssignment(NativeMethods.MemberDescriptionAssignment(member)),
+            CopyOutMemberAssignment(NativeMethods.MemberDescriptionTargetAssignment(member)),
+            NativeMethods.MemberDescriptionMemberEpoch(member, out int epoch) ? epoch : (int?)null,
+            NativeMethods.MemberDescriptionUpgraded(member, out bool upgraded) ? upgraded : (bool?)null);
+    }
+
+    /// <summary>
+    /// Copies one borrowed <c>MemberAssignment_t</c> out, or returns <see langword="null"/>
+    /// for a null pointer — Java's <c>Optional.empty()</c> on <c>targetAssignment()</c>.
+    /// The constructor coalesces a null <c>assignment()</c> to an empty one, so a defensive
+    /// null there stays faithful.
+    /// </summary>
+    /// <param name="assignment">The borrowed assignment pointer.</param>
+    private static MemberAssignment? CopyOutMemberAssignment(IntPtr assignment)
+    {
+        if (assignment == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        int count = NativeMethods.MemberAssignmentCount(assignment);
+        List<TopicPartition> topicPartitions = new List<TopicPartition>(Math.Max(count, 0));
+        for (int index = 0; index < count; index++)
+        {
+            // NUL-terminated, borrowed (ffi §B3 row 2) — copied out here, never NUL-scanned
+            // past its own terminator.
+            string? topic = Utf8Marshal.PtrToString(NativeMethods.MemberAssignmentGetTopic(assignment, index));
+            if (topic is null)
+            {
+                // Guarded by `count`, so unreachable; skipping is the safe reading.
+                continue;
+            }
+
+            topicPartitions.Add(
+                new TopicPartition(topic, NativeMethods.MemberAssignmentGetPartition(assignment, index)));
+        }
+
+        return new MemberAssignment(topicPartitions);
+    }
+
+    /// <summary>
+    /// <c>describeClassicGroups</c>' <b>shape-1</b> trampoline: one future per requested
+    /// group id, each resolved with that group's description or faulted with that group's
+    /// own error.
+    /// </summary>
+    /// <remarks>
+    /// The two error directions meet here as in every keyed RPC:
+    /// <paramref name="error"/> is the callback's own parameter, non-const, meaning the
+    /// request could not be submitted at all — it is <b>OWNED</b> and fails every requested
+    /// key; the per-group errors <see cref="DescribeClassicGroupsAccessors"/> reaches
+    /// through <c>get_error</c> are <b>BORROWED</b> from the result root and are read, never
+    /// freed. Both live in <see cref="CompleteKeyed{TKey, TValue}"/>, which also destroys
+    /// this RPC's own root — not <c>describeConsumerGroups</c>' — in its <c>finally</c>,
+    /// strictly after the copy-out.
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    private static void OnDescribeClassicGroups(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeClassicGroupsAccessors,
+            DescribeClassicGroupsKey,
+            ClassicGroupDescriptionValue,
+            s_destroyDescribeClassicGroupsResult);
+
+    /// <summary>
+    /// Copies one borrowed <c>ClassicGroupDescription_t</c> out into an owned
+    /// <see cref="ClassicGroupDescription"/>. Frees nothing: the caller's result root owns
+    /// every pointer reached from here and destroys it after this returns.
+    /// </summary>
+    /// <param name="description">The borrowed <c>get_value(i)</c> pointer.</param>
+    private static ClassicGroupDescription CopyOutClassicGroupDescription(IntPtr description)
+    {
+        if (description == IntPtr.Zero)
+        {
+            // Unreachable on this path: the walker reads get_error first and only calls the
+            // value reader when that key reported no error. Faulting just this key is the
+            // safe reading if the ABI ever disagrees.
+            throw new KafkaException(
+                "The describeClassicGroups result produced no description for a group that "
+                + "reported no error.");
+        }
+
+        int memberCount = NativeMethods.ClassicGroupDescriptionMemberCount(description);
+        List<MemberDescription> members = new List<MemberDescription>(Math.Max(memberCount, 0));
+        for (int index = 0; index < memberCount; index++)
+        {
+            IntPtr member = NativeMethods.ClassicGroupDescriptionGetMember(description, index);
+            if (member == IntPtr.Zero)
+            {
+                // Guarded by `member_count`, so unreachable; skipping is the safe reading.
+                continue;
+            }
+
+            // The same kafka_admin_MemberDescription_t describeConsumerGroups walks, read by
+            // that RPC's copy-out rather than a second one: a member this class holds and a
+            // member that one holds are one native type, and two readers could drift.
+            members.Add(CopyOutMemberDescription(member));
+        }
+
+        // ⚠ One state accessor on this class, and it is a ClassicGroupState — not the
+        // GroupState / deprecated-projection pair ConsumerGroupDescription carries. An
+        // unrecognised or null name reads as Unknown, because the managed property is a
+        // non-nullable enum with no null to store.
+        ClassicGroupState state =
+            GroupMarshal.ClassicStateFromName(NativeMethods.ClassicGroupDescriptionState(description))
+            ?? ClassicGroupState.Unknown;
+
+        // Java's authorizedOperations(): null when the broker reported no set at all, a
+        // (possibly empty) owned collection when it did — the gate, not the count. Passed to
+        // the SEVEN-argument constructor precisely so absence survives: the six-argument
+        // overload forwards Set.of() (ClassicGroupDescription.java:48), which would render
+        // "never asked" as "asked, none authorized".
+        IReadOnlyCollection<AclOperation>? authorizedOperations = AuthorizedOperationsMarshal.CopyOut(
+            description,
+            s_classicGroupHasAuthorizedOperations,
+            s_classicGroupAuthorizedOperationCount,
+            s_classicGroupAuthorizedOperation);
+
+        // ⚠ No is_simple_consumer_group read: Java derives isSimpleConsumerGroup() from
+        // protocol (:113) and so does the managed class, so protocol is the only input and
+        // there is no second axis to disagree on. ⚠ protocol stays null when absent — it is
+        // the one string Java does not coalesce (:59) — while groupId and protocolData are
+        // coalesced by the constructor exactly as Java coalesces them (:58, :60).
+        return new ClassicGroupDescription(
+            Utf8Marshal.PtrToString(NativeMethods.ClassicGroupDescriptionGroupId(description)),
+            Utf8Marshal.PtrToString(NativeMethods.ClassicGroupDescriptionProtocol(description)),
+            Utf8Marshal.PtrToString(NativeMethods.ClassicGroupDescriptionProtocolData(description)),
+            members,
+            state,
+            NodeMarshal.CopyOut(NativeMethods.ClassicGroupDescriptionCoordinator(description)),
+            authorizedOperations);
+    }
+
+    /// <summary>
+    /// <c>listConsumerGroupOffsets</c>' <b>shape-1</b> trampoline: one future per requested
+    /// group id, each resolved with that group's committed offsets or faulted with that
+    /// group's own error.
+    /// </summary>
+    /// <remarks>
+    /// The two error directions meet here as in every keyed RPC:
+    /// <paramref name="error"/> is the callback's own parameter, non-const, meaning the
+    /// request could not be submitted at all — it is <b>OWNED</b> and fails every requested
+    /// key; the per-group errors <see cref="ListConsumerGroupOffsetsAccessors"/> reaches
+    /// through <c>get_error</c> are <b>BORROWED</b> from the result root and are read, never
+    /// freed. Both live in <see cref="CompleteKeyed{TKey, TValue}"/>, which also destroys
+    /// this RPC's own root in its <c>finally</c>, strictly after the copy-out.
+    /// </remarks>
+    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
+    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    private static void OnListConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            ListConsumerGroupOffsetsAccessors,
+            ListConsumerGroupOffsetsKey,
+            ListConsumerGroupOffsetsValue,
+            s_destroyListConsumerGroupOffsetsResult);
+
+    /// <summary>
+    /// Copies one group's <b>borrowed</b> <c>kafka_admin_OffsetAndMetadataMap_t</c> into an
+    /// owned managed dictionary, entry by entry. Nothing native-backed is retained, and the
+    /// borrowed map is never freed here — the result root that owns it is destroyed by the
+    /// trampoline, strictly after this returns.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Not <see cref="OffsetMapMarshal"/>.</b> That marshaller reads the consumer's
+    /// <c>kafka_consumer_OffsetMap_t</c>, whose entries are borrowed child handles and whose
+    /// value cannot be null; this map is flat and index-addressed, and its value <em>is</em>
+    /// nullable. The two ABIs are unrelated and neither reader can decode the other. The one
+    /// piece deliberately shared is
+    /// <see cref="OffsetMapMarshalShared.ReadLeaderEpoch"/> — the presence-pair rule every
+    /// offset map on this surface obeys, stated once so no map can decode it differently.
+    /// </remarks>
+    /// <param name="map">The borrowed map, or <c>IntPtr.Zero</c>.</param>
+    /// <returns>The group's committed offsets keyed by partition; empty when the map is
+    /// null or carries no entries.</returns>
+    private static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> CopyOutOffsetAndMetadataMap(
+        IntPtr map) =>
+        CopyOutOffsetAndMetadataMap(map, s_offsetAndMetadataMapAccessors);
+
+    /// <summary>
+    /// The walk itself, over an injectable accessor set — production passes
+    /// <see cref="s_offsetAndMetadataMapAccessors"/>, which binds the six
+    /// <c>kafka_admin_OffsetAndMetadataMap_*</c> entry points.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Absent is not zero, and absent is not missing.</b> Java's map value is nullable:
+    /// a requested partition the group has never committed for is reported <em>present with
+    /// a null <c>OffsetAndMetadata</c></em>. So there are three states — not in the map, in
+    /// the map with a null value, in the map with an offset — and this walk must preserve
+    /// all three. An entry whose <c>has_offset</c> is <see langword="false"/> is
+    /// <b>still added</b>, with a <see langword="null"/> value; dropping it would silently
+    /// merge the first two.
+    /// </para>
+    /// <para>
+    /// ⚠ <c>has_offset</c> is the gate and is read <b>first</b>. When it is
+    /// <see langword="false"/> the other three accessors return fillers — <c>-1</c>, null,
+    /// <see langword="false"/> — and are <b>not consulted at all</b>: <c>-1</c> is a
+    /// sentinel, committed offsets are never negative, and
+    /// <see cref="OffsetAndMetadata"/>'s constructor rejects a negative offset, so letting
+    /// the filler through would fault the whole group's future over one uncommitted
+    /// partition.
+    /// </para>
+    /// <para>
+    /// The accessor set is injectable for the same reason
+    /// <see cref="AuthorizedOperationsMarshal.CopyOut"/>'s is: the rule under test is
+    /// "which accessor is consulted, and when", and a test cannot fabricate a native map to
+    /// ask it of.
+    /// </para>
+    /// </remarks>
+    /// <param name="map">The borrowed map, or <c>IntPtr.Zero</c>.</param>
+    /// <param name="accessors">The six map accessors.</param>
+    /// <returns>The group's committed offsets keyed by partition.</returns>
+    internal static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> CopyOutOffsetAndMetadataMap(
+        IntPtr map,
+        OffsetAndMetadataMapAccessors accessors)
+    {
+        int count = map == IntPtr.Zero ? 0 : accessors.Count(map);
+        if (count <= 0)
+        {
+            return EmptyReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>.Instance;
+        }
+
+        Dictionary<TopicPartition, OffsetAndMetadata?> offsets =
+            new Dictionary<TopicPartition, OffsetAndMetadata?>(count);
+        for (int index = 0; index < count; index++)
+        {
+            TopicPartition partition = new TopicPartition(
+                Utf8Marshal.PtrToString(accessors.GetTopic(map, index)) ?? string.Empty,
+                accessors.GetPartition(map, index));
+
+            // ⚠ The gate, and nothing else, decides — see the remarks. An uncommitted
+            // partition is listed with a null value, never dropped and never given -1.
+            offsets[partition] = accessors.HasOffset(map, index)
+                ? new OffsetAndMetadata(
+                    accessors.GetOffset(map, index),
+                    // Java normalises an absent metadata string to "", and so does the
+                    // constructor — copied out here, before the root destroy (§B3).
+                    Utf8Marshal.PtrToString(accessors.GetMetadata(map, index)),
+                    // ⚠ A presence pair, so it becomes nullable — never a sentinel.
+                    OffsetMapMarshalShared.ReadLeaderEpoch(
+                        accessors.GetLeaderEpoch(map, index, out int epoch), epoch))
+                : null;
+        }
+
+        return offsets;
+    }
+
+    /// <summary>
+    /// The <c>kafka_admin_OffsetAndMetadataMap_get_leader_epoch</c> shape: a presence pair,
+    /// which no <see cref="Func{T1, T2, TResult}"/> can express because of the
+    /// <see langword="out"/> parameter.
+    /// </summary>
+    /// <param name="map">The borrowed map.</param>
+    /// <param name="index">The entry to read.</param>
+    /// <param name="epoch">The epoch, written only when this returns <see langword="true"/>.</param>
+    /// <returns>Whether the entry has a leader epoch at all.</returns>
+    internal delegate bool LeaderEpochAccessor(IntPtr map, int index, out int epoch);
+
+    /// <summary>
+    /// The six <c>kafka_admin_OffsetAndMetadataMap_t</c> accessors, bundled so the walk can
+    /// be driven over a synthetic map. Built once as a <c>static readonly</c> field (method
+    /// groups bind straight to the delegate types), so a completion allocates none of them.
+    /// </summary>
+    internal sealed class OffsetAndMetadataMapAccessors
+    {
+        /// <summary>Creates an accessor set for one offset map.</summary>
+        /// <param name="count"><c>_count</c>.</param>
+        /// <param name="getTopic"><c>_get_topic</c>.</param>
+        /// <param name="getPartition"><c>_get_partition</c>.</param>
+        /// <param name="hasOffset"><c>_has_offset</c> — the gate.</param>
+        /// <param name="getOffset"><c>_get_offset</c>.</param>
+        /// <param name="getMetadata"><c>_get_metadata</c>.</param>
+        /// <param name="getLeaderEpoch"><c>_get_leader_epoch</c>.</param>
+        internal OffsetAndMetadataMapAccessors(
+            Func<IntPtr, int> count,
+            Func<IntPtr, int, IntPtr> getTopic,
+            Func<IntPtr, int, int> getPartition,
+            Func<IntPtr, int, bool> hasOffset,
+            Func<IntPtr, int, long> getOffset,
+            Func<IntPtr, int, IntPtr> getMetadata,
+            LeaderEpochAccessor getLeaderEpoch)
+        {
+            Count = count;
+            GetTopic = getTopic;
+            GetPartition = getPartition;
+            HasOffset = hasOffset;
+            GetOffset = getOffset;
+            GetMetadata = getMetadata;
+            GetLeaderEpoch = getLeaderEpoch;
+        }
+
+        /// <summary>How many partition entries the map carries.</summary>
+        internal Func<IntPtr, int> Count { get; }
+
+        /// <summary>The entry's topic — borrowed NUL-terminated UTF-8.</summary>
+        internal Func<IntPtr, int, IntPtr> GetTopic { get; }
+
+        /// <summary>The entry's partition.</summary>
+        internal Func<IntPtr, int, int> GetPartition { get; }
+
+        /// <summary>
+        /// ⚠ <b>The gate.</b> <see langword="false"/> means the partition is listed with no
+        /// committed offset, and the three accessors below must not be consulted.
+        /// </summary>
+        internal Func<IntPtr, int, bool> HasOffset { get; }
+
+        /// <summary>The entry's committed offset — only once <see cref="HasOffset"/> holds.</summary>
+        internal Func<IntPtr, int, long> GetOffset { get; }
+
+        /// <summary>The entry's metadata — only once <see cref="HasOffset"/> holds.</summary>
+        internal Func<IntPtr, int, IntPtr> GetMetadata { get; }
+
+        /// <summary>The entry's leader epoch, as a presence pair.</summary>
+        internal LeaderEpochAccessor GetLeaderEpoch { get; }
+    }
 }

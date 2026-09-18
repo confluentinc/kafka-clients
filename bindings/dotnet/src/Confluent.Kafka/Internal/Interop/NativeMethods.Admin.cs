@@ -1828,4 +1828,1179 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResultInfo_leader_epoch", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool ListOffsetsResultInfoLeaderEpoch(IntPtr info, out int outEpoch);
+
+    // ---- listGroups ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_groups_async</c> — Java's
+    /// <c>Admin.listGroups(ListGroupsOptions)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Three independent filter arrays, each with its own count.</b> They are
+    /// <c>const char *const *</c> of Java <c>toString()</c> names, matched
+    /// case-insensitively; a name this cluster does not recognise is not an error. A null
+    /// pointer with count <c>0</c> — which an empty <see cref="IntPtr"/><c>[]</c> marshals
+    /// to — means "no filter on that axis", exactly Java's empty
+    /// <c>Optional</c>/<c>Set</c>.
+    /// </para>
+    /// <para>
+    /// ⚠ Declared <c>IntPtr[]</c>, never <c>string[]</c>: the default marshaller would
+    /// emit ANSI, and the whole admin surface is UTF-8 (ffi-marshalling.md §A2). The
+    /// caller pins each name with <c>Utf8Marshal.Pin</c> for the duration of the call and
+    /// disposes in a <c>finally</c> — the core copies every name before returning, so the
+    /// pins are call-scoped (§A4).
+    /// </para>
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> selects the client's configured default.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_groups_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListGroupsAsync(
+        IntPtr admin,
+        IntPtr[] groupStates,
+        int groupStateCount,
+        IntPtr[] protocolTypes,
+        int protocolTypeCount,
+        IntPtr[] types,
+        int typeCount,
+        int timeoutMs,
+        AdminCallbacks.ListGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_ListGroupsResult_valid_count</c> — how many listings the call
+    /// returned, Java's <c>ListGroupsResult.valid()</c> size.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsResult_valid_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListGroupsResultValidCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListGroupsResult_get_valid</c> — one listing, <b>borrowed</b> from
+    /// the result root.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsResult_get_valid", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListGroupsResultGetValid(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListGroupsResult_error_count</c> — how many brokers failed, Java's
+    /// <c>ListGroupsResult.errors()</c> size.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>This count is NOT <see cref="ListGroupsResultValidCount"/>, and the two lists
+    /// are NOT parallel</b> — the header says so verbatim. One list holds the groups that
+    /// were listed, the other the per-broker failures; index <c>i</c> of one has nothing
+    /// to do with index <c>i</c> of the other. A single loop bounded by the valid count
+    /// silently truncates the errors (or reads past their end) and still passes every
+    /// round-trip test, because a mock that reports no failures makes the bug invisible.
+    /// Walk each list in its own loop, bounded by its own count.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsResult_error_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListGroupsResultErrorCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListGroupsResult_get_error</c> — one broker's failure.
+    /// <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The header returns <c>const kafka_common_Error_t *</c>, so this goes through
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>. Putting it through
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> would free a handle the result root
+    /// still owns and then free it again at
+    /// <see cref="ListGroupsResultDestroy"/> — a double free, which aborts the host.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListGroupsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListGroupsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_GroupListing_t ----
+
+    /// <summary>
+    /// <c>kafka_admin_GroupListing_group_id</c> — Java's <c>groupId()</c>. Borrowed UTF-8,
+    /// never null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_GroupListing_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr GroupListingGroupId(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_GroupListing_group_type</c> — Java's <c>type()</c> as its
+    /// <c>toString()</c> name, or <b>null for <c>Optional.empty()</c></b>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Null is absence, not failure: an older broker reports no type at all.
+    /// <see cref="GroupMarshal.TypeFromName"/> maps it to <see langword="null"/>, which is
+    /// distinct from the <c>GroupType.Unknown</c> an unrecognised <em>name</em> decodes to.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_GroupListing_group_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr GroupListingGroupType(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_GroupListing_protocol</c> — Java's <c>protocol()</c>. Borrowed UTF-8;
+    /// the <b>empty string</b>, not null, for a classic group not using one.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_GroupListing_protocol", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr GroupListingProtocol(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_GroupListing_group_state</c> — Java's <c>groupState()</c> as its
+    /// <c>toString()</c> name, or <b>null for <c>Optional.empty()</c></b>.
+    /// </summary>
+    /// <inheritdoc cref="GroupListingGroupType" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_GroupListing_group_state", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr GroupListingGroupState(IntPtr listing);
+
+    // kafka_admin_GroupListing_is_simple_consumer_group is deliberately NOT declared:
+    // GroupListing derives the flag from Type and Protocol, as Java does, so that a
+    // caller-built listing and a native-built one cannot disagree. See GroupListing.cs.
+
+    // ---- listConsumerGroups ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_consumer_groups_async</c> — Java's
+    /// <c>Admin.listConsumerGroups(ListConsumerGroupsOptions)</c>, deprecated since 4.1 in
+    /// favour of <see cref="AdminClientListGroupsAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Two filter arrays, not the three <see cref="AdminClientListGroupsAsync"/>
+    /// takes.</b> This RPC has no protocol-type axis — Java's
+    /// <c>ListConsumerGroupsOptions</c> declares none — so the argument list is group states
+    /// then types, and nothing else between them. The two declarations otherwise look alike,
+    /// and copying that one wholesale would leave <c>types</c> read as
+    /// <c>protocol_types</c> and shift every argument after it, including the callback
+    /// pointer.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>One state axis here, although Java's options expose two.</b> The header states
+    /// that Java's deprecated <c>inStates(Set&lt;ConsumerGroupState&gt;)</c> is defined as
+    /// <c>inGroupStates(...)</c> over <c>GroupState.parse(...)</c> of those same names, so a
+    /// caller holding <c>ConsumerGroupState</c> names passes them through
+    /// <paramref name="groupStates"/> too. There is no second array to fill.
+    /// </para>
+    /// <para>
+    /// Both are <c>const char *const *</c> of Java <c>toString()</c> names, matched
+    /// case-insensitively; a name this cluster does not recognise is not an error. A null
+    /// pointer with count <c>0</c> — which an empty <see cref="IntPtr"/><c>[]</c> marshals
+    /// to — means "no filter on that axis", exactly Java's empty <c>Set</c>.
+    /// </para>
+    /// <para>
+    /// ⚠ Declared <c>IntPtr[]</c>, never <c>string[]</c>: the default marshaller would
+    /// emit ANSI, and the whole admin surface is UTF-8 (ffi-marshalling.md §A2). The
+    /// caller pins each name with <c>Utf8Marshal.Pin</c> for the duration of the call and
+    /// disposes in a <c>finally</c> — the core copies every name before returning, so the
+    /// pins are call-scoped (§A4).
+    /// </para>
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> selects the client's configured default.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_consumer_groups_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListConsumerGroupsAsync(
+        IntPtr admin,
+        IntPtr[] groupStates,
+        int groupStateCount,
+        IntPtr[] types,
+        int typeCount,
+        int timeoutMs,
+        AdminCallbacks.ListConsumerGroupsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupsResult_valid_count</c> — how many listings the call
+    /// returned, Java's <c>ListConsumerGroupsResult.valid()</c> size.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_valid_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListConsumerGroupsResultValidCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupsResult_get_valid</c> — one listing, <b>borrowed</b>
+    /// from the result root.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_get_valid", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListConsumerGroupsResultGetValid(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupsResult_error_count</c> — how many brokers failed,
+    /// Java's <c>ListConsumerGroupsResult.errors()</c> size.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>This count is NOT <see cref="ListConsumerGroupsResultValidCount"/>, and the two
+    /// lists are NOT parallel</b> — the header says so verbatim, pointing at
+    /// <see cref="ListGroupsResultGetError"/> as having the same shape. One list holds the
+    /// groups that were listed, the other the per-broker failures; index <c>i</c> of one has
+    /// nothing to do with index <c>i</c> of the other. A single loop bounded by the valid
+    /// count silently truncates the errors (or reads past their end) and still passes every
+    /// round-trip test, because a mock that reports no failures makes the bug invisible.
+    /// Walk each list in its own loop, bounded by its own count.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_error_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListConsumerGroupsResultErrorCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupsResult_get_error</c> — one broker's failure.
+    /// <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The header returns <c>const kafka_common_Error_t *</c> and says "Do not destroy
+    /// it", so this goes through <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>.
+    /// Putting it through <see cref="KafkaException.FromHandle(IntPtr)"/> would free a
+    /// handle the result root still owns and then free it again at
+    /// <see cref="ListConsumerGroupsResultDestroy"/> — a double free, which aborts the host.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListConsumerGroupsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListConsumerGroupsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_ConsumerGroupListing_t ----
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupListing_group_id</c> — Java's <c>groupId()</c>. Borrowed
+    /// UTF-8, never null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupListingGroupId(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupListing_is_simple_consumer_group</c> — Java's
+    /// <c>isSimpleConsumerGroup()</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Declared here, unlike its <c>GroupListing</c> namesake a few lines above</b>,
+    /// which is deliberately absent — see the comment closing that block. The two Java classes
+    /// genuinely differ: <c>GroupListing</c> computes the answer from its type and protocol,
+    /// so the managed class derives it and must not be told a second answer, whereas
+    /// <c>ConsumerGroupListing</c> stores what the broker reported and has no protocol to
+    /// derive from — so the value can only come from here.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_is_simple_consumer_group", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerGroupListingIsSimpleConsumerGroup(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupListing_group_state</c> — Java's <c>groupState()</c> as
+    /// its <c>toString()</c> name, or <b>null for <c>Optional.empty()</c></b>.
+    /// </summary>
+    /// <inheritdoc cref="GroupListingGroupType" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_group_state", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupListingGroupState(IntPtr listing);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupListing_group_type</c> — Java's <c>type()</c> as its
+    /// <c>toString()</c> name, or <b>null for <c>Optional.empty()</c></b>.
+    /// </summary>
+    /// <inheritdoc cref="GroupListingGroupType" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupListing_group_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupListingGroupType(IntPtr listing);
+
+    // kafka_admin_ConsumerGroupListing_state is deliberately NOT declared, the same call
+    // GroupListing's is_simple_consumer_group makes above and for the same reason:
+    // ConsumerGroupListing.State is a lossy one-way projection of GroupState (Java computes
+    // it as groupState().map(s -> ConsumerGroupState.parse(s.toString())), and the header
+    // documents this accessor as exactly that map), so the managed class derives it. Reading
+    // it here would give a caller-built listing and a native-built one two ways to disagree
+    // on one axis. See ConsumerGroupListing.cs.
+
+    // ---- describeConsumerGroups ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_consumer_groups_async</c> — Java's
+    /// <c>Admin.describeConsumerGroups(Collection&lt;String&gt;, DescribeConsumerGroupsOptions)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>One array and one flag, not the two-flag shape of
+    /// <see cref="AdminClientDescribeTopicsAsync"/>.</b> There is no
+    /// <c>partitionSizeLimitPerResponse</c> here — Java's
+    /// <c>DescribeConsumerGroupsOptions</c> declares no such axis — so
+    /// <paramref name="includeAuthorizedOperations"/> is immediately followed by the
+    /// callback pointer. Copying the topic declaration wholesale would shift every
+    /// argument after the flag, including the callback.
+    /// </para>
+    /// <para>
+    /// ⚠ Declared <c>IntPtr[]</c>, never <c>string[]</c>: the default marshaller would
+    /// emit ANSI, and the whole admin surface is UTF-8 (ffi-marshalling.md §A2). The
+    /// caller pins each group id with <c>Utf8Marshal.Pin</c> for the duration of the call
+    /// and disposes in a <c>finally</c> — the core copies every id before returning, so
+    /// the pins are call-scoped (§A4).
+    /// </para>
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> selects the client's configured default.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_consumer_groups_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeConsumerGroupsAsync(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool includeAuthorizedOperations,
+        AdminCallbacks.DescribeConsumerGroupsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeConsumerGroupsResult_t — a Category-3 owned borrow-root ----
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConsumerGroupsResult_count</c> — how many group entries the
+    /// result carries, Java's <c>describedGroups()</c> size.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ This is a <b>keyed map</b>, not two independent lists: one key list, each key
+    /// carrying <em>either</em> a value <em>or</em> an error. Unlike
+    /// <see cref="ListConsumerGroupsResultErrorCount"/>'s RPC there is exactly one count,
+    /// and index <c>i</c> of the key, value and error walks all name the same group.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeConsumerGroupsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConsumerGroupsResult_get_group_id</c> — the key at one index,
+    /// borrowed NUL-terminated UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeConsumerGroupsResultGetGroupId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConsumerGroupsResult_get_value</c> — the description for the
+    /// group at one index, <b>borrowed</b> from the result root, or null when that key
+    /// failed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeConsumerGroupsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeConsumerGroupsResult_get_error</c> — that key's failure.
+    /// <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The header returns <c>const kafka_common_Error_t *</c>, so this goes through
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>. Putting it through
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> would free a handle the result root
+    /// still owns and then free it again at
+    /// <see cref="DescribeConsumerGroupsResultDestroy"/> — a double free, which aborts the
+    /// host.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeConsumerGroupsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeConsumerGroupsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_ConsumerGroupDescription_t ----
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_group_id</c> — Java's <c>groupId()</c>.
+    /// Borrowed UTF-8, never null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupDescriptionGroupId(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_is_simple_consumer_group</c> — Java's
+    /// <c>isSimpleConsumerGroup()</c>, a stored field with nothing to derive it from.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_is_simple_consumer_group", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerGroupDescriptionIsSimpleConsumerGroup(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_member_count</c> — Java's <c>members()</c>
+    /// size.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_member_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerGroupDescriptionMemberCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_get_member</c> — one member, <b>borrowed</b>
+    /// from the description, which is itself borrowed from the result root.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_get_member", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupDescriptionGetMember(IntPtr description, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_partition_assignor</c> — Java's
+    /// <c>partitionAssignor()</c>. Borrowed UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_partition_assignor", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupDescriptionPartitionAssignor(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_group_type</c> — Java's <c>type()</c> as its
+    /// <c>toString()</c> name.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Non-optional here</b>, unlike the same-named accessor on
+    /// <see cref="ConsumerGroupListingGroupType"/>, which returns null for Java's
+    /// <c>Optional.empty()</c>: the header says <c>type()</c> "is non-optional here", so a
+    /// null is an ABI contract violation rather than an absence to model.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_group_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupDescriptionGroupType(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_group_state</c> — Java's <c>groupState()</c>
+    /// as its <c>toString()</c> name. Non-optional, for the same reason as
+    /// <see cref="ConsumerGroupDescriptionGroupType"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_group_state", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupDescriptionGroupState(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_coordinator</c> — Java's
+    /// <c>coordinator()</c>, <b>borrowed</b>, or null when the broker reported none.
+    /// </summary>
+    /// <remarks>
+    /// The same <c>kafka_common_Node_t</c> the consumer surface already copies out, so it
+    /// is read through <c>NodeMarshal</c> and there is no second node marshaller.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_coordinator", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupDescriptionCoordinator(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_has_authorized_operations</c> — the
+    /// discriminant separating Java's <see langword="null"/> from a reported-but-empty set.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>This, not the count, is the gate.</b> A count of <c>0</c> means <em>both</em>
+    /// "the broker reported nothing" and "reported, and the set is empty", so deriving
+    /// nullability from <c>count == 0</c> collapses the two — and is invisible to any test
+    /// that only checks emptiness. Fed to <c>AuthorizedOperationsMarshal.CopyOut</c>, where
+    /// the rule lives once for every result carrying <c>authorizedOperations()</c>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_has_authorized_operations", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerGroupDescriptionHasAuthorizedOperations(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_authorized_operation_count</c> — how many
+    /// operations were reported. Meaningful only once
+    /// <see cref="ConsumerGroupDescriptionHasAuthorizedOperations"/> says there is a set.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_authorized_operation_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerGroupDescriptionAuthorizedOperationCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_authorized_operation</c> — one
+    /// <c>AclOperation</c> wire code, or <c>-1</c> when <paramref name="index"/> is out of
+    /// range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_authorized_operation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerGroupDescriptionAuthorizedOperation(IntPtr description, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_group_epoch</c> — writes the epoch and
+    /// returns <see langword="true"/>, or returns <see langword="false"/> when Java's
+    /// <c>groupEpoch()</c> is <c>Optional.empty()</c> (a classic group).
+    /// </summary>
+    /// <inheritdoc cref="ListOffsetsResultInfoLeaderEpoch" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_group_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerGroupDescriptionGroupEpoch(IntPtr description, out int outEpoch);
+
+    /// <summary>
+    /// <c>kafka_admin_ConsumerGroupDescription_target_assignment_epoch</c> — writes the
+    /// epoch and returns <see langword="true"/>, or returns <see langword="false"/> when
+    /// Java's <c>targetAssignmentEpoch()</c> is <c>Optional.empty()</c>.
+    /// </summary>
+    /// <inheritdoc cref="ListOffsetsResultInfoLeaderEpoch" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_target_assignment_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerGroupDescriptionTargetAssignmentEpoch(IntPtr description, out int outEpoch);
+
+    // kafka_admin_ConsumerGroupDescription_state is deliberately NOT declared, the same
+    // call ConsumerGroupListing's state accessor gets a few lines above and for the same
+    // reason: the header documents it as Java's deprecated state(), which "maps
+    // groupState() through ConsumerGroupState.parse(...)" — one field reached by two entry
+    // points, because C cannot express Optional.map. ConsumerGroupDescription.State is that
+    // projection, derived in managed code from GroupState, so reading the projection back
+    // out of the ABI would give a native-built description and a caller-built one two ways
+    // to disagree on one axis. See ConsumerGroupDescription.cs.
+
+    // ---- kafka_admin_MemberDescription_t ----
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_consumer_id</c> — Java's <c>consumerId()</c>.
+    /// Borrowed UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_consumer_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionConsumerId(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_group_instance_id</c> — Java's
+    /// <c>groupInstanceId()</c>, or <b>null for <c>Optional.empty()</c></b>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Null is <em>absence</em>, and Java's accessor is nullable, so it must stay null
+    /// rather than being normalised to the empty string the way <c>clientId</c> /
+    /// <c>host</c> are.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_group_instance_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionGroupInstanceId(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_rack_id</c> — Java's <c>rackId()</c>, or
+    /// <b>null for <c>Optional.empty()</c></b>.
+    /// </summary>
+    /// <inheritdoc cref="MemberDescriptionGroupInstanceId" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_rack_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionRackId(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_client_id</c> — Java's <c>clientId()</c>. Borrowed
+    /// UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_client_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionClientId(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_host</c> — Java's <c>host()</c>. Borrowed UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_host", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionHost(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_assignment</c> — Java's <c>assignment()</c>,
+    /// <b>borrowed</b> from the member, which is borrowed from the description, which is
+    /// borrowed from the result root.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_assignment", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionAssignment(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_target_assignment</c> — Java's
+    /// <c>targetAssignment()</c>, <b>borrowed</b>, or null for <c>Optional.empty()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_target_assignment", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberDescriptionTargetAssignment(IntPtr member);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_member_epoch</c> — writes the epoch and returns
+    /// <see langword="true"/>, or returns <see langword="false"/> when Java's
+    /// <c>memberEpoch()</c> is <c>Optional.empty()</c>.
+    /// </summary>
+    /// <inheritdoc cref="ListOffsetsResultInfoLeaderEpoch" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_member_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MemberDescriptionMemberEpoch(IntPtr member, out int outEpoch);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberDescription_upgraded</c> — writes the flag and returns
+    /// <see langword="true"/>, or returns <see langword="false"/> when Java's
+    /// <c>upgraded()</c> is <c>Optional.empty()</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Two booleans of different meaning.</b> The <em>return</em> is presence; the
+    /// <em>out</em> is the value. A member that reported <c>false</c> and a member that
+    /// reported nothing both write nothing useful to the caller's <c>false</c>-initialised
+    /// local, so reading the out-param without the return collapses
+    /// <c>Optional.of(false)</c> into <c>Optional.empty()</c>. Both are
+    /// <c>[MarshalAs(I1)]</c>: the C side is a 1-byte <c>bool</c>, and .NET's default
+    /// <c>BOOL</c> marshalling is 4 bytes, which would read three bytes of whatever
+    /// follows.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberDescription_upgraded", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MemberDescriptionUpgraded(
+        IntPtr member,
+        [MarshalAs(UnmanagedType.I1)] out bool outUpgraded);
+
+    // ---- kafka_admin_MemberAssignment_t ----
+
+    /// <summary>
+    /// <c>kafka_admin_MemberAssignment_count</c> — Java's <c>topicPartitions()</c> size.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberAssignment_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MemberAssignmentCount(IntPtr assignment);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberAssignment_get_topic</c> — the topic of one assigned partition,
+    /// borrowed NUL-terminated UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ NUL-terminated, so <c>Utf8Marshal.PtrToString(IntPtr)</c> — <em>not</em> the
+    /// length-delimited overload the node host / rack slices need (ffi §B3 row 2). The
+    /// header declares a bare <c>const char *</c> with no <c>out_len</c>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberAssignment_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MemberAssignmentGetTopic(IntPtr assignment, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_MemberAssignment_get_partition</c> — the partition of one assigned
+    /// partition.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MemberAssignment_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MemberAssignmentGetPartition(IntPtr assignment, int index);
+
+    // ---- describeClassicGroups ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_classic_groups_async</c> — Java's
+    /// <c>Admin.describeClassicGroups(Collection&lt;String&gt;, DescribeClassicGroupsOptions)</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Argument-for-argument the shape of
+    /// <see cref="AdminClientDescribeConsumerGroupsAsync"/> — one group-id array, one count,
+    /// the timeout, one <paramref name="includeAuthorizedOperations"/> flag, then the
+    /// callback. <c>DescribeClassicGroupsOptions</c> declares no further axis, so there is
+    /// no <c>partitionSizeLimitPerResponse</c>-style parameter to shift the callback along.
+    /// </para>
+    /// <para>
+    /// ⚠ Declared <c>IntPtr[]</c>, never <c>string[]</c>: the default marshaller would emit
+    /// ANSI, and the whole admin surface is UTF-8 (ffi-marshalling.md §A2). The caller pins
+    /// each group id with <c>Utf8Marshal.Pin</c> for the duration of the call and disposes
+    /// in a <c>finally</c> — the core copies every id before returning, so the pins are
+    /// call-scoped (§A4).
+    /// </para>
+    /// <para>
+    /// A negative <paramref name="timeoutMs"/> selects the client's configured default.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_classic_groups_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeClassicGroupsAsync(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool includeAuthorizedOperations,
+        AdminCallbacks.DescribeClassicGroupsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeClassicGroupsResult_t — a Category-3 owned borrow-root ----
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClassicGroupsResult_count</c> — how many group entries the
+    /// result carries, Java's <c>describedGroups()</c> size.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A <b>keyed map</b>, the same shape
+    /// <see cref="DescribeConsumerGroupsResultCount"/>'s RPC has: one count, and index
+    /// <c>i</c> of the key, value and error walks all name the same group. Not the
+    /// two-independent-lists sub-shape the <c>list*Groups</c> RPCs use.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeClassicGroupsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClassicGroupsResult_get_group_id</c> — the key at one index,
+    /// borrowed NUL-terminated UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClassicGroupsResultGetGroupId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClassicGroupsResult_get_value</c> — the description for the
+    /// group at one index, <b>borrowed</b> from the result root, or null when that key
+    /// failed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClassicGroupsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClassicGroupsResult_get_error</c> — that key's failure.
+    /// <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <inheritdoc cref="DescribeConsumerGroupsResultGetError" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClassicGroupsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeClassicGroupsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_ClassicGroupDescription_t ----
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_group_id</c> — Java's <c>groupId()</c>.
+    /// Borrowed UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClassicGroupDescriptionGroupId(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_protocol</c> — Java's <c>protocol()</c>.
+    /// Borrowed UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>This is also the <c>isSimpleConsumerGroup()</c> accessor</b>, which is why
+    /// <c>kafka_admin_ClassicGroupDescription_is_simple_consumer_group</c> is deliberately
+    /// NOT declared below. It is the one string Java's constructor does not coalesce
+    /// (<c>ClassicGroupDescription.java:59</c>), so a null pointer stays
+    /// <see langword="null"/> here rather than becoming the empty string — normalizing it
+    /// would turn a group with no protocol at all into a simple consumer group.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_protocol", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClassicGroupDescriptionProtocol(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_protocol_data</c> — Java's
+    /// <c>protocolData()</c>. Borrowed UTF-8; a null is coalesced to the empty string by the
+    /// managed constructor, as Java does at <c>:60</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_protocol_data", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClassicGroupDescriptionProtocolData(IntPtr description);
+
+    // kafka_admin_ClassicGroupDescription_is_simple_consumer_group is deliberately NOT
+    // declared, the same call ConsumerGroupDescription's `state` accessor gets above and for
+    // the same reason. The ABI exports it, but Java does not store it:
+    // isSimpleConsumerGroup() is `protocol.isEmpty()` (ClassicGroupDescription.java:113) —
+    // one field reached by two entry points — and the managed class mirrors that as a
+    // computed projection over Protocol with no backing state. Declaring the export would be
+    // dead P/Invoke whose only possible effect is to let a native-built description and a
+    // caller-built one disagree on one axis. NOTE this is the OPPOSITE of
+    // ConsumerGroupDescription, where Java DOES store the flag and
+    // ConsumerGroupDescriptionIsSimpleConsumerGroup is therefore declared and read. See
+    // ClassicGroupDescription.cs.
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_member_count</c> — Java's <c>members()</c>
+    /// size.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_member_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ClassicGroupDescriptionMemberCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_get_member</c> — one member, <b>borrowed</b>
+    /// from the description, which is itself borrowed from the result root.
+    /// </summary>
+    /// <remarks>
+    /// The same <c>kafka_admin_MemberDescription_t</c> <c>describeConsumerGroups</c> walks,
+    /// so it is read through that RPC's existing member copy-out and there is no second
+    /// member reader.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_get_member", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClassicGroupDescriptionGetMember(IntPtr description, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_state</c> — Java's <c>state()</c> as its
+    /// <c>ClassicGroupState.toString()</c> name.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>One state accessor here, not the two on
+    /// <see cref="ConsumerGroupDescriptionGroupState"/>'s class.</b> Java exposes a single,
+    /// non-deprecated <c>state()</c> on this type and there is no second projection beside
+    /// it, so this decodes through <c>GroupMarshal.ClassicStateFromName</c> — a
+    /// <c>ClassicGroupState</c>, never a <c>GroupState</c> or a <c>ConsumerGroupState</c>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_state", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClassicGroupDescriptionState(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_coordinator</c> — Java's <c>coordinator()</c>,
+    /// <b>borrowed</b>, or null when it is not known.
+    /// </summary>
+    /// <inheritdoc cref="ConsumerGroupDescriptionCoordinator" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_coordinator", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClassicGroupDescriptionCoordinator(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_has_authorized_operations</c> — the
+    /// discriminant separating Java's <see langword="null"/> from a reported-but-empty set.
+    /// </summary>
+    /// <inheritdoc cref="ConsumerGroupDescriptionHasAuthorizedOperations" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_has_authorized_operations", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ClassicGroupDescriptionHasAuthorizedOperations(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_authorized_operation_count</c> — how many
+    /// operations were reported. Meaningful only once
+    /// <see cref="ClassicGroupDescriptionHasAuthorizedOperations"/> says there is a set.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_authorized_operation_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ClassicGroupDescriptionAuthorizedOperationCount(IntPtr description);
+
+    /// <summary>
+    /// <c>kafka_admin_ClassicGroupDescription_authorized_operation</c> — one
+    /// <c>AclOperation</c> wire code, or <c>-1</c> when <paramref name="index"/> is out of
+    /// range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_authorized_operation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ClassicGroupDescriptionAuthorizedOperation(IntPtr description, int index);
+
+    // ---- listConsumerGroupOffsets ----
+    //
+    // The one jagged submit on this surface: per group id, a topic-partition selection that may
+    // be absent entirely ("all partitions", signalled by allPartitions[i] == true) or a list of
+    // (topic, partition) pairs carried as two parallel inner arrays. An ignored or empty
+    // selection passes a NULL inner pointer with a count of 0 — the core null-checks both
+    // pointers before reading, so that is well defined.
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_consumer_group_offsets_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListConsumerGroupOffsetsAsync(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)] bool[] allPartitions,
+        IntPtr[] topics,
+        IntPtr[] partitions,
+        int[] partitionCounts,
+        int groupCount,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool requireStable,
+        AdminCallbacks.ListConsumerGroupOffsetsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_ListConsumerGroupOffsetsResult_t — a Category-3 owned borrow-root ----
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_count</c> — how many group entries the
+    /// result carries.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A <b>keyed map</b>, the same shape <see cref="DescribeClassicGroupsResultCount"/>'s
+    /// RPC has: one count, and index <c>i</c> of the key, value and error walks all name the
+    /// same group. Not the two-independent-lists sub-shape the <c>list*Groups</c> RPCs use.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListConsumerGroupOffsetsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_group_id</c> — the key at one index,
+    /// borrowed NUL-terminated UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListConsumerGroupOffsetsResultGetGroupId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_value</c> — that group's committed
+    /// offsets, <b>borrowed</b> from the result root, or null when that key failed.
+    /// </summary>
+    /// <remarks>
+    /// The value is a <c>kafka_admin_OffsetAndMetadataMap_t</c> whose accessors are declared
+    /// below. It is borrowed two levels deep — the map from the result, every string from
+    /// the map — so the whole map is copied out inside the walk, before
+    /// <see cref="ListConsumerGroupOffsetsResultDestroy"/> runs.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListConsumerGroupOffsetsResultGetValue(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_ListConsumerGroupOffsetsResult_get_error</c> — that key's failure.
+    /// <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <inheritdoc cref="DescribeConsumerGroupsResultGetError" path="/remarks"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListConsumerGroupOffsetsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListConsumerGroupOffsetsResultDestroy(IntPtr result);
+
+    // ---- kafka_admin_OffsetAndMetadataMap_t ----
+    //
+    // ⚠ NOT kafka_consumer_OffsetMap_t. The consumer map is a pair of borrowed child handles
+    // per entry (a TopicPartition_t key and an OffsetAndMetadata_t value, read by
+    // OffsetMapMarshal); this one is FLAT — six index-addressed accessors, no child handle to
+    // dereference — and its value is NULLABLE, which the consumer map has no way to express.
+    // The two are not interchangeable and neither one's marshaller can read the other.
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_count</c> — how many partition entries this
+    /// group's map carries.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int OffsetAndMetadataMapCount(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_get_topic</c> — the topic of the entry at one
+    /// index. Borrowed NUL-terminated UTF-8.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr OffsetAndMetadataMapGetTopic(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_get_partition</c> — the partition of the entry at
+    /// one index.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int OffsetAndMetadataMapGetPartition(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_has_offset</c> — whether the entry at one index
+    /// carries a committed offset at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>This is the gate, and it must be read first.</b> Java's map value is nullable:
+    /// <c>listConsumerGroupOffsets</c> reports a requested partition the group has never
+    /// committed for as <em>present with a null <c>OffsetAndMetadata</c></em>. That is a
+    /// third state, distinct both from a committed offset of 0 and from the partition being
+    /// absent from the map, and both of the latter are reachable — so the managed value type
+    /// is <c>OffsetAndMetadata?</c> and <see langword="null"/> is what <c>false</c> means.
+    /// </para>
+    /// <para>
+    /// ⚠ When this returns <see langword="false"/> the other three accessors return
+    /// <em>fillers</em>, not data: <see cref="OffsetAndMetadataMapGetOffset"/> gives
+    /// <c>-1</c>, <see cref="OffsetAndMetadataMapGetMetadata"/> gives null and
+    /// <see cref="OffsetAndMetadataMapGetLeaderEpoch"/> gives <see langword="false"/>. None
+    /// of them may be read as a value in that state, and <c>-1</c> must never reach the
+    /// managed side as an offset — committed offsets are never negative (Java's
+    /// <c>OffsetAndMetadata</c> constructor rejects them, and so does this binding's), so it
+    /// is a sentinel that would throw rather than round-trip.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_has_offset", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool OffsetAndMetadataMapHasOffset(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_get_offset</c> — the committed offset of the entry
+    /// at one index.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Only meaningful once <see cref="OffsetAndMetadataMapHasOffset"/> has returned
+    /// <see langword="true"/> — otherwise it is the <c>-1</c> sentinel. See that accessor.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_get_offset", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long OffsetAndMetadataMapGetOffset(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_get_metadata</c> — the commit metadata of the
+    /// entry at one index. Borrowed NUL-terminated UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Only meaningful once <see cref="OffsetAndMetadataMapHasOffset"/> has returned
+    /// <see langword="true"/>. When it has, Java normalises an absent metadata string to
+    /// <c>""</c>, and so does <see cref="OffsetAndMetadata"/>'s constructor — so a null here
+    /// becomes the empty string rather than a null <see cref="OffsetAndMetadata.Metadata"/>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_get_metadata", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr OffsetAndMetadataMapGetMetadata(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_OffsetAndMetadataMap_get_leader_epoch</c> — the leader epoch of the
+    /// entry at one index, as a presence pair.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A <b>presence pair</b> (a 1-byte <c>bool</c> return beside an <c>out</c> epoch), so
+    /// it becomes a <b>nullable</b> <see cref="int"/> managed-side and never a sentinel —
+    /// decoded through <see cref="OffsetMapMarshalShared.ReadLeaderEpoch"/>, the one rule
+    /// every offset map on this surface shares. <see langword="false"/> covers all three of
+    /// Java's absences at once: out of range, no committed offset for the entry, and
+    /// <c>leaderEpoch() == Optional.empty()</c>.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_get_leader_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool OffsetAndMetadataMapGetLeaderEpoch(IntPtr map, int index, out int outEpoch);
+
+    // ---- M15/P5: alterConsumerGroupOffsets (result shape 2, composite key — RPC 4.6) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_alter_consumer_group_offsets_async</c> — Java's
+    /// <c>alterConsumerGroupOffsets(String, Map&lt;TopicPartition, OffsetAndMetadata&gt;,
+    /// AlterConsumerGroupOffsetsOptions)</c>. Java's map becomes <b>six parallel arrays</b>:
+    /// entry <c>i</c> is <c>(topics[i], partitions[i], offsets[i], metadata[i],
+    /// leaderEpochs[i], hasLeaderEpoch[i])</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <paramref name="hasLeaderEpoch"/> is a presence flag, mirroring
+    /// <see cref="OffsetAndMetadataMapGetLeaderEpoch"/>'s pattern in the other direction:
+    /// Java's <c>OffsetAndMetadata.leaderEpoch()</c> is an <c>Optional&lt;Integer&gt;</c>, so
+    /// a dedicated flag keeps "absent" distinguishable from epoch <c>0</c>. When an entry's
+    /// flag is <see langword="false"/>, that entry's <paramref name="leaderEpochs"/> slot is
+    /// not read.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The <c>bool</c> ARRAY needs its element type spelled out</b>, exactly as
+    /// <see cref="AdminClientAlterPartitionReassignmentsAsync"/>'s <c>cancel</c> parameter
+    /// does: the class-wide <see cref="UnmanagedType.I1"/> convention applies to scalar
+    /// <c>bool</c>s, and an array needs <see cref="UnmanagedType.LPArray"/> with
+    /// <c>ArraySubType = UnmanagedType.I1</c> spelled out as well — otherwise the marshaller
+    /// writes 4-byte Win32 <c>BOOL</c>s into a buffer the core reads as 1-byte C <c>bool</c>,
+    /// corrupting every flag after the first.
+    /// </para>
+    /// <para>
+    /// ⚠ When <paramref name="count"/> is <c>0</c> there is no per-key slot for an outcome, so
+    /// the whole-request error is returned instead — mirroring Java, where <c>all()</c> is
+    /// then the only observable accessor. The completion callback carries that error; no
+    /// special-casing is needed on the managed side.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_consumer_group_offsets_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientAlterConsumerGroupOffsetsAsync(
+        IntPtr admin,
+        IntPtr groupId,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        IntPtr[] metadata,
+        int[] leaderEpochs,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)] bool[] hasLeaderEpoch,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.AlterConsumerGroupOffsetsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterConsumerGroupOffsetsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterConsumerGroupOffsetsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterConsumerGroupOffsetsResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_get_error</c> — that partition's error,
+    /// or null if its offset was altered successfully. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ Byte-identical accessor set to <see cref="ElectLeadersResultGetError"/> and
+    /// <see cref="AlterPartitionReassignmentsResultGetError"/> — accessor-set identity is
+    /// evidence of nothing (<c>admin-client.md</c> §1.4). Here the Java per-partition value is
+    /// an <c>Errors</c> code, not a <c>KafkaFuture</c>, so a non-null pointer becomes a value
+    /// stored in the managed map (mirroring <see cref="ElectLeadersResultGetError"/>'s
+    /// semantics), not a fault on a per-partition awaitable (contrast
+    /// <see cref="AlterPartitionReassignmentsResultGetError"/>).
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterConsumerGroupOffsetsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AlterConsumerGroupOffsetsResultDestroy(IntPtr result);
+
+    // ---- M15/P5: deleteConsumerGroupOffsets (result shape 2, composite key — RPC 4.7) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_async</c> — Java's
+    /// <c>deleteConsumerGroupOffsets(String, Set&lt;TopicPartition&gt;,
+    /// DeleteConsumerGroupOffsetsOptions)</c>. Java's set becomes <b>two parallel
+    /// arrays</b>: entry <c>i</c> is <c>(topics[i], partitions[i])</c> — simpler than
+    /// <see cref="AdminClientAlterConsumerGroupOffsetsAsync"/>'s six, since deleting a
+    /// committed offset carries no per-partition value.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ When <paramref name="count"/> is <c>0</c> there is no per-key slot for an outcome, so
+    /// the whole-request error is returned instead — mirroring
+    /// <see cref="AdminClientAlterConsumerGroupOffsetsAsync"/>'s identical convention.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_consumer_group_offsets_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDeleteConsumerGroupOffsetsAsync(
+        IntPtr admin,
+        IntPtr groupId,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteConsumerGroupOffsetsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteConsumerGroupOffsetsResultCount(IntPtr result);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteConsumerGroupOffsetsResultGetTopic(IntPtr result, int index);
+
+    /// <inheritdoc cref="ElectLeadersResultGetTopic"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteConsumerGroupOffsetsResultGetPartition(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_get_error</c> — that partition's error,
+    /// or null if its offset was deleted successfully. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ Byte-identical accessor set to <see cref="AlterConsumerGroupOffsetsResultGetError"/> —
+    /// accessor-set identity is evidence of nothing (<c>admin-client.md</c> §1.4). Here too the
+    /// Java per-partition value is an <c>Errors</c> code, not a <c>KafkaFuture</c>, so a
+    /// non-null pointer becomes a value stored in the managed map.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteConsumerGroupOffsetsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeleteConsumerGroupOffsetsResultDestroy(IntPtr result);
+
+    // ---- M15/P5: deleteConsumerGroups (result shape 2, flat key — RPC 4.8) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_delete_consumer_groups_async</c> — Java's
+    /// <c>deleteConsumerGroups(Collection&lt;String&gt;, DeleteConsumerGroupsOptions)</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_consumer_groups_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDeleteConsumerGroupsAsync(
+        IntPtr admin,
+        IntPtr[] groupIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteConsumerGroupsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteConsumerGroupsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteConsumerGroupsResult_get_group_id</c> — the group id at
+    /// <paramref name="index"/>, <b>borrowed</b> (NUL-terminated).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_get_group_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteConsumerGroupsResultGetGroupId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteConsumerGroupsResult_get_error</c> — that group's error, or null
+    /// if it was deleted successfully.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>): it dies with the result root and must
+    /// <b>never</b> be destroyed — <see cref="KafkaException.FromBorrowedHandle"/>, not
+    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no
+    /// <c>_get_value</c> to declare beside it: Java's per-key future is
+    /// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteConsumerGroupsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeleteConsumerGroupsResultDestroy(IntPtr result);
+
+    // ---- M15/P5: removeMembersFromConsumerGroup (result shape 3 — RPC 4.9) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_async</c> — Java's
+    /// <c>removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ In <b>removeAll</b> mode Java exposes no per-member outcome at all, so the caller
+    /// passes <paramref name="groupInstanceIds"/> as <see langword="null"/> and
+    /// <paramref name="memberCount"/> as <c>0</c>; the result handle then always carries
+    /// zero rows regardless of success or failure, and any failure is reported through the
+    /// completion's error instead — the ABI header's own doc comment on this function states
+    /// this explicitly ("the result handle is empty and any failure is returned here").
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_remove_members_from_consumer_group_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientRemoveMembersFromConsumerGroupAsync(
+        IntPtr admin,
+        IntPtr groupId,
+        [MarshalAs(UnmanagedType.I1)] bool removeAll,
+        IntPtr[]? groupInstanceIds,
+        int memberCount,
+        IntPtr reason,
+        int timeoutMs,
+        AdminCallbacks.RemoveMembersFromConsumerGroupCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int RemoveMembersFromConsumerGroupResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id</c> — the
+    /// member's group instance id at <paramref name="index"/>, <b>borrowed</b>
+    /// (NUL-terminated).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr RemoveMembersFromConsumerGroupResultGetGroupInstanceId(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_get_error</c> — that member's
+    /// error, or null if it was removed successfully. <b>BORROWED</b> — read, never destroy.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr RemoveMembersFromConsumerGroupResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void RemoveMembersFromConsumerGroupResultDestroy(IntPtr result);
 }
