@@ -205,7 +205,7 @@ public sealed class AdminKeySeamShapeTests
     }
 
     /// <summary>
-    /// The walker's non-public static methods are exactly these five. Adding one is a
+    /// The walker's non-public static methods are exactly these six. Adding one is a
     /// deliberate act that must be recorded here.
     /// </summary>
     /// <remarks>
@@ -230,9 +230,14 @@ public sealed class AdminKeySeamShapeTests
     /// </para>
     /// <para>
     /// <see cref="CompilerGeneratedAttribute"/> is excluded so a future compiler-emitted
-    /// static cannot turn this red for no reason. Measured today: none of the five is
+    /// static cannot turn this red for no reason. Measured today: none of the six is
     /// compiler-generated, and the lambda display class is a <em>nested type</em>, which
     /// <see cref="Type.GetMethods(BindingFlags)"/> on the containing type never returns.
+    /// </para>
+    /// <para>
+    /// M15/P5 added <see cref="KeyedResultMarshal.CompleteTwoLists"/> — the sub-shape-3c
+    /// walk over <c>listGroups</c>' two independent lists — and this assertion went red as
+    /// designed, which is the reaction the paragraphs above describe working.
     /// </para>
     /// </remarks>
     [Fact]
@@ -252,6 +257,7 @@ public sealed class AdminKeySeamShapeTests
                 nameof(KeyedResultMarshal.Complete),
                 nameof(KeyedResultMarshal.CompleteAggregate),
                 nameof(KeyedResultMarshal.CompleteList),
+                nameof(KeyedResultMarshal.CompleteTwoLists),
                 nameof(KeyedResultMarshal.ReadStringKey),
             },
             callables);

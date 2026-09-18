@@ -145,6 +145,14 @@ public sealed class AdminP4ReaderWiringTests
         nameof(AdminCallbacks.ListOffsetsKey),
         "kafka_admin_ListOffsetsResult_get_topic",
         "kafka_admin_ListOffsetsResult_get_partition")]
+    [InlineData(
+        nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
+        "kafka_admin_AlterConsumerGroupOffsetsResult_get_topic",
+        "kafka_admin_AlterConsumerGroupOffsetsResult_get_partition")]
+    [InlineData(
+        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic",
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition")]
     public void EachCompositeKeyReader_CapturesItsOwnAccessors(
         string readerName, string getTopic, string getPartition) =>
         Assert.Equal(
@@ -161,6 +169,39 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[] { "kafka_admin_ElectLeadersResult_get_error" },
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.ElectLeadersOptionalError))));
+
+    /// <summary>
+    /// <c>alterConsumerGroupOffsets</c>' optional-error <b>value</b> reader captures
+    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_get_error</c> — its own, not the
+    /// byte-identical twin's.
+    /// </summary>
+    [Fact]
+    public void AlterConsumerGroupOffsetsOptionalError_CapturesItsOwnErrorAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_AlterConsumerGroupOffsetsResult_get_error" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError))));
+
+    /// <summary>
+    /// <c>deleteConsumerGroupOffsets</c>' optional-error <b>value</b> reader captures
+    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_get_error</c> — its own, not the
+    /// byte-identical twin's.
+    /// </summary>
+    [Fact]
+    public void DeleteConsumerGroupOffsetsOptionalError_CapturesItsOwnErrorAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_DeleteConsumerGroupOffsetsResult_get_error" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError))));
+
+    /// <summary>
+    /// <c>removeMembersFromConsumerGroup</c>' optional-error <b>value</b> reader captures
+    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_get_error</c> — its own, not the
+    /// byte-identical twin's.
+    /// </summary>
+    [Fact]
+    public void RemoveMembersFromConsumerGroupOptionalError_CapturesItsOwnErrorAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_RemoveMembersFromConsumerGroupResult_get_error" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))));
 
     /// <summary>
     /// No two of the factory-built readers capture the same accessors — the control that
@@ -182,6 +223,11 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.ListPartitionReassignmentsKey),
             nameof(AdminCallbacks.ListOffsetsKey),
             nameof(AdminCallbacks.ElectLeadersOptionalError),
+            nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
+            nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
+            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
+            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
+            nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
         };
 
         List<string> signatures = readers
@@ -233,12 +279,17 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
+                nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
+                nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
                 nameof(AdminCallbacks.AlterPartitionReassignmentsKey),
+                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
+                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
                 nameof(AdminCallbacks.DeleteRecordsKey),
                 nameof(AdminCallbacks.ElectLeadersKey),
                 nameof(AdminCallbacks.ElectLeadersOptionalError),
                 nameof(AdminCallbacks.ListOffsetsKey),
                 nameof(AdminCallbacks.ListPartitionReassignmentsKey),
+                nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
             },
             discovered);
     }

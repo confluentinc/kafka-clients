@@ -148,6 +148,20 @@ public sealed class MockAdminClient : IAdmin
         _native.AlterPartitionReassignments(reassignments, options);
 
     /// <inheritdoc/>
+    public AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        AlterConsumerGroupOffsetsOptions? options = null) =>
+        _native.AlterConsumerGroupOffsets(groupId, offsets, options);
+
+    /// <inheritdoc/>
+    public DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyCollection<TopicPartition> partitions,
+        DeleteConsumerGroupOffsetsOptions? options = null) =>
+        _native.DeleteConsumerGroupOffsets(groupId, partitions, options);
+
+    /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions,
         ListPartitionReassignmentsOptions? options = null) =>
@@ -158,6 +172,78 @@ public sealed class MockAdminClient : IAdmin
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options = null) =>
         _native.ListOffsets(topicPartitionOffsets, options);
+
+    /// <inheritdoc/>
+    public ListGroupsResult ListGroups(ListGroupsOptions? options = null) =>
+        _native.ListGroups(options);
+
+    /// <inheritdoc/>
+    [Obsolete(
+        "Deprecated in Kafka since 4.1. Use ListGroups instead.")]
+    public ListConsumerGroupsResult ListConsumerGroups(
+        ListConsumerGroupsOptions? options = null) =>
+        _native.ListConsumerGroups(options);
+
+    /// <inheritdoc/>
+    public DescribeConsumerGroupsResult DescribeConsumerGroups(
+        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null) =>
+        _native.DescribeConsumerGroups(groupIds, options);
+
+    /// <inheritdoc/>
+    public DescribeClassicGroupsResult DescribeClassicGroups(
+        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null) =>
+        _native.DescribeClassicGroups(groupIds, options);
+
+    /// <inheritdoc/>
+    public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        string groupId, ListConsumerGroupOffsetsOptions? options = null)
+    {
+        if (groupId is null)
+        {
+            throw new ArgumentNullException(nameof(groupId));
+        }
+
+        // Java's default overload (Admin.java:912-918): delegate to the batched form
+        // with a fresh spec, whose null TopicPartitions means "every committed
+        // partition", and let the batched form ignore any partitions on the options.
+        return ListConsumerGroupOffsets(
+            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+            {
+                [groupId] = new ListConsumerGroupOffsetsSpec(),
+            },
+            options);
+    }
+
+    /// <inheritdoc/>
+    public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
+        ListConsumerGroupOffsetsOptions? options = null) =>
+        _native.ListConsumerGroupOffsets(groupSpecs, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.deleteConsumerGroups</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:773-775</c>); the Rust mock surfaces that as a faulted
+    /// future per group id (<c>admin-client.md</c> §9), which this binding does not
+    /// need to special-case — it delegates to the same native mock every other RPC
+    /// here does.
+    /// </remarks>
+    public DeleteConsumerGroupsResult DeleteConsumerGroups(
+        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
+        _native.DeleteConsumerGroups(groupIds, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.removeMembersFromConsumerGroup</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:801-803</c>); the Rust mock surfaces that as a single
+    /// faulted future (<c>admin-client.md</c> §9), which this binding does not need to
+    /// special-case — it delegates to the same native mock every other RPC here does.
+    /// </remarks>
+    public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
+        string groupId, RemoveMembersFromConsumerGroupOptions options) =>
+        _native.RemoveMembersFromConsumerGroup(groupId, options);
 
     /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);

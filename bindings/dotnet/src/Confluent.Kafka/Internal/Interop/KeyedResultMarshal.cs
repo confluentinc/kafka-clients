@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Four entries — three shapes plus a sub-shape — each named by the method it goes
+/// <b>Five entries — three shapes plus two sub-shapes — each named by the method it goes
 /// through.</b>
 /// </para>
 /// <para>
@@ -117,6 +117,16 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>ListClientMetricsResourcesResult.java:45</c>) — a LIST, not a map, so there is no key
 /// to report an outcome against. Goes through <see cref="CompleteList{TValue}"/>, which
 /// has <b>no accessor set, no key reader and no error channel</b>.
+/// </item>
+/// <item>
+/// <b>Sub-shape 3c</b> — Java gives one future over a <b>heterogeneous</b> collection that
+/// it then partitions by type (<c>ListGroupsResult.java:36</c> takes a single
+/// <c>KafkaFuture&lt;Collection&lt;Object&gt;&gt;</c> and <c>:40-60</c> splits it into a
+/// <c>Collection&lt;GroupListing&gt;</c> and a <c>Collection&lt;Throwable&gt;</c>, which
+/// <c>all()</c> / <c>valid()</c> / <c>errors()</c> then publish). The ABI has already done
+/// that partition, handing over <b>two independent tables with two counts</b>, so the walk
+/// goes through <see cref="CompleteTwoLists{TFirst, TSecond}"/>.
+/// ⚠⚠ The two tables are <b>not parallel</b> — see that method's remarks.
 /// </item>
 /// </list>
 /// <para>
@@ -480,5 +490,90 @@ internal static class KeyedResultMarshal
         }
 
         operation.SetResult(entries);
+    }
+
+    /// <summary>
+    /// <b>Sub-shape 3c — one aggregate future over TWO independent ordered collections.</b>
+    /// Walks the result's two tables in <b>two separate loops, each bounded by its own
+    /// count</b>, and resolves the operation's single awaiter with both.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>The two tables are NOT parallel, and this is the whole reason the method
+    /// exists.</b> <c>kafka_admin_ListGroupsResult_get_error</c>'s header text says it
+    /// verbatim — "This list is not parallel to the listings … the two are independent and
+    /// generally of different lengths. Index this list with
+    /// <c>…_error_count</c>, never with <c>…_valid_count</c>" — so index <c>i</c> of one has
+    /// no relationship to index <c>i</c> of the other. Folding them into a single loop
+    /// bounded by the first count compiles, reads naturally, and is wrong in two directions
+    /// at once: it truncates the second list when it is longer and reads past its end when
+    /// it is shorter. It also passes every round-trip test, because the partial-success
+    /// outcome that makes both lists non-empty at the same time is precisely what a mock
+    /// reporting no failures never produces.
+    /// </para>
+    /// <para>
+    /// <b>Why <see cref="CompleteList{TValue}"/> cannot serve, twice over.</b> Calling it
+    /// twice would need two operations — Java holds one upstream future, not two — and its
+    /// single <see cref="CountAccessor"/> is exactly the parameter that must differ between
+    /// the two walks. Making the second list a <em>fault</em> instead is the other wrong
+    /// turn: a non-empty error list alongside a non-empty listing list is Java's ordinary
+    /// partial-success result, published by <c>errors()</c> as an ordinary value
+    /// (<c>ListGroupsResult.java:58</c>), and only <c>all()</c> turns the first of them into
+    /// a throw (<c>:52-53</c>). That projection belongs to the public result type, not here.
+    /// </para>
+    /// <para>
+    /// <b>Any failure faults the one task.</b> As in every shape-3 walk there is no per-key
+    /// channel, so a throw from either reader propagates to the trampoline's no-throw
+    /// boundary, which faults the single awaiter.
+    /// </para>
+    /// <para>
+    /// <b>Both readers copy out before the root dies</b>, on the same terms as every other
+    /// reader here — including a reader over a <b>borrowed</b> <c>get_error(i)</c>, which
+    /// must go through <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/>; the walker
+    /// destroys nothing and the trampoline destroys the root exactly once, after this
+    /// returns.
+    /// </para>
+    /// <para>
+    /// <b>Order is preserved exactly as the ABI delivers it</b>, in each list independently
+    /// — the header documents listings "in the order the brokers reported them in, as Java's
+    /// <c>valid()</c> does".
+    /// </para>
+    /// </remarks>
+    /// <param name="result">The owned result root.</param>
+    /// <param name="firstCount">The first table's own count accessor.</param>
+    /// <param name="secondCount">
+    /// The second table's own count accessor. <b>Required and distinct</b> — there is no
+    /// overload that reuses <paramref name="firstCount"/>, so the non-parallel bug above is
+    /// not expressible by omission.
+    /// </param>
+    /// <param name="operation">The single-awaiter bridge.</param>
+    /// <param name="readFirst">Reads and copies out the first table's element at one index.</param>
+    /// <param name="readSecond">Reads and copies out the second table's element at one index.</param>
+    /// <typeparam name="TFirst">The first collection's managed element type.</typeparam>
+    /// <typeparam name="TSecond">The second collection's managed element type.</typeparam>
+    internal static void CompleteTwoLists<TFirst, TSecond>(
+        IntPtr result,
+        CountAccessor firstCount,
+        CountAccessor secondCount,
+        SingleAdminOperation<(IReadOnlyCollection<TFirst> First, IReadOnlyCollection<TSecond> Second)> operation,
+        Func<IntPtr, int, TFirst> readFirst,
+        Func<IntPtr, int, TSecond> readSecond)
+    {
+        int firstTotal = firstCount(result);
+        List<TFirst> first = new List<TFirst>(Math.Max(firstTotal, 0));
+        for (int index = 0; index < firstTotal; index++)
+        {
+            first.Add(readFirst(result, index));
+        }
+
+        // A second walk, over its own count — never firstTotal. See the remarks.
+        int secondTotal = secondCount(result);
+        List<TSecond> second = new List<TSecond>(Math.Max(secondTotal, 0));
+        for (int index = 0; index < secondTotal; index++)
+        {
+            second.Add(readSecond(result, index));
+        }
+
+        operation.SetResult((first, second));
     }
 }
