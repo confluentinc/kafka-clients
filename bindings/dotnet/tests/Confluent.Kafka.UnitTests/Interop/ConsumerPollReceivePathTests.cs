@@ -1,0 +1,273 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Internal;
+
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests.Interop;
+
+/// <summary>
+/// The <b>owned-handle</b> completion bridge (M3/P3) exercised end to end through
+/// <c>poll_async</c> on a <c>MockConsumer</c> (ffi-marshalling.md §B6/§B7, §6.4). The
+/// batch copy-out runs on the dispatcher thread inside the poll callback; these tests
+/// assert the round-trip (incl. non-ASCII via the length-delimited <c>out_len</c> path,
+/// §B3), the FAILURE / empty / churn paths, and that nothing native-backed escapes.
+/// Every awaited op and teardown is under a <see cref="TestTimeout"/> hang guard.
+/// </summary>
+public sealed class ConsumerPollReceivePathTests
+{
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
+
+    // SetPollError's injected failure is built via Error::local_illegal_state (a8205c5c),
+    // which is a specific, meaningful code (LOCAL_ILLEGAL_STATE == -4) — not one of the
+    // indistinct broker-free codes the PLAN finding #8 comment originally warned about.
+    private const int LocalIllegalStateErrorCode = -4;
+
+    private const string Topic = "poll-topic";
+    private const int Partition = 0;
+
+    // Assign + seek to offset 0 so the mock poll has a valid position (poll's Step-6
+    // update_fetch_position is skipped when the position is already valid, so no
+    // beginning/end-offset reset config is needed — mirrors the canonical Rust
+    // mock-poll test's assign→seek→add_record→poll setup).
+    private static Task<NativeConsumer> MockReadyToPoll(string topic = Topic, int partition = Partition)
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        consumer.Assign(new[] { (topic, partition) });
+        consumer.Seek(topic, partition, offset: 0); // sync (M5/P7) — no await; callers still await the setup Task
+        return Task.FromResult(consumer);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_RoundTripsAllFields()
+    {
+        using NativeConsumer consumer = await MockReadyToPoll();
+        byte[] key = Encoding.UTF8.GetBytes("key-1");
+        byte[] value = Encoding.UTF8.GetBytes("value-1");
+        consumer.AddRecord(Topic, Partition, offset: 42, key, value);
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.Equal(Topic, record.Topic);
+        Assert.Equal(Partition, record.Partition);
+        Assert.Equal(42, record.Offset);
+        Assert.NotNull(record.Key);
+        Assert.NotNull(record.Value);
+        Assert.Equal(key, record.Key);
+        Assert.Equal(value, record.Value);
+        Assert.Empty(record.Headers);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_NonAsciiTopicAndBytes_RoundTripViaOutLen()
+    {
+        // A multi-byte topic + key/value: the length-delimited out_len path (§B3) must
+        // marshal a non-ASCII, non-NUL-terminated slice correctly (a NUL-scan would
+        // over-read past the slice into the batch).
+        const string nonAsciiTopic = "topic-grüße-Ω-🎉";
+        using NativeConsumer consumer = await MockReadyToPoll(nonAsciiTopic);
+        byte[] key = Encoding.UTF8.GetBytes("café-key-Ω");
+        byte[] value = Encoding.UTF8.GetBytes("naïve-value-🎉");
+        consumer.AddRecord(nonAsciiTopic, Partition, offset: 7, key, value);
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.Equal(nonAsciiTopic, record.Topic);
+        Assert.Equal(key, record.Key);
+        Assert.Equal(value, record.Value);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_TombstoneAndAbsentKey_MapToNull()
+    {
+        using NativeConsumer consumer = await MockReadyToPoll();
+        // Absent key (null) + tombstone value (null).
+        consumer.AddRecord(Topic, Partition, offset: 1, key: null, value: null);
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.Null(record.Key);
+        Assert.Null(record.Value);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_EmptyKeyAndValue_MapToEmptyNonNull()
+    {
+        using NativeConsumer consumer = await MockReadyToPoll();
+        // Empty (non-null) key/value: distinct from absent — a valid zero-length array.
+        consumer.AddRecord(Topic, Partition, offset: 2, key: Array.Empty<byte>(), value: Array.Empty<byte>());
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.NotNull(record.Key);
+        Assert.NotNull(record.Value);
+        Assert.Empty(record.Key!);
+        Assert.Empty(record.Value!);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_MultipleRecords_RoundTripInOrder()
+    {
+        using NativeConsumer consumer = await MockReadyToPoll();
+        for (int i = 0; i < 5; i++)
+        {
+            consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes($"k{i}"), Encoding.UTF8.GetBytes($"v{i}"));
+        }
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+
+        Assert.Equal(5, records.Count);
+        long[] offsets = records.Select(r => r.Offset).ToArray();
+        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, offsets);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_Empty_ReturnsNonNullZeroCount()
+    {
+        // An assigned partition with no records → a non-null ConsumerRecords, Count 0
+        // (success, not failure); the (empty) batch is still destroyed once.
+        using NativeConsumer consumer = await MockReadyToPoll();
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+
+        Assert.NotNull(records);
+        Assert.Empty(records);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_SetPollError_FaultsWithKafkaException()
+    {
+        using NativeConsumer consumer = await MockReadyToPoll();
+        consumer.SetPollError("boom");
+
+        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => PollWithCallback(consumer), s_deadline));
+
+        // Assert TYPE + Code (LOCAL_ILLEGAL_STATE == -4) + Message content (the message
+        // is part of the contract, DoD §3) + the retriable flag.
+        Assert.Equal(LocalIllegalStateErrorCode, ex.Code);
+        Assert.Contains("boom", ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsRetriable);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_SetPollError_IsOneShot_ThenReusable()
+    {
+        using NativeConsumer consumer = await MockReadyToPoll();
+        consumer.SetPollError("transient");
+
+        await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => PollWithCallback(consumer), s_deadline));
+
+        // The injected error is consumed by the first poll (Java setPollException):
+        // the next poll succeeds.
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+        Assert.Empty(records);
+    }
+
+    [Fact]
+    public async Task PollWithCallback_RecordsAndErrorsAndEmpties_Churned_NoCorruption()
+    {
+        // Interleave records / errors / empties in a loop — the double-free / leak
+        // detector for the owned-result path: the batch _destroy, the error handle,
+        // and the per-op GCHandle must each be freed EXACTLY ONCE per poll. A leak or
+        // double-free would corrupt the allocator over many iterations.
+        using NativeConsumer consumer = await MockReadyToPoll();
+
+        for (int i = 0; i < 100; i++)
+        {
+            switch (i % 3)
+            {
+                case 0:
+                    consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes($"k{i}"), Encoding.UTF8.GetBytes($"v{i}"));
+                    ConsumerRecords<byte[], byte[]> ok = await PollWithCallback(consumer);
+                    Assert.Single(ok);
+                    break;
+
+                case 1:
+                    consumer.SetPollError($"err-{i}");
+                    await Assert.ThrowsAsync<KafkaException>(
+                        () => TestTimeout.Run(() => PollWithCallback(consumer), s_deadline));
+                    break;
+
+                default:
+                    ConsumerRecords<byte[], byte[]> empty = await PollWithCallback(consumer);
+                    Assert.Empty(empty);
+                    break;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task PollWithCallback_InFlight_SurvivesAggressiveGc()
+    {
+        // The Poll delegate is rooted (static readonly) and the per-op context is
+        // rooted by its GCHandle (Normal); aggressive GC during an in-flight poll must
+        // not collect either. A collected thunk/context would crash.
+        using NativeConsumer consumer = await MockReadyToPoll();
+
+        for (int i = 0; i < 50; i++)
+        {
+            consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
+            Task<ConsumerRecords<byte[], byte[]>> op = consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            ConsumerRecords<byte[], byte[]> records = await TestTimeoutResult(op);
+            Assert.Single(records);
+        }
+    }
+
+    [Fact]
+    public async Task PollWithCallback_ResultSurvivesBeyondBatchDestroy()
+    {
+        // The copy-out is owned (§6.4): the batch is destroyed inside the callback, yet
+        // the returned records + their bytes remain valid afterward (nothing
+        // native-backed escaped). Force GC after the poll to shake out any dangling
+        // native reference, then read the bytes.
+        using NativeConsumer consumer = await MockReadyToPoll();
+        byte[] value = Encoding.UTF8.GetBytes("durable-value");
+        consumer.AddRecord(Topic, Partition, offset: 99, key: null, value);
+
+        ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
+        Assert.Equal(value, record.Value);
+        Assert.Equal(Topic, record.Topic);
+    }
+
+    private static Task<ConsumerRecords<byte[], byte[]>> PollWithCallback(NativeConsumer consumer) =>
+        consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+
+    private static async Task<ConsumerRecords<byte[], byte[]>> TestTimeoutResult(Task<ConsumerRecords<byte[], byte[]>> op)
+    {
+        ConsumerRecords<byte[], byte[]> result = default!;
+        await TestTimeout.Run(async () => result = await op, s_deadline);
+        return result;
+    }
+}
