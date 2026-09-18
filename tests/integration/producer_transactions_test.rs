@@ -116,8 +116,8 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
     ]);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid transactional producer config"),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("failed to build a transactional producer")
 }
@@ -160,8 +160,8 @@ fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Ve
     ]);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid plain producer config"),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("failed to build a plain producer")
 }

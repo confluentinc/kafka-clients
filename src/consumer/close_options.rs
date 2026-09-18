@@ -22,6 +22,7 @@ use std::time::Duration;
 ///
 /// Corresponds to Java's `CloseOptions.GroupMembershipOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum GroupMembershipOperation {
     /// The consumer will leave the group.
     LeaveGroup,

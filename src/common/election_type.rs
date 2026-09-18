@@ -22,6 +22,7 @@ use crate::common::Error;
 ///
 /// Translated from `org.apache.kafka.common.ElectionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ElectionType {
     /// Elect the preferred replica as leader.
     Preferred,

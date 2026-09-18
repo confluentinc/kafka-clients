@@ -187,8 +187,8 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_producer_config(bootstrap),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("Failed to build test producer");
 

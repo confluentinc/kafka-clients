@@ -41,6 +41,7 @@ use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 ///
 /// Corresponds to `FetchRequest.PartitionData` in Java.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PartitionData {
     /// Topic ID (may be the zero UUID for versions that don't support it).
     pub topic_id: Uuid,

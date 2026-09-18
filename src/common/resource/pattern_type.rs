@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.common.resource.PatternType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum PatternType {
     /// Represents any `PatternType` which this client cannot understand,
     /// perhaps because this client is too old.

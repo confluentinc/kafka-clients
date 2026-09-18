@@ -44,6 +44,7 @@ use crate::common::Error;
 
 /// The state enum for a Kafka channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum State {
     /// Connections are created in this state.
     NotConnected,

@@ -44,6 +44,7 @@ use crate::common::utils::LogContext;
 /// Translates the Java static-utility class `org.apache.kafka.common.network.ChannelBuilders`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct ChannelBuilders;
 
 impl ChannelBuilders {

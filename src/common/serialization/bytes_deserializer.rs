@@ -38,6 +38,7 @@ use crate::common::serialization::Deserializer;
 /// no shared source is available, e.g. unit tests) still copies via
 /// [`Bytes::copy_from_slice`], matching the §27 "safe copy fallback" contract.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct BytesDeserializer;
 
 impl BytesDeserializer {

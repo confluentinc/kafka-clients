@@ -25,6 +25,7 @@
 /// - `Ready`: connection is ready to send requests
 /// - `AuthenticationFailed`: connection failed due to an authentication error
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConnectionState {
     Disconnected,
     Connecting,

@@ -23,6 +23,7 @@ use crate::common::Error;
 /// Isolation level used to control which records are visible to a consumer
 /// when reading from a topic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum IsolationLevel {
     /// Read records including those from in-flight (uncommitted) transactions.
     ReadUncommitted,

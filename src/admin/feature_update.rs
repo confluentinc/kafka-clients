@@ -23,6 +23,7 @@ use crate::common::Error;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum UpgradeType {
     /// Unknown upgrade type.
     Unknown,

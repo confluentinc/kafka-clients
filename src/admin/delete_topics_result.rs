@@ -27,6 +27,7 @@ use crate::common::{KafkaFuture, Uuid};
 /// constructor; the Rust port makes the "exactly one keying" invariant a closed
 /// enum so it is unrepresentable to have both or neither.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum DeleteTopicsResult {
     /// Result keyed by topic id (the request used a `TopicIdCollection`).
     ByTopicId(HashMap<Uuid, KafkaFuture<()>>),

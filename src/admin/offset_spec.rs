@@ -23,6 +23,7 @@
 /// single closed enum since the variants carry no behavior beyond their
 /// timestamp mapping (`getOffsetFromSpec`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OffsetSpec {
     /// Retrieve the earliest offset of a partition.
     ///

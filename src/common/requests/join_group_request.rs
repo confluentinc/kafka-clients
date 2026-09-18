@@ -23,6 +23,7 @@
 /// Translates the Java static-utility class `org.apache.kafka.common.requests.JoinGroupRequest`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct JoinGroupRequest;
 
 impl JoinGroupRequest {

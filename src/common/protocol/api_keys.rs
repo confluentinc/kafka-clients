@@ -337,7 +337,7 @@ impl ApiKeys {
     /// the actual versions supported by `produce` — this method handles that when a listener type
     /// is provided and equals `Broker`.
     pub fn to_api_version_for_api_response(
-        &self,
+        self,
         enable_unstable_last_version: bool,
         listener_type: ListenerType,
     ) -> Option<ApiVersion> {
@@ -347,7 +347,7 @@ impl ApiKeys {
     /// Converts this API key to an `ApiVersion` with its version range.
     ///
     /// Returns `None` if the API is entirely disabled (latest version < oldest version).
-    pub fn to_api_version(&self, enable_unstable_last_version: bool) -> Option<ApiVersion> {
+    pub fn to_api_version(self, enable_unstable_last_version: bool) -> Option<ApiVersion> {
         self.to_api_version_internal(enable_unstable_last_version, None)
     }
 

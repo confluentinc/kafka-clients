@@ -22,6 +22,7 @@ use std::fmt;
 /// Defines the strategies which clients can follow to deal with the situation
 /// when none of the known nodes is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MetadataRecoveryStrategy {
     /// No recovery strategy.
     None,

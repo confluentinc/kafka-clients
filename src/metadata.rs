@@ -94,6 +94,7 @@ type PostUpdateFn = dyn Fn(&MetadataResponse, bool, i64) + Send + Sync;
 /// `retainTopic()`, `newMetadataRequestBuilder()`,
 /// `newMetadataRequestBuilderForNewTopics()`, and `update()`.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct MetadataOverrides {
     /// Optional function to override topic retention behavior.
     /// When `None`, the default (retain all topics) is used.
@@ -208,6 +209,7 @@ struct MetadataInner {
 }
 
 /// Result of `new_metadata_request_and_version`.
+#[non_exhaustive]
 pub struct MetadataRequestAndVersion {
     /// The request builder.
     pub request_builder: MetadataRequestBuilder,
@@ -224,6 +226,7 @@ pub struct MetadataRequestAndVersion {
 /// It is also possible that we know of the leader epoch, but not the leader when it
 /// is derived from an external source (e.g. a committed offset).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct LeaderAndEpoch {
     /// The leader node, if known.
     pub leader: Option<Node>,
@@ -258,6 +261,7 @@ impl fmt::Display for LeaderAndEpoch {
 ///
 /// Used by `update_partition_leadership`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct LeaderIdAndEpoch {
     /// The leader node ID, if known.
     pub leader_id: Option<i32>,

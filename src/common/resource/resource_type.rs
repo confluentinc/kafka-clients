@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.common.resource.ResourceType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum ResourceType {
     /// Represents any `ResourceType` which this client cannot understand,
     /// perhaps because this client is too old.

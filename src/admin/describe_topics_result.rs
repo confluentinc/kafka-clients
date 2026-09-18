@@ -27,6 +27,7 @@ use crate::common::{KafkaFuture, Uuid};
 /// with `DeleteTopicsResult`, the "keyed by id XOR name" invariant is a closed
 /// enum instead of Java's two nullable maps.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum DescribeTopicsResult {
     /// Result keyed by topic id (the request used a `TopicIdCollection`).
     ByTopicId(HashMap<Uuid, KafkaFuture<TopicDescription>>),

@@ -25,6 +25,7 @@ use crate::common::Error;
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.GroupProtocol`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum GroupProtocol {
     /// Classic group protocol.
     Classic,

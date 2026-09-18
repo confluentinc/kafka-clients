@@ -27,6 +27,7 @@ use std::fmt;
 /// since 4.0).
 #[deprecated(since = "4.0.0", note = "Use GroupState instead")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConsumerGroupState {
     /// An unrecognized consumer group state.
     Unknown,

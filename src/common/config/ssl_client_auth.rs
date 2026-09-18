@@ -26,6 +26,7 @@ use std::str::FromStr;
 ///
 /// Translated from `org.apache.kafka.common.config.SslClientAuth`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SslClientAuth {
     /// Server requires client certificate.
     Required,

@@ -25,6 +25,7 @@ use crate::common::GroupType;
 ///
 /// Corresponds to `org.apache.kafka.common.GroupState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum GroupState {
     /// An unrecognized group state (e.g. a state newer than this client).
     Unknown,

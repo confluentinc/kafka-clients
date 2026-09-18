@@ -28,6 +28,7 @@ use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 /// Translates the Java static-utility class `org.apache.kafka.common.requests.RequestUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct RequestUtils;
 
 impl RequestUtils {

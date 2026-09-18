@@ -29,6 +29,7 @@
 ///
 /// Corresponds to `org.apache.kafka.common.acl.AclOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum AclOperation {
     /// Represents any `AclOperation` which this client cannot understand,
     /// perhaps because this client is too old.

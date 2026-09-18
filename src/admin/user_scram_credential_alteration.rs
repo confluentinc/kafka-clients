@@ -31,6 +31,7 @@ use super::{UserScramCredentialDeletion, UserScramCredentialUpsertion};
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum UserScramCredentialAlteration {
     /// An update/insertion of a credential ([`UserScramCredentialUpsertion`]).
     Upsertion(UserScramCredentialUpsertion),

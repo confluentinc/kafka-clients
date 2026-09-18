@@ -22,6 +22,7 @@ use std::fmt;
 ///
 /// Corresponds to `org.apache.kafka.common.ClassicGroupState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ClassicGroupState {
     /// An unrecognized classic group state (e.g. a state newer than this
     /// client).

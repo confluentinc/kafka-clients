@@ -231,6 +231,7 @@ impl Measurable for SampledStat {
 /// Mirrors `SampledStat.Sample`. Fields are public to the crate so subclass
 /// `update`/`combine` implementations can read/write them exactly as Java does.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Sample {
     /// The initial (reset) value of this sample.
     pub initial_value: f64,

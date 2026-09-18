@@ -55,7 +55,12 @@ fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).expect("valid producer config");
-    KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer)).expect("build producer")
+    KafkaProducer::new(
+        config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
+    )
+    .expect("build producer")
 }
 
 /// Produce `num` records to `(topic, partition)`, waiting for the broker acks.

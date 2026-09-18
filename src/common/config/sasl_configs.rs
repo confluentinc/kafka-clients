@@ -40,6 +40,7 @@
 /// `org.apache.kafka.common.config.SaslConfigs`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct SaslConfigs;
 
 impl SaslConfigs {
@@ -69,6 +70,7 @@ impl SaslConfigs {
 ///
 /// Translated from `org.apache.kafka.common.config.SaslConfigs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SaslConfig {
     /// SASL mechanism. Default: `"GSSAPI"` (matches Java `DEFAULT_SASL_MECHANISM`).
     /// Corresponds to `sasl.mechanism`.

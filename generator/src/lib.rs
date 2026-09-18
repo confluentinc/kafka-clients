@@ -213,6 +213,7 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     // --- ListenerType enum ---
     writeln!(file, "/// Kafka listener types.")?;
     writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
+    writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub enum ListenerType {{")?;
     writeln!(file, "    Broker,")?;
     writeln!(file, "    Controller,")?;
@@ -223,6 +224,7 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     writeln!(file, "/// Identifiers and metadata for every Kafka API.")?;
     writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
     writeln!(file, "#[allow(non_camel_case_types)]")?;
+    writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub enum ApiMessageType {{")?;
 
     for data in apis.values() {
@@ -4754,7 +4756,7 @@ fn generate_schema_method(
         let schema_type_expr = schema_type_expr_for_field(field, flexible_versions);
         let about_escaped = field.about().replace('"', "\\\"");
         let push_stmt = format!(
-            "fields.push(Field {{ name: \"{}\", field_type: {}, about: \"{}\" }});",
+            "fields.push(Field::new(\"{}\", {}, \"{}\"));",
             field_name, schema_type_expr, about_escaped,
         );
 
@@ -5071,6 +5073,7 @@ fn generate_stub_file(file_name: &str, output_dir: &Path) -> Result<(), Box<dyn 
     writeln!(file, "#![allow(dead_code)]")?;
     writeln!(file)?;
     writeln!(file, "#[derive(Debug, Clone)]")?;
+    writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub struct {}Data {{", file_name)?;
     writeln!(file, "    // Fields will be generated when spec can be parsed")?;
     writeln!(file, "}}")?;

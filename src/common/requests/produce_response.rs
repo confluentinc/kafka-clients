@@ -126,6 +126,7 @@ impl std::fmt::Display for ProduceResponse {
 ///
 /// Corresponds to `ProduceResponse.PartitionResponse` in Java.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PartitionResponse {
     /// The error for this partition.
     pub error: Errors,
@@ -381,6 +382,7 @@ impl std::fmt::Display for PartitionResponse {
 ///
 /// Corresponds to `ProduceResponse.RecordError` in Java.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct RecordError {
     /// The batch index of the record that caused the error.
     pub batch_index: i32,

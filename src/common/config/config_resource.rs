@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `ConfigResource.Type`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConfigResourceType {
     /// A consumer group.
     Group,

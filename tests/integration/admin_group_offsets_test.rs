@@ -121,8 +121,8 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
     ]);
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         ProducerConfig::new(&props).expect("producer config"),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("build producer");
     let mut last = None;

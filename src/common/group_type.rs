@@ -22,6 +22,7 @@ use std::fmt;
 ///
 /// Corresponds to `org.apache.kafka.common.GroupType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum GroupType {
     /// An unrecognized group type (e.g. a type newer than this client).
     Unknown,

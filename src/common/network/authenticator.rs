@@ -133,6 +133,7 @@ pub trait Authenticator: Send + Sync {
 /// `PlaintextChannelBuilder.java`. For PLAINTEXT connections, authentication
 /// is a no-op since data is sent and received without encryption or
 /// authentication.
+#[non_exhaustive]
 pub struct PlaintextAuthenticator;
 
 impl PlaintextAuthenticator {

@@ -39,6 +39,7 @@ use crate::consumer::{Consumer, ConsumerConfig, GroupProtocol, async_kafka_consu
 /// `ConsumerDelegateCreator` are out of scope per `consumer-threading.md` §20
 /// ("collapses to direct `Box::new(AsyncKafkaConsumer)`"); this type is where
 /// that collapsed creator lives.
+#[non_exhaustive]
 pub struct KafkaConsumer;
 
 impl KafkaConsumer {

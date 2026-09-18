@@ -136,8 +136,8 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
 async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usize) {
     let producer: KafkaProducer<String, String> = KafkaProducer::new(
         make_producer_config(bootstrap),
-        Box::new(StringSerializer),
-        Box::new(StringSerializer),
+        Box::new(StringSerializer::default()),
+        Box::new(StringSerializer::default()),
     )
     .expect("Failed to build test producer");
 

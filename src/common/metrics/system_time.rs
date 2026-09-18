@@ -33,6 +33,7 @@ static NANO_ORIGIN: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLoc
 /// A `Time` implementation that uses the system clock and sleep call. Mirrors
 /// `org.apache.kafka.common.utils.SystemTime`.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct SystemTime;
 
 impl Time for SystemTime {

@@ -26,6 +26,7 @@ use crate::common::record::TimestampType;
 /// Corresponds to Java's nested
 /// `RecordDeserializationException.DeserializationExceptionOrigin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeserializationErrorOrigin {
     /// The key could not be deserialized.
     Key,

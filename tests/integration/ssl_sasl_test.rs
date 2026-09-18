@@ -61,12 +61,13 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
 
 /// Helper: create a Selector with SslChannelBuilder.
 fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
-    let ssl_config = SslConfig {
-        truststore_certificates: Some(ca_cert_pem.to_string()),
-        // Disable hostname verification for tests (connect via 127.0.0.1)
-        endpoint_identification_algorithm: String::new(),
-        ..SslConfig::default()
-    };
+    // `SslConfig` is `#[non_exhaustive]`, so a struct expression — including the
+    // `..default()` functional-update form — only compiles inside the crate.
+    // The fields stay `pub`, so assign them onto a `default()` instead.
+    let mut ssl_config = SslConfig::default();
+    ssl_config.truststore_certificates = Some(ca_cert_pem.to_string());
+    // Disable hostname verification for tests (connect via 127.0.0.1)
+    ssl_config.endpoint_identification_algorithm = String::new();
     let ssl_factory = SslFactory::new(&ssl_config).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
     Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
@@ -74,12 +75,13 @@ fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
 fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
-    let sasl_config = SaslConfig {
-        mechanism: "PLAIN".to_string(),
-        username: Some(username.to_string()),
-        password: Some(password.to_string()),
-        ..SaslConfig::default()
-    };
+    // `SaslConfig` is `#[non_exhaustive]`, so a struct expression — including the
+    // `..default()` functional-update form — only compiles inside the crate.
+    // The fields stay `pub`, so assign them onto a `default()` instead.
+    let mut sasl_config = SaslConfig::default();
+    sasl_config.mechanism = "PLAIN".to_string();
+    sasl_config.username = Some(username.to_string());
+    sasl_config.password = Some(password.to_string());
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config,
@@ -94,18 +96,20 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
 fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -> Selector {
-    let ssl_config = SslConfig {
-        truststore_certificates: Some(ca_cert_pem.to_string()),
-        endpoint_identification_algorithm: String::new(),
-        ..SslConfig::default()
-    };
+    // `SslConfig` is `#[non_exhaustive]`, so a struct expression — including the
+    // `..default()` functional-update form — only compiles inside the crate.
+    // The fields stay `pub`, so assign them onto a `default()` instead.
+    let mut ssl_config = SslConfig::default();
+    ssl_config.truststore_certificates = Some(ca_cert_pem.to_string());
+    ssl_config.endpoint_identification_algorithm = String::new();
     let ssl_factory = SslFactory::new(&ssl_config).unwrap();
-    let sasl_config = SaslConfig {
-        mechanism: "PLAIN".to_string(),
-        username: Some(username.to_string()),
-        password: Some(password.to_string()),
-        ..SaslConfig::default()
-    };
+    // `SaslConfig` is `#[non_exhaustive]`, so a struct expression — including the
+    // `..default()` functional-update form — only compiles inside the crate.
+    // The fields stay `pub`, so assign them onto a `default()` instead.
+    let mut sasl_config = SaslConfig::default();
+    sasl_config.mechanism = "PLAIN".to_string();
+    sasl_config.username = Some(username.to_string());
+    sasl_config.password = Some(password.to_string());
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslSsl,
         sasl_config,
@@ -318,12 +322,13 @@ async fn test_sasl_wrong_credentials() {
 async fn test_sasl_unsupported_mechanism() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     // Use SCRAM-SHA-256 mechanism which the broker doesn't have enabled
-    let sasl_config = SaslConfig {
-        mechanism: "SCRAM-SHA-256".to_string(),
-        username: Some(SASL_USERNAME.to_string()),
-        password: Some(SASL_PASSWORD.to_string()),
-        ..SaslConfig::default()
-    };
+    // `SaslConfig` is `#[non_exhaustive]`, so a struct expression — including the
+    // `..default()` functional-update form — only compiles inside the crate.
+    // The fields stay `pub`, so assign them onto a `default()` instead.
+    let mut sasl_config = SaslConfig::default();
+    sasl_config.mechanism = "SCRAM-SHA-256".to_string();
+    sasl_config.username = Some(SASL_USERNAME.to_string());
+    sasl_config.password = Some(SASL_PASSWORD.to_string());
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config,

@@ -93,8 +93,12 @@ pub fn transactional_producer_with(
         props.insert((*key).to_string(), (*value).to_string());
     }
     let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-        .map_err(|e| format!("building the producer: {e}"))
+    KafkaProducer::new(
+        config,
+        Box::new(StringSerializer::default()),
+        Box::new(StringSerializer::default()),
+    )
+    .map_err(|e| format!("building the producer: {e}"))
 }
 
 /// A plain (non-transactional) producer, for seeding and for the "mixed
@@ -108,8 +112,12 @@ pub fn plain_producer(bootstrap: &str, client_id: &str) -> Result<StringProducer
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
     let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
-        .map_err(|e| format!("building the producer: {e}"))
+    KafkaProducer::new(
+        config,
+        Box::new(StringSerializer::default()),
+        Box::new(StringSerializer::default()),
+    )
+    .map_err(|e| format!("building the producer: {e}"))
 }
 
 /// A consumer for `group_id` at the given isolation level, reading from the
@@ -140,8 +148,12 @@ pub fn build_consumer_with(
         props.insert((*key).to_string(), (*value).to_string());
     }
     let config = ConsumerConfig::new(&props).map_err(|e| format!("invalid consumer config: {e}"))?;
-    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .map_err(|e| format!("building the consumer: {e}"))
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        config,
+        Box::new(ByteArrayDeserializer::default()),
+        Box::new(ByteArrayDeserializer::default()),
+    )
+    .map_err(|e| format!("building the consumer: {e}"))
 }
 
 /// Builds a record for partition 0 with key `key-{value}`.

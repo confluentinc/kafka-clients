@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.common.acl.AclPermissionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum AclPermissionType {
     /// Represents any `AclPermissionType` which this client cannot understand,
     /// perhaps because this client is too old.
