@@ -220,6 +220,30 @@ public sealed class KafkaAdminClient : IAdmin
         _native.RemoveMembersFromConsumerGroup(groupId, options);
 
     /// <inheritdoc/>
+    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
+        _native.CreateAcls(acls, options);
+
+    /// <inheritdoc/>
+    public DeleteAclsResult DeleteAcls(
+        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
+        _native.DeleteAcls(filters, options);
+
+    /// <inheritdoc/>
+    public DescribeAclsResult DescribeAcls(
+        AclBindingFilter filter, DescribeAclsOptions? options = null) =>
+        _native.DescribeAcls(filter, options);
+
+    /// <inheritdoc/>
+    public DescribeClientQuotasResult DescribeClientQuotas(
+        ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
+        _native.DescribeClientQuotas(filter, options);
+
+    /// <inheritdoc/>
+    public AlterClientQuotasResult AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
+        _native.AlterClientQuotas(entries, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

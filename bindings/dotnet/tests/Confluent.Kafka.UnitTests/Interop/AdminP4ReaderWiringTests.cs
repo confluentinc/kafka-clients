@@ -112,9 +112,37 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// empty set, and fails the assertion. The table above is which branch the three known
 /// shapes take, not the argument that there are only three.
 /// </para>
+/// <para>
+/// ⚠⚠ <b>A shared accessor <em>bundle</em> is the same hazard one level up, and the
+/// closure scan above cannot see it (M15/P6, finding 76.1).</b> A bundle —
+/// <see cref="AclRowMarshal.NativeFilterAccessors"/>,
+/// <see cref="ClientQuotaMarshal.NativeEntityAccessors"/> — is a plain static object on a
+/// marshaller, not a <see cref="Delegate"/> on <see cref="AdminCallbacks"/>, so neither
+/// <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/> nor
+/// <see cref="CapturedEntryPoints"/> reaches it. Its constructor takes N accessors
+/// <b>positionally</b>, so transposing two of the same delegate type compiles. Measured on
+/// the reviewed commit: transposing <c>NativeFilterAccessors</c>' <c>Operation</c> and
+/// <c>PermissionType</c> left the suite at <b>1966/1966 green</b> — the only one of seven
+/// injections that survived, because the two tests able to observe a mis-decode both used
+/// <c>AclOperation.Read</c> (3) / <c>AclPermissionType.Allow</c> (3), identical codes.
+/// </para>
+/// <para>
+/// The bundle assertions below therefore pin each member to its own ABI symbol
+/// <b>positionally</b>, one row per member — a sorted set, as used for the readers above,
+/// is invariant under exactly the transposition being guarded against and would prove
+/// nothing. <see cref="TheTrackedBundleSet_CoversEveryAccessorBundle"/> discovers the
+/// bundles the same way the reader set is discovered, so a new one added without rows here
+/// turns red on its first run. Its criterion is the hazard itself — <b>two or more
+/// <em>same-typed</em></b> P/Invoke delegates held by one object — which is why
+/// <see cref="KeyedResultMarshal.Accessors"/> is correctly out of scope: its two members
+/// have distinct delegate types, so a transposition does not compile.
+/// </para>
 /// </remarks>
 public sealed class AdminP4ReaderWiringTests
 {
+    /// <summary>The one namespace an accessor bundle may live in (CLAUDE.md §2).</summary>
+    private const string InteropNamespace = "Confluent.Kafka.Internal.Interop";
+
     /// <summary>
     /// Each composite-key reader captures <b>its own</b> result type's
     /// <c>get_topic</c> / <c>get_partition</c> pair.
@@ -204,6 +232,113 @@ public sealed class AdminP4ReaderWiringTests
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))));
 
     /// <summary>
+    /// <c>createAcls</c>' <b>key</b> reader captures
+    /// <c>kafka_admin_CreateAclsResult_get_binding</c> — its own, not another ACL result's
+    /// (M15/P6).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The ACL results expose byte-identical accessor sets, so a cross-wired
+    /// <c>get_binding</c> returns a plausible binding rather than failing; and the Rust mock
+    /// does not implement any of these RPCs, so no behavioural test can tell them apart
+    /// either. The seven <c>kafka_common_AclBinding_*</c> accessors the reader then calls are
+    /// <em>shared</em> by every ACL result and so are not cross-wirable — which is why
+    /// <c>get_binding</c> is the only symbol this reader has to capture, and the only one
+    /// worth asserting.
+    /// </remarks>
+    [Fact]
+    public void CreateAclsKey_CapturesCreateAclsOwnBindingAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_CreateAclsResult_get_binding" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.CreateAclsKey))));
+
+    /// <summary>
+    /// <c>deleteAcls</c>' <b>key</b> reader captures
+    /// <c>kafka_admin_DeleteAclsResult_get_filter</c> — its own, not another ACL result's
+    /// (M15/P6).
+    /// </summary>
+    [Fact]
+    public void DeleteAclsKey_CapturesDeleteAclsOwnFilterAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_DeleteAclsResult_get_filter" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsKey))));
+
+    /// <summary>
+    /// <c>deleteAcls</c>' <b>value</b> reader captures all three of its own inner-axis
+    /// accessors — the <c>(i, j)</c> walk lives inside the reader, so all three are wired
+    /// here rather than in the accessor set (M15/P6).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>get_result_error</c> is the <b>value</b> channel; the accessor set's
+    /// <c>get_error</c> is the fault channel. A reader wired to the latter would look
+    /// plausible and would silently turn every inner failure into a filter-level fault.
+    /// </remarks>
+    [Fact]
+    public void DeleteAclsFilterResults_CapturesItsOwnInnerAccessors() =>
+        Assert.Equal(
+            new[]
+            {
+                "kafka_admin_DeleteAclsResult_get_binding",
+                "kafka_admin_DeleteAclsResult_get_result_count",
+                "kafka_admin_DeleteAclsResult_get_result_error",
+            },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsFilterResults))));
+
+    /// <summary>
+    /// <c>describeAcls</c>' <b>element</b> reader captures
+    /// <c>kafka_admin_DescribeAclsResult_get_binding</c> — its own, not
+    /// <c>createAcls</c>' or <c>deleteAcls</c>' byte-identical twin (M15/P6).
+    /// </summary>
+    [Fact]
+    public void DescribeAclsValue_CapturesDescribeAclsOwnBindingAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_DescribeAclsResult_get_binding" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeAclsValue))));
+
+    /// <summary>
+    /// <c>describeClientQuotas</c>' <b>key</b> reader captures
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_entity</c> — its own, not
+    /// <c>alterClientQuotas</c>' byte-identical twin (M15/P6).
+    /// </summary>
+    [Fact]
+    public void DescribeClientQuotasKey_CapturesItsOwnEntityAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_DescribeClientQuotasResult_get_entity" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeClientQuotasKey))));
+
+    /// <summary>
+    /// <c>describeClientQuotas</c>' <b>value</b> reader captures all three of its own
+    /// inner-axis accessors — the <c>(i, j)</c> quota walk lives inside the reader (M15/P6).
+    /// </summary>
+    [Fact]
+    public void DescribeClientQuotasValue_CapturesItsOwnInnerAccessors() =>
+        Assert.Equal(
+            new[]
+            {
+                "kafka_admin_DescribeClientQuotasResult_get_quota_count",
+                "kafka_admin_DescribeClientQuotasResult_get_quota_key",
+                "kafka_admin_DescribeClientQuotasResult_get_quota_value",
+            },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeClientQuotasValue))));
+
+    /// <summary>
+    /// ⚠⚠ <c>alterClientQuotas</c>' <b>key</b> reader captures
+    /// <c>kafka_admin_AlterClientQuotasResult_get_entity</c> — its own, not
+    /// <c>describeClientQuotas</c>' twin (M15/P6).
+    /// </summary>
+    /// <remarks>
+    /// <c>kafka_admin_CreateAclsResult_t</c> and <c>kafka_admin_AlterClientQuotasResult_t</c>
+    /// declare byte-identical accessor sets (<c>count</c> / <c>get_X</c> / <c>get_error</c> /
+    /// <c>destroy</c>), so a cross-wire between them compiles only for the <em>key</em>
+    /// reader's entity/binding types — but the quota pair does cross-wire silently, and both
+    /// are what this file exists for.
+    /// </remarks>
+    [Fact]
+    public void AlterClientQuotasKey_CapturesItsOwnEntityAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_AlterClientQuotasResult_get_entity" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.AlterClientQuotasKey))));
+
+    /// <summary>
     /// No two of the factory-built readers capture the same accessors — the control that
     /// makes the per-reader assertions above more than three restatements of one source
     /// line.
@@ -228,6 +363,13 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
             nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
             nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
+            nameof(AdminCallbacks.CreateAclsKey),
+            nameof(AdminCallbacks.DeleteAclsKey),
+            nameof(AdminCallbacks.DeleteAclsFilterResults),
+            nameof(AdminCallbacks.DescribeAclsValue),
+            nameof(AdminCallbacks.DescribeClientQuotasKey),
+            nameof(AdminCallbacks.DescribeClientQuotasValue),
+            nameof(AdminCallbacks.AlterClientQuotasKey),
         };
 
         List<string> signatures = readers
@@ -279,12 +421,19 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
+                nameof(AdminCallbacks.AlterClientQuotasKey),
                 nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
                 nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
                 nameof(AdminCallbacks.AlterPartitionReassignmentsKey),
+                nameof(AdminCallbacks.CreateAclsKey),
+                nameof(AdminCallbacks.DeleteAclsFilterResults),
+                nameof(AdminCallbacks.DeleteAclsKey),
                 nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
                 nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
                 nameof(AdminCallbacks.DeleteRecordsKey),
+                nameof(AdminCallbacks.DescribeAclsValue),
+                nameof(AdminCallbacks.DescribeClientQuotasKey),
+                nameof(AdminCallbacks.DescribeClientQuotasValue),
                 nameof(AdminCallbacks.ElectLeadersKey),
                 nameof(AdminCallbacks.ElectLeadersOptionalError),
                 nameof(AdminCallbacks.ListOffsetsKey),
@@ -293,6 +442,184 @@ public sealed class AdminP4ReaderWiringTests
             },
             discovered);
     }
+
+    /// <summary>
+    /// ⚠⚠ Every member of the shared <c>kafka_common_AclBindingFilter_*</c> bundle is bound
+    /// to <b>its own</b> ABI symbol — the positional guard the closure scan cannot give
+    /// (M15/P6, finding 76.1).
+    /// </summary>
+    /// <remarks>
+    /// The rows are compared in declaration order, member name included, so a transposition
+    /// of any same-typed pair — <c>Operation</c>/<c>PermissionType</c>,
+    /// <c>ResourceType</c>/<c>PatternType</c>, or any two of
+    /// <c>ResourceName</c>/<c>Principal</c>/<c>Host</c> — moves a symbol to the wrong row
+    /// and fails here. The expected symbols are the header's own accessor order
+    /// (<c>confluent_kafka.h:7525/7537/7550/7561/7572/7584/7596</c>).
+    /// </remarks>
+    [Fact]
+    public void NativeFilterAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        AclRowMarshal.FilterAccessors accessors = AclRowMarshal.NativeFilterAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "ResourceType=kafka_common_AclBindingFilter_resource_type",
+                "ResourceName=kafka_common_AclBindingFilter_resource_name",
+                "PatternType=kafka_common_AclBindingFilter_pattern_type",
+                "Principal=kafka_common_AclBindingFilter_principal",
+                "Host=kafka_common_AclBindingFilter_host",
+                "Operation=kafka_common_AclBindingFilter_operation",
+                "PermissionType=kafka_common_AclBindingFilter_permission_type",
+            },
+            new[]
+            {
+                "ResourceType=" + EntryPointOf(accessors.ResourceType),
+                "ResourceName=" + EntryPointOf(accessors.ResourceName),
+                "PatternType=" + EntryPointOf(accessors.PatternType),
+                "Principal=" + EntryPointOf(accessors.Principal),
+                "Host=" + EntryPointOf(accessors.Host),
+                "Operation=" + EntryPointOf(accessors.Operation),
+                "PermissionType=" + EntryPointOf(accessors.PermissionType),
+            });
+    }
+
+    /// <summary>
+    /// Every member of the shared <c>kafka_common_ClientQuotaEntity_*</c> bundle is bound to
+    /// <b>its own</b> ABI symbol (M15/P6).
+    /// </summary>
+    /// <remarks>
+    /// <c>GetEntryType</c>/<c>GetEntryName</c> are the one same-typed pair here;
+    /// <c>EntryCount</c> has its own delegate shape and cannot be transposed with either.
+    /// </remarks>
+    [Fact]
+    public void NativeEntityAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        ClientQuotaMarshal.EntityAccessors accessors = ClientQuotaMarshal.NativeEntityAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "EntryCount=kafka_common_ClientQuotaEntity_entry_count",
+                "GetEntryType=kafka_common_ClientQuotaEntity_get_entry_type",
+                "GetEntryName=kafka_common_ClientQuotaEntity_get_entry_name",
+            },
+            new[]
+            {
+                "EntryCount=" + EntryPointOf(accessors.EntryCount),
+                "GetEntryType=" + EntryPointOf(accessors.GetEntryType),
+                "GetEntryName=" + EntryPointOf(accessors.GetEntryName),
+            });
+    }
+
+    /// <summary>
+    /// Every member of the <c>kafka_admin_OffsetAndMetadataMap_*</c> bundle is bound to
+    /// <b>its own</b> ABI symbol.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Found by <see cref="TheTrackedBundleSet_CoversEveryAccessorBundle"/> rather than by
+    /// hand — it predates M15/P6 and was unpinned, which is the whole argument for a
+    /// mechanical discovery over a checklist. Its same-typed pair is
+    /// <c>GetTopic</c>/<c>GetMetadata</c>, and transposing those swaps a key for a value.
+    /// </remarks>
+    [Fact]
+    public void OffsetAndMetadataMapAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        AdminCallbacks.OffsetAndMetadataMapAccessors accessors =
+            (AdminCallbacks.OffsetAndMetadataMapAccessors)typeof(AdminCallbacks)
+                .GetField("s_offsetAndMetadataMapAccessors", BindingFlags.NonPublic | BindingFlags.Static)!
+                .GetValue(null)!;
+
+        Assert.Equal(
+            new[]
+            {
+                "Count=kafka_admin_OffsetAndMetadataMap_count",
+                "GetTopic=kafka_admin_OffsetAndMetadataMap_get_topic",
+                "GetPartition=kafka_admin_OffsetAndMetadataMap_get_partition",
+                "HasOffset=kafka_admin_OffsetAndMetadataMap_has_offset",
+                "GetOffset=kafka_admin_OffsetAndMetadataMap_get_offset",
+                "GetMetadata=kafka_admin_OffsetAndMetadataMap_get_metadata",
+                "GetLeaderEpoch=kafka_admin_OffsetAndMetadataMap_get_leader_epoch",
+            },
+            new[]
+            {
+                "Count=" + EntryPointOf(accessors.Count),
+                "GetTopic=" + EntryPointOf(accessors.GetTopic),
+                "GetPartition=" + EntryPointOf(accessors.GetPartition),
+                "HasOffset=" + EntryPointOf(accessors.HasOffset),
+                "GetOffset=" + EntryPointOf(accessors.GetOffset),
+                "GetMetadata=" + EntryPointOf(accessors.GetMetadata),
+                "GetLeaderEpoch=" + EntryPointOf(accessors.GetLeaderEpoch),
+            });
+    }
+
+    /// <summary>
+    /// ⚠⚠ <b>The tracked bundle set is COMPLETE: every shared accessor bundle in the binding
+    /// is pinned by one of the three assertions above.</b> The bundle-level twin of
+    /// <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/>.
+    /// </summary>
+    /// <remarks>
+    /// Discovery is the hazard's own definition — an object held in an interop static field
+    /// that carries <b>two or more same-typed</b> P/Invoke delegates, which is exactly what a
+    /// positional constructor lets you transpose without a compile error. A bundle whose
+    /// delegate types are all distinct (<see cref="KeyedResultMarshal.Accessors"/>) is not
+    /// discovered because it is not transposable, so this does not widen into a checklist
+    /// over every accessor set in the binding.
+    /// </remarks>
+    [Fact]
+    public void TheTrackedBundleSet_CoversEveryAccessorBundle()
+    {
+        string[] discovered = typeof(AdminCallbacks).Assembly
+            .GetTypes()
+            .Where(type => type.Namespace == InteropNamespace && !type.ContainsGenericParameters)
+            .SelectMany(type =>
+                type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+            .Where(field => !typeof(Delegate).IsAssignableFrom(field.FieldType)
+                && !field.FieldType.IsPrimitive
+                && field.FieldType != typeof(string))
+            .Where(field => HasTransposableAccessorPair(field.GetValue(null)))
+            .Select(field => field.DeclaringType!.Name + "." + field.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        // Control-positive: the discovery really reaches bundles, so a criterion that
+        // silently matched nothing could not make this pass vacuously.
+        Assert.NotEmpty(discovered);
+
+        Assert.Equal(
+            new[]
+            {
+                "AclRowMarshal.NativeFilterAccessors",
+                "AdminCallbacks.s_offsetAndMetadataMapAccessors",
+                "ClientQuotaMarshal.NativeEntityAccessors",
+            },
+            discovered);
+    }
+
+    /// <summary>
+    /// Whether an object holds two or more P/Invoke delegates of the <b>same</b> delegate
+    /// type — the shape a positional constructor lets a caller transpose silently.
+    /// </summary>
+    private static bool HasTransposableAccessorPair(object? bundle) =>
+        bundle is not null
+        && bundle.GetType()
+            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Where(field => field.GetValue(bundle) is Delegate accessor
+                && accessor.Method.GetCustomAttribute<DllImportAttribute>() is not null)
+            .GroupBy(field => field.FieldType)
+            .Any(sameTyped => sameTyped.Count() >= 2);
+
+    /// <summary>
+    /// The ABI <c>EntryPoint</c> one bundle member is bound to.
+    /// </summary>
+    /// <exception cref="Xunit.Sdk.XunitException">
+    /// The member is not a direct P/Invoke, so the row below it would assert nothing.
+    /// </exception>
+    private static string EntryPointOf(Delegate accessor) =>
+        accessor.Method.GetCustomAttribute<DllImportAttribute>()?.EntryPoint
+        ?? throw new Xunit.Sdk.XunitException(
+            "the bundle member is not a direct P/Invoke, so its ABI symbol is no longer "
+            + "readable here — this assertion needs a different mechanism, not deleting");
 
     /// <summary>
     /// Whether a delegate closes over at least one <c>DllImport</c> — the signature of a

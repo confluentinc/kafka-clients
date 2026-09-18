@@ -246,6 +246,65 @@ public sealed class MockAdminClient : IAdmin
         _native.RemoveMembersFromConsumerGroup(groupId, options);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.createAcls</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:806-808</c>); the Rust mock mirrors that as one exceptional
+    /// future <em>per binding</em> rather than a panic (<c>admin-client.md</c> §9), so every
+    /// binding's awaitable faults with that message instead of succeeding.
+    /// </remarks>
+    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
+        _native.CreateAcls(acls, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.deleteAcls</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:816-818</c>); the Rust mock mirrors that as one exceptional
+    /// future <em>per filter</em> rather than a panic (<c>admin-client.md</c> §9), so every
+    /// filter's awaitable faults with that message instead of succeeding.
+    /// </remarks>
+    public DeleteAclsResult DeleteAcls(
+        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
+        _native.DeleteAcls(filters, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.describeAcls</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:811-813</c>); the Rust mock mirrors that as one exceptional
+    /// future for the whole call (<c>admin-client.md</c> §9), so
+    /// <see cref="DescribeAclsResult.Values"/> faults with that message.
+    /// </remarks>
+    public DescribeAclsResult DescribeAcls(
+        AclBindingFilter filter, DescribeAclsOptions? options = null) =>
+        _native.DescribeAcls(filter, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.describeClientQuotas</c> throws
+    /// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
+    /// (<c>MockAdminClient.java:1244-1246</c>); the Rust mock surfaces that as one exceptional
+    /// future for the whole call (<c>admin-client.md</c> §9), so
+    /// <see cref="DescribeClientQuotasResult.Entities"/> faults with that message.
+    /// </remarks>
+    public DescribeClientQuotasResult DescribeClientQuotas(
+        ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
+        _native.DescribeClientQuotas(filter, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.alterClientQuotas</c> throws
+    /// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
+    /// (<c>MockAdminClient.java:1249-1251</c>); the Rust mock surfaces that as one exceptional
+    /// future <em>per entity</em> (<c>admin-client.md</c> §9), so every entity's awaitable
+    /// faults with that message instead of succeeding.
+    /// </remarks>
+    public AlterClientQuotasResult AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
+        _native.AlterClientQuotas(entries, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

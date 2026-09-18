@@ -3003,4 +3003,494 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void RemoveMembersFromConsumerGroupResultDestroy(IntPtr result);
+
+    // ---- M15/P6: the flat kafka_common_AclBinding_t accessors (borrowed, ffi §B2 Cat. 4) ----
+    //
+    // The ABI exposes no AccessControlEntry_* or ResourcePattern_* type at all: a binding is
+    // seven flat accessors, each documented in terms of the Java path it flattens
+    // ("pattern().resourceType().code()"). AclRowMarshal.ReadBinding restores the nesting.
+    // Every binding pointer is borrowed from its result root and must never be destroyed.
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_resource_type</c> — <c>pattern().resourceType().code()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_resource_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingResourceType(IntPtr binding);
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_resource_name</c> — <c>pattern().name()</c>, borrowed and
+    /// NUL-terminated. Never null on a binding (unlike the filter accessor).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_resource_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AclBindingResourceName(IntPtr binding);
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_pattern_type</c> — <c>pattern().patternType().code()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_pattern_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingPatternType(IntPtr binding);
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_principal</c> — <c>entry().principal()</c>, borrowed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_principal", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AclBindingPrincipal(IntPtr binding);
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_host</c> — <c>entry().host()</c>, borrowed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_host", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AclBindingHost(IntPtr binding);
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_operation</c> — <c>entry().operation().code()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_operation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingOperation(IntPtr binding);
+
+    /// <summary>
+    /// <c>kafka_common_AclBinding_permission_type</c> —
+    /// <c>entry().permissionType().code()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_permission_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingPermissionType(IntPtr binding);
+
+    // ---- M15/P6: createAcls (result shape 2) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_create_acls_async</c> — Java's
+    /// <c>createAcls(Collection&lt;AclBinding&gt;, CreateAclsOptions)</c>. The bindings cross
+    /// as seven parallel arrays; row <c>i</c> of each describes one binding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Ordinary bad input reaches the INLINE callback path here.</b> The header's own
+    /// doc extends the inline trigger set well beyond a NULL handle: the callback runs
+    /// "synchronously on the calling thread, before this function returns" for a NULL
+    /// resource name, principal or host entry, or an enum code Java's
+    /// <c>ResourcePattern</c> / <c>AccessControlEntry</c> constructor rejects. So
+    /// <c>TaskCreationOptions.RunContinuationsAsynchronously</c> is load-bearing and the
+    /// <c>GCHandle</c> free on that path is a correctness requirement. The managed side
+    /// rejects those inputs at construction anyway (PLAN D38), which keeps the path
+    /// exceptional rather than removing the obligation.
+    /// </para>
+    /// <para>
+    /// The <c>_async</c> form is driven rather than the sync twin: the sync one blocks until
+    /// every per-binding future has resolved, which would make the synchronous C# method
+    /// block (PLAN §5.2).
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_create_acls_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientCreateAclsAsync(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int[] patternTypes,
+        IntPtr[] principals,
+        IntPtr[] hosts,
+        int[] operations,
+        int[] permissionTypes,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.CreateAclsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_CreateAclsResult_t — a Category-3 owned borrow-root ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CreateAclsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_CreateAclsResult_get_binding</c> — the binding at
+    /// <paramref name="index"/>, <b>borrowed</b>; it dies with the result root. Entries are
+    /// sorted by resource type, name, pattern type, principal, host, operation and
+    /// permission type.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr CreateAclsResultGetBinding(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_CreateAclsResult_get_error</c> — that binding's error, or null if it
+    /// was created successfully.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>): read it with
+    /// <see cref="KafkaException.FromBorrowedHandle"/>, never
+    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no <c>_get_value</c>
+    /// beside it — Java's per-binding future is <c>KafkaFuture&lt;Void&gt;</c>, so a null
+    /// error <em>is</em> the success value.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr CreateAclsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void CreateAclsResultDestroy(IntPtr result);
+
+    // ---- M15/P6: the flat kafka_common_AclBindingFilter_t accessors (borrowed) ----
+    //
+    // The filter twin of the seven AclBinding accessors above, and NOT interchangeable with
+    // them: the three string accessors return null when the filter matches any value, and
+    // "null is distinct from a pointer to the empty string, which filters on the name ''"
+    // (confluent_kafka.h:7528-7530). The enums may also carry ANY=1 / MATCH=2.
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_resource_type</c> —
+    /// <c>patternFilter().resourceType().code()</c>; may be ANY.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_resource_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingFilterResourceType(IntPtr filter);
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_resource_name</c> — <c>patternFilter().name()</c>,
+    /// borrowed, or <b>null when the filter matches any name</b>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_resource_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AclBindingFilterResourceName(IntPtr filter);
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_pattern_type</c> —
+    /// <c>patternFilter().patternType().code()</c>; may be ANY or MATCH.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_pattern_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingFilterPatternType(IntPtr filter);
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_principal</c> — <c>entryFilter().principal()</c>,
+    /// borrowed, or null when the filter matches any principal.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_principal", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AclBindingFilterPrincipal(IntPtr filter);
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_host</c> — <c>entryFilter().host()</c>, borrowed, or
+    /// null when the filter matches any host.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_host", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AclBindingFilterHost(IntPtr filter);
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_operation</c> —
+    /// <c>entryFilter().operation().code()</c>; may be ANY.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_operation", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingFilterOperation(IntPtr filter);
+
+    /// <summary>
+    /// <c>kafka_common_AclBindingFilter_permission_type</c> —
+    /// <c>entryFilter().permissionType().code()</c>; may be ANY.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_permission_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AclBindingFilterPermissionType(IntPtr filter);
+
+    // ---- M15/P6: deleteAcls (result shape 1, two-level nested value) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_delete_acls_async</c> — Java's
+    /// <c>deleteAcls(Collection&lt;AclBindingFilter&gt;, DeleteAclsOptions)</c>. The signature
+    /// is byte-identical to <see cref="AdminClientCreateAclsAsync"/>, but the contract is the
+    /// opposite: a NULL string entry means "match any" and no enum combination is rejected
+    /// (<c>confluent_kafka.h:8121-8125</c>), which is why the filters have their own row
+    /// projector overload.
+    /// </summary>
+    /// <remarks>
+    /// The <c>_async</c> form is driven rather than the sync twin, which blocks until every
+    /// per-filter future has resolved.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_delete_acls_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDeleteAclsAsync(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int[] patternTypes,
+        IntPtr[] principals,
+        IntPtr[] hosts,
+        int[] operations,
+        int[] permissionTypes,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteAclsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DeleteAclsResult_t — a Category-3 owned borrow-root, two levels deep ----
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsResult_count</c> — the number of <b>filters</b> (the outer
+    /// axis).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteAclsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsResult_get_filter</c> — the filter at <paramref name="index"/>,
+    /// <b>borrowed</b>; it dies with the result root.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_filter", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteAclsResultGetFilter(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsResult_get_error</c> — the <b>filter's</b> future failing,
+    /// meaning nothing was deleted for it, or null when it was applied successfully.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>) — <see cref="KafkaException.FromBorrowedHandle"/>,
+    /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>FAULT</b> channel: it
+    /// faults that filter's <c>Task</c>. An individual matched ACL that could not be deleted
+    /// is reported by <see cref="DeleteAclsResultGetResultError"/> instead and leaves this
+    /// null (<c>confluent_kafka.h:7744-7747</c>).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteAclsResultGetError(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsResult_get_result_count</c> — how many ACLs the filter at
+    /// <paramref name="index"/> matched (the size of Java's <c>FilterResults.values()</c>),
+    /// or 0 if the filter failed.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteAclsResultGetResultCount(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsResult_get_binding</c> — the ACL deleted by filter
+    /// <paramref name="index"/>, entry <paramref name="resultIndex"/>, <b>borrowed</b>, or
+    /// null when that entry carries an exception instead.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteAclsResultGetBinding(IntPtr result, int index, int resultIndex);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsResult_get_result_error</c> — Java's
+    /// <c>FilterResult.error()</c>: the filter matched this ACL but deleting it failed.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>) — <see cref="KafkaException.FromBorrowedHandle"/>,
+    /// never <see cref="KafkaException.FromHandle"/>. ⚠ This is the <b>VALUE</b> channel: it
+    /// is stored inside a successfully completed <c>FilterResults</c> and is independent of
+    /// <see cref="DeleteAclsResultGetError"/> (<c>confluent_kafka.h:7793-7796</c>). It is
+    /// complementary to <see cref="DeleteAclsResultGetBinding"/> — for an in-range entry
+    /// precisely one of the two is non-null.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_get_result_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteAclsResultGetResultError(IntPtr result, int index, int resultIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeleteAclsResultDestroy(IntPtr result);
+
+    // ---- M15/P6: describeAcls (result sub-shape 3b — one future over a collection) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_acls_async</c> — Java's
+    /// <c>describeAcls(AclBindingFilter, DescribeAclsOptions)</c>. Java takes a
+    /// <b>single</b> filter, so the seven fields cross as scalars rather than arrays
+    /// (<c>confluent_kafka.h:8040-8041</c>).
+    /// </summary>
+    /// <remarks>
+    /// A NULL string means "match any" and is distinct from a pointer to <c>""</c>; no enum
+    /// combination is rejected (<c>confluent_kafka.h:8052-8063</c>). The <c>_async</c> form
+    /// is driven rather than the sync twin.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_acls_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeAclsAsync(
+        IntPtr admin,
+        int resourceType,
+        IntPtr resourceName,
+        int patternType,
+        IntPtr principal,
+        IntPtr host,
+        int operation,
+        int permissionType,
+        int timeoutMs,
+        AdminCallbacks.DescribeAclsCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeAclsResult_t — an owned borrow-root with NO get_error ----
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeAclsResult_count</c> — the number of matching bindings.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeAclsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeAclsResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeAclsResult_get_binding</c> — the binding at
+    /// <paramref name="index"/>, <b>borrowed</b>, in the order the broker reported
+    /// (<c>confluent_kafka.h:7696-7697</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeAclsResult_get_binding", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeAclsResultGetBinding(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeAclsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeAclsResultDestroy(IntPtr result);
+
+    // ---- kafka_common_ClientQuotaEntity_t — a borrowed value type, shared by the quota RPCs ----
+
+    /// <summary>
+    /// <c>kafka_common_ClientQuotaEntity_entry_count</c> — the size of Java's
+    /// <c>entries()</c> map.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_entry_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ClientQuotaEntityEntryCount(IntPtr entity);
+
+    /// <summary>
+    /// <c>kafka_common_ClientQuotaEntity_get_entry_type</c> — <c>"user"</c> / <c>"client-id"</c>
+    /// / <c>"ip"</c>, borrowed, sorted by type.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_get_entry_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClientQuotaEntityGetEntryType(IntPtr entity, int index);
+
+    /// <summary>
+    /// <c>kafka_common_ClientQuotaEntity_get_entry_name</c> — borrowed, or null out of range
+    /// <b>or when the entry names the built-in default entity</b>
+    /// (<c>confluent_kafka.h:7622-7628</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_get_entry_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ClientQuotaEntityGetEntryName(IntPtr entity, int index);
+
+    // ---- M15/P6: describeClientQuotas (result shape 3 — one future over a map) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_client_quotas_async</c> — Java's
+    /// <c>describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)</c>. The
+    /// filter's components cross as three parallel arrays plus <c>strict</c>
+    /// (<c>containsOnly</c> vs <c>contains</c>); <c>count == 0</c> with <c>strict == false</c>
+    /// is Java's <c>ClientQuotaFilter.all()</c> (<c>confluent_kafka.h:8204-8218</c>).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>strict</c> carries <see cref="UnmanagedType.I1"/>: C's <c>bool</c> is one byte,
+    /// and the default 4-byte Win32 <c>BOOL</c> would corrupt the next argument.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_client_quotas_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeClientQuotasAsync(
+        IntPtr admin,
+        IntPtr[] entityTypes,
+        int[] matchTypes,
+        IntPtr[] matchNames,
+        int count,
+        [MarshalAs(UnmanagedType.I1)] bool strict,
+        int timeoutMs,
+        AdminCallbacks.DescribeClientQuotasCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_DescribeClientQuotasResult_t — an owned borrow-root with NO get_error ----
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClientQuotasResult_count</c> — the number of matching entities.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeClientQuotasResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_entity</c> — the entity at
+    /// <paramref name="index"/>, <b>borrowed</b>, sorted by <c>(entity type, entity name)</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_get_entity", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClientQuotasResultGetEntity(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_count</c> — how many quota values
+    /// the entity at <paramref name="index"/> has. A type it has no value for is absent.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_get_quota_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeClientQuotasResultGetQuotaCount(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_key</c> — the key at
+    /// <c>(index, quotaIndex)</c>, borrowed and sorted. Opaque broker-defined strings in
+    /// Java too; there is no enum (<c>confluent_kafka.h:7857</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_get_quota_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeClientQuotasResultGetQuotaKey(IntPtr result, int index, int quotaIndex);
+
+    /// <summary>
+    /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_value</c> — writes the value at
+    /// <c>(index, quotaIndex)</c> and returns whether both indices were in range.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Presence is the return value, never a sentinel:</b> every <c>double</c>,
+    /// including every negative one and <c>0</c>, is a legal quota value
+    /// (<c>confluent_kafka.h:7868-7876</c>). The <see cref="UnmanagedType.I1"/> is
+    /// load-bearing for the same reason as on <c>strict</c> above.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_get_quota_value", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool DescribeClientQuotasResultGetQuotaValue(
+        IntPtr result, int index, int quotaIndex, out double value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeClientQuotasResultDestroy(IntPtr result);
+
+    // ---- M15/P6: alterClientQuotas (result shape 2) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_alter_client_quotas_async</c> — Java's
+    /// <c>alterClientQuotas(Collection&lt;ClientQuotaAlteration&gt;, AlterClientQuotasOptions)</c>.
+    /// Each alteration is an entity plus a list of ops, so <b>both</b> levels cross as arrays
+    /// of arrays with per-row counts (<c>confluent_kafka.h:8321-8332</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <c>op_has_values</c> is a <c>bool**</c>. Its inner buffers are pinned
+    /// <c>byte[]</c>s of 0/1 rather than <c>bool[]</c>s, because a <c>bool</c> array
+    /// parameter marshals as 4-byte Win32 <c>BOOL</c>s by default; the outer array is
+    /// <see cref="IntPtr"/>s, so nothing about it is left to the default marshaller.
+    /// <c>validateOnly</c> carries <see cref="UnmanagedType.I1"/> for the same reason
+    /// <c>strict</c> does above.
+    /// </para>
+    /// <para>
+    /// Ordinary bad input reaches the <b>inline</b> callback path here — a NULL entity type
+    /// or op key, an alteration with no entity types, or a repeated entity
+    /// (<c>confluent_kafka.h:8341-8342</c>). The managed side rejects those before any pin
+    /// (PLAN D38), which keeps the path exceptional rather than removing the obligation.
+    /// The <c>_async</c> form is driven rather than the sync twin, which blocks until every
+    /// per-entity future has resolved.
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_client_quotas_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientAlterClientQuotasAsync(
+        IntPtr admin,
+        IntPtr[] entityTypes,
+        IntPtr[] entityNames,
+        int[] entityCounts,
+        IntPtr[] opKeys,
+        IntPtr[] opValues,
+        IntPtr[] opHasValues,
+        int[] opCounts,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool validateOnly,
+        AdminCallbacks.AlterClientQuotasCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_admin_AlterClientQuotasResult_t — a Category-3 owned borrow-root ----
+
+    /// <summary>
+    /// <c>kafka_admin_AlterClientQuotasResult_count</c> — the number of entities whose
+    /// quotas were altered.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterClientQuotasResultCount(IntPtr result);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterClientQuotasResult_get_entity</c> — the entity at
+    /// <paramref name="index"/>, <b>borrowed</b>; it dies with the result root. Entities are
+    /// sorted by their <c>(entity type, entity name)</c> pairs.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_get_entity", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterClientQuotasResultGetEntity(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>kafka_admin_AlterClientQuotasResult_get_error</c> — that entity's error, or null if
+    /// its quotas were altered successfully.
+    /// <para>
+    /// ⚠ <b>BORROWED</b> (<c>const</c>): read it with
+    /// <see cref="KafkaException.FromBorrowedHandle"/>, never
+    /// <see cref="KafkaException.FromHandle"/>. There is deliberately no <c>_get_value</c>
+    /// beside it — Java's per-entity future is <c>KafkaFuture&lt;Void&gt;</c>, so a null
+    /// error <em>is</em> the success value.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterClientQuotasResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AlterClientQuotasResultDestroy(IntPtr result);
 }

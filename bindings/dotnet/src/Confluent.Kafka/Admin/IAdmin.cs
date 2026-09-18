@@ -968,6 +968,149 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         string groupId, RemoveMembersFromConsumerGroupOptions options);
 
     /// <summary>
+    /// Creates ACL bindings on the cluster — Java's
+    /// <c>createAcls(Collection&lt;AclBinding&gt;, CreateAclsOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="acls">
+    /// The ACL bindings to create. Duplicates collapse, because Java keys its result on a
+    /// map. Every binding is already valid by construction —
+    /// <see cref="ResourcePattern"/> and <see cref="AccessControlEntry"/> reject the ANY and
+    /// MATCH values the broker would refuse.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per binding — Java's
+    /// <c>Map&lt;AclBinding, KafkaFuture&lt;Void&gt;&gt;</c>. See
+    /// <see cref="CreateAclsResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="acls"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="acls"/> contains a null element.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null);
+
+    /// <summary>
+    /// Deletes every ACL matching any of the given filters — Java's
+    /// <c>deleteAcls(Collection&lt;AclBindingFilter&gt;, DeleteAclsOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="filters">
+    /// The filters to apply. Duplicates collapse, because Java keys its result on a map. A
+    /// <see langword="null"/> name, principal or host matches <em>any</em> value, and is
+    /// distinct from <c>""</c>, which filters on the literal empty string.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per filter — Java's
+    /// <c>Map&lt;AclBindingFilter, KafkaFuture&lt;FilterResults&gt;&gt;</c>. See
+    /// <see cref="DeleteAclsResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="filters"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="filters"/> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DeleteAclsResult DeleteAcls(
+        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null);
+
+    /// <summary>
+    /// Lists every ACL matching the given filter — Java's
+    /// <c>describeAcls(AclBindingFilter, DescribeAclsOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="filter">
+    /// The filter to apply — a <b>single</b> filter, as Java takes. A
+    /// <see langword="null"/> name, principal or host matches <em>any</em> value, and is
+    /// distinct from <c>""</c>, which filters on the literal empty string.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable over the whole matching collection — Java's
+    /// <c>KafkaFuture&lt;Collection&lt;AclBinding&gt;&gt;</c>. See
+    /// <see cref="DescribeAclsResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeAclsResult DescribeAcls(
+        AclBindingFilter filter, DescribeAclsOptions? options = null);
+
+    /// <summary>
+    /// Describes the quotas of every entity matching the given filter — Java's
+    /// <c>describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="filter">
+    /// The filter to apply. An empty, non-strict filter is
+    /// <see cref="ClientQuotaFilter.All"/> and matches everything.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable over the whole map — Java's
+    /// <c>KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;</c>. See
+    /// <see cref="DescribeClientQuotasResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// A component matches exactly but carries no match name.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeClientQuotasResult DescribeClientQuotas(
+        ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null);
+
+    /// <summary>
+    /// Alters the quotas of the given entities — Java's
+    /// <c>alterClientQuotas(Collection&lt;ClientQuotaAlteration&gt;, AlterClientQuotasOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="entries">
+    /// The alterations to apply. An <see cref="ClientQuotaAlteration.Op"/> with a null
+    /// <see cref="ClientQuotaAlteration.Op.Value"/> <em>removes</em> that quota, while
+    /// <c>0.0</c> sets it to zero. ⚠ Unlike the two ACL RPCs above, a <b>repeated entity is
+    /// rejected</b> rather than collapsed, because the ABI refuses it and collapsing would
+    /// drop an alteration the caller wrote — a recorded divergence: Java accepts it
+    /// (<c>KafkaAdminClient.java:4314-4318</c>), so code ported from Java may need to
+    /// de-duplicate at the call site.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults.
+    /// </param>
+    /// <returns>
+    /// One awaitable per entity — Java's <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;</c>.
+    /// See <see cref="AlterClientQuotasResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="entries"/> contains a null element, an alteration whose entity has no
+    /// entity types, or the same entity more than once.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AlterClientQuotasResult AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null);
+
+    /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background
     /// task to finish — Java's <c>close(Duration)</c>. Idempotent: closing an
     /// already-closed client completes without error.

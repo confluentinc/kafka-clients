@@ -393,6 +393,52 @@ internal static class AdminCallbacks
     internal delegate void RemoveMembersFromConsumerGroupCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_create_acls_callback_t</c>.
+    /// ⚠ A <b>per-binding</b> failure arrives inside <paramref name="result"/>, borrowed; a
+    /// non-null <paramref name="error"/> means the request could not be submitted at all and
+    /// is <b>owned</b>. This callback reaches the inline path for ordinary bad input — see
+    /// <see cref="NativeMethods.AdminClientCreateAclsAsync"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void CreateAclsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_delete_acls_callback_t</c>.
+    /// ⚠ A <b>per-filter</b> failure arrives inside <paramref name="result"/>, borrowed; a
+    /// non-null <paramref name="error"/> means the request could not be submitted at all and
+    /// is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DeleteAclsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_describe_acls_callback_t</c>.
+    /// ⚠ <c>describeAcls</c> has a <b>single</b> future for the whole call, so <em>any</em>
+    /// failure arrives as <paramref name="error"/>, <b>owned</b>; the result declares no
+    /// <c>get_error</c> at all (<c>confluent_kafka.h:1085-1092</c>).
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeAclsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_describe_client_quotas_callback_t</c>.
+    /// ⚠ <c>describeClientQuotas</c> has a <b>single</b> future for the whole call, so
+    /// <em>any</em> failure arrives as <paramref name="error"/>, <b>owned</b>; the result
+    /// declares no <c>get_error</c> at all (<c>confluent_kafka.h:1110-1117</c>).
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeClientQuotasCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for <c>kafka_admin_AdminClient_alter_client_quotas_callback_t</c>.
+    /// ⚠ A <b>per-entity</b> failure arrives inside <paramref name="result"/>, borrowed; a
+    /// non-null <paramref name="error"/> means the request could not be submitted at all and
+    /// is <b>owned</b> (<c>confluent_kafka.h:1123-1131</c>).
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void AlterClientQuotasCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
     /// The single rooted instance passed to every <c>close_async</c> submission. Rooted
     /// for the process lifetime, so the native thunk never dangles (ffi §B6 keep-alive).
     /// </summary>
@@ -910,6 +956,153 @@ internal static class AdminCallbacks
     /// </summary>
     internal static readonly RemoveMembersFromConsumerGroupCallback RemoveMembersFromConsumerGroup =
         OnRemoveMembersFromConsumerGroup;
+
+    /// <summary>
+    /// The rooted instance passed to every <c>create_acls_async</c> submission.
+    /// </summary>
+    internal static readonly CreateAclsCallback CreateAcls = OnCreateAcls;
+
+    /// <summary>
+    /// <c>createAcls</c>' universal accessors — result <b>shape 2</b>: Java stores
+    /// <c>Map&lt;AclBinding, KafkaFuture&lt;Void&gt;&gt;</c>
+    /// (<c>CreateAclsResult.java:30</c>), so the ABI declares no <c>_get_value</c> and a
+    /// null per-binding error <em>is</em> the success value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors CreateAclsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.CreateAclsResultCount,
+            NativeMethods.CreateAclsResultGetError);
+
+    /// <summary>
+    /// <c>createAcls</c>' key reader: the borrowed <c>get_binding(i)</c>, copied out into the
+    /// nested managed <see cref="AclBinding"/> before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Built over <b><c>createAcls</c>'</b> own <c>get_binding</c>. The ACL result types
+    /// expose byte-identical accessor sets, so a cross-wired reader returns a plausible
+    /// answer rather than failing — <c>AdminP4ReaderWiringTests</c> reads the captured symbol
+    /// back off this closure for exactly that reason.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, AclBinding> CreateAclsKey =
+        AclRowMarshal.BindingReader(NativeMethods.CreateAclsResultGetBinding);
+
+    /// <summary>
+    /// The rooted instance passed to every <c>delete_acls_async</c> submission.
+    /// </summary>
+    internal static readonly DeleteAclsCallback DeleteAcls = OnDeleteAcls;
+
+    /// <summary>
+    /// <c>deleteAcls</c>' universal accessors — result <b>shape 1</b>: Java stores
+    /// <c>Map&lt;AclBindingFilter, KafkaFuture&lt;FilterResults&gt;&gt;</c>
+    /// (<c>DeleteAclsResult.java:91</c>), so each filter carries a value <em>and</em> a fault
+    /// channel.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>GetError</c> here is <c>get_error(i)</c> — the <b>filter's</b> future failing. The
+    /// inner <c>get_result_error(i, j)</c> is a stored value and is read by
+    /// <see cref="DeleteAclsFilterResults"/> instead; the two are independent.
+    /// </remarks>
+    internal static readonly KeyedResultMarshal.Accessors DeleteAclsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DeleteAclsResultCount,
+            NativeMethods.DeleteAclsResultGetError);
+
+    /// <summary>
+    /// <c>deleteAcls</c>' key reader: the borrowed <c>get_filter(i)</c>, copied out into the
+    /// nested managed <see cref="AclBindingFilter"/> before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Built over <b><c>deleteAcls</c>'</b> own <c>get_filter</c> — the ACL results expose
+    /// byte-identical accessor sets, so a cross-wired reader returns a plausible answer rather
+    /// than failing (<c>AdminP4ReaderWiringTests</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, AclBindingFilter> DeleteAclsKey =
+        AclRowMarshal.FilterReader(NativeMethods.DeleteAclsResultGetFilter);
+
+    /// <summary>
+    /// <c>deleteAcls</c>' value reader: the whole inner <c>(i, j)</c> axis, walked inside the
+    /// reader so the keyed walker needs no second index.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, DeleteAclsResult.FilterResults> DeleteAclsFilterResults =
+        DeleteAclsResultMarshal.FilterResultsReader(
+            NativeMethods.DeleteAclsResultGetResultCount,
+            NativeMethods.DeleteAclsResultGetBinding,
+            NativeMethods.DeleteAclsResultGetResultError,
+            AclRowMarshal.ReadBinding);
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_acls_async</c> submission.
+    /// </summary>
+    internal static readonly DescribeAclsCallback DescribeAcls = OnDescribeAcls;
+
+    /// <summary>
+    /// <c>describeAcls</c>' element reader: the borrowed <c>get_binding(i)</c>, copied out
+    /// into the nested managed <see cref="AclBinding"/> before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Built over <b><c>describeAcls</c>'</b> own <c>get_binding</c> — the ACL results
+    /// expose byte-identical accessor sets, so a cross-wired reader returns a plausible
+    /// answer rather than failing (<c>AdminP4ReaderWiringTests</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, AclBinding> DescribeAclsValue =
+        AclRowMarshal.BindingReader(NativeMethods.DescribeAclsResultGetBinding);
+
+    /// <summary>
+    /// The rooted instance passed to every <c>describe_client_quotas_async</c> submission.
+    /// </summary>
+    internal static readonly DescribeClientQuotasCallback DescribeClientQuotas =
+        OnDescribeClientQuotas;
+
+    /// <summary>
+    /// <c>describeClientQuotas</c>' key reader: the borrowed <c>get_entity(i)</c>, copied out
+    /// into the managed <see cref="ClientQuotaEntity"/> before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Built over <b><c>describeClientQuotas</c>'</b> own <c>get_entity</c> — the quota
+    /// results expose byte-identical accessor sets (<c>AdminP4ReaderWiringTests</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ClientQuotaEntity> DescribeClientQuotasKey =
+        ClientQuotaMarshal.EntityReader(NativeMethods.DescribeClientQuotasResultGetEntity);
+
+    /// <summary>
+    /// <c>describeClientQuotas</c>' value reader: the whole inner <c>(i, j)</c> quota axis,
+    /// walked inside the reader so the aggregate walker needs no second index.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, IReadOnlyDictionary<string, double>> DescribeClientQuotasValue =
+        ClientQuotaMarshal.QuotaMapReader(
+            NativeMethods.DescribeClientQuotasResultGetQuotaCount,
+            NativeMethods.DescribeClientQuotasResultGetQuotaKey,
+            NativeMethods.DescribeClientQuotasResultGetQuotaValue);
+
+    /// <summary>
+    /// The rooted instance passed to every <c>alter_client_quotas_async</c> submission.
+    /// </summary>
+    internal static readonly AlterClientQuotasCallback AlterClientQuotas = OnAlterClientQuotas;
+
+    /// <summary>
+    /// <c>alterClientQuotas</c>' universal accessors — result <b>shape 2</b>: Java stores
+    /// <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;</c>
+    /// (<c>AlterClientQuotasResult.java:31</c>), so the ABI declares no <c>_get_value</c> and
+    /// a null per-entity error <em>is</em> the success value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors AlterClientQuotasAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.AlterClientQuotasResultCount,
+            NativeMethods.AlterClientQuotasResultGetError);
+
+    /// <summary>
+    /// <c>alterClientQuotas</c>' key reader: the borrowed <c>get_entity(i)</c>, copied out
+    /// into the managed <see cref="ClientQuotaEntity"/> before the root dies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Built over <b><c>alterClientQuotas</c>'</b> own <c>get_entity</c>.
+    /// <c>kafka_admin_CreateAclsResult_t</c> declares a byte-identical accessor set
+    /// (<c>count</c> / <c>get_X</c> / <c>get_error</c> / <c>destroy</c>), so a cross-wired
+    /// reader returns a plausible answer rather than failing — <c>AdminP4ReaderWiringTests</c>
+    /// reads the captured symbol back off this closure for exactly that reason.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ClientQuotaEntity> AlterClientQuotasKey =
+        ClientQuotaMarshal.EntityReader(NativeMethods.AlterClientQuotasResultGetEntity);
 
     /// <summary>
     /// <c>deleteConsumerGroups</c>' universal accessors — result <b>shape 2</b>: Java's
@@ -1733,6 +1926,29 @@ internal static class AdminCallbacks
     private static readonly Action<IntPtr> s_destroyListOffsetsResult =
         NativeMethods.ListOffsetsResultDestroy;
 
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyCreateAclsResult =
+        NativeMethods.CreateAclsResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyDeleteAclsResult =
+        NativeMethods.DeleteAclsResultDestroy;
+
+    private static readonly KeyedResultMarshal.CountAccessor s_describeAclsCount =
+        NativeMethods.DescribeAclsResultCount;
+
+    private static readonly Action<IntPtr> s_destroyDescribeAclsResult =
+        NativeMethods.DescribeAclsResultDestroy;
+
+    private static readonly KeyedResultMarshal.CountAccessor s_describeClientQuotasCount =
+        NativeMethods.DescribeClientQuotasResultCount;
+
+    private static readonly Action<IntPtr> s_destroyDescribeClientQuotasResult =
+        NativeMethods.DescribeClientQuotasResultDestroy;
+
+    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
+    private static readonly Action<IntPtr> s_destroyAlterClientQuotasResult =
+        NativeMethods.AlterClientQuotasResultDestroy;
+
     private static void OnClose(IntPtr error, IntPtr userData)
     {
         OperationCompletionSource? context = null;
@@ -2211,6 +2427,47 @@ internal static class AdminCallbacks
             StringComparer.Ordinal,
             s_destroyRemoveMembersFromConsumerGroupResult);
 
+    private static void OnCreateAcls(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            CreateAclsAccessors,
+            CreateAclsKey,
+            s_destroyCreateAclsResult);
+
+    /// <summary>
+    /// <c>alterClientQuotas</c>' <b>shape-2</b> trampoline: one awaitable per entity, each
+    /// carrying only that entity's own outcome.
+    /// </summary>
+    private static void OnAlterClientQuotas(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            AlterClientQuotasAccessors,
+            AlterClientQuotasKey,
+            s_destroyAlterClientQuotasResult);
+
+    /// <summary>
+    /// <c>deleteAcls</c>' shape-1 trampoline: one awaitable per filter, each carrying that
+    /// filter's own <c>FilterResults</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The accessor set's <c>get_error(i)</c> faults the filter's <c>Task</c>; the inner
+    /// <c>get_result_error(i, j)</c> the value reader reads is a stored value on a
+    /// successfully completed one. Both are borrowed; neither is destroyed.
+    /// </remarks>
+    private static void OnDeleteAcls(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DeleteAclsAccessors,
+            DeleteAclsKey,
+            DeleteAclsFilterResults,
+            s_destroyDeleteAclsResult);
+
     /// <summary>
     /// <c>listPartitionReassignments</c>' shape-3 trampoline: one awaiter over
     /// <c>Map&lt;TopicPartition, PartitionReassignment&gt;</c>.
@@ -2372,6 +2629,34 @@ internal static class AdminCallbacks
             s_listConfigResourcesCount,
             ConfigResourceValue,
             s_destroyListConfigResourcesResult);
+
+    /// <summary>
+    /// <c>describeAcls</c>' <b>sub-shape-3b</b> trampoline: one awaiter over the matching
+    /// bindings, in the broker's own order.
+    /// </summary>
+    private static void OnDescribeAcls(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteListRpc(
+            result,
+            error,
+            userData,
+            s_describeAclsCount,
+            DescribeAclsValue,
+            s_destroyDescribeAclsResult);
+
+    /// <summary>
+    /// <c>describeClientQuotas</c>' <b>shape-3</b> trampoline: one awaiter over the whole
+    /// entity-to-quota map.
+    /// </summary>
+    private static void OnDescribeClientQuotas(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_describeClientQuotasCount,
+            DescribeClientQuotasKey,
+            DescribeClientQuotasValue,
+            EqualityComparer<ClientQuotaEntity>.Default,
+            s_destroyDescribeClientQuotasResult);
 
 #pragma warning disable CS0618 // Java deprecates the listing type itself; mirrored, not avoided.
     private static void OnListClientMetricsResources(IntPtr result, IntPtr error, IntPtr userData) =>

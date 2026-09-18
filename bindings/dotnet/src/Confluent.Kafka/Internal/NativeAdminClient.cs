@@ -583,6 +583,119 @@ internal sealed class NativeAdminClient : IDisposable
         AdminCallbacks.RemoveMembersFromConsumerGroupCallback callback,
         IntPtr userData);
 
+    /// <summary>
+    /// The <c>create_acls_async</c> submit shape — seven parallel arrays sharing one count,
+    /// injectable for the same reason as <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The three string arrays follow <c>AclRowMarshal</c>'s null-versus-empty rule, which
+    /// is invisible end to end because the Rust mock does not implement this RPC — it is
+    /// therefore asserted here, at the seam.
+    /// </remarks>
+    internal delegate void NativeCreateAclsSubmit(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int[] patternTypes,
+        IntPtr[] principals,
+        IntPtr[] hosts,
+        int[] operations,
+        int[] permissionTypes,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.CreateAclsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>delete_acls_async</c> submit shape — byte-identical to
+    /// <see cref="NativeCreateAclsSubmit"/>, injectable for the same reason.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Here a NULL string entry is meaningful ("match any") rather than rejected, so
+    /// <c>AclRowMarshal</c>'s null-versus-empty rule is load-bearing on this path — and, as
+    /// there, invisible end to end because the Rust mock does not implement this RPC.
+    /// </remarks>
+    internal delegate void NativeDeleteAclsSubmit(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int[] patternTypes,
+        IntPtr[] principals,
+        IntPtr[] hosts,
+        int[] operations,
+        int[] permissionTypes,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DeleteAclsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_acls_async</c> submit shape, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>. Java takes a <b>single</b> filter, so the
+    /// seven fields cross as scalars rather than arrays.
+    /// </summary>
+    internal delegate void NativeDescribeAclsSubmit(
+        IntPtr admin,
+        int resourceType,
+        IntPtr resourceName,
+        int patternType,
+        IntPtr principal,
+        IntPtr host,
+        int operation,
+        int permissionType,
+        int timeoutMs,
+        AdminCallbacks.DescribeAclsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_client_quotas_async</c> submit shape, injectable for the same reason
+    /// as <see cref="NativeCreateTopicsSubmit"/>. A <c>count</c> of 0 with
+    /// <paramref name="strict"/> false is Java's <c>ClientQuotaFilter.all()</c>, not an error.
+    /// </summary>
+    internal delegate void NativeDescribeClientQuotasSubmit(
+        IntPtr admin,
+        IntPtr[] entityTypes,
+        int[] matchTypes,
+        IntPtr[] matchNames,
+        int count,
+        bool strict,
+        int timeoutMs,
+        AdminCallbacks.DescribeClientQuotasCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>alter_client_quotas_async</c> submit shape — the phase's only <b>ragged
+    /// 2-level</b> input, injectable for the same reason as
+    /// <see cref="NativeCreateTopicsSubmit"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Four of the seven arrays are arrays-of-arrays: row <c>i</c>'s entity is
+    /// <c>entityCounts[i]</c> <c>(type, name)</c> pairs and its ops are <c>opCounts[i]</c>
+    /// triples, with the two lengths independent of each other
+    /// (<c>confluent_kafka.h:8321-8332</c>).
+    /// </para>
+    /// <para>
+    /// ⚠ <paramref name="opHasValues"/> is a <c>bool**</c> whose inner buffers are pinned
+    /// <c>byte[]</c>s of 0/1 — a cleared flag is Java's <c>Op(key, null)</c>, i.e. REMOVE the
+    /// quota, not "set it to 0".
+    /// </para>
+    /// </remarks>
+    internal delegate void NativeAlterClientQuotasSubmit(
+        IntPtr admin,
+        IntPtr[] entityTypes,
+        IntPtr[] entityNames,
+        int[] entityCounts,
+        IntPtr[] opKeys,
+        IntPtr[] opValues,
+        IntPtr[] opHasValues,
+        int[] opCounts,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool validateOnly,
+        AdminCallbacks.AlterClientQuotasCallback callback,
+        IntPtr userData);
+
     internal SafeAdminHandle Handle => _handle;
 
     /// <summary>
@@ -3008,6 +3121,479 @@ internal sealed class NativeAdminClient : IDisposable
         return new RemoveMembersFromConsumerGroupResult(operation.Task, members);
     }
 
+    internal CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options) =>
+        CreateAcls(acls, options, NativeMethods.AdminClientCreateAclsAsync);
+
+    /// <summary>
+    /// Submits <c>createAcls</c> and returns immediately with one awaitable per binding
+    /// (result shape 2).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ The binding is the <b>key</b>, so <see cref="AclBinding"/>'s value equality is
+    /// load-bearing here rather than decorative: the bridge's dictionary and every
+    /// <c>Values[binding]</c> lookup a caller makes are keyed by it (PLAN D39).
+    /// </para>
+    /// <para>
+    /// No ANY/NULL screening happens here. Java's <c>ResourcePattern</c> and
+    /// <c>AccessControlEntry</c> constructors reject exactly what the ABI rejects, and this
+    /// binding's do too, so an <see cref="AclBinding"/> that exists is already valid
+    /// (PLAN D38). A second check would only shadow the one that runs.
+    /// </para>
+    /// </remarks>
+    internal CreateAclsResult CreateAcls(
+        IEnumerable<AclBinding> acls, CreateAclsOptions? options, NativeCreateAclsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (acls is null)
+        {
+            throw new ArgumentNullException(nameof(acls));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreateAclsOptions));
+        }
+
+        List<AclBinding> keys = DistinctBindings(acls, nameof(acls));
+
+        VoidKeyedAdminOperation<AclBinding> operation = new VoidKeyedAdminOperation<AclBinding>(
+            "createAcls", keys, EqualityComparer<AclBinding>.Default);
+
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        AclRowMarshal.Rows? rows = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            rows = AclRowMarshal.Pin(keys);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                rows.ResourceTypes,
+                rows.ResourceNames,
+                rows.PatternTypes,
+                rows.Principals,
+                rows.Hosts,
+                rows.Operations,
+                rows.PermissionTypes,
+                rows.Count,
+                timeoutMs,
+                AdminCallbacks.CreateAcls,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies every row out during the submit,
+            // and the inline callback path has already run by the time it returns.
+            rows?.Dispose();
+        }
+
+        return new CreateAclsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal DeleteAclsResult DeleteAcls(
+        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options) =>
+        DeleteAcls(filters, options, NativeMethods.AdminClientDeleteAclsAsync);
+
+    /// <summary>
+    /// Submits <c>deleteAcls</c> and returns immediately with one awaitable per filter
+    /// (result shape 1, whose value is itself an indexed list).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ The filter is the <b>key</b>, so <see cref="AclBindingFilter"/>'s value equality is
+    /// load-bearing here rather than decorative (PLAN D39).
+    /// </para>
+    /// <para>
+    /// No ANY/NULL screening happens here, and unlike <c>createAcls</c> none is warranted:
+    /// the ABI rejects no enum combination and reads a NULL name as "match any"
+    /// (<c>confluent_kafka.h:8121-8125</c>), exactly as Java's filter constructors do.
+    /// </para>
+    /// </remarks>
+    internal DeleteAclsResult DeleteAcls(
+        IEnumerable<AclBindingFilter> filters,
+        DeleteAclsOptions? options,
+        NativeDeleteAclsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (filters is null)
+        {
+            throw new ArgumentNullException(nameof(filters));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteAclsOptions));
+        }
+
+        List<AclBindingFilter> keys = DistinctFilters(filters, nameof(filters));
+
+        KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation =
+            new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
+                "deleteAcls", keys, EqualityComparer<AclBindingFilter>.Default);
+
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        AclRowMarshal.Rows? rows = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            rows = AclRowMarshal.Pin(keys);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                rows.ResourceTypes,
+                rows.ResourceNames,
+                rows.PatternTypes,
+                rows.Principals,
+                rows.Hosts,
+                rows.Operations,
+                rows.PermissionTypes,
+                rows.Count,
+                timeoutMs,
+                AdminCallbacks.DeleteAcls,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies every row out during the submit,
+            // and the inline callback path has already run by the time it returns.
+            rows?.Dispose();
+        }
+
+        return new DeleteAclsResult(operation.Tasks);
+    }
+
+    internal DescribeAclsResult DescribeAcls(
+        AclBindingFilter filter, DescribeAclsOptions? options) =>
+        DescribeAcls(filter, options, NativeMethods.AdminClientDescribeAclsAsync);
+
+    /// <summary>
+    /// Submits <c>describeAcls</c> and returns immediately with the <b>single</b> awaitable
+    /// Java's <c>DescribeAclsResult</c> wraps (result sub-shape 3b).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ The filter's seven fields cross as <b>scalars</b>, not arrays — Java takes one
+    /// filter, not a collection (<c>confluent_kafka.h:8040-8041</c>).
+    /// </para>
+    /// <para>
+    /// No ANY/NULL screening happens here, as on <c>deleteAcls</c>: a NULL string means
+    /// "match any", distinct from a pointer to <c>""</c>, and no enum combination is
+    /// rejected (<c>confluent_kafka.h:8052-8063</c>).
+    /// </para>
+    /// </remarks>
+    internal DescribeAclsResult DescribeAcls(
+        AclBindingFilter filter,
+        DescribeAclsOptions? options,
+        NativeDescribeAclsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (filter is null)
+        {
+            throw new ArgumentNullException(nameof(filter));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeAclsOptions));
+        }
+
+        ResourcePatternFilter pattern = filter.PatternFilter;
+        AccessControlEntryFilter entry = filter.EntryFilter;
+
+        SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation =
+            new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(3);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                (int)pattern.ResourceType,
+                AclRowMarshal.PinName(pattern.Name, pinned),
+                (int)pattern.PatternType,
+                AclRowMarshal.PinName(entry.Principal, pinned),
+                AclRowMarshal.PinName(entry.Host, pinned),
+                (int)entry.Operation,
+                (int)entry.PermissionType,
+                timeoutMs,
+                AdminCallbacks.DescribeAcls,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the filter out during the submit,
+            // and the inline callback path has already run by the time it returns.
+            foreach (Utf8Marshal.PinnedUtf8String name in pinned)
+            {
+                name.Dispose();
+            }
+        }
+
+        return new DescribeAclsResult(operation.Task);
+    }
+
+    internal DescribeClientQuotasResult DescribeClientQuotas(
+        ClientQuotaFilter filter, DescribeClientQuotasOptions? options) =>
+        DescribeClientQuotas(filter, options, NativeMethods.AdminClientDescribeClientQuotasAsync);
+
+    /// <summary>
+    /// Submits <c>describeClientQuotas</c> and returns immediately with the <b>single</b>
+    /// awaitable Java's <c>DescribeClientQuotasResult</c> wraps (result shape 3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ The component's match type is the ABI's own discriminant — 0 EXACT, 1 DEFAULT,
+    /// 2 SPECIFIED — and DEFAULT and SPECIFIED both carry no name, so a <c>string?</c> model
+    /// would collapse them (<c>confluent_kafka.h:8204-8216</c>, PLAN D37).
+    /// </para>
+    /// <para>
+    /// ⚠ An empty component list with <c>Strict</c> false is Java's
+    /// <c>ClientQuotaFilter.all()</c> — the most common call — so there is deliberately no
+    /// emptiness guard here.
+    /// </para>
+    /// </remarks>
+    internal DescribeClientQuotasResult DescribeClientQuotas(
+        ClientQuotaFilter filter,
+        DescribeClientQuotasOptions? options,
+        NativeDescribeClientQuotasSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (filter is null)
+        {
+            throw new ArgumentNullException(nameof(filter));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeClientQuotasOptions));
+        }
+
+        SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
+            new SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
+                "describeClientQuotas");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        ClientQuotaMarshal.FilterRows? rows = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            rows = ClientQuotaMarshal.Pin(filter);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                rows.EntityTypes,
+                rows.MatchTypes,
+                rows.MatchNames,
+                rows.Count,
+                rows.Strict,
+                timeoutMs,
+                AdminCallbacks.DescribeClientQuotas,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the filter out during the submit,
+            // and the inline callback path has already run by the time it returns.
+            rows?.Dispose();
+        }
+
+        return new DescribeClientQuotasResult(operation.Task);
+    }
+
+    internal AlterClientQuotasResult AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options) =>
+        AlterClientQuotas(entries, options, NativeMethods.AdminClientAlterClientQuotasAsync);
+
+    /// <summary>
+    /// Submits <c>alterClientQuotas</c> and returns immediately with one awaitable per entity
+    /// (result shape 2).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ The entity is the <b>key</b>, so <see cref="ClientQuotaEntity"/>'s value equality is
+    /// load-bearing here rather than decorative: the bridge's dictionary and every
+    /// <c>Values[entity]</c> lookup a caller makes are keyed by it (PLAN D39).
+    /// </para>
+    /// <para>
+    /// ⚠ Three ABI rejections are surfaced here, before any pin (PLAN D38), because the ABI
+    /// reports them by firing the callback synchronously on this thread
+    /// (<c>confluent_kafka.h:8341-8342</c>). Two of them are reachable and are checked below:
+    /// an alteration with <b>no entity types</b>, and a <b>repeated entity</b> across
+    /// alterations — which is rejected rather than collapsed, since the ABI refuses it and
+    /// silently dropping one would lose an alteration the caller wrote
+    /// (<c>h:8300-8302</c>). ⚠ <b>Java accepts a repeated entity</b>
+    /// (<c>KafkaAdminClient.java:4314-4318</c> puts the futures unconditionally, collapsing
+    /// the map, and still sends every alteration), so this is a recorded divergence
+    /// (<c>definition-of-done.md</c> §7), not parity — the one P6 RPC whose Java-faithful
+    /// <c>Collection</c> shape is not accepted verbatim. The rest are already unreachable: a repeated entity type
+    /// <em>within</em> one alteration and a null entity type cannot survive
+    /// <see cref="ClientQuotaEntity"/>'s dictionary, and a null op key cannot survive
+    /// <see cref="ClientQuotaAlteration.Op"/>'s constructor.
+    /// </para>
+    /// </remarks>
+    internal AlterClientQuotasResult AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries,
+        AlterClientQuotasOptions? options,
+        NativeAlterClientQuotasSubmit submit)
+    {
+        ThrowIfClosed();
+
+        // ---- Preconditions, BEFORE any pin / marshal / P-Invoke (ffi §B5) ----
+        if (entries is null)
+        {
+            throw new ArgumentNullException(nameof(entries));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool validateOnly = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AlterClientQuotasOptions));
+            validateOnly = options.ValidateOnly;
+        }
+
+        List<ClientQuotaAlteration> alterations = new List<ClientQuotaAlteration>();
+        List<ClientQuotaEntity> keys = new List<ClientQuotaEntity>();
+        HashSet<ClientQuotaEntity> seen = new HashSet<ClientQuotaEntity>();
+        foreach (ClientQuotaAlteration alteration in entries)
+        {
+            if (alteration is null)
+            {
+                throw new ArgumentException(
+                    "The client quota alterations must not contain a null element.", nameof(entries));
+            }
+
+            if (alteration.Entity.Entries.Count == 0)
+            {
+                throw new ArgumentException(
+                    "The client quota alterations must not contain an alteration with no entity types.",
+                    nameof(entries));
+            }
+
+            if (!seen.Add(alteration.Entity))
+            {
+                throw new ArgumentException(
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "The client quota alterations must not alter the entity {0} more than once.",
+                        alteration.Entity),
+                    nameof(entries));
+            }
+
+            alterations.Add(alteration);
+            keys.Add(alteration.Entity);
+        }
+
+        VoidKeyedAdminOperation<ClientQuotaEntity> operation =
+            new VoidKeyedAdminOperation<ClientQuotaEntity>(
+                "alterClientQuotas", keys, EqualityComparer<ClientQuotaEntity>.Default);
+
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        ClientQuotaMarshal.AlterationRows? rows = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            rows = ClientQuotaMarshal.PinAlterations(alterations);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                rows.EntityTypes,
+                rows.EntityNames,
+                rows.EntityCounts,
+                rows.OpKeys,
+                rows.OpValues,
+                rows.OpHasValues,
+                rows.OpCounts,
+                rows.Count,
+                timeoutMs,
+                validateOnly,
+                AdminCallbacks.AlterClientQuotas,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies every row out during the submit,
+            // and the inline callback path has already run by the time it returns.
+            rows?.Dispose();
+        }
+
+        return new AlterClientQuotasResult(operation.Tasks, operation.KeyComparer);
+    }
+
     internal ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options) =>
         ListPartitionReassignments(
@@ -4319,6 +4905,68 @@ internal sealed class NativeAdminClient : IDisposable
             if (seen.Add(name))
             {
                 keys.Add(name);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <summary>
+    /// De-duplicates the requested ACL bindings by <b>value</b>, preserving request order,
+    /// and rejects a null element before it can reach the ABI.
+    /// </summary>
+    /// <remarks>
+    /// The de-duplication is by value because Java's result is a
+    /// <c>Map&lt;AclBinding, …&gt;</c>, so two equal bindings are one entry — which is also
+    /// what stops the per-key bridge seeing a duplicate key. Takes an
+    /// <see cref="IEnumerable{T}"/> rather than a collection because Java's signature is
+    /// <c>Collection&lt;AclBinding&gt;</c> and the public overload mirrors it.
+    /// </remarks>
+    /// <param name="acls">The requested bindings, in request order.</param>
+    /// <param name="parameterName">The caller's parameter to blame.</param>
+    private static List<AclBinding> DistinctBindings(IEnumerable<AclBinding> acls, string parameterName)
+    {
+        List<AclBinding> keys = new List<AclBinding>();
+        HashSet<AclBinding> seen = new HashSet<AclBinding>();
+        foreach (AclBinding acl in acls)
+        {
+            if (acl is null)
+            {
+                throw new ArgumentException(
+                    "The ACL bindings must not contain a null element.", parameterName);
+            }
+
+            if (seen.Add(acl))
+            {
+                keys.Add(acl);
+            }
+        }
+
+        return keys;
+    }
+
+    /// <summary>
+    /// The filter twin of <see cref="DistinctBindings"/>, for the same reason: Java's result
+    /// is a <c>Map&lt;AclBindingFilter, …&gt;</c>, so two value-equal filters are one entry.
+    /// </summary>
+    /// <param name="filters">The requested filters, in request order.</param>
+    /// <param name="parameterName">The caller's parameter to blame.</param>
+    private static List<AclBindingFilter> DistinctFilters(
+        IEnumerable<AclBindingFilter> filters, string parameterName)
+    {
+        List<AclBindingFilter> keys = new List<AclBindingFilter>();
+        HashSet<AclBindingFilter> seen = new HashSet<AclBindingFilter>();
+        foreach (AclBindingFilter filter in filters)
+        {
+            if (filter is null)
+            {
+                throw new ArgumentException(
+                    "The ACL filters must not contain a null element.", parameterName);
+            }
+
+            if (seen.Add(filter))
+            {
+                keys.Add(filter);
             }
         }
 
