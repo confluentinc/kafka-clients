@@ -40,7 +40,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Nullable `string`/`bytes` fields in the Kafka message specs without an explicit `"default": "null"` must default to empty (`Some(String::new())` / `Some(Vec::new())`), not `None`. Only use `None` when the spec explicitly sets `"default": "null"`
    - Java interfaces become traits in Rust, except those translated to std traits or to functions, default method implementation on an interface become a default trait function implementation in Rust
     If a Java class implements multiple interfaces and that have a function in common with same signature, implement the function on the struct and delegate to it in both implementations.
-    Constants that should be associated to the trait are exported through the module containing the trait, like nested structs or enums, to make sure they're dyn compatible
+    Constants that should be associated to the trait are exported through the module containing the trait, also nested structs, enums or static methods
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
    - Overloaded methods: make sure there's:
      - a method with same name (after translation) that has the intersection of parameters from all overloaded methods, if that method exists in Java.
