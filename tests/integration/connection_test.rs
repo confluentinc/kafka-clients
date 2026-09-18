@@ -183,14 +183,14 @@ async fn test_api_versions_request_response() {
 
     // Verify no error
     assert_eq!(
-        api_versions_response.data().error_code,
+        api_versions_response.data().error_code(),
         Errors::None.code(),
         "ApiVersionsResponse should have no error"
     );
 
     // Verify API keys are present
     assert!(
-        !api_versions_response.data().api_keys.is_empty(),
+        !api_versions_response.data().api_keys().is_empty(),
         "ApiVersionsResponse should contain API keys"
     );
 
@@ -233,13 +233,13 @@ async fn test_full_connection_flow() {
     let ConcreteResponse::ApiVersions(ref avr) = api_versions_response else {
         panic!("Expected ApiVersions response");
     };
-    assert_eq!(avr.data().error_code, Errors::None.code());
+    assert_eq!(avr.data().error_code(), Errors::None.code());
 
     // Step 3: Determine the Metadata version to use from the broker's supported range
     let metadata_version_info = avr
         .api_version(ApiKeys::METADATA.id())
         .expect("Broker should support METADATA API");
-    let metadata_version = metadata_version_info.max_version;
+    let metadata_version = metadata_version_info.max_version();
 
     // Step 4: Send MetadataRequest (for all topics)
     let mut metadata_builder =
@@ -261,15 +261,15 @@ async fn test_full_connection_flow() {
 
     // The cluster should have at least one broker
     assert!(
-        !mr.data().brokers.is_empty(),
+        !mr.data().brokers().is_empty(),
         "MetadataResponse should contain at least one broker"
     );
 
     // Verify broker information
-    let broker = &mr.data().brokers[0];
-    assert!(broker.node_id >= 0, "Broker node ID should be non-negative");
-    assert!(!broker.host.is_empty(), "Broker host should not be empty");
-    assert!(broker.port > 0, "Broker port should be positive");
+    let broker = &mr.data().brokers()[0];
+    assert!(broker.node_id() >= 0, "Broker node ID should be non-negative");
+    assert!(!broker.host().is_empty(), "Broker host should not be empty");
+    assert!(broker.port() > 0, "Broker port should be positive");
 
     selector.close().await;
 }

@@ -1021,12 +1021,12 @@ fn test_join_group_response_versions() {
     test_all_message_round_trips_from_version(2, new_response().set_throttle_time_ms(1000));
     {
         let mut resp = new_response();
-        resp.members[0].set_group_instance_id(None);
+        resp.members_mut()[0].set_group_instance_id(None);
         test_all_message_round_trips(&resp);
     }
     {
         let mut resp = new_response();
-        resp.members[0].set_group_instance_id(Some("instanceId".to_string()));
+        resp.members_mut()[0].set_group_instance_id(Some("instanceId".to_string()));
         test_all_message_round_trips_from_version(5, &resp);
     }
 }
@@ -1066,14 +1066,14 @@ fn test_list_offsets_response_versions() {
 
     for version in ApiKeys::LIST_OFFSETS.oldest_version()..=ApiKeys::LIST_OFFSETS.latest_version() {
         let mut response_data = ListOffsetsResponseData::new().set_topics(topics.clone()).clone();
-        response_data.topics[0].partitions[0].set_offset(456);
-        response_data.topics[0].partitions[0].set_timestamp(123);
+        response_data.topics_mut()[0].partitions_mut()[0].set_offset(456);
+        response_data.topics_mut()[0].partitions_mut()[0].set_timestamp(123);
         if version > 1 {
             response_data.set_throttle_time_ms(1000);
         }
         if version > 3 {
             partition.set_leader_epoch(1);
-            response_data.topics[0].partitions[0].set_leader_epoch(1);
+            response_data.topics_mut()[0].partitions_mut()[0].set_leader_epoch(1);
         }
         test_equivalent_message_round_trip(version, &response_data);
     }
@@ -1167,7 +1167,7 @@ fn test_group_instance_id_ignorable_in_describe_groups_response() {
 
     let mut expected_response = response_with_instance_id.duplicate();
     // Unset GroupInstanceId
-    expected_response.groups[0].members[0].set_group_instance_id(None);
+    expected_response.groups_mut()[0].members_mut()[0].set_group_instance_id(None);
 
     test_all_message_round_trips_before_version(4, &response_with_instance_id, &expected_response);
 }
@@ -1369,7 +1369,7 @@ fn test_txn_offset_commit_request_versions() {
             .clone();
 
         if version < 2 {
-            request_data.topics[0].partitions[0].set_committed_leader_epoch(-1);
+            request_data.topics_mut()[0].partitions_mut()[0].set_committed_leader_epoch(-1);
         }
 
         if version < 3 {
@@ -1558,22 +1558,22 @@ fn test_produce_response_versions() {
             .clone();
 
         if version < 8 {
-            response_data.responses[0].partition_responses[0].set_record_errors(Vec::new());
-            response_data.responses[0].partition_responses[0].set_error_message(None);
+            response_data.responses_mut()[0].partition_responses_mut()[0].set_record_errors(Vec::new());
+            response_data.responses_mut()[0].partition_responses_mut()[0].set_error_message(None);
         }
         if version < 5 {
-            response_data.responses[0].partition_responses[0].set_log_start_offset(-1);
+            response_data.responses_mut()[0].partition_responses_mut()[0].set_log_start_offset(-1);
         }
         if version < 2 {
-            response_data.responses[0].partition_responses[0].set_log_append_time_ms(-1);
+            response_data.responses_mut()[0].partition_responses_mut()[0].set_log_append_time_ms(-1);
         }
         if version < 1 {
             response_data.set_throttle_time_ms(0);
         }
         if version >= 13 {
-            response_data.responses[0].set_topic_id(topic_id);
+            response_data.responses_mut()[0].set_topic_id(topic_id);
         } else {
-            response_data.responses[0].set_name(topic_name.to_string());
+            response_data.responses_mut()[0].set_name(topic_name.to_string());
         }
 
         if (3..=4).contains(&version) {

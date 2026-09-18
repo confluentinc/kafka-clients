@@ -221,7 +221,7 @@ async fn test_ssl_connection() {
     let ConcreteResponse::ApiVersions(ref avr) = response else {
         panic!("Expected ApiVersions response, got: {response}");
     };
-    assert_eq!(avr.data().error_code, Errors::None.code());
+    assert_eq!(avr.data().error_code(), Errors::None.code());
     assert!(avr.api_version(ApiKeys::METADATA.id()).is_some(), "Should contain METADATA API");
 
     selector.close().await;
@@ -253,7 +253,7 @@ async fn test_sasl_plaintext_connection() {
     let ConcreteResponse::ApiVersions(ref avr) = response else {
         panic!("Expected ApiVersions response, got: {response}");
     };
-    assert_eq!(avr.data().error_code, Errors::None.code());
+    assert_eq!(avr.data().error_code(), Errors::None.code());
 
     selector.close().await;
 }
@@ -285,7 +285,7 @@ async fn test_sasl_ssl_connection() {
     let ConcreteResponse::ApiVersions(ref avr) = response else {
         panic!("Expected ApiVersions response, got: {response}");
     };
-    assert_eq!(avr.data().error_code, Errors::None.code());
+    assert_eq!(avr.data().error_code(), Errors::None.code());
 
     selector.close().await;
 }

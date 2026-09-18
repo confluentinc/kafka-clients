@@ -133,7 +133,7 @@ async fn test_api_versions_no_error() {
     let response = send_api_versions_request(&mut selector).await;
 
     assert_eq!(
-        response.data().error_code,
+        response.data().error_code(),
         Errors::None.code(),
         "ApiVersionsResponse should have no error"
     );
@@ -218,19 +218,19 @@ async fn test_version_ranges_valid() {
 
     let response = send_api_versions_request(&mut selector).await;
 
-    for api_version in &response.data().api_keys {
+    for api_version in response.data().api_keys() {
         assert!(
-            api_version.min_version >= 0,
+            api_version.min_version() >= 0,
             "API {} min_version should be non-negative, got {}",
-            api_version.api_key,
-            api_version.min_version
+            api_version.api_key(),
+            api_version.min_version()
         );
         assert!(
-            api_version.max_version >= api_version.min_version,
+            api_version.max_version() >= api_version.min_version(),
             "API {} max_version ({}) should be >= min_version ({})",
-            api_version.api_key,
-            api_version.max_version,
-            api_version.min_version
+            api_version.api_key(),
+            api_version.max_version(),
+            api_version.min_version()
         );
     }
 
@@ -263,11 +263,11 @@ async fn test_metadata_api_version_range() {
         .api_version(ApiKeys::METADATA.id())
         .expect("METADATA API should be in response");
 
-    assert_eq!(metadata_version.min_version, 0, "METADATA API should support version 0");
+    assert_eq!(metadata_version.min_version(), 0, "METADATA API should support version 0");
     assert!(
-        metadata_version.max_version >= 1,
+        metadata_version.max_version() >= 1,
         "METADATA API should support at least version 1, got max={}",
-        metadata_version.max_version
+        metadata_version.max_version()
     );
 
     selector.close().await;

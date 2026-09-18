@@ -48,27 +48,27 @@ mod tests {
 
         // Create nested struct instances
         let partition = OffsetForLeaderPartition::new();
-        assert_eq!(partition.partition, 0);
-        assert_eq!(partition.leader_epoch, 0);
+        assert_eq!(partition.partition(), 0);
+        assert_eq!(partition.leader_epoch(), 0);
 
         let topic = OffsetForLeaderTopic::new();
-        assert_eq!(topic.topic, "");
-        assert_eq!(topic.partitions.len(), 0);
+        assert_eq!(topic.topic(), "");
+        assert_eq!(topic.partitions().len(), 0);
 
         // Create the main request with nested data
         let mut req = OffsetForLeaderEpochRequestData::new();
-        assert_eq!(req.replica_id, -2); // Default is -2 per Kafka spec
-        assert_eq!(req.topics.len(), 0);
+        assert_eq!(req.replica_id(), -2); // Default is -2 per Kafka spec
+        assert_eq!(req.topics().len(), 0);
 
         // Add a topic with partitions
         let mut topic_with_data = OffsetForLeaderTopic::new();
-        topic_with_data.topic = "test-topic".to_string();
-        topic_with_data.partitions.push(partition);
-        req.topics.push(topic_with_data);
+        topic_with_data.set_topic("test-topic".to_string());
+        topic_with_data.partitions_mut().push(partition);
+        req.topics_mut().push(topic_with_data);
 
-        assert_eq!(req.topics.len(), 1);
-        assert_eq!(req.topics[0].topic, "test-topic");
-        assert_eq!(req.topics[0].partitions.len(), 1);
+        assert_eq!(req.topics().len(), 1);
+        assert_eq!(req.topics()[0].topic(), "test-topic");
+        assert_eq!(req.topics()[0].partitions().len(), 1);
     }
 
     #[test]
@@ -77,15 +77,15 @@ mod tests {
         use add_partitions_to_txn_request_data::*;
 
         let topic = AddPartitionsToTxnTopic::new();
-        assert_eq!(topic.name, "");
-        assert_eq!(topic.partitions.len(), 0);
+        assert_eq!(topic.name(), "");
+        assert_eq!(topic.partitions().len(), 0);
 
         let mut transaction = AddPartitionsToTxnTransaction::new();
-        transaction.transactional_id = "txn-1".to_string();
-        transaction.producer_id = 12345;
-        transaction.topics.push(topic);
+        transaction.set_transactional_id("txn-1".to_string());
+        transaction.set_producer_id(12345);
+        transaction.topics_mut().push(topic);
 
-        assert_eq!(transaction.topics.len(), 1);
+        assert_eq!(transaction.topics().len(), 1);
     }
 
     #[test]
@@ -96,18 +96,18 @@ mod tests {
 
         // Create a TopicPartitions with UUID
         let mut topic_partitions = TopicPartitions::new();
-        assert!(topic_partitions.topic_id.is_zero());
+        assert!(topic_partitions.topic_id().is_zero());
 
         // Set a UUID value
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
-        topic_partitions.topic_id = uuid;
+        topic_partitions.set_topic_id(uuid);
 
-        assert_eq!(topic_partitions.topic_id.most_sig_bits(), 0x0123456789ABCDEF);
-        assert_eq!(topic_partitions.topic_id.least_sig_bits(), 0xFEDCBA9876543210);
-        assert!(!topic_partitions.topic_id.is_zero());
+        assert_eq!(topic_partitions.topic_id().most_sig_bits(), 0x0123456789ABCDEF);
+        assert_eq!(topic_partitions.topic_id().least_sig_bits(), 0xFEDCBA9876543210);
+        assert!(!topic_partitions.topic_id().is_zero());
 
         // Test UUID string conversion (base64 URL encoding without padding)
-        let uuid_str = topic_partitions.topic_id.to_string();
+        let uuid_str = topic_partitions.topic_id().to_string();
         assert_eq!(uuid_str, "ASNFZ4mrze_-3LqYdlQyEA");
     }
 }

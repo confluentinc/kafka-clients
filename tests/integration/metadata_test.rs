@@ -134,11 +134,11 @@ async fn handshake_and_get_metadata_version(selector: &mut Selector) -> i16 {
     let ConcreteResponse::ApiVersions(avr) = response else {
         panic!("Expected ApiVersions response");
     };
-    assert_eq!(avr.data().error_code, Errors::None.code());
+    assert_eq!(avr.data().error_code(), Errors::None.code());
 
     avr.api_version(ApiKeys::METADATA.id())
         .expect("Broker should support METADATA")
-        .max_version
+        .max_version()
 }
 
 /// Helper: send a MetadataRequest and return the parsed MetadataResponse.
@@ -176,13 +176,13 @@ async fn test_cluster_metadata_brokers() {
     let metadata = send_metadata_request(&mut selector, metadata_version, None, 2).await;
 
     // Verify at least one broker
-    assert!(!metadata.data().brokers.is_empty(), "Cluster should have at least one broker");
+    assert!(!metadata.data().brokers().is_empty(), "Cluster should have at least one broker");
 
     // Verify broker details
-    let broker = &metadata.data().brokers[0];
-    assert!(broker.node_id >= 0, "Broker node_id should be non-negative");
-    assert!(!broker.host.is_empty(), "Broker host should not be empty");
-    assert!(broker.port > 0, "Broker port should be positive");
+    let broker = &metadata.data().brokers()[0];
+    assert!(broker.node_id() >= 0, "Broker node_id should be non-negative");
+    assert!(!broker.host().is_empty(), "Broker host should not be empty");
+    assert!(broker.port() > 0, "Broker port should be positive");
 
     selector.close().await;
 }
@@ -200,11 +200,11 @@ async fn test_cluster_metadata_controller() {
     let metadata = send_metadata_request(&mut selector, metadata_version, None, 2).await;
 
     // In a single-broker cluster, the controller should be the only broker
-    let controller_id = metadata.data().controller_id;
+    let controller_id = metadata.data().controller_id();
     assert!(controller_id >= 0, "Controller ID should be non-negative, got {controller_id}");
 
     // The controller ID should match one of the reported brokers
-    let controller_is_broker = metadata.data().brokers.iter().any(|b| b.node_id == controller_id);
+    let controller_is_broker = metadata.data().brokers().iter().any(|b| b.node_id() == controller_id);
     assert!(
         controller_is_broker,
         "Controller ID {controller_id} should match a broker in the cluster"
@@ -235,11 +235,11 @@ async fn test_metadata_for_specific_topic() {
     let metadata = send_metadata_request(&mut selector, metadata_version, Some(&[&topic_name]), 2).await;
 
     // Should have exactly one topic in the response
-    assert_eq!(metadata.data().topics.len(), 1, "Should have exactly one topic in response");
+    assert_eq!(metadata.data().topics().len(), 1, "Should have exactly one topic in response");
 
-    let topic = &metadata.data().topics[0];
+    let topic = &metadata.data().topics()[0];
     assert_eq!(
-        topic.name.as_deref(),
+        topic.name().as_deref(),
         Some(topic_name.as_str()),
         "Topic name should match the requested name"
     );
@@ -247,7 +247,7 @@ async fn test_metadata_for_specific_topic() {
     // With auto-create enabled (default), the topic may be auto-created with no error,
     // or it may report UNKNOWN_TOPIC_OR_PARTITION if auto-create was not triggered yet.
     // Both are valid outcomes.
-    let error = Errors::for_code(topic.error_code);
+    let error = Errors::for_code(topic.error_code());
     assert!(
         error == Errors::None || error == Errors::UnknownTopicOrPartition || error == Errors::LeaderNotAvailable,
         "Topic error should be NONE, UNKNOWN_TOPIC_OR_PARTITION, or LEADER_NOT_AVAILABLE, got: {error:?}"
@@ -273,7 +273,7 @@ async fn test_metadata_all_topics() {
 
     // Should have broker info regardless of topics
     assert!(
-        !metadata.data().brokers.is_empty(),
+        !metadata.data().brokers().is_empty(),
         "All-topics metadata should contain brokers"
     );
 

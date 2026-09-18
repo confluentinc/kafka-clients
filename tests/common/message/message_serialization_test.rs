@@ -28,8 +28,8 @@ mod tests {
     fn test_produce_request_round_trip() -> io::Result<()> {
         // Create a ProduceRequestData with some test data
         let mut request = ProduceRequestData::new();
-        request.timeout_ms = 5000;
-        request.acks = 1;
+        request.set_timeout_ms(5000);
+        request.set_acks(1);
 
         // Serialize to bytes
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
@@ -42,8 +42,8 @@ mod tests {
         let deserialized = ProduceRequestData::read(&mut read_buffer, 3)?;
 
         // Verify fields match
-        assert_eq!(request.timeout_ms, deserialized.timeout_ms);
-        assert_eq!(request.acks, deserialized.acks);
+        assert_eq!(request.timeout_ms(), deserialized.timeout_ms());
+        assert_eq!(request.acks(), deserialized.acks());
 
         Ok(())
     }
@@ -52,9 +52,9 @@ mod tests {
     #[test]
     fn test_fetch_request_with_arrays() -> io::Result<()> {
         let mut request = FetchRequestData::new();
-        request.max_wait_ms = 500;
-        request.min_bytes = 1024;
-        request.max_bytes = 1048576;
+        request.set_max_wait_ms(500);
+        request.set_min_bytes(1024);
+        request.set_max_bytes(1048576);
 
         // Serialize and deserialize (version 4+ for FetchRequest)
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
@@ -65,9 +65,9 @@ mod tests {
 
         let deserialized = FetchRequestData::read(&mut read_buffer, 4)?;
 
-        assert_eq!(request.max_wait_ms, deserialized.max_wait_ms);
-        assert_eq!(request.min_bytes, deserialized.min_bytes);
-        assert_eq!(request.max_bytes, deserialized.max_bytes);
+        assert_eq!(request.max_wait_ms(), deserialized.max_wait_ms());
+        assert_eq!(request.min_bytes(), deserialized.min_bytes());
+        assert_eq!(request.max_bytes(), deserialized.max_bytes());
 
         Ok(())
     }
@@ -76,10 +76,10 @@ mod tests {
     #[test]
     fn test_string_serialization() -> io::Result<()> {
         let mut request = AddOffsetsToTxnRequestData::new();
-        request.transactional_id = "test-txn-id".to_string();
-        request.group_id = "test-group".to_string();
-        request.producer_id = 12345;
-        request.producer_epoch = 1;
+        request.set_transactional_id("test-txn-id".to_string());
+        request.set_group_id("test-group".to_string());
+        request.set_producer_id(12345);
+        request.set_producer_epoch(1);
 
         // Serialize and deserialize
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
@@ -90,10 +90,10 @@ mod tests {
 
         let deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
 
-        assert_eq!(request.transactional_id, deserialized.transactional_id);
-        assert_eq!(request.group_id, deserialized.group_id);
-        assert_eq!(request.producer_id, deserialized.producer_id);
-        assert_eq!(request.producer_epoch, deserialized.producer_epoch);
+        assert_eq!(request.transactional_id(), deserialized.transactional_id());
+        assert_eq!(request.group_id(), deserialized.group_id());
+        assert_eq!(request.producer_id(), deserialized.producer_id());
+        assert_eq!(request.producer_epoch(), deserialized.producer_epoch());
 
         Ok(())
     }
@@ -102,8 +102,8 @@ mod tests {
     #[test]
     fn test_empty_string_serialization() -> io::Result<()> {
         let mut request = AddOffsetsToTxnRequestData::new();
-        request.transactional_id = String::new();
-        request.group_id = String::new();
+        request.set_transactional_id(String::new());
+        request.set_group_id(String::new());
 
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
         request.write(&mut write_buffer, 3)?;
@@ -113,10 +113,10 @@ mod tests {
 
         let deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
 
-        assert_eq!(request.transactional_id, deserialized.transactional_id);
-        assert_eq!(request.group_id, deserialized.group_id);
-        assert!(deserialized.transactional_id.is_empty());
-        assert!(deserialized.group_id.is_empty());
+        assert_eq!(request.transactional_id(), deserialized.transactional_id());
+        assert_eq!(request.group_id(), deserialized.group_id());
+        assert!(deserialized.transactional_id().is_empty());
+        assert!(deserialized.group_id().is_empty());
 
         Ok(())
     }
@@ -125,9 +125,9 @@ mod tests {
     #[test]
     fn test_bytes_serialization() -> io::Result<()> {
         let mut request = AddPartitionsToTxnRequestData::new();
-        request.v3_and_below_transactional_id = "test-txn".to_string();
-        request.v3_and_below_producer_id = 98765;
-        request.v3_and_below_producer_epoch = 2;
+        request.set_v3_and_below_transactional_id("test-txn".to_string());
+        request.set_v3_and_below_producer_id(98765);
+        request.set_v3_and_below_producer_epoch(2);
 
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
         request.write(&mut write_buffer, 3)?;
@@ -138,11 +138,14 @@ mod tests {
         let deserialized = AddPartitionsToTxnRequestData::read(&mut read_buffer, 3)?;
 
         assert_eq!(
-            request.v3_and_below_transactional_id,
-            deserialized.v3_and_below_transactional_id
+            request.v3_and_below_transactional_id(),
+            deserialized.v3_and_below_transactional_id()
         );
-        assert_eq!(request.v3_and_below_producer_id, deserialized.v3_and_below_producer_id);
-        assert_eq!(request.v3_and_below_producer_epoch, deserialized.v3_and_below_producer_epoch);
+        assert_eq!(request.v3_and_below_producer_id(), deserialized.v3_and_below_producer_id());
+        assert_eq!(
+            request.v3_and_below_producer_epoch(),
+            deserialized.v3_and_below_producer_epoch()
+        );
 
         Ok(())
     }
@@ -152,12 +155,12 @@ mod tests {
     fn test_boolean_serialization() -> io::Result<()> {
         // Create a request with boolean fields (if available)
         let mut request = ProduceRequestData::new();
-        request.acks = 1;
-        request.timeout_ms = 1000;
+        request.set_acks(1);
+        request.set_timeout_ms(1000);
 
         // Test with different acks values (which behaves like bool in some versions)
         for &acks_value in &[0, 1, -1] {
-            request.acks = acks_value;
+            request.set_acks(acks_value);
 
             let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
             request.write(&mut write_buffer, 3)?;
@@ -167,7 +170,7 @@ mod tests {
 
             let deserialized = ProduceRequestData::read(&mut read_buffer, 3)?;
 
-            assert_eq!(request.acks, deserialized.acks);
+            assert_eq!(request.acks(), deserialized.acks());
         }
 
         Ok(())
@@ -201,13 +204,13 @@ mod tests {
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(4096));
 
         let mut req1 = ProduceRequestData::new();
-        req1.timeout_ms = 1000;
-        req1.acks = 1;
+        req1.set_timeout_ms(1000);
+        req1.set_acks(1);
         req1.write(&mut write_buffer, 3)?;
 
         let mut req2 = FetchRequestData::new();
-        req2.max_wait_ms = 500;
-        req2.min_bytes = 1;
+        req2.set_max_wait_ms(500);
+        req2.set_min_bytes(1);
         req2.write(&mut write_buffer, 4)?;
 
         // Read them back
@@ -215,12 +218,12 @@ mod tests {
         let mut read_buffer = ByteBufferAccessor::new(bytes);
 
         let deser1 = ProduceRequestData::read(&mut read_buffer, 3)?;
-        assert_eq!(req1.timeout_ms, deser1.timeout_ms);
-        assert_eq!(req1.acks, deser1.acks);
+        assert_eq!(req1.timeout_ms(), deser1.timeout_ms());
+        assert_eq!(req1.acks(), deser1.acks());
 
         let deser2 = FetchRequestData::read(&mut read_buffer, 4)?;
-        assert_eq!(req2.max_wait_ms, deser2.max_wait_ms);
-        assert_eq!(req2.min_bytes, deser2.min_bytes);
+        assert_eq!(req2.max_wait_ms(), deser2.max_wait_ms());
+        assert_eq!(req2.min_bytes(), deser2.min_bytes());
 
         Ok(())
     }
@@ -232,8 +235,8 @@ mod tests {
 
         // Create a moderately large string (not too large to avoid memory issues in tests)
         let large_string = "x".repeat(1000);
-        request.transactional_id = large_string.clone();
-        request.group_id = "test-group".to_string();
+        request.set_transactional_id(large_string.clone());
+        request.set_group_id("test-group".to_string());
 
         let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(4096));
         request.write(&mut write_buffer, 3)?;
@@ -242,9 +245,9 @@ mod tests {
         let mut read_buffer = ByteBufferAccessor::new(bytes);
         let deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
 
-        assert_eq!(request.transactional_id, deserialized.transactional_id);
-        assert_eq!(large_string, deserialized.transactional_id);
-        assert_eq!(1000, deserialized.transactional_id.len());
+        assert_eq!(request.transactional_id(), deserialized.transactional_id());
+        assert_eq!(&large_string, deserialized.transactional_id());
+        assert_eq!(1000, deserialized.transactional_id().len());
 
         Ok(())
     }
