@@ -142,6 +142,7 @@ use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::OffsetAndMetadata;
+use confluent_kafka::consumer::OffsetCommitCallback;
 use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -383,22 +384,133 @@ async fn await_rebalance_with_deadline(
     );
 }
 
-/// Translates Java's `ClientsTestUtils.ensureNoRebalance(consumer,
-/// listener)`. Polls for a short period (Java uses ~3s) and asserts the
-/// listener's `callsToAssigned` count has NOT advanced. Returns once the
-/// short poll window has elapsed.
-async fn ensure_no_rebalance(consumer: &mut BytesConsumer, counters: &RebalanceCounters) {
-    let initial_assigned = counters.calls_to_assigned();
-    // Java's `ensureNoRebalance` polls for ~3 seconds and asserts the
-    // count is unchanged. We mirror that window.
-    let end = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < end {
+/// Mirrors Java's `ClientsTestUtils.RetryCommitCallback` (line 500):
+/// resend on `RetriableCommitFailedException`, otherwise record
+/// completion and the error (if any).
+///
+/// Java holds the consumer in the callback so it can resend itself. A
+/// Rust callback cannot own the consumer (`&mut` is held by the caller's
+/// `poll`), so the resend is driven by the awaiting loop in
+/// [`send_and_await_async_commit`] instead — it observes the recorded
+/// retriable error and re-issues the commit. Behaviour is identical; only
+/// the location of the resend differs.
+struct RetryCommitCallback {
+    is_complete: Arc<AtomicUsize>,
+    error: Arc<Mutex<Option<Error>>>,
+    retriable: Arc<AtomicUsize>,
+}
+
+impl RetryCommitCallback {
+    fn new() -> Self {
+        Self {
+            is_complete: Arc::new(AtomicUsize::new(0)),
+            error: Arc::new(Mutex::new(None)),
+            retriable: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn handles(&self) -> Self {
+        Self {
+            is_complete: Arc::clone(&self.is_complete),
+            error: Arc::clone(&self.error),
+            retriable: Arc::clone(&self.retriable),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.is_complete.load(Ordering::SeqCst) > 0
+    }
+
+    /// True once a retriable failure has been recorded and not yet resent.
+    fn take_retriable(&self) -> bool {
+        self.retriable.swap(0, Ordering::SeqCst) > 0
+    }
+}
+
+#[async_trait]
+impl OffsetCommitCallback for RetryCommitCallback {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        // Java: `if (exception instanceof RetriableCommitFailedException)
+        //          sendAsyncCommit(consumer, this, offsetsOpt);
+        //        else { isComplete = true; error = Optional.ofNullable(exception); }`
+        match error {
+            Some(Error::ConsumerRetriableCommitFailed(_)) => {
+                self.retriable.fetch_add(1, Ordering::SeqCst);
+            },
+            other => {
+                *self.error.lock().expect("commit error mutex poisoned") = other.cloned();
+                self.is_complete.fetch_add(1, Ordering::SeqCst);
+            },
+        }
+    }
+}
+
+/// Translates Java's `ClientsTestUtils.sendAndAwaitAsyncCommit(consumer,
+/// Optional.empty())` (line 309).
+///
+/// `Optional.empty()` means `sendAsyncCommit` calls `consumer.commitAsync(callback)`
+/// — commit whatever has been consumed — so the Rust form is
+/// `commit_async_with_callback`, NOT the offsets-taking overload. Drives
+/// `poll(100ms)` until the callback fires, resending on a retriable failure
+/// exactly as Java's `RetryCommitCallback` does, then asserts the commit
+/// carried no error.
+async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
+    let callback = RetryCommitCallback::new();
+    let handle: Arc<dyn OffsetCommitCallback> = Arc::new(callback.handles());
+    consumer
+        .commit_async_with_callback(Arc::clone(&handle))
+        .await
+        .expect("commit_async_with_callback should enqueue");
+
+    // Java uses `TestUtils.waitForCondition`, whose default bound is 15s.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if callback.is_complete() {
+            let err = callback.error.lock().expect("commit error mutex poisoned").clone();
+            // Java: `assertEquals(Optional.empty(), commitCallback.error)`.
+            assert!(err.is_none(), "async commit failed: {}", err.expect("checked is_some"));
+            return;
+        }
+        if callback.take_retriable() {
+            // Java's callback resends itself; see the note on RetryCommitCallback.
+            consumer
+                .commit_async_with_callback(Arc::clone(&handle))
+                .await
+                .expect("retriable resend should enqueue");
+        }
         let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
     }
+    panic!("Failed to observe commit callback before timeout");
+}
+
+/// Translates Java's `ClientsTestUtils.ensureNoRebalance(consumer, listener)`
+/// (line 336).
+///
+/// Java's comment states the contract: *"The best way to verify that the
+/// current membership is still active is to commit offsets. This would fail
+/// if the group had rebalanced."* So the check is a round-tripped async
+/// commit plus an assertion that **`callsToRevoked`** has not advanced —
+/// it does NOT poll for a fixed window, and it does NOT look at
+/// `callsToAssigned`.
+///
+/// Both details matter under KIP-848 and an earlier version of this helper
+/// got them wrong (3s poll window, asserting `calls_to_assigned`). The
+/// coordinator may deliver a multi-partition assignment across two
+/// target-assignment epochs, and each reconciliation that *adds* partitions
+/// fires `on_partitions_assigned` once with no revocation — so
+/// `calls_to_assigned` can legitimately reach 2 while membership never
+/// lapsed. `calls_to_revoked` cannot move in that scenario, which is
+/// precisely why Java watches it.
+async fn ensure_no_rebalance(consumer: &mut BytesConsumer, counters: &RebalanceCounters) {
+    // The best way to verify that the current membership is still active is
+    // to commit offsets. This would fail if the group had rebalanced.
+    let initial_revoke_calls = counters.calls_to_revoked();
+    send_and_await_async_commit(consumer).await;
     assert_eq!(
-        counters.calls_to_assigned(),
-        initial_assigned,
-        "expected no rebalance (callsToAssigned should remain {initial_assigned})"
+        counters.calls_to_revoked(),
+        initial_revoke_calls,
+        "membership lapsed: on_partitions_revoked fired during ensureNoRebalance \
+         (callsToRevoked should remain {initial_revoke_calls})"
     );
 }
 
@@ -920,9 +1032,24 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_max_poll_interval_assignment");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    // Create the topic EMPTY through the admin client, exactly as Java's
+    // `@BeforeEach` does: `cluster.createTopic(topic, 2, (short) BROKER_COUNT)`.
+    // `create_topic` is the translation of `TestUtils.createTopicWithAdmin`
+    // and does not return until the partition metadata has propagated to
+    // every broker.
+    //
+    // This test must NOT use `ensure_topic_with_2_partitions`, which
+    // provisions by *producing* a `__provisioner__` record per partition.
+    // That triggers broker-side auto-create, which returns when the produce
+    // is acked while the group coordinator's metadata image is still
+    // converging — so the coordinator's first computed assignment can cover
+    // only one partition, with the second arriving an epoch later and firing
+    // a second `on_partitions_assigned`. Java never races that, because the
+    // admin create commits through the controller before anything subscribes.
+    // Java also produces no records in this test at all.
+    let admin = admin_for(ctx.bootstrap_servers());
+    create_topic(admin.as_ref(), &topic, 2, 3).await;
+    admin.close(Duration::from_secs(5)).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(

@@ -179,8 +179,7 @@ class AsyncCompatibleProducer:
 
     Wraps ``confluent_kafka.aio.producer.AIOProducer`` so it exposes the same
     shape async_main expects: an async ``send`` returning a delivery future,
-    plus async context-manager / ``close``. Mirrors the GraalVM reference perf
-    test's ``AsyncCompatibleProducer``.
+    plus async context-manager / ``close``.
     """
 
     def __init__(self, configuration):
