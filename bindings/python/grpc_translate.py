@@ -611,6 +611,26 @@ def _admin_void_response(outcomes, key_fn):
     return apb.VoidKeyedResponse(entries=entries)
 
 
+def _admin_remove_members_response(outcomes):
+    """Build the ``RemoveMembersFromConsumerGroup`` VoidKeyedResponse.
+
+    In ``removeAll`` mode admin.py returns a single whole-operation entry keyed
+    by ``None`` (Java's ``all()`` observable, which has no per-member key). The
+    harness has already awaited that entry via ``_resolve_admin_futures`` (so the
+    operation has run to completion before this response is built — unlike the
+    old fire-and-forget behavior). A whole-op failure becomes the top-level
+    response error, matching Java's ``all()`` semantics; a whole-op success
+    yields no per-member entries (so the caller observes an empty map). Per-member
+    outcomes (non-removeAll) go through :func:`_admin_void_response` unchanged.
+    """
+    if None in outcomes:
+        whole_op = outcomes.pop(None)
+        if isinstance(whole_op, kp.KafkaError):
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(whole_op))
+        # removeAll success: no per-member outcome to report.
+    return _admin_void_response(outcomes, _admin_name_key)
+
+
 def _admin_new_topics(protos):
     """[proto NewTopic] -> [admin.py NewTopic].
 

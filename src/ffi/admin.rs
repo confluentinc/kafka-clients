@@ -13488,9 +13488,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
 /// `kafka_common_Error_destroy`.
 ///
 /// In `removeAll` mode Java's `memberResult` is not applicable at all (there
-/// is no member list to key by), so this callback is never invoked — use the
-/// synchronous entry point's `all()`-backed result to observe that mode's
-/// outcome.
+/// is no member list to key by), so `all()` is the only observable. This
+/// callback then fires **exactly once** with a **NULL `group_instance_id`**,
+/// carrying the whole operation's outcome once `all()` resolves — a null
+/// `error` on success, or the operation's error. This lets a caller await the
+/// operation to completion (and observe its error) even in `removeAll` mode; the
+/// binding maps the NULL key to a well-known sentinel.
 pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
     unsafe extern "C" fn(*const c_char, *mut kafka_common_Error_t, *mut c_void);
 
@@ -13557,33 +13560,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// Removes members from a consumer group asynchronously. See
 /// [`kafka_admin_AdminClient_remove_members_from_consumer_group`].
 ///
-/// Unlike the synchronous entry point, the callback fires **once per member,
-/// as that member's future resolves**, not once for the whole batch — a fast
-/// or already-resolved member is not held up by a slow or failing one. It is
-/// called once per distinct group instance id in the input (skipping NULL
-/// entries; never, in `removeAll` mode — see the callback typedef's
-/// documentation), but not always on the same thread. Per key, it normally
-/// runs on the handle's dispatcher thread. It runs **synchronously on the
-/// calling thread, before this function returns, for every key**, when the
-/// RPC cannot be submitted at all (a NULL `admin` handle or a NULL
-/// `group_id`). And it runs on a **tokio worker thread** if the dispatcher's
-/// completion queue can no longer be reached when a given member's result
-/// arrives. Destroying the handle does not cause that — an outstanding
-/// operation holds its own sender, so it cannot disconnect the queue; what
-/// remains is a dispatcher thread that terminated abnormally, i.e. a panic
-/// inside an earlier callback. So callbacks for different keys are not
-/// guaranteed to be serialised on one thread, nor in request order. Do not
-/// hold a lock across this call and re-acquire it in the callback, and
-/// publish everything the callback needs (including `user_data`) before
-/// calling rather than after.
+/// Unlike the synchronous entry point, the per-member callback fires **once per
+/// member, as that member's future resolves**, not once for the whole batch — a
+/// fast or already-resolved member is not held up by a slow or failing one. It
+/// is called once per distinct group instance id in the input (skipping NULL
+/// entries), but not always on the same thread. Per key, it normally runs on the
+/// handle's dispatcher thread. It runs **synchronously on the calling thread,
+/// before this function returns, for every key**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle or a NULL `group_id`). And it runs on
+/// a **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when a given member's result arrives. Destroying the handle does
+/// not cause that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks for
+/// different keys are not guaranteed to be serialised on one thread, nor in
+/// request order. Do not hold a lock across this call and re-acquire it in the
+/// callback, and publish everything the callback needs (including `user_data`)
+/// before calling rather than after.
 ///
-/// When `remove_all` is false and no group instance id is supplied, there is
-/// no per-member key at all (the same "no per-key slot" case
-/// `alter_consumer_group_offsets_async`/`delete_consumer_group_offsets_async`
-/// document), so the callback is never invoked — not even to report that the
-/// request could not be submitted. It does **not** fall into the
-/// "synchronously, for every key" case above, because there is no key for it
-/// to fire for.
+/// In `removeAll` mode (`remove_all` true) Java's `memberResult` is not
+/// applicable, so there is no per-member key: `all()` is the only observable.
+/// The callback therefore fires **exactly once** with a **NULL
+/// `group_instance_id`**, carrying the whole operation's outcome (a NULL error
+/// on success, or the operation's error) once `all()` resolves — awaiting the
+/// operation to completion exactly as the synchronous entry point does. The
+/// binding maps that NULL key to a well-known sentinel so the caller can await
+/// the operation and observe its error even though there is no per-member
+/// `Future`. It runs on the calling thread before returning only when the RPC
+/// cannot be submitted at all (NULL `admin`/`group_id`); otherwise on the
+/// dispatcher thread (or a tokio worker, per the paragraph above).
 ///
 /// # Safety
 ///
@@ -13603,14 +13608,46 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     callback: kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t,
     user_data: *mut c_void,
 ) {
-    // Computed independently of `remove_members_options`'s fallible
-    // empty-member-list construction, so every requested key still gets its
-    // own callback via `admin_async_per_key_op`'s fan-out even when that
-    // construction fails. `removeAll` mode has no per-member key at all
-    // (mirrors `submit_remove_members_from_consumer_group_entries`'s own
-    // empty-members branch), so `keys` is empty and `group_instance_ids` /
-    // `member_count` are ignored, exactly as the synchronous entry point
-    // documents.
+    // `group`/`options` are computed independently of the per-key vs whole-op
+    // routing below. `remove_members_options`'s empty-member-list construction is
+    // fallible (Java rejects an explicitly empty collection), and the error is
+    // still surfaced on whichever path runs: the per-key fan-out reports it per
+    // requested key, and the removeAll whole-op path reports it through its single
+    // callback.
+    let group = unsafe { read_required_string(group_id, "group_id") };
+    let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
+
+    if remove_all {
+        // `removeAll` mode has no per-member key at all — Java's `memberResult`
+        // is not applicable, so `all()` is the only observable. The per-key
+        // fan-out would therefore submit the operation but register no
+        // completion at all (empty entries), leaving it fire-and-forget with
+        // nothing to await: the caller could not tell whether it finished, and a
+        // whole-op failure would be silently dropped. So deliver the whole-op
+        // outcome via a SINGLE callback with a NULL `group_instance_id`, awaiting
+        // `all()` exactly as the synchronous entry point and the direct-backend
+        // path do. The binding maps the NULL key to a well-known sentinel so the
+        // caller/harness can await the operation's completion (and observe its
+        // error) even though there is no per-member `Future`.
+        unsafe {
+            admin_async_future_op(
+                admin,
+                user_data,
+                move |a| {
+                    let group = group?;
+                    let options = options?;
+                    let future = submit_remove_members_from_consumer_group(a, &group, options)?;
+                    Ok(async move { future.get().await.map(|_| ()) })
+                },
+                move |outcome: Result<(), Error>, ud| {
+                    let error = outcome.err().map(box_error).unwrap_or_else(std::ptr::null_mut);
+                    callback(std::ptr::null(), error, ud);
+                },
+            )
+        };
+        return;
+    }
+
     // Deduplicated to DISTINCT group instance ids (first-occurrence order): the
     // Rust core keys the removal on `HashSet<MemberToRemove>` (Java's
     // `Set<MemberToRemove>`), so two members naming the same instance id collapse
@@ -13622,17 +13659,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // binding already dedups the ids it passes (`dict.fromkeys`), so this also
     // keeps the C incref count (the passed member array length) matched to the
     // firing count for that path.
-    let keys = if remove_all {
-        Vec::new()
-    } else {
+    let keys = {
         let mut seen = std::collections::HashSet::new();
         unsafe { read_strings(group_instance_ids, member_count) }
             .into_iter()
             .filter(|id| seen.insert(id.clone()))
             .collect::<Vec<_>>()
     };
-    let group = unsafe { read_required_string(group_id, "group_id") };
-    let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
     unsafe {
         admin_async_per_key_op(
             admin,
@@ -27428,27 +27461,41 @@ mod tests {
 
     /// `removeMembersFromConsumerGroup` in `removeAll` mode: Java's
     /// `memberResult` is not applicable at all (there is no member list to key
-    /// by), so the per-key callback must never fire — confirmed with a bounded
-    /// wait rather than an infinite one, so a regression that *did* fire the
-    /// callback (e.g. against a synthetic key) would fail fast instead of
-    /// this test's silently passing for the wrong reason.
+    /// by), so `all()` is the only observable. The callback must fire **exactly
+    /// once** with a NULL `group_instance_id`, carrying the whole operation's
+    /// outcome — this is what lets a caller/harness await the operation to
+    /// completion (and observe its error) even in `removeAll` mode, rather than
+    /// the operation being fire-and-forget with nothing to await.
+    ///
+    /// Against `MockAdminClient`, `removeMembersFromConsumerGroup` completes its
+    /// whole-op future with `UnsupportedOperationException("Not implemented
+    /// yet")` (`MockAdminClient.java:801-803`), so the single callback carries
+    /// exactly that error — proving completion is now observable.
     #[test]
-    fn remove_members_from_consumer_group_async_never_fires_in_remove_all_mode() {
+    fn remove_members_from_consumer_group_async_fires_whole_op_once_in_remove_all_mode() {
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
 
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        struct Ctx(std::sync::mpsc::Sender<()>);
+        let (tx, rx) = std::sync::mpsc::channel::<(bool, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(bool, Option<String>)>);
         extern "C" fn on_remove(
-            _group_instance_id: *const c_char,
+            group_instance_id: *const c_char,
             error: *mut kafka_common_Error_t,
             user_data: *mut c_void,
         ) {
-            if !error.is_null() {
+            // removeAll delivers the whole-op outcome with a NULL key.
+            let key_is_null = group_instance_id.is_null();
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
                 unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
-            }
+                Some(text)
+            };
             let ctx = unsafe { &*(user_data as *const Ctx) };
-            ctx.0.send(()).unwrap();
+            ctx.0.send((key_is_null, message)).unwrap();
         }
         let ctx = Box::new(Ctx(tx));
         let ctx_ptr = Box::into_raw(ctx);
@@ -27467,9 +27514,22 @@ mod tests {
             );
         }
 
+        let (key_is_null, message) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("removeAll must fire the whole-op callback exactly once");
+        assert!(
+            key_is_null,
+            "removeAll delivers the whole-op outcome with a NULL group_instance_id"
+        );
+        assert_eq!(
+            message.as_deref(),
+            Some("Not implemented yet"),
+            "the mock's removeAll whole-op future carries the unsupported error"
+        );
+        // Exactly once: no second callback.
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "removeAll mode has no per-member key, so the callback must never fire"
+            "removeAll fires the whole-op callback exactly once"
         );
 
         unsafe {

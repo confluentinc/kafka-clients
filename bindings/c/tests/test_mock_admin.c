@@ -4776,22 +4776,26 @@ static void test_mock_admin_remove_members_rejects_an_empty_member_list(void) {
 typedef struct {
     atomic_int fired;
     atomic_int error_count;
+    atomic_int null_key_count;
     char last_group_instance_id[64];
 } remove_members_async_result_t;
 
-/* Per-key async result (Phase E): the callback now fires once per member,
+/* Per-key async result (Phase E): the callback fires once per member,
  * independently, rather than once for the whole batch - see
  * `admin_async_per_key_op` /
  * `kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t`.
  * There is no value parameter: Java's per-member future is
  * `KafkaFuture<Void>`, so a null error *is* the success value. In `removeAll`
- * mode this callback never fires at all (there is no per-member key). */
+ * mode `memberResult` is not applicable, so the callback fires EXACTLY ONCE with
+ * a NULL group instance id, carrying the whole operation's `all()` outcome. */
 static void on_remove_members(const char *group_instance_id, kafka_common_Error_t *error,
                               void *user_data) {
     remove_members_async_result_t *r = (remove_members_async_result_t *)user_data;
     if (group_instance_id != NULL) {
         strncpy(r->last_group_instance_id, group_instance_id,
                 sizeof(r->last_group_instance_id) - 1);
+    } else {
+        atomic_fetch_add(&r->null_key_count, 1);
     }
     if (error != NULL) {
         atomic_fetch_add(&r->error_count, 1);
@@ -4851,19 +4855,33 @@ static void test_mock_admin_remove_members_async_two_members(void) {
 }
 
 /* `removeAll` mode: Java's `memberResult` is not applicable at all (there is
- * no member list to key by), so the per-key callback must never fire - a
- * bounded wait turns a regression that *did* fire it into a fast, explicit
- * failure instead of this test's silently passing for the wrong reason. */
-static void test_mock_admin_remove_members_async_remove_all_never_fires(void) {
+ * no member list to key by), so `all()` is the only observable. The callback
+ * must fire EXACTLY ONCE with a NULL group instance id, carrying the whole
+ * operation's outcome - this is what lets a caller await the operation to
+ * completion (and observe its error) even in `removeAll` mode, rather than the
+ * operation being fire-and-forget with nothing to await. Against the mock,
+ * `removeMembersFromConsumerGroup` completes with the unsupported error
+ * (MockAdminClient.java:801-803), so the single callback carries that error. */
+static void test_mock_admin_remove_members_async_remove_all_fires_whole_op_once(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
 
     remove_members_async_result_t r = {0};
     atomic_init(&r.fired, 0);
     atomic_init(&r.error_count, 0);
+    atomic_init(&r.null_key_count, 0);
     kafka_admin_AdminClient_remove_members_from_consumer_group_async(
         admin, "rm-group-all", true, NULL, 0, NULL, -1, on_remove_members, &r);
-    TEST_ASSERT_TRUE(wait_briefly_for_nothing(&r.fired));
-    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.fired));
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    /* The whole-op outcome is delivered with a NULL group instance id. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.null_key_count));
+    /* The mock's removeAll whole-op future carries the unsupported error. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    /* Exactly once: give a second callback time to (wrongly) arrive, then
+     * confirm the count is still 1. (`wait_briefly_for_nothing` sleeps 200ms;
+     * its return value is irrelevant here since `fired` is already 1.) */
+    (void)wait_briefly_for_nothing(&r.fired);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -7407,7 +7425,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_remove_members_rejects_an_empty_member_list);
     RUN_TEST(test_mock_admin_remove_members_async);
     RUN_TEST(test_mock_admin_remove_members_async_two_members);
-    RUN_TEST(test_mock_admin_remove_members_async_remove_all_never_fires);
+    RUN_TEST(test_mock_admin_remove_members_async_remove_all_fires_whole_op_once);
     RUN_TEST(test_mock_admin_group_offsets_driver_rejects_non_mock);
     RUN_TEST(test_mock_admin_b4_null_out_result);
     RUN_TEST(test_mock_admin_create_acls_reports_unsupported_per_binding);

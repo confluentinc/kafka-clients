@@ -130,6 +130,7 @@ from grpc_translate import (  # noqa: E402
     _admin_transaction_id_pattern,
     _admin_transaction_states,
     _admin_void_response,
+    _admin_remove_members_response,
     _resolve_admin_futures_async,
     _kafka_error_to_proto,
     _metric_to_proto,
@@ -1176,9 +1177,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 request.group_id, _admin_members_to_remove(request),
                 reason=request.reason if request.HasField("reason") else None,
                 timeout=_admin_timeout(request))
-            # Keyed by group.instance.id, which is a plain string.
+            # Keyed by group.instance.id (a plain string), except in removeAll
+            # mode where a single whole-operation entry is keyed by None. Awaiting
+            # here runs the operation to completion before responding.
             outcomes = await _resolve_admin_futures_async(futures)
-            return _admin_void_response(outcomes, _admin_name_key)
+            return _admin_remove_members_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("remove_members_from_consumer_group raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))

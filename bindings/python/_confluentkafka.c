@@ -5768,11 +5768,14 @@ static PyObject* py_Admin_remove_members_from_consumer_group_async(PyObject* sel
     Py_ssize_t n = build_string_array(members, &ids);
     if (n < 0) return NULL;
     // One callback invocation per member (Java's per-key KafkaFuture), keyed by
-    // group instance id - see admin_remove_members_trampoline. `members` is
-    // empty both in `removeAll` mode and for an (unsubmittable) empty member
-    // list without `removeAll`, so `n` is 0 in both cases and the callback
-    // never fires at all - there is no per-member key to deliver it to.
-    admin_incref_n(cb, n);
+    // group instance id - see admin_remove_members_trampoline. In `removeAll`
+    // mode there is no per-member key: `memberResult` is not applicable, so the
+    // callback fires EXACTLY ONCE with a NULL group instance id, carrying the
+    // whole operation's `all()` outcome. `members` is empty in that mode (n == 0),
+    // so incref once for that single whole-op callback. For an (unsubmittable)
+    // empty member list WITHOUT `removeAll`, `n` is also 0 and the callback never
+    // fires - there is no per-member key to deliver it to, and no incref is owed.
+    admin_incref_n(cb, remove_all ? 1 : n);
     kafka_admin_AdminClient_remove_members_from_consumer_group_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, remove_all ? true : false, ids,
         (int32_t)n, reason, timeout_ms, admin_remove_members_trampoline, cb);
