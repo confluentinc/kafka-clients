@@ -89,6 +89,7 @@ use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
+use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
     AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, AlterUserScramCredentialsRequestBuilder,
@@ -357,8 +358,8 @@ impl KafkaAdminClient {
             100, // max in-flight requests per connection (admin sends <= 1 per node)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            <Selector as crate::common::network::Selectable>::USE_DEFAULT_BUFFER_SIZE,
-            <Selector as crate::common::network::Selectable>::USE_DEFAULT_BUFFER_SIZE,
+            USE_DEFAULT_BUFFER_SIZE,
+            USE_DEFAULT_BUFFER_SIZE,
             config.request_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),

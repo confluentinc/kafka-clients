@@ -24,10 +24,7 @@ use confluent_kafka::common::network::NetworkSend;
 use confluent_kafka::common::network::PlaintextChannelBuilder;
 use confluent_kafka::common::network::Selectable;
 use confluent_kafka::common::network::Selector;
-
-/// Java writes `Selectable.USE_DEFAULT_BUFFER_SIZE`; Rust cannot name a trait
-/// constant without a `Self` type (E0790), so bind it once per file.
-const USE_DEFAULT_BUFFER_SIZE: i32 = <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE;
+use confluent_kafka::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{

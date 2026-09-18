@@ -53,11 +53,13 @@ mod static_broker_strategy;
 
 pub(crate) use abort_transaction_handler::AbortTransactionHandler;
 pub(crate) use admin_api_driver::{AdminApiDriver, RequestSpec};
-// `UNKNOWN_BROKER_ID` cannot become `AdminApiFuture::UNKNOWN_BROKER_ID` (Java's
-// `AdminApiFuture.java:30`, an interface field): an associated const makes a
-// trait not dyn-compatible (E0038) and `AdminApiDriver` holds
-// `Box<dyn AdminApiFuture<K, V>>`. It stays module-level and is reached through
-// this re-export instead.
+// `UNKNOWN_BROKER_ID` is module-level rather than `AdminApiFuture::UNKNOWN_BROKER_ID`
+// (Java's `AdminApiFuture.java:30`, an interface field), per CLAUDE.md §2: a constant
+// Java associates with an interface is exported through the module containing the
+// trait. An associated const makes a trait non-dyn-compatible (E0038) — which here
+// would break `AdminApiDriver`'s `Box<dyn AdminApiFuture<K, V>>` outright — and is
+// unnameable without a `Self` type (E0790). Same treatment as
+// `common::network::selectable::USE_DEFAULT_BUFFER_SIZE`.
 pub(crate) use admin_api_future::{AdminApiFuture, SimpleAdminApiFuture, UNKNOWN_BROKER_ID};
 pub(crate) use admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
 pub(crate) use admin_api_lookup_strategy::{AdminApiLookupStrategy, LookupResult};

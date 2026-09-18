@@ -42,6 +42,7 @@ use super::NetworkSend;
 use super::Receive;
 use super::Selectable;
 use super::is_authentication_error;
+use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
 
 use indexmap::IndexMap;
@@ -1123,10 +1124,10 @@ impl Selectable for Selector {
 
         // Configure socket
         socket.set_keepalive(true)?;
-        if send_buffer_size != Self::USE_DEFAULT_BUFFER_SIZE {
+        if send_buffer_size != USE_DEFAULT_BUFFER_SIZE {
             socket.set_send_buffer_size(send_buffer_size as u32)?;
         }
-        if receive_buffer_size != Self::USE_DEFAULT_BUFFER_SIZE {
+        if receive_buffer_size != USE_DEFAULT_BUFFER_SIZE {
             socket.set_recv_buffer_size(receive_buffer_size as u32)?;
         }
         socket.set_nodelay(true)?;
