@@ -886,7 +886,7 @@ mod tests {
     }
 
     fn make_builder() -> MemoryRecordsBuilder {
-        MemoryRecords::builder_with_initial_capacity(512, Compression::NONE, TimestampType::CreateTime, 128)
+        MemoryRecords::builder_with_initial_capacity(512, Compression::none().build(), TimestampType::CreateTime, 128)
     }
 
     /// Translated from `ProducerBatchTest.testBatchAbort`.
@@ -1072,7 +1072,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -1282,7 +1282,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );

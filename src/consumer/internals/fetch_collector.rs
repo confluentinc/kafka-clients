@@ -1050,7 +1050,7 @@ mod tests {
         let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &records,
         );
@@ -1909,7 +1909,7 @@ mod tests {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(512)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::NONE)
+                .set_compression(Compression::none().build())
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(base_offset)
                 .set_log_append_time(-1)

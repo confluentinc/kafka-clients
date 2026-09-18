@@ -2744,7 +2744,7 @@ mod tests {
     fn create_accumulator() -> Arc<RecordAccumulator> {
         Arc::new(RecordAccumulator::new_for_test(
             16384,
-            Compression::NONE,
+            Compression::none().build(),
             5,
             100,
             1000,
@@ -3228,7 +3228,7 @@ mod tests {
         let metadata = create_metadata_with_topic(TOPIC, 2);
         let accumulator = Arc::new(RecordAccumulator::new(
             BATCH_SIZE as i32,
-            Compression::NONE,
+            Compression::none().build(),
             0,
             100,
             1000,
@@ -4328,7 +4328,7 @@ mod tests {
         // A pool that fits exactly one batch.
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             BATCH_SIZE,
-            Compression::NONE,
+            Compression::none().build(),
             5,
             100,
             1000,
@@ -4753,7 +4753,7 @@ mod tests {
             // A large batch so every send below appends to the same batch.
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
-                Compression::NONE,
+                Compression::none().build(),
                 5,
                 100,
                 1000,
@@ -4835,7 +4835,7 @@ mod tests {
             // A large batch so every send below appends to the same batch.
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
-                Compression::NONE,
+                Compression::none().build(),
                 5,
                 100,
                 1000,

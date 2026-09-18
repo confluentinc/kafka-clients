@@ -1148,7 +1148,7 @@ mod tests {
         let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             2048,
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             1234567,
         );
@@ -1183,7 +1183,7 @@ mod tests {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(2048)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::NONE)
+                .set_compression(Compression::none().build())
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(1234567)
                 .set_log_append_time(RecordBatch::NO_TIMESTAMP)
@@ -1224,7 +1224,7 @@ mod tests {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(2048)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::NONE)
+                .set_compression(Compression::none().build())
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(1234567)
                 .set_log_append_time(RecordBatch::NO_TIMESTAMP)
@@ -1280,7 +1280,7 @@ mod tests {
                     .expect("SimpleRecordOptionsBuilder::build: every mandatory parameter is set above"),
             ),
         ];
-        let actual_size = MemoryRecords::with_records(Compression::NONE, &records).size_in_bytes();
+        let actual_size = MemoryRecords::with_records(Compression::none().build(), &records).size_in_bytes();
         assert_eq!(actual_size, DefaultRecordBatch::size_in_bytes_of_simple_records(&records));
     }
 
@@ -1290,7 +1290,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &[
                 SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
@@ -1388,7 +1388,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &[SimpleRecord::with_timestamp_key_value(
                 1,
@@ -1457,7 +1457,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &[
                 SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
@@ -1487,7 +1487,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1519,7 +1519,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &[
                 SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
@@ -1548,7 +1548,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &[
                 SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
@@ -1585,7 +1585,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &[
                 SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),

@@ -4961,7 +4961,8 @@ mod tests {
 
     /// A single-record batch, mirroring `batchWithValue` (Java 840).
     fn batch_with_value(topic_partition: &TopicPartition, value: &str) -> ProducerBatch {
-        let builder = MemoryRecords::builder_with_initial_capacity(64, Compression::NONE, TimestampType::CreateTime, 0);
+        let builder =
+            MemoryRecords::builder_with_initial_capacity(64, Compression::none().build(), TimestampType::CreateTime, 0);
         let mut batch = ProducerBatch::new(topic_partition.clone(), builder, 0);
         assert!(
             batch.try_append(0, Some(&[]), Some(value.as_bytes()), &[], None, 0).is_ok(),

@@ -921,7 +921,7 @@ mod tests {
     /// All compression types to test with, each only for magic v2.
     fn all_compressions() -> Vec<Compression> {
         vec![
-            Compression::NONE,
+            Compression::none().build(),
             Compression::gzip().build(),
             Compression::snappy().build(),
             Compression::lz4().build(),

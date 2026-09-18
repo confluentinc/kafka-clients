@@ -1043,7 +1043,7 @@ mod round_trip {
         MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &simple,
         )
@@ -1069,7 +1069,7 @@ mod round_trip {
             .collect();
         MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
             base_offset,
-            Compression::NONE,
+            Compression::none().build(),
             partition_leader_epoch,
             &simple,
         )
@@ -1091,7 +1091,7 @@ mod round_trip {
         MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             &simple,
         )
@@ -1105,7 +1105,7 @@ mod round_trip {
         let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             1024,
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             offsets.first().copied().unwrap_or(0),
         );
@@ -1130,7 +1130,7 @@ mod round_trip {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(512)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::NONE)
+                .set_compression(Compression::none().build())
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(base_offset)
                 .set_log_append_time(-1)
@@ -1162,7 +1162,7 @@ mod round_trip {
             .collect();
         MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
             base_offset,
-            Compression::NONE,
+            Compression::none().build(),
             partition_leader_epoch,
             &simple,
         )
@@ -1201,7 +1201,7 @@ mod round_trip {
         let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             1024,
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::NONE,
+            Compression::none().build(),
             TimestampType::CreateTime,
             base_offset,
         );
@@ -1237,7 +1237,7 @@ mod round_trip {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(512)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::NONE)
+                .set_compression(Compression::none().build())
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(base_offset)
                 .set_log_append_time(-1)
