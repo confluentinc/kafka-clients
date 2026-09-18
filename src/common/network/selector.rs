@@ -1397,25 +1397,37 @@ impl Selectable for Selector {
 
             // Phase 26 (Fix #1): match stock Java `NetworkClient.poll`, which
             // loops `do { selector.poll(t) } while (completedReceives().isEmpty()
-            // && disconnected().isEmpty())` — it does NOT return on completed
-            // *sends*. A send-only round (fetch / heartbeat / commit request
-            // written, response not yet arrived) keeps waiting in the `select!`
-            // below for the actual response, rather than returning and forcing
-            // `run_once` to spin a full extra iteration (drain events + poll
-            // every manager) before re-entering to await the response. Every
-            // consumer request expects a response, so there is no
-            // fire-and-forget send that would block forever; `completed_sends`
-            // still accumulate and are returned to the caller when the poll next
-            // breaks (on receive / connect / disconnect / deadline), just one
-            // cycle later.
+            // && disconnected().isEmpty())` — it does NOT return on a completed
+            // *response-expecting* send. A send-only round (fetch / heartbeat /
+            // commit / `acks!=0` produce request written, response not yet
+            // arrived) keeps waiting in the `select!` below for the actual
+            // response, rather than returning and forcing `run_once` to spin a
+            // full extra iteration (drain events + poll every manager) before
+            // re-entering to await the response. Such `completed_sends` still
+            // accumulate and are returned to the caller when the poll next breaks
+            // (on receive / connect / disconnect / deadline), just one cycle
+            // later.
+            //
+            // EXCEPTION — fire-and-forget sends (producer `acks=0`): these get NO
+            // response ever, so there is nothing to wait for. If they did not
+            // break here, the loop would park in `select!` until the deadline,
+            // delaying every acks=0 send's synthesized completion
+            // (`NetworkClient::handle_completed_sends`) by the full poll timeout —
+            // observed as a ~throughput collapse to a few hundred msg/s with
+            // multi-second latency and an idle CPU. This mirrors Java, whose
+            // `Selector.poll` returns on the write-readiness event that completes
+            // the send. Only fire-and-forget sends are checked, so the
+            // response-expecting optimization above is preserved unchanged.
             //
             // CRITICAL (§10): `connected` MUST stay in the break.
             // `poll_channel_reads` pushes onto `self.connected` on the
             // post-handshake (TLS/SASL) ready transition specifically so `poll()`
             // exits and `handle_initiate_api_version_requests` fires (the join
             // path). Removing `connected` would re-introduce the join stall.
-            let made_progress =
-                !self.completed_receives.is_empty() || !self.connected.is_empty() || !self.disconnected.is_empty();
+            let made_progress = !self.completed_receives.is_empty()
+                || !self.connected.is_empty()
+                || !self.disconnected.is_empty()
+                || self.completed_sends.iter().any(NetworkSend::is_fire_and_forget);
 
             if made_progress {
                 break;
@@ -3326,6 +3338,75 @@ mod tests {
         // break) and are covered by `test_readiness_wait_path`,
         // `blocking_connect`/`wait_for_channel_ready`, and the `test_close*`
         // family. Only `completed_sends` was removed from the break here.
+
+        // Cleanup.
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    /// Regression test for the producer `acks=0` collapse: a **fire-and-forget**
+    /// send (one that expects no response, `NetworkSend::is_fire_and_forget`)
+    /// gets NO receive ever, so the poll that completes it MUST break promptly
+    /// rather than parking to the deadline. This is the inverse of
+    /// `test_send_only_poll_does_not_return_early`'s `(a2)` case (a
+    /// response-expecting send, which correctly parks to the deadline).
+    ///
+    /// Before the fix, `made_progress` excluded `completed_sends` entirely, so an
+    /// `acks=0` send's synthesized completion (`NetworkClient::handle_completed_sends`)
+    /// was delayed by the full poll timeout — observed as an ~1600x throughput
+    /// collapse (a few hundred msg/s) with multi-second latency and an idle CPU.
+    ///
+    /// Bounded by a hard `tokio::time::timeout` so a regression (parking to the
+    /// long deadline) fails the test instead of blocking the suite.
+    #[tokio::test]
+    async fn test_fire_and_forget_send_breaks_poll_promptly() {
+        use std::time::{Duration, Instant};
+
+        let server = SinkServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+
+        // Settle the connect bookkeeping so the measured poll genuinely parks on
+        // the socket-readiness `select!` (deadline = Some), matching the sibling
+        // test's settle loop.
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // Queue a FIRE-AND-FORGET send (producer acks=0): no echo will ever come
+        // back from the sink server, so the only terminal event is the send
+        // completing.
+        let mut send = create_send("0", "fire-and-forget");
+        send.set_fire_and_forget(true);
+        selector.send(send).unwrap();
+
+        // A single poll with a LONG (10s) deadline must return PROMPTLY once the
+        // send is written — the fire-and-forget completed send breaks the poll
+        // loop. Pre-fix, this poll would park the full 10s.
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(3), selector.poll(10_000))
+            .await
+            .expect("fire-and-forget poll hung well past a prompt return")
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            !selector.completed_sends().is_empty(),
+            "the fire-and-forget request should have been written and completed as a send"
+        );
+        assert!(
+            selector.completed_sends().iter().any(NetworkSend::is_fire_and_forget),
+            "the completed send must be marked fire-and-forget"
+        );
+        assert!(
+            selector.completed_receives().is_empty(),
+            "the sink server never echoes, so there must be no completed receive"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a fire-and-forget send must break the poll promptly (returned in {elapsed:?}), \
+             not park to the 10s deadline"
+        );
 
         // Cleanup.
         selector.close_channel("0").await;

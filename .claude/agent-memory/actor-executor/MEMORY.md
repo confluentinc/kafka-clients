@@ -175,3 +175,9 @@
 - [Admin per-key callbacks Phase C](admin_per_key_callbacks_phase_c_notes.md) — Log dirs family; reused nested LogDirDescriptionMap_t handle verbatim; COMMENTS.67: a key absent from `entries` now gets a generic explicit-error fan-out in admin_async_per_key_op (not a documented hang — "matches Java" was the wrong excuse)
 - [Admin per-key callbacks Phase D](admin_per_key_callbacks_phase_d_notes.md) — Partitions/offsets family; no dedup needed anywhere (both RPCs already dict-keyed); listOffsets uses AdminApiDriver (temporal-independence caveat, doesn't block the direct mechanism test); caught grpc_translate.py docstring drift from Phase C
 - [Admin per-key callbacks Phase G](admin_per_key_callbacks_phase_g_notes.md) — FINAL; producers/transactions family; reuse flattened result handle as single-key value (no standalone value handle in sync path); FenceProducersResult::futures() accessor; listTransactions left joined
+- [Loop 50 split panic (§9.18)](loop50_split_panic_notes.md) — a check narrower than its claim is the default failure; verify the artifact, not the script's exit
+- [§9.1 version-gate guard](generator_version_gate_guard.md) — guard lives in generateClassWriter only; needs curVersions threading; derive counts from specs then diff
+- [New error path needs its catch](new_error_path_needs_its_catch.md) — making a silent path loud is half a translation; §9.1's guard turned a silent drop into an I/O-task panic
+- [Skips recorded in prose](skips_recorded_in_prose.md) — untranslated tests park in comments, not just #[ignore]; grep the Rust tree for the blocker's words
+- [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
+- [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed

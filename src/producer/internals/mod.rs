@@ -36,7 +36,7 @@ pub(crate) mod txn_partition_entry;
 pub(crate) mod txn_partition_map;
 
 pub(crate) use buffer_pool::BufferPool;
-pub(crate) use built_in_partitioner::BuiltInPartitioner;
+pub(crate) use built_in_partitioner::{BuiltInPartitioner, KeyHasher};
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use kafka_producer_metrics::KafkaProducerMetrics;
