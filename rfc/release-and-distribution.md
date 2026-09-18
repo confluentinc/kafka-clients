@@ -1,6 +1,6 @@
 # RFC: Client release and distribution
 
-- **Status:** Draft
+- **Status:** Proposed
 - **Audience:** users and contributors of Confluent's Kafka clients
 
 ## Summary
@@ -19,7 +19,7 @@ encoding defined in the versioning proposal.
 
 ## Preview and GA
 
-Each capability ships first as a preview (beta/RC) and then as GA. Preview releases are for
+New releases ship first as a release candidate and then as GA. Preview releases are for
 evaluation, published to the same registries and clearly marked as pre-release, so existing
 production workloads are unaffected until a user opts in. GA releases are production-ready.
 
@@ -33,12 +33,7 @@ Each client is published to its language's standard registry under its existing 
 | Python | PyPI | `pip install confluent-kafka` | prebuilt wheels per platform |
 | .NET | NuGet | `dotnet add package Confluent.Kafka` | native runtime assets in the package |
 | JavaScript | npm | `npm install @confluentinc/kafka-javascript` | prebuilt platform packages (`optionalDependencies`) |
-| C/C++ | TBD (see [GitHub repository structure](repository-structure.md)) | TBD | TBD |
-
-The publishing/mirror model is covered in
-[GitHub repository structure](repository-structure.md). C/C++ distribution — its
-registry and location, its install path, and whether it ships prebuilt binaries only or also
-C source — is TBD, pending the C/C++ publishing decision that is open in that proposal.
+| C/C++ | N/A | i.e. `apt-get install confluent-kafka-c-dev` or `./configure && make && make install` |  |
 
 ## Installation without a build toolchain
 
@@ -53,7 +48,7 @@ rather than compiling on the user's machine. This means:
 
 ## Platform support
 
-Initial target platforms for prebuilt binaries:
+All language clients will be made available for the following platforms.
 
 | Platform | Architectures |
 | --- | --- |
@@ -61,19 +56,4 @@ Initial target platforms for prebuilt binaries:
 | macOS | arm64 |
 | Windows | x86-64 |
 
-The exact matrix is developed on this proposal. A source build remains available where a
-platform is not prebuilt.
-
-## Coexistence of major versions
-
-The new major version and the legacy librdkafka-based major version are published side by
-side, so an application can install and migrate at its own pace (see
-[Client versioning](versioning.md) and
-[GitHub repository structure](repository-structure.md)).
-
-## Open questions
-
-- The exact prebuilt-platform matrix (for example musl/Alpine Linux, macOS x86-64, Windows
-  arm64).
-- Whether Python also ships a source distribution that builds from source, and the minimum
-  toolchain if so.
+Users can build from source for unsupported platforms.

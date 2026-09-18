@@ -6,18 +6,15 @@
 ## Summary
 
 Align each client's public API and configuration with the Apache Kafka Java client. This
-umbrella document states the shared principles; a separate proposal per language covers the
-concrete API and the migration from the current librdkafka-based client.
+umbrella document states the shared principles; the Rust proposal below covers the concrete
+API of the native core.
 
 | Language | Proposal |
 | --- | --- |
-| Python | [python.md](python.md) |
-| .NET | [dotnet.md](dotnet.md) |
-| JavaScript | [javascript.md](javascript.md) |
-| C/C++ | [c-cpp.md](c-cpp.md) |
 | Rust | [rust.md](rust.md) |
 
-Go is being evaluated separately and is not covered here.
+The Python, .NET, JavaScript, and C/C++ bindings, and the Go client, are covered separately
+and are not part of this RFC set.
 
 ## Why align with the Java API
 
@@ -30,7 +27,7 @@ friction today.
 
 ## Categories of change
 
-Each per-language proposal describes its changes in three categories:
+The alignment spans three categories:
 
 1. **Configuration.** Config keys align with the Java client. librdkafka-specific keys (for
    example `message.max.bytes`) map to their Java equivalents (for example
@@ -65,11 +62,6 @@ Schema Registry support is provided by Confluent's existing per-language seriali
 deserializer (serdes) libraries, installed alongside the client. The new clients support
 Schema Registry exactly as the librdkafka-based clients do today: the same serdes libraries,
 attached to produce and consume the same way, with no change required by this RFC.
-
-Each per-language proposal includes a Schema Registry example:
-[Python](python.md#schema-registry), [.NET](dotnet.md#schema-registry), and
-[JavaScript](javascript.md#schema-registry). C/C++ is the exception, as librdkafka never
-shipped a Schema Registry serializer of its own (see [c-cpp.md](c-cpp.md#schema-registry)).
 
 ## Relationship to the other RFCs
 

@@ -61,9 +61,3 @@ Because `MAJOR.MINOR` tracks Apache Kafka, default values aim to match the Java 
 Where a default is chosen to diverge, it is chosen in the user's interest, kept
 forward-compatible with the corresponding Java release, and tracked through a KIP. For
 example, the new client defaults to the KIP-848 consumer group protocol.
-
-## Open questions
-
-- Whether a single patch digit per stream per Apache Kafka minor release is enough in
-  practice, or whether some streams need more room.
-- How pre-release (preview) builds are tagged relative to this scheme.

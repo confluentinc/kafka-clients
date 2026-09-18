@@ -1,6 +1,6 @@
 # RFC: GitHub repository structure
 
-- **Status:** Draft
+- **Status:** Proposed
 - **Audience:** users and contributors of Confluent's Kafka clients
 
 ## Summary
@@ -51,32 +51,6 @@ We keep dedicated per-language repositories, rather than pointing users at the m
 that search results, package-registry links, stars, and existing bookmarks continue to
 resolve to a familiar per-language landing page and README.
 
-## C/C++ client
-
-C/C++ users consume the Kafka client directly rather than as a dependency of a higher-level
-wrapper. Under this proposal the Rust core produces the C/C++ libraries as build artifacts,
-and the new C library carries a different name than `librdkafka`.
-
-**Open question.** Where the C/C++ client is published is not settled. Two options:
-
-1. Publish the C/C++ artifacts from the monorepo and deprecate the `librdkafka` repository.
-2. Publish the C/C++ client from a new `confluentinc/kafka-c` repository, mirrored from the
-   monorepo like the per-language repositories for the other languages.
-
-The choice depends on whether the Rust core emits C source for the client, not only
-compiled binaries:
-
-- **Compiled artifacts only, no generated C source: prefer option 1.** A dedicated
-  repository holding only build artifacts with no corresponding source diverges from how
-  the language-binding mirrors work (those mirror real source subfolders), so the monorepo
-  is the better home in that case.
-- **Generated C source (headers and a C API layer): prefer option 2.** `confluentinc/kafka-c`
-  then mirrors real generated source, exactly like the other per-language mirrors, and keeps
-  the C/C++ client consistent with them.
-
-Feedback on this trade-off, and on whether the core emits C source, is specifically
-requested. See also the C/C++ API proposal in [apis/c-cpp.md](apis/c-cpp.md).
-
 ## Prior art
 
 The monorepo-with-mirrors model has precedent:
@@ -88,8 +62,3 @@ The monorepo-with-mirrors model has precedent:
 - **Symfony** splits components out of the
   [symfony/symfony](https://github.com/symfony/symfony) monorepo into per-package
   repositories such as [symfony/console](https://github.com/symfony/console).
-
-## Open questions
-
-- The C/C++ publishing location, above.
-- The mirroring tooling (for example a git subtree split versus a publishing bot).
