@@ -654,8 +654,9 @@ pub trait Admin: Send + Sync {
 /// Creates a network-backed [`Admin`] client from the given configuration.
 ///
 /// Corresponds to `Admin.create(Properties)` / `AdminClient.create`. Spawns the
-/// single background I/O task. Phase 1 supports the PLAINTEXT security protocol
-/// only.
+/// single background I/O task, selecting the channel builder from
+/// `security.protocol` + `ssl.*` / `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT /
+/// SASL_SSL); SASL mechanism PLAIN only.
 ///
 /// # Errors
 ///
