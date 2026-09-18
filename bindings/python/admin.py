@@ -86,13 +86,14 @@ already-resolved values:
 * ``remove_members_from_consumer_group`` ->
   ``{group_instance_id: Future[None]}``. ``members=None`` selects Java's
   "remove every member" mode, which has no per-member outcome in Java at all
-  (``memberResult`` refuses and ``all()`` is the only observable) and returns
-  an empty dict for the same reason as the empty-offsets case above. An empty
-  (non-``None``) ``members`` iterable is different again: Java's
-  ``RemoveMembersFromConsumerGroupOptions(Collection)`` constructor raises
-  ``IllegalArgumentException`` **synchronously**, before any ``KafkaFuture``
-  exists, so this raises :class:`KafkaError` synchronously too rather than
-  returning anything.
+  (``memberResult`` refuses and ``all()`` is the only observable); the returned
+  dict then carries a single whole-operation entry keyed by ``None`` (the
+  ``all()`` observable), so awaiting it awaits the whole removeAll to completion
+  and surfaces its error. An empty (non-``None``) ``members`` iterable is
+  different again: Java's ``RemoveMembersFromConsumerGroupOptions(Collection)``
+  constructor raises ``IllegalArgumentException`` **synchronously**, before any
+  ``KafkaFuture`` exists, so this raises :class:`KafkaError` synchronously too
+  rather than returning anything.
 * ``create_acls`` -> ``{AclBinding: Future[None]}`` (per-binding future is
   ``KafkaFuture<Void>``, so a result of ``None`` means success). A binding
   with an ``ANY``/``MATCH`` field Java's ``ResourcePattern`` /
@@ -109,13 +110,13 @@ already-resolved values:
   broker — a deliberate C-layer-stricter deviation from Java, which sends
   both and only its own local future map, never observed here, collapses).
 * ``alter_user_scram_credentials`` -> ``{user: Future[None]}``
-* ``update_features`` -> ``{feature: Future[None]}``. An empty map returns an
-  **empty dict**, against both a mock and a real client: unlike Java's
-  ``KafkaAdminClient.updateFeatures``, which throws
-  ``IllegalArgumentException`` for one, there is no per-call callback slot
-  left to report that rejection through when there are zero features to key
-  a ``Future`` on — a documented limitation of the per-key async entry point,
-  not a Java-faithful "yields an empty result".
+* ``update_features`` -> ``{feature: Future[None]}``. An empty map raises
+  :class:`KafkaError` **synchronously** with the message
+  ``"Feature updates can not be null or empty."``, mirroring Java's
+  ``KafkaAdminClient.updateFeatures`` (which throws ``IllegalArgumentException``
+  for one). The per-key async entry point has no key to fan an error out over
+  when there are zero features, so the check is enforced before any ``Future``
+  is built rather than being silently dropped.
 
 A per-key failure surfaces as that key's own ``Future`` raising the
 :class:`KafkaError` (``Future.result()``) or holding it (``Future.exception()``);
@@ -3239,7 +3240,14 @@ class _AdminBase:
         must still reach `read_client_quota_alterations` so it is rejected
         with its real per-row message (`admin-client.md`'s "the C layer is
         stricter" deviation), rather than being silently coalesced here.
+
+        ``entries`` is materialized to a ``list`` once up front: it is iterated
+        twice below (to build ``keys`` and again for the native rows), so a
+        one-shot iterable (e.g. a generator) would be exhausted by the first
+        pass, leaving the second empty -- no per-key callback would fire and
+        every returned ``Future`` would hang.
         """
+        entries = list(entries)
         keys = list(dict.fromkeys(a.entity for a in entries))
         return keys, self._quota_alteration_rows(entries)
 
@@ -3317,7 +3325,14 @@ class _AdminBase:
         `kafka_admin_AdminClient_alter_user_scram_credentials_async`'s `keys`
         and `count_distinct_scram_users`). All rows are still sent to the
         broker — only the per-user *outcome* is collapsed, exactly as Java
-        does."""
+        does.
+
+        ``alterations`` is materialized to a ``list`` once up front: it is
+        iterated twice below (to build ``keys`` and again for the native rows),
+        so a one-shot iterable (e.g. a generator) would be exhausted by the
+        first pass, leaving the second empty -- no per-key callback would fire
+        and every returned ``Future`` would hang."""
+        alterations = list(alterations)
         keys = list(dict.fromkeys(str(a.user) for a in alterations))
         return keys, self._scram_alteration_rows(alterations)
 
@@ -3376,7 +3391,24 @@ class _AdminBase:
 
     def _update_features_keys_and_spec(self, feature_updates):
         """`feature_updates`' keys are already unique (a plain dict); the
-        spec is the flattened per-feature rows the C extension unpacks."""
+        spec is the flattened per-feature rows the C extension unpacks.
+
+        An empty map is rejected **synchronously**, before any ``Future`` is
+        built. Java's ``KafkaAdminClient.updateFeatures``
+        (``KafkaAdminClient.java:4578``) throws
+        ``IllegalArgumentException("Feature updates can not be null or empty.")``,
+        and this crate's ``KafkaAdminClient::update_features`` reproduces it. But
+        the per-key async entry point fans its error out over the per-feature
+        keys, and an empty map has none — so the core's rejection would be
+        silently dropped. This mirrors
+        :meth:`_remove_members_from_consumer_group_keys_and_spec`'s
+        empty-collection guard: with no key for a ``Future`` to attach to, raise
+        directly rather than return a dict with nothing to observe the failure
+        through.
+        """
+        if not feature_updates:
+            raise KafkaError._from_parts(
+                -1, "Feature updates can not be null or empty.", False, False)
         return list(feature_updates.keys()), self._feature_update_rows(feature_updates)
 
     # ---- B6: producers and transactions ------------------------------------
@@ -3985,16 +4017,22 @@ class Admin(_AdminBase):
         ``RemoveMembersFromConsumerGroupOptions()``: remove **every** member of
         the group. That mode has no per-member outcome in Java at all —
         ``memberResult`` refuses and ``all()`` is the only observable — so the
-        returned dict is empty; there is no ``Future`` to observe that mode's
-        outcome through. An empty iterable is not the same thing: Java's
-        collection constructor raises ``IllegalArgumentException``
-        synchronously, before any per-member ``Future`` could exist to carry
-        it, so this raises :class:`KafkaError` synchronously too rather than
-        silently selecting the destructive form or returning an empty dict.
+        returned dict carries a **single whole-operation** entry keyed by
+        ``None`` (the ``all()`` observable), rather than a per-member entry:
+        ``{None: Future[None]}``. Awaiting that ``Future`` awaits the whole
+        removeAll to completion and surfaces its error, mirroring Java's
+        ``all()``. An empty iterable is not the same thing: Java's collection
+        constructor raises ``IllegalArgumentException`` synchronously, before any
+        per-member ``Future`` could exist to carry it, so this raises
+        :class:`KafkaError` synchronously too rather than silently selecting the
+        destructive form.
         """
         self._check_closed()
         keys, (remove_all, ids) = self._remove_members_from_consumer_group_keys_and_spec(members)
-        futures = {key: Future() for key in keys}
+        # `removeAll` has no per-member key; the native layer delivers the whole
+        # operation's outcome via a single callback with a NULL group instance id
+        # (-> the `None` key here), so the caller can await the operation.
+        futures = {None: Future()} if remove_all else {key: Future() for key in keys}
         ms = _ms(timeout)
         _lib.Admin_remove_members_from_consumer_group_async(
             self._h, str(group_id), remove_all, ids,
@@ -4177,16 +4215,14 @@ class Admin(_AdminBase):
         ``{feature: Future[None]}`` immediately; each feature's ``Future``
         resolves independently.
 
-        An empty map returns an empty dict, against both a mock (Java's
-        ``MockAdminClient.updateFeatures`` does not check for one) and a real
-        client. Against a real client this is a narrower observable than
-        Java's ``KafkaAdminClient.updateFeatures``, which throws
-        ``IllegalArgumentException`` for an empty map: with zero features
-        there is no per-call callback slot left to report that rejection
-        through, so it is silently dropped rather than surfaced -- a
-        documented limitation of the per-key async entry point
-        (`kafka_admin_AdminClient_update_features_async`), not something this
-        binding can recover.
+        An empty map raises :class:`KafkaError` **synchronously** with the
+        message ``"Feature updates can not be null or empty."``, mirroring
+        Java's ``KafkaAdminClient.updateFeatures``
+        (``KafkaAdminClient.java:4578``) and this crate's
+        ``KafkaAdminClient::update_features``. The per-key async entry point
+        fans its error out over the per-feature keys, of which an empty map has
+        none, so the check is enforced here before any ``Future`` is built
+        rather than being silently dropped.
         """
         self._check_closed()
         keys, rows = self._update_features_keys_and_spec(feature_updates)
@@ -4695,11 +4731,17 @@ class AsyncAdmin(_AdminBase):
         """See :meth:`Admin.remove_members_from_consumer_group`. ``members`` is
         required; pass ``None`` explicitly to remove every member. Returns
         ``{group_instance_id: Future[None]}`` immediately (no internal
-        ``await``); each member's ``Future`` resolves independently."""
+        ``await``); each member's ``Future`` resolves independently. In
+        ``removeAll`` mode (``members=None``) the returned dict carries a single
+        whole-operation entry keyed by ``None`` (Java's ``all()`` observable)."""
         self._check_closed()
         keys, (remove_all, ids) = self._remove_members_from_consumer_group_keys_and_spec(members)
         loop = asyncio.get_running_loop()
-        futures = {key: loop.create_future() for key in keys}
+        # `removeAll` has no per-member key; the native layer delivers the whole
+        # operation's outcome via a single callback with a NULL group instance id
+        # (-> the `None` key here), so the caller can await the operation.
+        futures = ({None: loop.create_future()} if remove_all
+                   else {key: loop.create_future() for key in keys})
         ms = _ms(timeout)
         _lib.Admin_remove_members_from_consumer_group_async(
             self._h, str(group_id), remove_all, ids,

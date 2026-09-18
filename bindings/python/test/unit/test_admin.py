@@ -1929,10 +1929,16 @@ def test_remove_members_dedups_same_group_instance_id():
 def test_remove_all_members_has_no_per_member_outcome():
     """`members=None` is Java's no-argument options constructor, where
     `memberResult` is not applicable and `all()` is the only observable — so
-    the returned dict is empty; there is no Future to observe that mode's
-    outcome through."""
+    the returned dict carries a single whole-operation entry keyed by `None`
+    (the `all()` observable) rather than any per-member entry. Awaiting that
+    Future awaits the whole removeAll to completion and surfaces its error;
+    against the mock that error is Java's "Not implemented yet"."""
     with MockAdminClient(1) as admin:
-        assert admin.remove_members_from_consumer_group("rm-group", None) == {}
+        futures = admin.remove_members_from_consumer_group("rm-group", None)
+        assert list(futures.keys()) == [None]
+        with pytest.raises(KafkaError) as exc:
+            futures[None].result()
+        assert str(exc.value) == "Not implemented yet"
 
 
 def test_remove_members_rejects_an_empty_member_list():
@@ -2363,6 +2369,30 @@ def test_alter_client_quotas_reports_unsupported_per_entity():
             with pytest.raises(KafkaError) as exc:
                 future.result(timeout=5)
             assert str(exc.value) == "Not implement yet"
+
+
+def test_alter_client_quotas_accepts_a_one_shot_generator():
+    """`entries` may be any iterable, including a one-shot generator.
+    `_alter_client_quotas_keys_and_spec` iterates it twice (to build the keys and
+    again for the native rows), so it must materialize it to a list first;
+    otherwise the generator is exhausted by the first pass, the native request is
+    empty, no per-key callback fires, and every returned Future hangs. This test
+    resolves the futures with a bounded timeout so a regression would fail (hang)
+    rather than pass."""
+    with MockAdminClient(1) as admin:
+        alice = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
+        bob = ClientQuotaEntity({ClientQuotaEntity.USER: "bob"})
+        entries = (
+            ClientQuotaAlteration(e, [ClientQuotaOp("producer_byte_rate", 1024.0)])
+            for e in (alice, bob)
+        )
+        futures = admin.alter_client_quotas(entries)
+        assert set(futures) == {alice, bob}
+        for future in futures.values():
+            # The mock rejects the whole request, but the point is the Future
+            # RESOLVES (does not hang) -- proving the generator was not exhausted.
+            with pytest.raises(KafkaError):
+                future.result(timeout=5)
 
 
 def test_alter_client_quotas_keeps_the_default_entity_distinct():
@@ -3068,12 +3098,29 @@ def test_update_features_rejects_what_javas_feature_update_constructor_rejects()
             future.result(timeout=5)
         assert str(exc.value) == "feature update at index 0: Cannot specify a negative version level."
 
-        # Java's MockAdminClient does not check for an empty map (the real
-        # client does), so an empty request yields an empty result here -- and
-        # with zero keys there is no per-call callback slot for a real
-        # client's rejection to land in either (see `update_features`'s
-        # docstring), so this is not distinguishing mock from real here.
-        assert admin.update_features({}) == {}
+
+def test_update_features_rejects_an_empty_map():
+    """An empty map is rejected **synchronously** with Java's exact message,
+    before any Future is built. Java's `KafkaAdminClient.updateFeatures`
+    (`KafkaAdminClient.java:4578`) throws `IllegalArgumentException("Feature
+    updates can not be null or empty.")`; with zero features the per-key async
+    entry point has no key to fan that error out over, so the check is enforced
+    here rather than being silently dropped (which is what previously let the
+    empty map return `{}`)."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.update_features({})
+        assert str(exc.value) == "Feature updates can not be null or empty."
+
+
+@pytest.mark.asyncio
+async def test_update_features_rejects_an_empty_map_async():
+    """The async client rejects an empty map synchronously too (the check is in
+    the shared `_update_features_keys_and_spec`, before any Future is built)."""
+    async with AsyncMockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            await admin.update_features({})
+        assert str(exc.value) == "Feature updates can not be null or empty."
 
 
 @pytest.mark.asyncio
