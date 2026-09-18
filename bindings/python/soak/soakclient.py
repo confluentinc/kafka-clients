@@ -583,16 +583,43 @@ def check_admin_credentials(conf):
     for two weeks against the wrong thing. PLAINTEXT (no SASL) requires no
     credentials and passes untouched.
 
+    A second, symmetric misconfiguration is refused just as fast: SASL
+    credentials or a mechanism are configured, but ``security.protocol`` is not a
+    SASL protocol (does not contain ``"SASL"``). The Rust client defaults to
+    PLAINTEXT, so it would connect *unauthenticated* while the operator believes
+    SASL is in force — exactly the "runs for two weeks against the wrong thing"
+    failure, in the opposite direction. Naming it at startup beats discovering it
+    from an unauthenticated listener later.
+
     Raises :class:`FatalStartupError` (mapped to ``EXIT_FATAL``: a restart cannot
     fix a bad credential), naming the missing piece.
     """
-    sasl_expected = ("SASL" in conf.get("security.protocol", "").upper()
-                     or bool(conf.get("sasl.mechanism")))
+    protocol = conf.get("security.protocol", "")
+    protocol_is_sasl = "SASL" in protocol.upper()
+    mechanism = conf.get("sasl.mechanism", "")
+    jaas = conf.get("sasl.jaas.config")
+    username, password = jaas_credentials(jaas) if jaas else (None, None)
+    sasl_creds_present = username is not None or password is not None
+    sasl_configured = bool(mechanism) or sasl_creds_present
+
+    # SASL is configured, but the protocol would not actually use it: the client
+    # connects as PLAINTEXT (the Rust default) — silently unauthenticated. A
+    # restart cannot fix a protocol mismatch, so refuse before the run begins.
+    if sasl_configured and not protocol_is_sasl:
+        raise FatalStartupError(
+            "sasl.mechanism={!r} / sasl.jaas.config {}, but security.protocol={!r} "
+            "is not a SASL protocol, so the client would connect WITHOUT SASL "
+            "(PLAINTEXT, the Rust default) — silently unauthenticated. Set "
+            "security.protocol to a SASL protocol (e.g. SASL_SSL or "
+            "SASL_PLAINTEXT). Restarting will not fix this.".format(
+                mechanism,
+                "has credentials" if sasl_creds_present else "has no credentials",
+                protocol))
+
+    sasl_expected = protocol_is_sasl or bool(mechanism)
     if not sasl_expected:
         return
 
-    jaas = conf.get("sasl.jaas.config")
-    username, password = jaas_credentials(jaas) if jaas else (None, None)
     if username is not None and password is not None:
         return
 

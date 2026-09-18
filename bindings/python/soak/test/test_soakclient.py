@@ -483,6 +483,49 @@ def test_check_admin_credentials_triggers_on_sasl_mechanism_alone():
         })
 
 
+def test_check_admin_credentials_refuses_sasl_mechanism_with_plaintext_protocol():
+    """SASL is configured (mechanism set) but security.protocol=PLAINTEXT, so the
+    client would connect unauthenticated — refuse, even though credentials happen
+    to be present, because the protocol would not use them."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "PLAINTEXT",
+            "sasl.mechanism": "PLAIN",
+            "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
+                                 'PlainLoginModule required username="u" '
+                                 'password="p";'),
+        })
+    message = str(exc.value)
+    assert "not a SASL protocol" in message
+    assert "WITHOUT SASL" in message
+
+
+def test_check_admin_credentials_refuses_sasl_mechanism_without_protocol():
+    """sasl.mechanism set but security.protocol absent: the Rust default is
+    PLAINTEXT, so this too would connect unauthenticated and must be refused."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "sasl.mechanism": "PLAIN",
+        })
+    assert "not a SASL protocol" in str(exc.value)
+
+
+def test_check_admin_credentials_refuses_jaas_creds_with_plaintext_protocol():
+    """Credentials via sasl.jaas.config but security.protocol=PLAINTEXT (no
+    mechanism): still a SASL-configured-but-PLAINTEXT mismatch to refuse."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "PLAINTEXT",
+            "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
+                                 'PlainLoginModule required username="u" '
+                                 'password="p";'),
+        })
+    assert "not a SASL protocol" in str(exc.value)
+
+
 def test_check_admin_credentials_passes_with_valid_jaas():
     # A jaas with an extractable user+pass is accepted (no exception).
     check_admin_credentials({
