@@ -55,6 +55,7 @@ const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: u64 = 1_000_000_000;
 /// - `MutedAndThrottledAndResponsePending`: (SocketServer only) Channel is muted,
 ///   throttling is in progress, and a response is pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChannelMuteState {
     /// Channel is not muted.
     NotMuted,
@@ -78,6 +79,7 @@ pub enum ChannelMuteState {
 /// - `ThrottleEnded`: `MutedAndThrottled` => `Muted`,
 ///   `MutedAndThrottledAndResponsePending` => `MutedAndResponsePending`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChannelMuteEvent {
     /// A request has been received from the client.
     RequestReceived,

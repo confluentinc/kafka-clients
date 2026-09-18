@@ -731,7 +731,7 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         name.clone(),
         MetricValueProvider::Gauge(Box::new(gauge)),
         Arc::new(MetricConfig::new()),
-        Arc::new(SystemTime),
+        Arc::new(SystemTime::default()),
     );
     (name, Arc::new(metric))
 }

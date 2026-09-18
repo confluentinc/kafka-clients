@@ -22,6 +22,7 @@ use super::ConcreteRequest;
 ///
 /// Corresponds to `RequestAndSize` in Java.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RequestAndSize {
     /// The parsed request.
     pub request: ConcreteRequest,

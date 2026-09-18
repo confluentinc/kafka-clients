@@ -27,6 +27,7 @@ use super::RawTaggedField;
 /// Translates the Java static-utility class `org.apache.kafka.common.protocol.MessageUtil`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct MessageUtil;
 
 impl MessageUtil {

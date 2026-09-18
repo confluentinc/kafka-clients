@@ -32,6 +32,7 @@ use crate::common::errors::*;
 /// the newly-added error code.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(i16)]
+#[non_exhaustive]
 pub enum Errors {
     UnknownServerError = -1,
     None = 0,

@@ -54,6 +54,7 @@ use super::TxnOffsetCommitResponse;
 ///
 /// Corresponds to the nested `TxnOffsetCommitRequest.CommittedOffset`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CommittedOffset {
     /// The offset to commit.
     pub offset: i64,

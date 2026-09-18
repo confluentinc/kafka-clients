@@ -38,6 +38,7 @@ use super::ResponseHeader;
 ///
 /// Serializes header + body into a size-prefixed buffer, with zero-copy
 /// support for record fields via scatter-gather I/O.
+#[non_exhaustive]
 pub struct SendBuilder;
 
 impl SendBuilder {

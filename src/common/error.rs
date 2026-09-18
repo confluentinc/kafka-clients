@@ -842,6 +842,7 @@ impl ErrorHierarchy for LocalTimeoutError {}
 #[delegate(ErrorName)]
 #[delegate(ErrorSource)]
 #[delegate(Display)]
+#[non_exhaustive]
 pub enum Error {
     // Payloads defined in this file: the bare `KafkaException` and the
     // generic `java.lang` / `java.util` runtime errors, which have no

@@ -22,6 +22,7 @@ use crate::common::MetricName;
 /// `Double` or a non-measurable gauge value of any type. This enum captures the
 /// value kinds the consumer metrics produce.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum MetricValue {
     /// A measurable (or `Double`-valued gauge) reading.
     Double(f64),

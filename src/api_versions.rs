@@ -29,6 +29,7 @@ use super::NodeApiVersions;
 
 /// Information about finalized features and their epoch.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FinalizedFeaturesInfo {
     /// The epoch of the finalized features.
     pub finalized_features_epoch: i64,

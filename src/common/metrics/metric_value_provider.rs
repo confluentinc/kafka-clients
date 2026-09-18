@@ -24,6 +24,7 @@ use crate::common::metrics::{Gauge, Measurable, MetricConfig, MetricValue};
 /// [`crate::common::Metric::metric_value`] returns an erased value, we model the
 /// provider as an enum over the two concrete kinds rather than a generic trait;
 /// the produced value is the type-erased [`MetricValue`].
+#[non_exhaustive]
 pub enum MetricValueProvider {
     /// A measurable quantity (produces an `f64`).
     Measurable(Box<dyn Measurable>),

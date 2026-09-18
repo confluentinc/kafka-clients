@@ -22,6 +22,7 @@ use crate::common::Error;
 ///
 /// Corresponds to `ConfigEntry.ConfigType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum ConfigType {
     /// Unknown data type.
     #[default]
@@ -75,6 +76,7 @@ impl ConfigType {
 ///
 /// Corresponds to `ConfigEntry.ConfigSource`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConfigSource {
     /// Dynamic topic config that is configured for a specific topic.
     DynamicTopicConfig,

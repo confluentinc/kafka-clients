@@ -31,6 +31,7 @@ use super::{MetadataResponse, PartitionMetadata, TopicMetadata};
 /// `org.apache.kafka.common.requests.RequestTestUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct RequestTestUtils;
 
 impl RequestTestUtils {

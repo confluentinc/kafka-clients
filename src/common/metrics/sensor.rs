@@ -32,6 +32,7 @@ use crate::common::{Error, MetricName};
 /// Mirrors `Sensor.RecordingLevel`. The numeric ids are part of the protocol and
 /// must not change: INFO=0, DEBUG=1, TRACE=2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RecordingLevel {
     /// INFO level (id 0).
     Info,

@@ -38,6 +38,7 @@
 /// `org.apache.kafka.common.config.SslConfigs`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct SslConfigs;
 
 impl SslConfigs {
@@ -126,6 +127,7 @@ impl SslConfigs {
 ///
 /// Translated from `org.apache.kafka.common.config.SslConfigs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SslConfig {
     /// Path to the trust store file (CA certificates).
     /// Corresponds to `ssl.truststore.location`.

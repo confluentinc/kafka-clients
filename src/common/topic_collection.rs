@@ -25,6 +25,7 @@ use crate::common::Uuid;
 /// subclasses; in Rust the closed set of subclasses is an enum, so callers
 /// `match` on the variant instead of using `instanceof`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TopicCollection {
     /// A collection of topics defined by their topic ID
     /// (`TopicCollection.TopicIdCollection`).

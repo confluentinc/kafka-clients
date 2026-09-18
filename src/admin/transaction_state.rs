@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.TransactionState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TransactionState {
     /// A transaction is in progress.
     Ongoing,

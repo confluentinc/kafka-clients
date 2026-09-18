@@ -27,6 +27,7 @@
 /// two must remain distinct here; folding them together would break
 /// `equals`/wire encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ClientQuotaMatch {
     /// Matches the provided entity name exactly (`Optional.of(name)`).
     Exact(String),

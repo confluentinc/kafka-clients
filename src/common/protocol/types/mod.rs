@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 /// The type of a field in the schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SchemaType {
     Boolean,
     Int8,
@@ -51,6 +52,7 @@ pub enum SchemaType {
 
 /// A field definition in a schema.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Field {
     /// The name of the field (snake_case).
     pub name: &'static str,
@@ -60,8 +62,20 @@ pub struct Field {
     pub about: &'static str,
 }
 
+impl Field {
+    /// Creates a field definition.
+    ///
+    /// `Field` is `#[non_exhaustive]`, so a struct literal only compiles inside
+    /// this crate. The generated `fn schema()` bodies compile into the external
+    /// test crates too, so they go through this constructor instead.
+    pub const fn new(name: &'static str, field_type: SchemaType, about: &'static str) -> Self {
+        Field { name, field_type, about }
+    }
+}
+
 /// A tagged field definition in a schema.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TaggedField {
     /// The tag number.
     pub tag: i32,
@@ -75,6 +89,7 @@ pub struct TaggedField {
 
 /// A field definition bound to a particular schema.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BoundField {
     /// The field definition.
     pub def: Field,

@@ -56,6 +56,7 @@ pub trait MemoryPool: Send {
 /// This corresponds to Java's `MemoryPool.NONE` — the default pool used by clients
 /// where memory pooling is not needed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct NoopMemoryPool;
 
 impl MemoryPool for NoopMemoryPool {

@@ -18,6 +18,7 @@
 /// `org.apache.kafka.common.utils.Utils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
 pub struct Utils;
 
 impl Utils {

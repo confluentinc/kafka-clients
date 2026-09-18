@@ -1006,6 +1006,11 @@ fn config_source_name(source: ConfigSource) -> &'static str {
         ConfigSource::StaticBrokerConfig => "STATIC_BROKER_CONFIG",
         ConfigSource::DefaultConfig => "DEFAULT_CONFIG",
         ConfigSource::Unknown => "UNKNOWN",
+        // `ConfigSource` is `#[non_exhaustive]`, so this external crate needs a
+        // wildcard arm. A variant added upstream has no entry in Java's
+        // `name()` table above, so name the gap rather than assert a wrong
+        // string against the C and Python servers.
+        _ => panic!("config_source_name is missing an entry for {source:?}"),
     }
 }
 
@@ -1022,6 +1027,8 @@ fn config_type_name(config_type: ConfigType) -> &'static str {
         ConfigType::List => "LIST",
         ConfigType::Class => "CLASS",
         ConfigType::Password => "PASSWORD",
+        // See the wildcard arm in `config_source_name`.
+        _ => panic!("config_type_name is missing an entry for {config_type:?}"),
     }
 }
 

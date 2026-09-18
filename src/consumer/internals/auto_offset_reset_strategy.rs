@@ -27,6 +27,7 @@ use crate::common::LocalIllegalArgumentError;
 ///
 /// Corresponds to Java's nested `AutoOffsetResetStrategy.StrategyType` enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum StrategyType {
     /// Reset to the latest available offset.
     Latest,

@@ -26,6 +26,7 @@ use std::str::FromStr;
 ///
 /// Translated from `org.apache.kafka.common.security.auth.SecurityProtocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SecurityProtocol {
     /// Un-authenticated, non-encrypted channel.
     Plaintext,

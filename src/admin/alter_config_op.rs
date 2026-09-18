@@ -22,6 +22,7 @@ use super::ConfigEntry;
 ///
 /// Corresponds to `AlterConfigOp.OpType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OpType {
     /// Set the value of the configuration entry.
     Set,

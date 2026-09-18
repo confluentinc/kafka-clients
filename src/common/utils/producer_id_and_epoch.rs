@@ -29,6 +29,7 @@ use crate::common::record::internal::RecordBatch;
 /// This type is two scalars, so it is `Copy` and lives on the stack — Java
 /// allocates an object here, but there is nothing to own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ProducerIdAndEpoch {
     /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
     pub producer_id: i64,

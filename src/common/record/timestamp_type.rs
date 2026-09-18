@@ -22,6 +22,11 @@ use crate::common::Error;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+// `NoTimestampType` repeats the enum name because that is Java's constant
+// (`TimestampType.NO_TIMESTAMP_TYPE`) and also its wire-visible `name()`;
+// renaming it would break CLAUDE.md §2's name preservation.
+#[allow(clippy::enum_variant_names)]
 pub enum TimestampType {
     /// No timestamp type (magic v0).
     NoTimestampType = -1,

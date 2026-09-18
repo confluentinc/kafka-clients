@@ -26,6 +26,7 @@
 /// passing `ScramCredentialUpsertion` and for the internal
 /// `UserScramCredentialRecord`. Do not change the type field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ScramMechanism {
     /// An unknown / unsupported mechanism (type indicator `0`).
     Unknown,

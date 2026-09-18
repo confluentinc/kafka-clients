@@ -438,6 +438,7 @@ impl Holder {
 ///
 /// Corresponds to `MetadataResponse.TopicMetadata` in Java.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TopicMetadata {
     /// The topic-level error.
     pub error: Errors,
@@ -531,6 +532,7 @@ impl std::hash::Hash for TopicMetadata {
 ///
 /// Corresponds to `MetadataResponse.PartitionMetadata` in Java.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PartitionMetadata {
     /// The partition-level error.
     pub error: Errors,

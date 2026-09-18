@@ -142,8 +142,8 @@ fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> Producer
 async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &TopicPartition, num_records: usize) {
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_sasl_ssl_producer_config(bootstrap, ca_cert_pem),
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
     )
     .expect("Failed to build SASL_SSL test producer");
 

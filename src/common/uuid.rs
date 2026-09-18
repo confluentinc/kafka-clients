@@ -97,7 +97,7 @@ impl Uuid {
     }
 
     /// Converts this UUID to a 16-byte array in big-endian order.
-    pub fn to_bytes(&self) -> [u8; 16] {
+    pub fn to_bytes(self) -> [u8; 16] {
         let mut bytes = [0u8; 16];
         bytes[0..8].copy_from_slice(&self.most_sig_bits.to_be_bytes());
         bytes[8..16].copy_from_slice(&self.least_sig_bits.to_be_bytes());
@@ -132,7 +132,7 @@ impl Uuid {
 
     /// Returns a base64 URL encoded string (without padding) of the UUID.
     /// This matches the Java implementation's toString() method.
-    pub fn to_base64_string(&self) -> String {
+    pub fn to_base64_string(self) -> String {
         let bytes = self.to_bytes();
         base64_url_encode(&bytes)
     }

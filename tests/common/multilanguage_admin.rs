@@ -1177,6 +1177,11 @@ fn offset_spec_to_proto(spec: OffsetSpec) -> proto::OffsetSpec {
         OffsetSpec::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
         OffsetSpec::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
         OffsetSpec::Timestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
+        // `OffsetSpec` is `#[non_exhaustive]`, so this external crate needs a
+        // wildcard arm. `admin_service.proto`'s `OffsetSpec.Kind` has a fixed
+        // variant set, so a spec added upstream cannot be encoded — failing
+        // here beats sending a wrong kind to the C and Python servers.
+        _ => panic!("offset_spec_to_proto has no proto::offset_spec::Kind for {spec:?}"),
     };
     proto::OffsetSpec { kind: kind as i32, timestamp }
 }
@@ -1245,6 +1250,8 @@ fn quota_filter_component_to_proto(component: &ClientQuotaFilterComponent) -> pr
         ClientQuotaMatch::Exact(name) => (proto::ClientQuotaMatchKind::MatchKindExact, Some(name.clone())),
         ClientQuotaMatch::Default => (proto::ClientQuotaMatchKind::MatchKindDefault, None),
         ClientQuotaMatch::Any => (proto::ClientQuotaMatchKind::MatchKindAny, None),
+        // See the wildcard arm in `offset_spec_to_proto`.
+        other => panic!("quota_filter_component_to_proto has no proto::ClientQuotaMatchKind for {other:?}"),
     };
     proto::ClientQuotaFilterComponent {
         entity_type: component.entity_type().to_string(),
@@ -1315,6 +1322,8 @@ fn scram_alteration_to_proto(alteration: &UserScramCredentialAlteration) -> prot
                 salt: Some(upsertion.salt().to_vec()),
             }
         },
+        // See the wildcard arm in `offset_spec_to_proto`.
+        other => panic!("scram_alteration_to_proto has no proto encoding for {other:?}"),
     }
 }
 

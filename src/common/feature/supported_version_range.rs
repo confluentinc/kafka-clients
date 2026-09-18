@@ -82,7 +82,7 @@ impl SupportedVersionRange {
     }
 
     /// Converts this version range to a map with `min_version` and `max_version` keys.
-    pub fn to_map(&self) -> HashMap<&'static str, i16> {
+    pub fn to_map(self) -> HashMap<&'static str, i16> {
         let mut map = HashMap::new();
         map.insert(MIN_VERSION_KEY_LABEL, self.min_value);
         map.insert(MAX_VERSION_KEY_LABEL, self.max_value);

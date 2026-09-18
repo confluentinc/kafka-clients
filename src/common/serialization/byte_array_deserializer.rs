@@ -34,6 +34,7 @@ use crate::common::serialization::Deserializer;
 /// [`slice::to_vec`]. That single allocation is the user-deserializer's
 /// budget per §27 and is unavoidable for an owned-`Vec<u8>` value type.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ByteArrayDeserializer;
 
 impl ByteArrayDeserializer {

@@ -24,6 +24,7 @@
 ///
 /// Variant order matches Java's declaration order (`ABORT`, `COMMIT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TransactionResult {
     /// Abort the transaction; `id` is `false` on the wire.
     Abort,
