@@ -183,7 +183,7 @@ impl<R: Read> Read for XerialSnappyReader<R> {
 /// ```
 /// use confluent_kafka::common::compress::Compression;
 ///
-/// let compression = Compression::NONE;
+/// let compression = Compression::none().build();
 /// assert_eq!(compression.compression_type().name(), "none");
 ///
 /// let gzip = Compression::gzip().level(6).unwrap().build();
@@ -344,7 +344,13 @@ pub struct StatelessCompressionBuilder {
 
 impl StatelessCompressionBuilder {
     /// Build the compression codec.
-    pub fn build(self) -> Compression {
+    ///
+    /// `const` so that [`Compression::NONE`] can be defined as
+    /// `Compression::none().build()`, exactly as Java defines its `NONE` field
+    /// (`Compression.java:91`). Java's is a static initializer rather than a
+    /// compile-time constant, but a stateless builder has nothing to evaluate,
+    /// so Rust can do it at compile time and keep the one definition.
+    pub const fn build(self) -> Compression {
         self.compression
     }
 }
@@ -378,11 +384,14 @@ impl CompressionBuilder {
 
 impl Compression {
     /// No compression. Translates Java's `Compression.NONE` constant, which is
-    /// defined as `none().build()`.
-    pub const NONE: Compression = Compression::None;
+    /// defined as `none().build()` (`Compression.java:91`) — as it is here.
+    ///
+    /// Prefer `Compression::none().build()` at call sites: every codec is then
+    /// constructed the same way, through its builder.
+    pub const NONE: Compression = Compression::none().build();
 
     /// Create a builder for no compression.
-    pub fn none() -> StatelessCompressionBuilder {
+    pub const fn none() -> StatelessCompressionBuilder {
         StatelessCompressionBuilder { compression: Self::None }
     }
 
@@ -392,7 +401,7 @@ impl Compression {
     }
 
     /// Create a builder for snappy compression.
-    pub fn snappy() -> StatelessCompressionBuilder {
+    pub const fn snappy() -> StatelessCompressionBuilder {
         StatelessCompressionBuilder { compression: Self::Snappy }
     }
 
@@ -623,7 +632,7 @@ mod tests {
     #[test]
     fn test_none_round_trip() {
         let data = b"Hello, Kafka!";
-        let result = round_trip(&Compression::NONE, data);
+        let result = round_trip(&Compression::none().build(), data);
         assert_eq!(result, data);
     }
 
