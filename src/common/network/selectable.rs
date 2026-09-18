@@ -27,24 +27,31 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
+/// See [`Selectable::connect`] — use the platform default buffer size.
+///
+/// Java `Selectable.USE_DEFAULT_BUFFER_SIZE` (`Selectable.java:36`), an interface
+/// field and therefore implicitly `public static final`.
+///
+/// Module-level rather than an associated const on [`Selectable`], per CLAUDE.md
+/// §2: a constant that Java associates with an interface is exported through the
+/// module containing the trait. An associated const would make the trait
+/// non-dyn-compatible (E0038) and would be unnameable without a `Self` type
+/// (E0790), which forced callers outside an `impl` to write
+/// `<Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE`. Same treatment as
+/// `AdminApiFuture::UNKNOWN_BROKER_ID`.
+///
+/// Note this does not by itself make [`Selectable`] dyn-compatible — [`Selectable::connect`]
+/// and the other I/O methods return `impl Future`, so `dyn Selectable` remains
+/// impossible. The rule is applied because §2 asks for it uniformly, not because the
+/// const was the binding constraint.
+pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
+
 /// An interface for asynchronous, multi-channel network I/O.
 ///
 /// Translated from the Java `Selectable` interface.
 ///
 /// All I/O methods are `async` per CLAUDE.md rule 8.
 pub trait Selectable: Send {
-    /// See [`Self::connect`] — use the platform default buffer size.
-    ///
-    /// Java `Selectable.USE_DEFAULT_BUFFER_SIZE` (`Selectable.java:36`), an
-    /// interface field and therefore implicitly `public static final`.
-    ///
-    /// Rust has no way to name a trait constant without a `Self` type
-    /// (E0790), so callers outside an `impl` write the fully-qualified
-    /// `<Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE`. The trait is never
-    /// used as `dyn Selectable`, so the associated const does not cost
-    /// dyn-compatibility here (unlike `AdminApiFuture::UNKNOWN_BROKER_ID`).
-    const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
-
     /// Begin establishing a socket connection to the given address identified by
     /// the given id.
     ///
@@ -54,9 +61,9 @@ pub trait Selectable: Send {
     /// * `address` - The address to connect to
     /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
     /// * `send_buffer_size` - The send buffer for the socket
-    ///   (use [`Self::USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
     /// * `receive_buffer_size` - The receive buffer for the socket
-    ///   (use [`Self::USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
     ///
     /// # Errors
     ///

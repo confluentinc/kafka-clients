@@ -37,7 +37,7 @@ mod plaintext_channel_builder;
 mod plaintext_transport_layer;
 mod receive;
 mod sasl_channel_builder;
-mod selectable;
+pub mod selectable;
 mod selector;
 mod send;
 mod ssl_channel_builder;
