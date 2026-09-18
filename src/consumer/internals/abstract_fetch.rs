@@ -1390,7 +1390,7 @@ mod tests {
         let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             &records,
         );

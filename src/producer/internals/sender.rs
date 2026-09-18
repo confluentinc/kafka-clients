@@ -3140,7 +3140,7 @@ mod tests {
 
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 batch_size,
-                Compression::none(),
+                Compression::NONE,
                 linger_ms,
                 accumulator_retry_backoff_ms,
                 accumulator_retry_backoff_ms * 10,
@@ -3400,7 +3400,7 @@ mod tests {
             Vec::with_capacity(1024),
             0, // initial_position
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
             0,
@@ -3424,7 +3424,7 @@ mod tests {
             Vec::with_capacity(256),
             0, // initial_position
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0, // base_offset
             0, // log_append_time
@@ -3779,7 +3779,7 @@ mod tests {
     fn test_get_expired_inflight_batches() {
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             1024 * 1024,
-            Compression::none(),
+            Compression::NONE,
             0,
             RETRY_BACKOFF_MS,
             RETRY_BACKOFF_MS * 10,
@@ -4861,7 +4861,7 @@ mod tests {
 
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
-            Compression::none(),
+            Compression::NONE,
             0, // linger_ms
             0,
             0,
@@ -6337,7 +6337,7 @@ mod tests {
 
         let builder = crate::common::record::internal::MemoryRecords::builder_with_initial_capacity(
             64,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
         );

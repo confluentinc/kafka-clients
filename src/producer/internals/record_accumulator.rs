@@ -2266,7 +2266,7 @@ mod tests {
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         RecordAccumulator::new_for_test(
             batch_size,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
             100,
             1000,
@@ -2290,7 +2290,7 @@ mod tests {
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         let _accum = RecordAccumulator::new(
             batch_size,
-            Compression::none(),
+            Compression::NONE,
             0,
             100,
             1000,
@@ -2352,7 +2352,7 @@ mod tests {
         let batch_size = 1025;
         let total_batch_size = batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
 
-        let accum = create_test_accumulator(total_batch_size, 10 * batch_size as i64, Compression::none(), 10);
+        let accum = create_test_accumulator(total_batch_size, 10 * batch_size as i64, Compression::NONE, 10);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
         let cluster = metadata.cluster().clone();
 
@@ -2391,7 +2391,7 @@ mod tests {
         let n1 = node1();
         let batch_size = 512;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::NONE, 0);
         let metadata = make_metadata_snapshot(&[n1], TOPIC, &[(0, Some(0))]);
         let cluster = metadata.cluster().clone();
 
@@ -2413,7 +2413,7 @@ mod tests {
         let linger_ms = 10;
         let batch_size = 1024;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none(), linger_ms);
+        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::NONE, linger_ms);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
         let cluster = metadata.cluster().clone();
 
@@ -2445,7 +2445,7 @@ mod tests {
         let v = value();
         let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none(), 10);
+        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::NONE, 10);
 
         let metadata =
             make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
@@ -2480,7 +2480,7 @@ mod tests {
     #[test]
     fn test_mute_unmute() {
         let tp = tp1();
-        let accum = create_test_accumulator(1024, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(1024, i64::MAX, Compression::NONE, 0);
         assert!(!accum.is_muted(&tp));
         accum.mute_partition(tp.clone());
         assert!(accum.is_muted(&tp));
@@ -2491,7 +2491,7 @@ mod tests {
     /// Test close sets the closed flag.
     #[test]
     fn test_close() {
-        let accum = create_test_accumulator(1024, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(1024, i64::MAX, Compression::NONE, 0);
         accum.close();
         assert!(accum.closed.load(Ordering::Relaxed));
     }
@@ -2499,7 +2499,7 @@ mod tests {
     /// Test flush lifecycle.
     #[test]
     fn test_flush_in_progress() {
-        let accum = create_test_accumulator(1024, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(1024, i64::MAX, Compression::NONE, 0);
         assert!(!accum.flush_in_progress());
         accum.begin_flush();
         assert!(accum.flush_in_progress());
@@ -2512,7 +2512,7 @@ mod tests {
         let now: i64 = 0;
         let batch_size = 1024;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::NONE, 0);
         let metadata = make_metadata_snapshot(&[n1], TOPIC, &[(0, Some(0))]);
         let cluster = metadata.cluster().clone();
 
@@ -2532,7 +2532,7 @@ mod tests {
         let n1 = node1();
         let now: i64 = 0;
 
-        let accum = create_test_accumulator(1024, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(1024, i64::MAX, Compression::NONE, 0);
 
         // Create metadata with partition 0 having no leader.
         let metadata = make_metadata_snapshot(&[n1], TOPIC, &[(0, None)]);
@@ -2558,7 +2558,7 @@ mod tests {
         let pool = Arc::new(BufferPool::new_for_test(i64::MAX, 1024));
         let accum = RecordAccumulator::new_for_test(
             1024,
-            Compression::none(),
+            Compression::NONE,
             0,
             100,
             1000,
@@ -2593,7 +2593,7 @@ mod tests {
         let n1 = node1();
         let now: i64 = 0;
 
-        let accum = create_test_accumulator(1024, i64::MAX, Compression::none(), 0);
+        let accum = create_test_accumulator(1024, i64::MAX, Compression::NONE, 0);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
         let cluster = metadata.cluster().clone();
 
@@ -2631,7 +2631,7 @@ mod tests {
         let accum = create_test_accumulator(
             1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * 1024,
-            Compression::none(),
+            Compression::NONE,
             10,
         );
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
@@ -2675,7 +2675,7 @@ mod tests {
         let accum = create_test_accumulator(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * batch_size as i64,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
         );
 
@@ -2744,7 +2744,7 @@ mod tests {
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         let accum = RecordAccumulator::new_for_test(
             batch_size,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
             retry_backoff_ms,
             retry_backoff_max_ms,
@@ -2836,7 +2836,7 @@ mod tests {
         let accum = create_test_accumulator(
             4 * 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             64 * 1024,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
         );
         let metadata =
@@ -2884,7 +2884,7 @@ mod tests {
         let accum = create_test_accumulator(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * batch_size as i64,
-            Compression::none(),
+            Compression::NONE,
             10,
         );
         let k = key();
@@ -2948,7 +2948,7 @@ mod tests {
         let accum = create_test_accumulator(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * batch_size as i64,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
         );
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
@@ -3001,7 +3001,7 @@ mod tests {
         ));
         let accum = RecordAccumulator::new_for_test(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
             100,
             1000,
@@ -3063,7 +3063,7 @@ mod tests {
         let n2 = node2();
         let now: i64 = 0;
 
-        let accum = create_test_accumulator(batch_size, total_size, Compression::none(), linger_ms);
+        let accum = create_test_accumulator(batch_size, total_size, Compression::NONE, linger_ms);
 
         // Create cluster metadata, node2 doesn't host any partitions.
         let metadata = make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0))]);
@@ -3100,7 +3100,7 @@ mod tests {
         ));
         let accum = RecordAccumulator::new_for_test(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
             100,
             1000,
@@ -3170,7 +3170,7 @@ mod tests {
         let accum = Arc::new(create_test_accumulator(
             1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             10 * 1024,
-            Compression::none(),
+            Compression::NONE,
             0,
         ));
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
@@ -3245,7 +3245,7 @@ mod tests {
         let mut builder = MemoryRecords::builder_with_buffer_magic(
             builder_buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
         );
@@ -3287,7 +3287,7 @@ mod tests {
         let v = value();
         let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none(), 10);
+        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::NONE, 10);
 
         // 4 partitions: tp1->n1, tp2->n1, tp3->n2, tp4->n2
         let metadata = make_metadata_snapshot(
@@ -3417,7 +3417,7 @@ mod tests {
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         let accum = RecordAccumulator::new_for_test(
             batch_size,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
             retry_backoff_ms,
             retry_backoff_max_ms,
@@ -3479,7 +3479,7 @@ mod tests {
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
         let accum = RecordAccumulator::new_for_test(
             batch_size,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
             retry_backoff_ms,
             retry_backoff_max_ms,
@@ -3560,7 +3560,7 @@ mod tests {
         let accum = create_test_accumulator(
             128 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             64 * 1024,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
         );
 
@@ -3628,7 +3628,7 @@ mod tests {
         let accum = create_test_accumulator(
             128 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             64 * 1024,
-            Compression::none(),
+            Compression::NONE,
             linger_ms,
         );
         let metadata =
@@ -3687,7 +3687,7 @@ mod tests {
     async fn test_split_and_reenqueue() {
         let now: i64 = 0;
         let n1 = node1();
-        let accum = create_test_accumulator(1024, 10 * 1024, Compression::none(), 10);
+        let accum = create_test_accumulator(1024, 10 * 1024, Compression::NONE, 10);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
 
         // Create a big batch manually
@@ -3695,7 +3695,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
         );
@@ -3775,7 +3775,7 @@ mod tests {
         let accum = create_test_accumulator(
             4 * 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             64 * 1024,
-            Compression::none(),
+            Compression::NONE,
             i32::MAX,
         );
 
@@ -3879,7 +3879,7 @@ mod tests {
 
         // First set the compression ratio estimation to be good.
         CompressionRatioEstimator::set_estimation(TOPIC, CompressionType::None, 0.1);
-        let accum = create_test_accumulator(batch_size, buffer_capacity, Compression::none(), 0);
+        let accum = create_test_accumulator(batch_size, buffer_capacity, Compression::NONE, 0);
         let n1 = node1();
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
 
@@ -3888,7 +3888,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
         );
@@ -3919,7 +3919,7 @@ mod tests {
                     MemoryRecords::builder_with_buffer_magic(
                         vec![0u8; 2048],
                         RecordBatch::CURRENT_MAGIC_VALUE,
-                        Compression::none(),
+                        Compression::NONE,
                         TimestampType::CreateTime,
                         0,
                     ),
@@ -3949,7 +3949,7 @@ mod tests {
         let n1 = node1();
         let n2 = node2();
 
-        let accum = create_test_accumulator(batch_size, total_size, Compression::none(), 10);
+        let accum = create_test_accumulator(batch_size, total_size, Compression::NONE, 10);
         let metadata = make_metadata_snapshot(&[n1, n2], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
         let cluster = metadata.cluster().clone();
 
@@ -4009,7 +4009,7 @@ mod tests {
         let now: i64 = 0;
         let batch_size = 1024 * 1024; // 1MB batch size
         let n1 = node1();
-        let accum = create_test_accumulator(batch_size, 10 * batch_size as i64, Compression::none(), 10);
+        let accum = create_test_accumulator(batch_size, 10 * batch_size as i64, Compression::NONE, 10);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
 
         // Create a large producer batch manually
@@ -4017,7 +4017,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
         );
@@ -4372,7 +4372,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 4096],
             RecordBatch::CURRENT_MAGIC_VALUE,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             0,
         );
@@ -4498,7 +4498,7 @@ mod tests {
     /// so every send racing `close()` permanently shrank the accounting.
     #[tokio::test]
     async fn append_returns_the_buffer_to_the_pool_when_the_producer_closes() {
-        let accum = Arc::new(create_test_accumulator(1024, 1024, Compression::none(), 0));
+        let accum = Arc::new(create_test_accumulator(1024, 1024, Compression::NONE, 0));
         let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
         let now = 0i64;
 
@@ -4572,7 +4572,7 @@ mod tests {
     async fn cancelled_append_balances_appends_in_progress_and_returns_its_buffer() {
         // A pool with room for exactly one batch, so the second append parks inside
         // `free.allocate` and can be cancelled there.
-        let accum = Arc::new(create_test_accumulator(1024, 1024, Compression::none(), 0));
+        let accum = Arc::new(create_test_accumulator(1024, 1024, Compression::NONE, 0));
         let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
         let now = 0i64;
 
@@ -4618,7 +4618,7 @@ mod tests {
     /// `linger.ms` batching.
     #[tokio::test]
     async fn cancelled_flush_balances_flushes_in_progress() {
-        let accum = Arc::new(create_test_accumulator(1024, 10 * 1024, Compression::none(), 1_000));
+        let accum = Arc::new(create_test_accumulator(1024, 10 * 1024, Compression::NONE, 1_000));
         let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
         let now = 0i64;
 
@@ -4653,7 +4653,7 @@ mod tests {
         let n1 = node1();
         let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
         // A pool that fits exactly one batch.
-        let accum = create_test_accumulator(batch_size, batch_size as i64, Compression::none(), 10);
+        let accum = create_test_accumulator(batch_size, batch_size as i64, Compression::NONE, 10);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
         let cluster = metadata.cluster().clone();
         let k = key();
@@ -4700,7 +4700,7 @@ mod tests {
         let now: i64 = 0;
         let n1 = node1();
         let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
-        let accum = create_test_accumulator(batch_size, 10 * batch_size as i64, Compression::none(), 10);
+        let accum = create_test_accumulator(batch_size, 10 * batch_size as i64, Compression::NONE, 10);
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
         let cluster = metadata.cluster().clone();
         accum.close();
@@ -4761,7 +4761,7 @@ mod tests {
         let accum = Arc::new(create_test_accumulator(
             batch_size,
             2 * batch_size as i64,
-            Compression::none(),
+            Compression::NONE,
             10,
         ));
 

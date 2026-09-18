@@ -1225,11 +1225,11 @@ mod tests {
     /// All compression types to test with.
     fn all_compressions() -> Vec<Compression> {
         vec![
-            Compression::none(),
-            Compression::gzip(),
-            Compression::snappy(),
-            Compression::lz4(),
-            Compression::zstd(),
+            Compression::NONE,
+            Compression::gzip().build(),
+            Compression::snappy().build(),
+            Compression::lz4().build(),
+            Compression::zstd().build(),
         ]
     }
 
@@ -1366,8 +1366,8 @@ mod tests {
     fn test_checksum_v2() {
         // We get reasonable coverage with uncompressed and one compression type
         for (compression, expected_checksum) in &[
-            (Compression::none(), 3851219455_u32),
-            (Compression::lz4(), 2745969314_u32),
+            (Compression::NONE, 3851219455_u32),
+            (Compression::lz4().build(), 2745969314_u32),
         ] {
             let records = vec![
                 SimpleRecord::with_timestamp_key_value(283843, Some(b"key1".to_vec()), Some(b"value1".to_vec())),
@@ -1556,7 +1556,7 @@ mod tests {
     #[should_panic(expected = "Slice from position")]
     fn test_slice_invalid_position() {
         let records = MemoryRecords::with_records(
-            Compression::none(),
+            Compression::NONE,
             &[SimpleRecord::with_timestamp_key_value(
                 1,
                 Some(b"k".to_vec()),
@@ -1641,7 +1641,7 @@ mod tests {
         MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             0,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             &records,
         )
@@ -1752,7 +1752,7 @@ mod tests {
         let second = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             10,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             &good,
         )

@@ -71,9 +71,7 @@ fn records_of(values: &[&str]) -> Bytes {
         .iter()
         .map(|value| SimpleRecord::with_value(Some(value.as_bytes().to_vec())))
         .collect();
-    MemoryRecords::with_records(Compression::none(), &records)
-        .buffer_bytes()
-        .clone()
+    MemoryRecords::with_records(Compression::NONE, &records).buffer_bytes().clone()
 }
 
 #[test]

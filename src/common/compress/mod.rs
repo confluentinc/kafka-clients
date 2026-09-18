@@ -23,6 +23,7 @@
 
 use std::io::{self, Cursor, Read, Write};
 
+use crate::common::Error;
 use crate::common::record::internal::CompressionType;
 
 // --- Xerial/snappy-java framing format ---
@@ -182,117 +183,256 @@ impl<R: Read> Read for XerialSnappyReader<R> {
 /// ```
 /// use confluent_kafka::common::compress::Compression;
 ///
-/// let compression = Compression::none();
+/// let compression = Compression::NONE;
 /// assert_eq!(compression.compression_type().name(), "none");
 ///
-/// let gzip = Compression::gzip_with_level(6).unwrap();
+/// let gzip = Compression::gzip().level(6).unwrap().build();
 /// assert_eq!(gzip.compression_type().name(), "gzip");
 /// ```
+///
+/// # Deviations from Java
+///
+/// Java models this as `interface Compression` with one implementing class per
+/// codec; Rust models it as an enum whose variants wrap those classes. Three
+/// consequences are worth naming, because the shapes are not identical:
+///
+/// 1. `Builder::build` returns `Compression`, not the concrete per-codec struct.
+///    Java's `Builder<T>.build()` returns `GzipCompression`, implicitly upcast to
+///    the `Compression` interface at the call site. A Rust enum has no subtyping,
+///    so `build` performs that upcast itself. Call-site shape is unchanged.
+/// 2. [`Compression::of`] returns a [`CompressionBuilder`] enum rather than
+///    Java's `Builder<? extends Compression>` wildcard — Rust cannot return an
+///    existential without boxing, and an enum is this crate's established
+///    pattern for a closed set of wire/config types.
+/// 3. Java's overloaded `of(String)` becomes [`Compression::of_name`], since Rust
+///    has no overloading.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Compression {
-    /// No compression.
+    /// No compression. Translates Java's `NoCompression`, which holds no state.
     None,
-    /// Gzip compression with a configurable level.
-    Gzip {
-        /// Compression level. -1 means default.
-        level: i32,
-    },
-    /// Snappy compression.
+    /// Gzip compression. Translates Java's `GzipCompression`.
+    Gzip(GzipCompression),
+    /// Snappy compression. Translates Java's `SnappyCompression`, which holds no
+    /// state.
     Snappy,
-    /// LZ4 compression with a configurable level.
-    Lz4 {
-        /// Compression level.
-        level: i32,
-    },
-    /// Zstandard compression with a configurable level.
-    Zstd {
-        /// Compression level.
-        level: i32,
-    },
+    /// LZ4 compression. Translates Java's `Lz4Compression`.
+    Lz4(Lz4Compression),
+    /// Zstandard compression. Translates Java's `ZstdCompression`.
+    Zstd(ZstdCompression),
 }
 
-impl Compression {
-    /// Create a no-compression instance.
-    pub fn none() -> Self {
-        Self::None
-    }
+/// Gzip compression settings.
+///
+/// Translates Java's `GzipCompression`. `level` is private exactly as in Java
+/// (`private final int level`), which exposes no getter for it — the level is
+/// read only when wrapping an output stream. Build one with
+/// [`Compression::gzip`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GzipCompression {
+    level: i32,
+}
 
-    /// Create a gzip compression instance with default level.
-    pub fn gzip() -> Self {
-        Self::Gzip { level: CompressionType::Gzip.default_level().unwrap() }
-    }
+/// LZ4 compression settings.
+///
+/// Translates Java's `Lz4Compression`. See [`GzipCompression`] for why `level`
+/// is private. Build one with [`Compression::lz4`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lz4Compression {
+    level: i32,
+}
 
-    /// Create a gzip compression instance with a specific level.
+/// Zstandard compression settings.
+///
+/// Translates Java's `ZstdCompression`. See [`GzipCompression`] for why `level`
+/// is private. Build one with [`Compression::zstd`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZstdCompression {
+    level: i32,
+}
+
+/// Builder for [`GzipCompression`]. Translates Java's `GzipCompression.Builder`.
+#[derive(Clone, Debug)]
+pub struct GzipCompressionBuilder {
+    level: i32,
+}
+
+impl GzipCompressionBuilder {
+    /// Set the compression level.
     ///
-    /// Returns `None` if the level is out of range.
-    pub fn gzip_with_level(level: i32) -> Option<Self> {
+    /// Java throws `IllegalArgumentException` for an out-of-range level; per
+    /// CLAUDE.md §10.2 that becomes an `Err` here, carrying Java's message.
+    pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Gzip.min_level().unwrap();
         let max = CompressionType::Gzip.max_level().unwrap();
         let default = CompressionType::Gzip.default_level().unwrap();
-        if (level < min || level > max) && level != default {
-            return Option::None;
+        if (level < min || max < level) && level != default {
+            return Err(Error::local_illegal_argument(format!(
+                "gzip doesn't support given compression level: {level}"
+            )));
         }
-        Some(Self::Gzip { level })
+        self.level = level;
+        Ok(self)
     }
 
-    /// Create a snappy compression instance.
-    pub fn snappy() -> Self {
-        Self::Snappy
+    /// Build the compression codec.
+    pub fn build(self) -> Compression {
+        Compression::Gzip(GzipCompression { level: self.level })
     }
+}
 
-    /// Create an LZ4 compression instance with default level.
-    pub fn lz4() -> Self {
-        Self::Lz4 { level: CompressionType::Lz4.default_level().unwrap() }
-    }
+/// Builder for [`Lz4Compression`]. Translates Java's `Lz4Compression.Builder`.
+#[derive(Clone, Debug)]
+pub struct Lz4CompressionBuilder {
+    level: i32,
+}
 
-    /// Create an LZ4 compression instance with a specific level.
-    ///
-    /// Returns `None` if the level is out of range.
-    pub fn lz4_with_level(level: i32) -> Option<Self> {
+impl Lz4CompressionBuilder {
+    /// Set the compression level. See [`GzipCompressionBuilder::level`] for the
+    /// throw-to-`Err` translation.
+    pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Lz4.min_level().unwrap();
         let max = CompressionType::Lz4.max_level().unwrap();
-        if level < min || level > max {
-            return Option::None;
+        if level < min || max < level {
+            return Err(Error::local_illegal_argument(format!(
+                "lz4 doesn't support given compression level: {level}"
+            )));
         }
-        Some(Self::Lz4 { level })
+        self.level = level;
+        Ok(self)
     }
 
-    /// Create a zstd compression instance with default level.
-    pub fn zstd() -> Self {
-        Self::Zstd { level: CompressionType::Zstd.default_level().unwrap() }
+    /// Build the compression codec.
+    pub fn build(self) -> Compression {
+        Compression::Lz4(Lz4Compression { level: self.level })
     }
+}
 
-    /// Create a zstd compression instance with a specific level.
-    ///
-    /// Returns `None` if the level is out of range.
-    pub fn zstd_with_level(level: i32) -> Option<Self> {
+/// Builder for [`ZstdCompression`]. Translates Java's `ZstdCompression.Builder`.
+#[derive(Clone, Debug)]
+pub struct ZstdCompressionBuilder {
+    level: i32,
+}
+
+impl ZstdCompressionBuilder {
+    /// Set the compression level. See [`GzipCompressionBuilder::level`] for the
+    /// throw-to-`Err` translation.
+    pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Zstd.min_level().unwrap();
         let max = CompressionType::Zstd.max_level().unwrap();
-        if level < min || level > max {
-            return Option::None;
+        if level < min || max < level {
+            return Err(Error::local_illegal_argument(format!(
+                "zstd doesn't support given compression level: {level}"
+            )));
         }
-        Some(Self::Zstd { level })
+        self.level = level;
+        Ok(self)
     }
 
-    /// Create a `Compression` from a `CompressionType` with default settings.
-    pub fn of(compression_type: CompressionType) -> Self {
-        match compression_type {
-            CompressionType::None => Self::none(),
-            CompressionType::Gzip => Self::gzip(),
-            CompressionType::Snappy => Self::snappy(),
-            CompressionType::Lz4 => Self::lz4(),
-            CompressionType::Zstd => Self::zstd(),
+    /// Build the compression codec.
+    pub fn build(self) -> Compression {
+        Compression::Zstd(ZstdCompression { level: self.level })
+    }
+}
+
+/// Builder for a codec that carries no settings — Java's `NoCompression.Builder`
+/// and `SnappyCompression.Builder`, which have no `level`.
+#[derive(Clone, Debug)]
+pub struct StatelessCompressionBuilder {
+    compression: Compression,
+}
+
+impl StatelessCompressionBuilder {
+    /// Build the compression codec.
+    pub fn build(self) -> Compression {
+        self.compression
+    }
+}
+
+/// The builder returned by [`Compression::of`] / [`Compression::of_name`],
+/// standing in for Java's `Builder<? extends Compression>` wildcard.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum CompressionBuilder {
+    /// A codec with no settings (none / snappy).
+    Stateless(StatelessCompressionBuilder),
+    /// Gzip, with a configurable level.
+    Gzip(GzipCompressionBuilder),
+    /// LZ4, with a configurable level.
+    Lz4(Lz4CompressionBuilder),
+    /// Zstandard, with a configurable level.
+    Zstd(ZstdCompressionBuilder),
+}
+
+impl CompressionBuilder {
+    /// Build the compression codec.
+    pub fn build(self) -> Compression {
+        match self {
+            Self::Stateless(b) => b.build(),
+            Self::Gzip(b) => b.build(),
+            Self::Lz4(b) => b.build(),
+            Self::Zstd(b) => b.build(),
         }
+    }
+}
+
+impl Compression {
+    /// No compression. Translates Java's `Compression.NONE` constant, which is
+    /// defined as `none().build()`.
+    pub const NONE: Compression = Compression::None;
+
+    /// Create a builder for no compression.
+    pub fn none() -> StatelessCompressionBuilder {
+        StatelessCompressionBuilder { compression: Self::None }
+    }
+
+    /// Create a builder for gzip compression, defaulted to gzip's default level.
+    pub fn gzip() -> GzipCompressionBuilder {
+        GzipCompressionBuilder { level: CompressionType::Gzip.default_level().unwrap() }
+    }
+
+    /// Create a builder for snappy compression.
+    pub fn snappy() -> StatelessCompressionBuilder {
+        StatelessCompressionBuilder { compression: Self::Snappy }
+    }
+
+    /// Create a builder for LZ4 compression, defaulted to LZ4's default level.
+    pub fn lz4() -> Lz4CompressionBuilder {
+        Lz4CompressionBuilder { level: CompressionType::Lz4.default_level().unwrap() }
+    }
+
+    /// Create a builder for zstd compression, defaulted to zstd's default level.
+    pub fn zstd() -> ZstdCompressionBuilder {
+        ZstdCompressionBuilder { level: CompressionType::Zstd.default_level().unwrap() }
+    }
+
+    /// Create a builder for the given compression type, with default settings.
+    pub fn of(compression_type: CompressionType) -> CompressionBuilder {
+        match compression_type {
+            CompressionType::None => CompressionBuilder::Stateless(Self::none()),
+            CompressionType::Gzip => CompressionBuilder::Gzip(Self::gzip()),
+            CompressionType::Snappy => CompressionBuilder::Stateless(Self::snappy()),
+            CompressionType::Lz4 => CompressionBuilder::Lz4(Self::lz4()),
+            CompressionType::Zstd => CompressionBuilder::Zstd(Self::zstd()),
+        }
+    }
+
+    /// Create a builder for the named compression type, with default settings.
+    ///
+    /// Translates Java's overloaded `Compression.of(String)`; Rust has no
+    /// overloading, so the name-taking form gets its own name.
+    pub fn of_name(compression_name: &str) -> Result<CompressionBuilder, Error> {
+        Ok(Self::of(CompressionType::for_name(compression_name)?))
     }
 
     /// The compression type for this compression codec.
     pub fn compression_type(&self) -> CompressionType {
         match self {
             Self::None => CompressionType::None,
-            Self::Gzip { .. } => CompressionType::Gzip,
+            Self::Gzip(_) => CompressionType::Gzip,
             Self::Snappy => CompressionType::Snappy,
-            Self::Lz4 { .. } => CompressionType::Lz4,
-            Self::Zstd { .. } => CompressionType::Zstd,
+            Self::Lz4(_) => CompressionType::Lz4,
+            Self::Zstd(_) => CompressionType::Zstd,
         }
     }
 
@@ -313,11 +453,11 @@ impl Compression {
     pub fn wrap_for_output<W: Write>(&self, writer: W, _message_version: i8) -> io::Result<CompressingWriter<W>> {
         match self {
             Self::None => Ok(CompressingWriter::None(writer)),
-            Self::Gzip { level } => {
-                let flate2_level = if *level == -1 {
+            Self::Gzip(gzip) => {
+                let flate2_level = if gzip.level == -1 {
                     flate2::Compression::default()
                 } else {
-                    flate2::Compression::new(*level as u32)
+                    flate2::Compression::new(gzip.level as u32)
                 };
                 Ok(CompressingWriter::Gzip(flate2::write::GzEncoder::new(writer, flate2_level)))
             },
@@ -325,19 +465,19 @@ impl Compression {
                 let encoder = XerialSnappyWriter::new(writer);
                 Ok(CompressingWriter::Snappy(Box::new(encoder)))
             },
-            Self::Lz4 { .. } => {
+            Self::Lz4(_) => {
                 // Note: lz4_flex is a pure-Rust LZ4 implementation that does not support
                 // compression levels. The Java client uses net.jpountz.lz4.LZ4Compressor
                 // which supports levels 1-17 via Lz4BlockOutputStream. We keep lz4_flex
-                // to avoid a C dependency; the configured level (stored in the Lz4 { level }
-                // field) is accepted and validated but does not affect compression output.
+                // to avoid a C dependency; the configured level (stored in `Lz4Compression`)
+                // is accepted and validated but does not affect compression output.
                 // All data is compressed at lz4_flex's single default level, which is
                 // equivalent to Java's default LZ4 fast compressor.
                 let encoder = lz4_flex::frame::FrameEncoder::new(writer);
                 Ok(CompressingWriter::Lz4(encoder))
             },
-            Self::Zstd { level } => {
-                let encoder = zstd::Encoder::new(writer, *level)?;
+            Self::Zstd(zstd_cfg) => {
+                let encoder = zstd::Encoder::new(writer, zstd_cfg.level)?;
                 Ok(CompressingWriter::Zstd(encoder))
             },
         }
@@ -355,7 +495,7 @@ impl Compression {
     pub fn wrap_for_input<R: Read>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),
-            Self::Gzip { .. } => {
+            Self::Gzip(_) => {
                 let decoder = flate2::read::GzDecoder::new(reader);
                 Ok(DecompressingReader::Gzip(decoder))
             },
@@ -363,11 +503,11 @@ impl Compression {
                 let decoder = XerialSnappyReader::new(reader);
                 Ok(DecompressingReader::Snappy(decoder))
             },
-            Self::Lz4 { .. } => {
+            Self::Lz4(_) => {
                 let decoder = lz4_flex::frame::FrameDecoder::new(reader);
                 Ok(DecompressingReader::Lz4(decoder))
             },
-            Self::Zstd { .. } => {
+            Self::Zstd(_) => {
                 let decoder = zstd::Decoder::new(reader)?;
                 Ok(DecompressingReader::Zstd(decoder))
             },
@@ -380,6 +520,7 @@ impl Compression {
 /// This enum wraps the different compression encoder types. Use
 /// [`finish()`](CompressingWriter::finish) to finalize compression and
 /// recover the inner writer.
+#[non_exhaustive]
 pub enum CompressingWriter<W: Write> {
     /// No compression — data is passed through.
     None(W),
@@ -429,6 +570,7 @@ impl<W: Write> Write for CompressingWriter<W> {
 }
 
 /// A reader that decompresses data.
+#[non_exhaustive]
 pub enum DecompressingReader<R: Read> {
     /// No compression — data is passed through.
     None(R),
@@ -481,99 +623,126 @@ mod tests {
     #[test]
     fn test_none_round_trip() {
         let data = b"Hello, Kafka!";
-        let result = round_trip(&Compression::none(), data);
+        let result = round_trip(&Compression::NONE, data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_gzip_round_trip() {
         let data = b"Hello, Kafka! This is a test of gzip compression.";
-        let result = round_trip(&Compression::gzip(), data);
+        let result = round_trip(&Compression::gzip().build(), data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_gzip_with_level() {
         let data = b"Hello, Kafka! Testing gzip with specific level.";
-        let compression = Compression::gzip_with_level(6).unwrap();
+        let compression = Compression::gzip().level(6).unwrap().build();
         let result = round_trip(&compression, data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_gzip_invalid_level() {
-        assert!(Compression::gzip_with_level(10).is_none());
-        assert!(Compression::gzip_with_level(0).is_none());
+        // Java throws IllegalArgumentException with this exact text; the message
+        // is part of the contract, so assert it and not merely `is_err`.
+        let err = Compression::gzip().level(10).unwrap_err();
+        assert!(
+            err.to_string().contains("gzip doesn't support given compression level: 10"),
+            "unexpected message: {err}"
+        );
+        assert!(Compression::gzip().level(0).is_err());
     }
 
     #[test]
     fn test_gzip_default_level_valid() {
-        assert!(Compression::gzip_with_level(-1).is_some());
+        assert!(Compression::gzip().level(-1).is_ok());
     }
 
     #[test]
     fn test_snappy_round_trip() {
         let data = b"Hello, Kafka! This is a test of snappy compression.";
-        let result = round_trip(&Compression::snappy(), data);
+        let result = round_trip(&Compression::snappy().build(), data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_lz4_round_trip() {
         let data = b"Hello, Kafka! This is a test of lz4 compression.";
-        let result = round_trip(&Compression::lz4(), data);
+        let result = round_trip(&Compression::lz4().build(), data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_lz4_invalid_level() {
-        assert!(Compression::lz4_with_level(0).is_none());
-        assert!(Compression::lz4_with_level(18).is_none());
+        let err = Compression::lz4().level(18).unwrap_err();
+        assert!(
+            err.to_string().contains("lz4 doesn't support given compression level: 18"),
+            "unexpected message: {err}"
+        );
+        assert!(Compression::lz4().level(0).is_err());
     }
 
     #[test]
     fn test_zstd_round_trip() {
         let data = b"Hello, Kafka! This is a test of zstd compression.";
-        let result = round_trip(&Compression::zstd(), data);
+        let result = round_trip(&Compression::zstd().build(), data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_zstd_with_level() {
         let data = b"Hello, Kafka! Testing zstd with specific level.";
-        let compression = Compression::zstd_with_level(1).unwrap();
+        let compression = Compression::zstd().level(1).unwrap().build();
         let result = round_trip(&compression, data);
         assert_eq!(result, data);
     }
 
     #[test]
     fn test_zstd_invalid_level() {
-        assert!(Compression::zstd_with_level(23).is_none());
+        let err = Compression::zstd().level(23).unwrap_err();
+        assert!(
+            err.to_string().contains("zstd doesn't support given compression level: 23"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
     fn test_compression_type() {
-        assert_eq!(Compression::none().compression_type(), CompressionType::None);
-        assert_eq!(Compression::gzip().compression_type(), CompressionType::Gzip);
-        assert_eq!(Compression::snappy().compression_type(), CompressionType::Snappy);
-        assert_eq!(Compression::lz4().compression_type(), CompressionType::Lz4);
-        assert_eq!(Compression::zstd().compression_type(), CompressionType::Zstd);
+        assert_eq!(Compression::NONE.compression_type(), CompressionType::None);
+        assert_eq!(Compression::gzip().build().compression_type(), CompressionType::Gzip);
+        assert_eq!(Compression::snappy().build().compression_type(), CompressionType::Snappy);
+        assert_eq!(Compression::lz4().build().compression_type(), CompressionType::Lz4);
+        assert_eq!(Compression::zstd().build().compression_type(), CompressionType::Zstd);
     }
 
     #[test]
     fn test_of() {
-        assert_eq!(Compression::of(CompressionType::None), Compression::none());
-        assert_eq!(Compression::of(CompressionType::Gzip), Compression::gzip());
-        assert_eq!(Compression::of(CompressionType::Snappy), Compression::snappy());
-        assert_eq!(Compression::of(CompressionType::Lz4), Compression::lz4());
-        assert_eq!(Compression::of(CompressionType::Zstd), Compression::zstd());
+        assert_eq!(Compression::of(CompressionType::None).build(), Compression::NONE);
+        assert_eq!(Compression::of(CompressionType::Gzip).build(), Compression::gzip().build());
+        assert_eq!(Compression::of(CompressionType::Snappy).build(), Compression::snappy().build());
+        assert_eq!(Compression::of(CompressionType::Lz4).build(), Compression::lz4().build());
+        assert_eq!(Compression::of(CompressionType::Zstd).build(), Compression::zstd().build());
+    }
+
+    /// Translates Java's `Compression.of(String)` overload.
+    #[test]
+    fn test_of_name() {
+        assert_eq!(Compression::of_name("none").unwrap().build(), Compression::NONE);
+        assert_eq!(Compression::of_name("gzip").unwrap().build(), Compression::gzip().build());
+        assert_eq!(Compression::of_name("snappy").unwrap().build(), Compression::snappy().build());
+        assert_eq!(Compression::of_name("lz4").unwrap().build(), Compression::lz4().build());
+        assert_eq!(Compression::of_name("zstd").unwrap().build(), Compression::zstd().build());
+
+        // Java's CompressionType.forName throws for an unknown name.
+        assert!(Compression::of_name("bogus").is_err());
     }
 
     #[test]
     fn test_empty_data_round_trip() {
         let data = b"";
         for compression_type in CompressionType::values() {
-            let compression = Compression::of(*compression_type);
+            let compression = Compression::of(*compression_type).build();
             let result = round_trip(&compression, data);
             assert_eq!(result, data, "Empty data round-trip failed for {:?}", compression_type);
         }
@@ -583,7 +752,7 @@ mod tests {
     fn test_large_data_round_trip() {
         let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
         for compression_type in CompressionType::values() {
-            let compression = Compression::of(*compression_type);
+            let compression = Compression::of(*compression_type).build();
             let result = round_trip(&compression, &data);
             assert_eq!(result, data, "Large data round-trip failed for {:?}", compression_type);
         }
