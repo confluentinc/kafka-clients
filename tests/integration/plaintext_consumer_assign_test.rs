@@ -80,9 +80,9 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::OffsetCommitCallback;
-use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -92,7 +92,7 @@ use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
-// by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
+// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -499,12 +499,12 @@ async fn test_async_assign_and_commit_async_not_committed() {
     let num_records = 10_000;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
@@ -565,12 +565,12 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     let num_records = 10_000;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
@@ -611,12 +611,12 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
 
     let num_records: usize = 10_000;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let starting_timestamp = current_time_ms();
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
@@ -657,12 +657,12 @@ async fn test_async_assign_and_consume() {
 
     let num_records: usize = 10;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let starting_timestamp = current_time_ms();
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
@@ -694,12 +694,12 @@ async fn test_async_assign_and_consume_skipping_position() {
 
     let num_records: usize = 10;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let starting_timestamp = current_time_ms();
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
@@ -749,12 +749,12 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     let starting_timestamp = current_time_ms();
 
     {
-        let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+        let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
             make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
-        .expect("new_consumer should succeed (consumer 1)");
+        .expect("KafkaConsumer::new should succeed (consumer 1)");
 
         // Java's `@BeforeEach setup()` pre-creates the topic empty before any
         // records are produced; mirror that here to close the consumer-side
@@ -777,12 +777,12 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     }
 
     {
-        let mut another = new_consumer::<Vec<u8>, Vec<u8>>(
+        let mut another = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
             make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
-        .expect("new_consumer should succeed (consumer 2)");
+        .expect("KafkaConsumer::new should succeed (consumer 2)");
 
         another.assign(vec![tp.clone()]).await.expect("assign should succeed");
         let committed = another
@@ -814,12 +814,12 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     let starting_timestamp = current_time_ms();
 
     {
-        let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+        let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
             make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
-        .expect("new_consumer should succeed (consumer 1)");
+        .expect("KafkaConsumer::new should succeed (consumer 1)");
 
         // Java's `@BeforeEach setup()` pre-creates the topic empty before any
         // records are produced; mirror that here to close the consumer-side
@@ -850,12 +850,12 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     }
 
     {
-        let mut another = new_consumer::<Vec<u8>, Vec<u8>>(
+        let mut another = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
             make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
-        .expect("new_consumer should succeed (consumer 2)");
+        .expect("KafkaConsumer::new should succeed (consumer 2)");
 
         let committed = another
             .committed(std::slice::from_ref(&tp))
@@ -897,12 +897,12 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     let num_records: usize = 100;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), Some(&group_id)),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side

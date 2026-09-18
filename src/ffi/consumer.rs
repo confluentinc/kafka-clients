@@ -425,10 +425,10 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
         },
     };
 
-    // Replicate the `GroupProtocol::of` gate from `new_consumer`
+    // Replicate the `GroupProtocol::of` gate from `KafkaConsumer::new`
     // (`src/consumer/mod.rs`): classic protocol is unsupported in this client.
     // We construct the concrete `AsyncKafkaConsumer` directly (rather than
-    // routing through `new_consumer`, which erases the concrete type) so we can
+    // routing through `KafkaConsumer::new`, which erases the concrete type) so we can
     // capture its `handle()` before boxing it as a trait object.
     match GroupProtocol::of(config.group_protocol()) {
         Ok(GroupProtocol::Consumer) => {},

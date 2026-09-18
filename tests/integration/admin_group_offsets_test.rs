@@ -52,7 +52,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
 use confluent_kafka::common::{Error, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
@@ -88,12 +88,12 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
 }
 
 fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
-    new_consumer::<Vec<u8>, Vec<u8>>(
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         consumer_config(bootstrap, group_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed")
+    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Subscribe and poll until the KIP-848 group has reconciled (partitions

@@ -72,7 +72,7 @@
 //!   covered by `test_async_consumer_headers`.
 //! - SKIP `testAsyncConsumerInterceptors` /
 //!   `testAsyncConsumerInterceptorsWithWrongKeyValue` — no public way to
-//!   attach a `ConsumerInterceptor`. `new_consumer` always builds an EMPTY
+//!   attach a `ConsumerInterceptor`. `KafkaConsumer::new` always builds an EMPTY
 //!   interceptor chain (`async_kafka_consumer.rs:761`); Java's reflective
 //!   `interceptor.classes` loader is not translated, and the
 //!   `with_components` seam carrying interceptors is `pub(crate)`,
@@ -110,7 +110,7 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -120,7 +120,7 @@ use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned by
-// `new_consumer::<Vec<u8>, Vec<u8>>` (mirrors Java's `Consumer<byte[], byte[]>`).
+// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>` (mirrors Java's `Consumer<byte[], byte[]>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster configs ───────────────────────────────────────────────────
@@ -220,12 +220,12 @@ fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
 }
 
 fn make_consumer(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> Box<BytesConsumer> {
-    new_consumer::<Vec<u8>, Vec<u8>>(
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config(bootstrap, group_id, overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed")
+    .expect("KafkaConsumer::new should succeed")
 }
 
 // ── Producer helpers ─────────────────────────────────────────────────
@@ -923,19 +923,19 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     let bootstrap = ctx.bootstrap_servers().to_string();
     // consumer1: groupless, earliest. consumer2: groupless, latest.
     // consumer3: groupless, explicit seek.
-    let mut consumer1 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer1");
-    let mut consumer2 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "latest"), ("client.id", "consumer2")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer2");
-    let mut consumer3 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer3 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer3")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -1007,12 +1007,12 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let bootstrap = ctx.bootstrap_servers().to_string();
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer");
+    .expect("KafkaConsumer::new");
     create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
@@ -1092,12 +1092,12 @@ async fn test_async_consumer_position_respects_wakeup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     // bootstrap points at an unreachable address (Java: "localhost:12345").
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config("localhost:12345", "g_position_err_wakeup", &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer");
+    .expect("KafkaConsumer::new");
     let topic = "topic".to_string();
     let tp = TopicPartition::new(topic, 15);
     consumer.assign(vec![tp.clone()]).await.expect("assign");

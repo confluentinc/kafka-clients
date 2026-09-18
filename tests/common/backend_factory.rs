@@ -29,7 +29,7 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -206,7 +206,7 @@ impl AdminBackendFactory for RustNativeFactory {
 impl ConsumerBackendFactory for RustNativeFactory {
     async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
         let consumer_config = ConsumerConfig::new(&config)?;
-        new_consumer::<Vec<u8>, Vec<u8>>(
+        KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
             consumer_config,
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),

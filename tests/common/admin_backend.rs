@@ -34,14 +34,14 @@ use confluent_kafka::admin::{
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
     DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets,
+    FenceProducersOptions, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, KafkaAdminClient,
     ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
     ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
     ListTransactionsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic,
     OffsetSpec, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
     RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription, new_admin_client,
+    UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
@@ -1073,7 +1073,7 @@ impl RustNativeAdmin {
     /// Build a network-backed admin client from `config`.
     pub fn from_config(config: &HashMap<String, String>) -> Result<Self, Error> {
         let config = AdminClientConfig::new(config)?;
-        Ok(Self { admin: new_admin_client(config)? })
+        Ok(Self { admin: Box::new(KafkaAdminClient::new(config)?) })
     }
 
     /// Build a broker-less [`MockAdminClient`] with `num_brokers` brokers.

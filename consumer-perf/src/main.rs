@@ -49,7 +49,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 
 /// Zero-copy deserializer: returns the byte length instead of the bytes, so the
@@ -595,7 +595,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .set_enable_auto_commit(true);
 
     let mut consumer: Box<dyn Consumer<usize, usize>> =
-        new_consumer::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
+        KafkaConsumer::new::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
     consumer.subscribe_with_topics(vec![args.topic.clone()]).await?;
     println!("\n>>> Subscribed; waiting for partition assignment (KIP-848 join)...");

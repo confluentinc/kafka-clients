@@ -1635,7 +1635,7 @@ where
     /// Constructs an `AsyncKafkaConsumer` from pre-built components.
     ///
     /// Test-visible seam. The production factory in
-    /// `consumer/mod.rs::new_consumer` flows through
+    /// `consumer/kafka_consumer.rs::KafkaConsumer::new` flows through
     /// `AsyncKafkaConsumer::new` (Phase 12 commit 4/N), which builds the
     /// dependency closure and delegates to this method. Tests build
     /// their own components (typically with a `MockClient`-backed
@@ -5864,7 +5864,7 @@ where
 // internal helpers, and the `pub`-visible API for users that hold an
 // `AsyncKafkaConsumer<K, V>` directly. The trait impl exposes the same
 // surface through `Box<dyn Consumer<K, V>>` for callers that want
-// type-erased dispatch (the factory `new_consumer<K, V>` returns this
+// type-erased dispatch (the factory `KafkaConsumer::new::<K, V>` returns this
 // boxed form per DoD §11).
 
 #[async_trait::async_trait]
@@ -6835,7 +6835,7 @@ mod tests {
     //     `MemberStateListener` (commit (7/N)) that populates
     //     `group_metadata`. Deferred to that commit.
     //   - `testUnsubscribeWithoutGroupId` — depends on a no-group ctor
-    //     path which is built in commit (7/N) via `new_consumer`.
+    //     path which is built in commit (7/N) via `KafkaConsumer::new`.
     //     Deferred.
     //   - `testSubscribePatternAgainstBrokerNotSupportingRegex` —
     //     end-to-end against a `MockClient`; depends on the poll path
@@ -7302,7 +7302,7 @@ mod tests {
     //     (classic-protocol out of scope per §20).
     //   - testFailConstructor — PLAN deferral #5 (Supplier-based ctor
     //     failure paths don't translate; the equivalent error path is
-    //     observed via the `Error` returned from `new_consumer` on
+    //     observed via the `Error` returned from `KafkaConsumer::new` on
     //     bad config).
     //   - testGroupMetadataIsResetAfterUnsubscribe (Java line 1350-1374)
     //     — translated below as
@@ -10383,7 +10383,7 @@ mod tests {
     // SKIPs (commit 10 batch):
     //   - testFailConstructor — PLAN deferral #5 (Supplier-style ctor
     //     failure paths don't translate; bad-config path observed via
-    //     `Error` returned from `new_consumer`).
+    //     `Error` returned from `KafkaConsumer::new`).
     //   - testCloseInvokesStreamsRebalanceListener* /
     //     testCloseWrapsStreamsRebalanceListenerException — PLAN
     //     deferral #2 (Streams out of scope per §20).

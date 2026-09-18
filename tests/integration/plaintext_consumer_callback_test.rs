@@ -94,7 +94,7 @@ use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -143,8 +143,8 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str) -> ConsumerConfig
 }
 
 fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("new_consumer should succeed")
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
+        .expect("KafkaConsumer::new should succeed")
 }
 
 fn make_producer_config(bootstrap: &str) -> ProducerConfig {

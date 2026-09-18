@@ -1133,20 +1133,6 @@ pub trait Admin: Send + Sync {
     async fn close_with_timeout(&self, timeout: Duration);
 }
 
-/// Creates a network-backed [`Admin`] client from the given configuration.
-///
-/// Corresponds to `Admin.create(Properties)` / `AdminClient.create`. Spawns the
-/// single background I/O task. Phase 1 supports the PLAINTEXT security protocol
-/// only.
-///
-/// # Errors
-///
-/// Returns an error if the bootstrap addresses cannot be resolved or the
-/// network client cannot be constructed.
-pub fn new_admin_client(config: AdminClientConfig) -> Result<Box<dyn Admin>, Error> {
-    Ok(Box::new(KafkaAdminClient::new(config)?))
-}
-
 #[cfg(test)]
 mod tests {
     //! Coverage for the `Admin` trait's `default` bodies — the Rust

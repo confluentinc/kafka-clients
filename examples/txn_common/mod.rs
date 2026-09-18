@@ -33,7 +33,7 @@ use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRecords;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -140,7 +140,7 @@ pub fn build_consumer_with(
         props.insert((*key).to_string(), (*value).to_string());
     }
     let config = ConsumerConfig::new(&props).map_err(|e| format!("invalid consumer config: {e}"))?;
-    new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
         .map_err(|e| format!("building the consumer: {e}"))
 }
 

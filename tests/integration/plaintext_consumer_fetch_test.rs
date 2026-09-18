@@ -86,7 +86,7 @@ use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRecord;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -98,7 +98,7 @@ use crate::common::test_context::TestContext;
 use crate::common::test_utils::wait_for_all_partitions_metadata_with_context;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
-// by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
+// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -434,12 +434,12 @@ async fn test_async_consumer_fetch_invalid_offset() {
     let group_id = ctx.group_id("g_fetch_invalid_offset");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("auto.offset.reset", "none")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     // produce two records
     let total_records: usize = 2;
@@ -500,7 +500,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
     let group_id = ctx.group_id("g_fetch_oor_earliest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -511,7 +511,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let total_records: usize = 10;
     let starting_timestamp: i64 = 0;
@@ -546,7 +546,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     let group_id = ctx.group_id("g_fetch_oor_latest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -560,7 +560,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let total_records: usize = 10;
@@ -641,7 +641,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp2 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer1 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id_1,
@@ -650,7 +650,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer (consumer1) should succeed");
+    .expect("KafkaConsumer::new (consumer1) should succeed");
 
     let total_records: usize = 10;
     let starting_timestamp_1 = current_time_ms();
@@ -675,7 +675,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
 
     // Second scenario: starting offset is earlier than the requested
     // duration. Generate records with 1 hour interval for 1 day.
-    let mut consumer2 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id_2,
@@ -684,7 +684,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer (consumer2) should succeed");
+    .expect("KafkaConsumer::new (consumer2) should succeed");
 
     let total_records_2: usize = 25;
     let starting_timestamp_2 = current_time_ms() - Duration::from_secs(24 * 60 * 60).as_millis() as i64;
@@ -771,12 +771,12 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, consumer_overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     // produce a record that is larger than the configured fetch size
@@ -855,12 +855,12 @@ async fn check_fetch_honours_size_if_large_record_not_first(
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, consumer_overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
 
@@ -960,7 +960,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
         }
     }
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -980,7 +980,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0, "initial assignment should be empty");
     consumer

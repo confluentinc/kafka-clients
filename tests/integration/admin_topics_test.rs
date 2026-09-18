@@ -550,7 +550,7 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
 ///
 /// This is the scenario that proves the harness actually talks to Kafka: G0's
 /// create/close vertical passes against an unreachable bootstrap, because
-/// `new_admin_client` does not connect eagerly and `close` succeeds regardless.
+/// `KafkaAdminClient::new` does not connect eagerly and `close` succeeds regardless.
 /// A `createTopics` cannot.
 async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     // Port 1 is reserved and never listening; a short api timeout keeps the

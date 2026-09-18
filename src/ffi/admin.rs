@@ -162,7 +162,8 @@ use crate::admin::{
 // only the functions.
 #[allow(deprecated)]
 use crate::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
+    ClientMetricsResourceListing, ConsumerGroupListing, KafkaAdminClient, ListClientMetricsResourcesOptions,
+    ListConsumerGroupsOptions,
 };
 use crate::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -196,7 +197,7 @@ use super::consumer::kafka_common_Node_t;
 /// The two admin implementations exposed through the FFI.
 enum AdminKind {
     /// Production, network-backed admin client (`KafkaAdminClient` behind the
-    /// `Admin` trait object returned by `new_admin_client`).
+    /// `Admin` trait object it is boxed into here).
     Kafka(Box<dyn Admin>),
     /// In-memory admin client with immediately-resolved futures, for tests.
     Mock(Box<MockAdminClient>),
@@ -466,12 +467,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
         },
     };
 
-    // Enter the runtime so `new_admin_client` can `tokio::spawn` the admin
+    // Enter the runtime so `KafkaAdminClient::new` can `tokio::spawn` the admin
     // background task. The guard is dropped before the handle is built.
     let admin = {
         let _guard = runtime.enter();
-        match crate::admin::new_admin_client(config) {
-            Ok(a) => a,
+        match KafkaAdminClient::new(config) {
+            Ok(a) => Box::new(a) as Box<dyn Admin>,
             Err(e) => {
                 if !out_error.is_null() {
                     unsafe { *out_error = box_error(e) };

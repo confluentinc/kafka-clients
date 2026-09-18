@@ -99,8 +99,8 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::SubscriptionPattern;
-use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -110,7 +110,7 @@ use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
-// by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
+// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -416,12 +416,12 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     ensure_topic_with_2_partitions(&producer, &topic3).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0, "initial assignment should be empty");
     // Java uses literal "t.*c". We use the per-test prefix so the
@@ -485,12 +485,12 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &topic1).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0);
 
@@ -539,12 +539,12 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     ensure_topic_with_2_partitions(&producer, &topic2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0);
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
@@ -611,12 +611,12 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &topic1).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0);
 
@@ -709,12 +709,12 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     ensure_topic_with_2_partitions(&producer, &topic2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0);
 
@@ -765,12 +765,12 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
     let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_invalid_regex");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     assert_eq!(consumer.assignment().len(), 0);
 
@@ -827,12 +827,12 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     // Note: Java creates the `other` topic AFTER the first
     // `awaitAssignment` call. We mirror that ordering below.
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let mut initial_assignment: HashSet<TopicPartition> = HashSet::new();
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
@@ -876,12 +876,12 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     ensure_topic_with_2_partitions(&producer, &other_topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let mut initial_assignment: HashSet<TopicPartition> = HashSet::new();
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
@@ -928,12 +928,12 @@ async fn test_async_consumer_unsubscribe_topic() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     consumer
         .subscribe_with_topics(vec![topic.clone()])
@@ -984,12 +984,12 @@ async fn test_async_consumer_subscribe_invalid_topic_can_unsubscribe() {
     let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_invalid_topic_unsubscribe");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     setup_subscribe_invalid_topic(consumer.as_mut()).await;
     consumer
@@ -1009,12 +1009,12 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
     let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_invalid_topic_close");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     setup_subscribe_invalid_topic(consumer.as_mut()).await;
     consumer.close().await.expect("close should succeed after invalid topic");

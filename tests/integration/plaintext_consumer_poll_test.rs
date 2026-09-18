@@ -141,21 +141,21 @@ use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
-use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use confluent_kafka::admin::{Admin, AdminClientConfig, new_admin_client};
+use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
-// by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
+// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -558,7 +558,7 @@ async fn test_async_consumer_max_poll_records() {
     let starting_timestamp = current_time_ms();
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -567,7 +567,7 @@ async fn test_async_consumer_max_poll_records() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consume_and_verify_records_with_max_poll(
@@ -615,12 +615,12 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // test's behavioral contract is "fence-rejoin after the poll
     // interval elapses without a poll" — preserved here by using
     // max.poll.interval.ms=5000 + sleep 7s (still > interval).
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("max.poll.interval.ms", "5000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let counters = RebalanceCounters::new();
     let listener: Arc<dyn ConsumerRebalanceListener> =
@@ -796,7 +796,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     create_topic(admin.as_ref(), &other_topic, 2, 1).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -805,7 +805,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let counters = RebalanceCounters::new();
     let committed_position = Arc::new(Mutex::new(-1_i64));
@@ -979,7 +979,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -988,7 +988,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let counters = RebalanceCounters::new();
     let listener: Arc<dyn ConsumerRebalanceListener> =
@@ -1025,12 +1025,12 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("max.poll.interval.ms", "1000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let counters = RebalanceCounters::new();
     let listener: Arc<dyn ConsumerRebalanceListener> =
@@ -1078,12 +1078,12 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     let num_messages: usize = 100;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_messages, current_time_ms()).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     consumer
         .subscribe_with_topics(vec![topic.clone()])
@@ -1154,12 +1154,12 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("auto.offset.reset", "none")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -1256,7 +1256,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     send_records_with_producer(&producer, &tp, num_messages, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
             ctx.bootstrap_servers(),
             &group_id,
@@ -1265,7 +1265,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let counters = RebalanceCounters::new();
     let rebalance_timeout_exceeded = Arc::new(Mutex::new(false));
@@ -1353,7 +1353,7 @@ fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
-    new_admin_client(config).expect("admin client")
+    Box::new(KafkaAdminClient::new(config).expect("admin client"))
 }
 
 /// (a no-op record is just appended).

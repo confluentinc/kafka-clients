@@ -42,7 +42,7 @@ use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRecord;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -53,7 +53,7 @@ use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
 use crate::common::test_context::TestContext;
 
 /// Type alias for the bytes-typed `Consumer` trait object returned by
-/// `new_consumer::<Vec<u8>, Vec<u8>>`.
+/// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`.
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 
 /// Local byte-array deserializer (the crate exports `ByteArraySerializer` but
@@ -204,12 +204,12 @@ async fn test_sasl_ssl_consume_records() {
     const NUM_RECORDS: usize = 5;
     produce_records_sasl_ssl(&bootstrap, &ca_cert_pem, &tp, NUM_RECORDS).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, SASL_PASSWORD),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed for SASL_SSL");
+    .expect("KafkaConsumer::new should succeed for SASL_SSL");
 
     consumer
         .subscribe_with_topics(vec![topic.clone()])
@@ -245,12 +245,12 @@ async fn test_sasl_ssl_wrong_credentials() {
     let topic = ctx.topic("sasl_ssl_bad_creds_topic");
     let group_id = ctx.group_id("sasl_ssl_bad_creds_group");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, "wrong-password"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed (config is structurally valid)");
+    .expect("KafkaConsumer::new should succeed (config is structurally valid)");
 
     consumer
         .subscribe_with_topics(vec![topic.clone()])

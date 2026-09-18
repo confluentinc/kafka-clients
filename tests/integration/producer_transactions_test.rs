@@ -68,8 +68,8 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
-use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -180,12 +180,12 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
         ("isolation.level".to_string(), isolation_level.to_string()),
         ("client.id".to_string(), format!("txn-consumer-{group_id}")),
     ]);
-    new_consumer::<Vec<u8>, Vec<u8>>(
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         ConsumerConfig::new(&props).expect("invalid consumer config"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed")
+    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Sends `values` inside the current transaction, awaiting each ack.

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::{ConsumerConfig, new_consumer};
+use confluent_kafka::consumer::{ConsumerConfig, KafkaConsumer};
 
 const BOOTSTRAP_SERVERS: &str = "localhost:9092";
 const TOPIC: &str = "test-topic-consumer";
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .set_enable_auto_commit(false);
 
     let mut consumer =
-        new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
+        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
 
     consumer.subscribe_with_topics(vec![TOPIC.to_string()]).await?;
     println!("Subscribed to '{TOPIC}' on {BOOTSTRAP_SERVERS}. Press Ctrl-C to stop.");

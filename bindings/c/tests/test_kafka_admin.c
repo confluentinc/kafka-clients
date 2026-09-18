@@ -24,7 +24,7 @@
 //
 // test_mock_admin.c covers the RPC semantics against MockAdminClient. What only
 // this file can cover is the production path: building and *entering* the tokio
-// runtime so `new_admin_client` can spawn its background task, close/destroy
+// runtime so `KafkaAdminClient::new` can spawn its background task, close/destroy
 // against `AdminKind::Kafka` rather than `AdminKind::Mock`, and `mock_ref`
 // rejecting a production handle.
 

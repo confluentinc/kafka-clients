@@ -103,9 +103,9 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::OffsetCommitCallback;
-use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -115,7 +115,7 @@ use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
-// by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
+// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -181,8 +181,8 @@ fn make_consumer_config_bytes(
 }
 
 fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("new_consumer should succeed")
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
+        .expect("KafkaConsumer::new should succeed")
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────

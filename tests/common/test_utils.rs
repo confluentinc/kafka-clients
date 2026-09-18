@@ -25,7 +25,7 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, NewTopic, new_admin_client,
+    Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, KafkaAdminClient, NewTopic,
 };
 use confluent_kafka::common::TopicCollection;
 
@@ -204,7 +204,7 @@ pub async fn wait_for_all_partitions_metadata_with_context(
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
-    let admin = new_admin_client(config).expect("admin client");
+    let admin: Box<dyn Admin> = Box::new(KafkaAdminClient::new(config).expect("admin client"));
     wait_for_all_partitions_metadata(admin.as_ref(), topic, expected_num_partitions).await;
     admin.close_with_timeout(ADMIN_CLOSE_TIMEOUT).await;
 }

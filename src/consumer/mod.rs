@@ -33,6 +33,7 @@ mod consumer_records;
 mod consumer_retriable_commit_failed_error;
 mod group_protocol;
 mod interceptor;
+mod kafka_consumer;
 mod mock_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
@@ -53,6 +54,7 @@ pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
 pub use internals::{AutoOffsetResetStrategy, StrategyType};
+pub use kafka_consumer::KafkaConsumer;
 pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
@@ -505,63 +507,6 @@ where
     fn handle(&self) -> ConsumerHandle;
 }
 
-/// Constructs a new [`Consumer`] from a configuration and explicit
-/// key/value [`Deserializer`]s.
-///
-/// For `group.protocol=consumer` (KIP-848), this returns
-/// `Box::new(AsyncKafkaConsumer::new(...)?)` — the production consumer
-/// built end-to-end with `SubscriptionState`, `ConsumerMetadata`,
-/// `NetworkClient`, every `RequestManager`, and a single bg task
-/// (`ConsumerNetworkThread`). For `group.protocol=classic`, returns
-/// [`Error::unsupported_version`] per `consumer-threading.md` §20
-/// (classic protocol deferred to a later milestone).
-///
-/// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
-/// them as explicit `Box<dyn>` parameters (Phase 1 decision not to
-/// translate reflection machinery). The consumer wraps them in
-/// `Arc<Deserializers<K, V>>` internally for sharing with
-/// `Fetcher`/`FetchCollector` (Shape B).
-///
-/// `MockConsumer` (Phase 3) does NOT come through this factory — it has
-/// its own constructor. The factory is for the production consumer only.
-pub fn new_consumer<K, V>(
-    config: ConsumerConfig,
-    key_deserializer: Box<dyn Deserializer<K>>,
-    value_deserializer: Box<dyn Deserializer<V>>,
-) -> Result<Box<dyn Consumer<K, V>>, Error>
-where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
-{
-    // Phase 12 commit (4/N) wires the `GroupProtocol::Consumer` arm to
-    // the production constructor at
-    // [`async_kafka_consumer::AsyncKafkaConsumer::new`], which translates
-    // the Java primary constructor at `AsyncKafkaConsumer.java:285-518`
-    // end-to-end. The ctor builds the full dependency closure
-    // (`SubscriptionState`, `ConsumerMetadata`, `NetworkClient` +
-    // PLAINTEXT `ChannelBuilder`, every `RequestManager`,
-    // `ApplicationEventHandler`, `ConsumerNetworkThread` bg task) and
-    // hands off to `AsyncKafkaConsumer::with_components` so the
-    // Phase-11 test seam is preserved. `Box<dyn Consumer<K, V>>` is
-    // returned so the dispatch surface stays object-safe (Consumer
-    // trait surface check at `tests/consumer/trait_surface_check.rs`).
-    //
-    // `GroupProtocol::Classic` remains an `unsupported_version` error
-    // per `consumer-threading.md` §20 (classic protocol deferred to a
-    // later milestone).
-    let protocol = GroupProtocol::of(config.group_protocol())?;
-    match protocol {
-        GroupProtocol::Consumer => Ok(Box::new(async_kafka_consumer::AsyncKafkaConsumer::<K, V>::new(
-            config,
-            key_deserializer,
-            value_deserializer,
-        )?)),
-        GroupProtocol::Classic => Err(Error::unsupported_version(
-            "Classic group protocol is not yet supported in this client; \
-             set group.protocol=consumer (KIP-848).",
-        )),
-    }
-}
 pub use consumer_commit_failed_error::ConsumerCommitFailedError;
 pub use consumer_log_truncation_error::ConsumerLogTruncationError;
 pub use consumer_no_offset_for_partition_error::ConsumerNoOffsetForPartitionError;

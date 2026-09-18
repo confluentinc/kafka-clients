@@ -110,7 +110,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
 
 use crate::common::admin_backend::{
     AdminBackend, admin_for, all_of_exactly, alter_consumer_group_offsets_awaiting_propagation, create_topic,
@@ -183,21 +183,21 @@ fn static_consumer_config(bootstrap: &str, group_id: &str, instance_id: &str) ->
 }
 
 fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
-    new_consumer::<Vec<u8>, Vec<u8>>(
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         consumer_config(bootstrap, group_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed")
+    .expect("KafkaConsumer::new should succeed")
 }
 
 fn new_static_bytes_consumer(bootstrap: &str, group_id: &str, instance_id: &str) -> BytesConsumer {
-    new_consumer::<Vec<u8>, Vec<u8>>(
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         static_consumer_config(bootstrap, group_id, instance_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed")
+    .expect("KafkaConsumer::new should succeed")
 }
 
 /// Subscribe the consumer to `topic` and poll until it has been assigned
