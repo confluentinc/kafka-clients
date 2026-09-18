@@ -258,15 +258,20 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// lazily awaited instead via a spawned task. The spawned-task path
     /// requires a Tokio runtime context; the eager path does not.
     ///
-    /// This is `pub(crate)` rather than `pub`: the only callers are the in-crate
-    /// FFI (`src/ffi/admin.rs`), which always run inside a Tokio runtime context
-    /// (`h.runtime.enter()`). Exposing it publicly is a footgun — calling it on a
-    /// combinator future (`then_apply`/`all_of`/...) from ordinary sync code with
-    /// no runtime panics on the spawn fallback described above.
+    /// This is `pub(crate)` rather than `pub`, and exposing it publicly is a
+    /// footgun: calling it on a combinator future (`then_apply`/`all_of`/...)
+    /// from ordinary sync code with no Tokio runtime panics on the spawn
+    /// fallback described above. Callers inside the crate always run inside a
+    /// runtime context.
     ///
-    /// `allow(dead_code)`: the sole caller is the FFI (`src/ffi/admin.rs`), so in
-    /// a build without the `ffi` feature this method — and the
-    /// `register_completion` mechanism it drives — has no caller.
+    /// `allow(dead_code)`: this public-view hook mirrors Java's
+    /// `KafkaFuture.whenComplete` (required by `admin-client.md` §4), but the
+    /// crate's own completion paths — the FFI per-key delivery and the
+    /// group-describe chain (`kafka_admin_client.rs`) — register their callbacks
+    /// on the `KafkaFutureImpl` handle instead (see
+    /// [`KafkaFutureImpl::when_complete`]), so this method currently has no
+    /// in-tree caller in any build configuration. It is retained as the mandated
+    /// public-mirror completion hook.
     #[allow(dead_code)]
     pub(crate) fn when_complete<F>(&self, action: F)
     where

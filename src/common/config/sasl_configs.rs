@@ -134,73 +134,82 @@ impl SaslConfig {
 ///
 /// Values may be quoted with double or single quotes, or left bare. Whitespace
 /// is tolerated on either side of the `=` — a JAAS string legally carries
-/// `name="v"`, `name = "v"`, `name='v'`, or `name=v`. Keys are matched
-/// case-sensitively and at a word boundary, so `serviceName=` /
-/// `foo.username=` do not match `name=` / `username=` (mirroring the regex
-/// `(?<![\w.])name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s;]+))`).
+/// `name="v"`, `name = "v"`, `name='v'`, or `name=v`.
+///
+/// A key is recognized only at an **option start** — the beginning of the
+/// string or immediately after whitespace — and quoted regions are skipped
+/// wholesale, so a `key=` sequence appearing inside another option's quoted
+/// value is never mistaken for a real option (e.g. `password="username=x"
+/// username="right"` resolves `username` to `right`, not `x`). This mirrors
+/// Java's JAAS lexer, which tokenizes options rather than substring-matching.
+/// The same option-start rule rejects `serviceName=` / `foo.username=` when
+/// searching for `name=` / `username=` (the char before the substring is a
+/// letter / `.`, not whitespace).
 ///
 /// Returns a reference into the original `jaas` string if found, `None` otherwise.
 fn parse_jaas_option<'a>(jaas: &'a str, key: &str) -> Option<&'a str> {
     let bytes = jaas.as_bytes();
-    let key_len = key.len();
+    let n = bytes.len();
 
-    // Search for the key in the string; validate the boundary and the `= value`
-    // that must follow (with optional surrounding whitespace) at each hit.
-    let mut search_from = 0;
-    while let Some(rel) = jaas[search_from..].find(key) {
-        let pos = search_from + rel;
-        let after_key = pos + key_len;
+    // Walk the string once, skipping quoted regions, and only consider a match
+    // where an option can legally begin (start of string or after whitespace).
+    let mut i = 0;
+    while i < n {
+        let c = bytes[i];
 
-        // Left word boundary: the char before `key` must not be a word char
-        // (alphanumeric or '_') or '.', so `myusername` / `serviceName` /
-        // `foo.username` do not match `username` / `name`.
-        let left_ok = pos == 0 || {
-            let c = bytes[pos - 1];
-            !(c.is_ascii_alphanumeric() || c == b'_' || c == b'.')
-        };
-        if !left_ok {
-            search_from = after_key;
-            continue;
-        }
-
-        // Skip whitespace between the key and '='.
-        let mut i = after_key;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        // Skip a quoted region wholesale so `key=` inside a value cannot match.
+        if c == b'"' || c == b'\'' {
             i += 1;
-        }
-        // The key must be followed by '=' (after the optional whitespace);
-        // otherwise this was e.g. `namespace` matching `name` — keep searching.
-        if i >= bytes.len() || bytes[i] != b'=' {
-            search_from = after_key;
-            continue;
-        }
-        i += 1; // past '='
-
-        // Skip whitespace between '=' and the value.
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            return None;
-        }
-
-        // Quoted value: double or single quote.
-        let quote = bytes[i];
-        if quote == b'"' || quote == b'\'' {
-            let value_start = i + 1;
-            if let Some(quote_end) = jaas[value_start..].find(quote as char) {
-                return Some(&jaas[value_start..value_start + quote_end]);
+            while i < n && bytes[i] != c {
+                i += 1;
             }
-            // No closing quote found — malformed.
-            return None;
+            i += 1; // past the closing quote (or off the end if unterminated)
+            continue;
         }
 
-        // Unquoted value: read until whitespace or semicolon.
-        let value_end = jaas[i..]
-            .find(|c: char| c.is_ascii_whitespace() || c == ';')
-            .map(|e| i + e)
-            .unwrap_or(jaas.len());
-        return Some(&jaas[i..value_end]);
+        // A key can only begin at an option start.
+        let at_option_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if at_option_start && jaas[i..].starts_with(key) {
+            // Skip whitespace between the key and '='.
+            let mut j = i + key.len();
+            while j < n && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            // The key must be followed by '=' (after the optional whitespace);
+            // otherwise this was e.g. `namespace` starting with `name` — keep
+            // scanning.
+            if j < n && bytes[j] == b'=' {
+                j += 1; // past '='
+
+                // Skip whitespace between '=' and the value.
+                while j < n && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j >= n {
+                    return None;
+                }
+
+                // Quoted value: double or single quote.
+                let quote = bytes[j];
+                if quote == b'"' || quote == b'\'' {
+                    let value_start = j + 1;
+                    if let Some(quote_end) = jaas[value_start..].find(quote as char) {
+                        return Some(&jaas[value_start..value_start + quote_end]);
+                    }
+                    // No closing quote found — malformed.
+                    return None;
+                }
+
+                // Unquoted value: read until whitespace or semicolon.
+                let value_end = jaas[j..]
+                    .find(|ch: char| ch.is_ascii_whitespace() || ch == ';')
+                    .map(|e| j + e)
+                    .unwrap_or(n);
+                return Some(&jaas[j..value_end]);
+            }
+        }
+
+        i += 1;
     }
 
     None
@@ -413,6 +422,20 @@ mod tests {
         // `username`, because '=' does not immediately follow (after optional
         // whitespace) the matched key text.
         assert_eq!(parse_jaas_option("m required usernamespace=\"x\";", "username"), None);
+    }
+
+    #[test]
+    fn test_jaas_config_key_inside_a_quoted_value_does_not_match() {
+        // A `key=` sequence appearing inside another option's quoted value must
+        // not be mistaken for a real option — quoted regions are skipped
+        // wholesale. Here the real `username` option must resolve to `right`,
+        // not the `username=x` embedded in the password value.
+        let config = SaslConfig {
+            jaas_config: Some("PlainLoginModule required password=\"username=x\" username=\"right\";".to_owned()),
+            ..SaslConfig::default()
+        };
+        assert_eq!(config.resolve_username(), Some("right"));
+        assert_eq!(config.resolve_password(), Some("username=x"));
     }
 
     #[test]

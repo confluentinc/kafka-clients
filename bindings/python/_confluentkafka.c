@@ -5488,8 +5488,9 @@ static void admin_delete_consumer_group_offsets_trampoline(const char* topic, in
 
 // removeMembersFromConsumerGroup (Phase E; fires once per member,
 // independently, keyed by group instance id). Java's per-member future is
-// KafkaFuture<Void>, so there is no value parameter. Never fires at all in
-// `removeAll` mode (there is no per-member key to deliver a callback for).
+// KafkaFuture<Void>, so there is no value parameter. In `removeAll` mode there
+// is no per-member key: the callback fires EXACTLY ONCE with a NULL group
+// instance id (-> Python None), carrying the whole operation's all() outcome.
 static void admin_remove_members_trampoline(const char* group_instance_id,
     kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
