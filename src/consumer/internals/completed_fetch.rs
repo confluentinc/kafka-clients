@@ -1450,7 +1450,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1474,7 +1474,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1493,7 +1493,7 @@ mod tests {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             base_offset,
-            Compression::gzip(),
+            Compression::gzip().build(),
             TimestampType::CreateTime,
             &simple_records,
         );
@@ -1730,7 +1730,7 @@ mod tests {
     /// order, with correct key/value — must be unchanged.
     #[test]
     fn test_multi_batch_ordering_and_offsets() {
-        for compression in [Compression::none(), Compression::gzip()] {
+        for compression in [Compression::NONE, Compression::gzip().build()] {
             let base_offset = 50;
             let batch_count = 4;
             let records_per_batch = 3;
@@ -1776,7 +1776,7 @@ mod tests {
         let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             512,
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
+            Compression::NONE,
             TimestampType::CreateTime,
             base_offset,
         );
@@ -1808,7 +1808,7 @@ mod tests {
             MemoryRecordsBuilderOptionsBuilder::new()
                 .set_initial_capacity(512)
                 .set_magic(RecordBatch::MAGIC_VALUE_V2)
-                .set_compression(Compression::none())
+                .set_compression(Compression::NONE)
                 .set_timestamp_type(TimestampType::CreateTime)
                 .set_base_offset(base_offset)
                 .set_log_append_time(-1)

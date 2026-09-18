@@ -400,7 +400,7 @@ mod tests {
     /// Builds a batch with `record_count` records and the given producer state.
     fn batch(producer_id: i64, epoch: i16, base_sequence: i32, record_count: i32) -> ProducerBatch {
         let builder =
-            MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128);
+            MemoryRecords::builder_with_initial_capacity(512, Compression::NONE, TimestampType::CreateTime, 128);
         let mut b = ProducerBatch::new(tp(), builder, 0);
         b.record_count = record_count;
         b.set_producer_state(producer_id, epoch, base_sequence, false);

@@ -934,7 +934,11 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 3. Derive compression from config
         //    Translated from KafkaProducer.configureCompression().
-        let compression = Compression::of(config.compression_type);
+        // NOTE: Java also applies the per-codec level configs here
+        // (`compression.gzip.level` / `.lz4.level` / `.zstd.level`); those
+        // `ProducerConfig` keys are not translated yet, so every codec is built
+        // at its default level.
+        let compression = Compression::of(config.compression_type).build();
 
         // 4. Create a system clock time provider
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
@@ -2740,7 +2744,7 @@ mod tests {
     fn create_accumulator() -> Arc<RecordAccumulator> {
         Arc::new(RecordAccumulator::new_for_test(
             16384,
-            Compression::none(),
+            Compression::NONE,
             5,
             100,
             1000,
@@ -3224,7 +3228,7 @@ mod tests {
         let metadata = create_metadata_with_topic(TOPIC, 2);
         let accumulator = Arc::new(RecordAccumulator::new(
             BATCH_SIZE as i32,
-            Compression::none(),
+            Compression::NONE,
             0,
             100,
             1000,
@@ -4324,7 +4328,7 @@ mod tests {
         // A pool that fits exactly one batch.
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             BATCH_SIZE,
-            Compression::none(),
+            Compression::NONE,
             5,
             100,
             1000,
@@ -4749,7 +4753,7 @@ mod tests {
             // A large batch so every send below appends to the same batch.
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
-                Compression::none(),
+                Compression::NONE,
                 5,
                 100,
                 1000,
@@ -4831,7 +4835,7 @@ mod tests {
             // A large batch so every send below appends to the same batch.
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
-                Compression::none(),
+                Compression::NONE,
                 5,
                 100,
                 1000,
@@ -5057,7 +5061,7 @@ mod tests {
             ));
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
-                Compression::of(config.compression_type),
+                Compression::of(config.compression_type).build(),
                 config.linger_ms as i32,
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
@@ -6630,7 +6634,7 @@ mod tests {
         ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
-            Compression::of(config.compression_type),
+            Compression::of(config.compression_type).build(),
             config.linger_ms as i32,
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
