@@ -15,9 +15,9 @@ four more in one section. The register is a lead, not a spec.
 **How to apply:**
 
   - Java emits this guard in **exactly one** place — `generateClassWriter`
-    (`MessageDataGenerator.java:792`). `generateNonIgnorableFieldCheck` has a single
-    caller. `generateClassMessageSize` never emits it, so `size()` legitimately
-    succeeds at a version where `write()` refuses. Any future claim that a check
+    (`MessageDataGenerator.java:792`). `generateNonIgnorableFieldCheck` has two callers:
+    `MessageDataGenerator.java:794` and `JsonConverterGenerator.java:328`. The latter
+    is not translated here, but it is still a caller in the Java source.
     belongs "in the generator" must name the *generator method*, not a line range —
     line ranges in the register have already drifted.
   - Emission requires **two** gates, not one: `!field.ignorable()` **and** the `else`
