@@ -664,11 +664,11 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
         if !field.about().is_empty() {
             writeln!(file, "    /// {}", field.about())?;
         }
-        writeln!(file, "    pub {}: {},", field_name, rust_type)?;
+        writeln!(file, "    pub(crate) {}: {},", field_name, rust_type)?;
     }
 
     writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
-    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
+    writeln!(file, "    pub(crate) unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -720,6 +720,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     generate_schema_method(file, struct_spec, flexible_versions)?;
 
     // Builder setters
+    generate_field_accessors(file, struct_spec)?;
     generate_builder_setters(file, struct_spec)?;
 
     writeln!(file, "}}")?;
@@ -801,11 +802,11 @@ fn generate_nested_struct(
         if !nested_field.about().is_empty() {
             writeln!(file, "    /// {}", nested_field.about())?;
         }
-        writeln!(file, "    pub {}: {},", field_name, rust_type)?;
+        writeln!(file, "    pub(crate) {}: {},", field_name, rust_type)?;
     }
 
     writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
-    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
+    writeln!(file, "    pub(crate) unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -837,6 +838,7 @@ fn generate_nested_struct(
     generate_write_method(file, &struct_name, &struct_spec, flexible_versions, parent_versions)?;
 
     // Builder setters
+    generate_field_accessors(file, &struct_spec)?;
     generate_builder_setters(file, &struct_spec)?;
 
     writeln!(file, "}}")?;
@@ -886,11 +888,11 @@ fn generate_common_struct(
         if !field.about().is_empty() {
             writeln!(file, "    /// {}", field.about())?;
         }
-        writeln!(file, "    pub {}: {},", field_name, rust_type)?;
+        writeln!(file, "    pub(crate) {}: {},", field_name, rust_type)?;
     }
 
     writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
-    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
+    writeln!(file, "    pub(crate) unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -920,6 +922,7 @@ fn generate_common_struct(
     generate_write_method(file, struct_name, struct_spec, flexible_versions, struct_spec.versions())?;
 
     // Builder setters
+    generate_field_accessors(file, struct_spec)?;
     generate_builder_setters(file, struct_spec)?;
 
     writeln!(file, "}}")?;
@@ -1001,6 +1004,65 @@ fn generate_manual_eq_hash(
     writeln!(file, "    }}")?;
     writeln!(file, "}}")?;
     writeln!(file)?;
+
+    Ok(())
+}
+
+/// True when the field's Rust type is `Copy`, so its getter can return by
+/// value instead of by reference. `Option<T>` is `Copy` when `T` is, so
+/// nullability does not change the answer.
+fn is_copy_field(field: &FieldSpec) -> bool {
+    matches!(
+        field.field_type(),
+        FieldType::Bool
+            | FieldType::Int8
+            | FieldType::Int16
+            | FieldType::Int32
+            | FieldType::Int64
+            | FieldType::Uint16
+            | FieldType::Uint32
+            | FieldType::Uuid
+            | FieldType::Float64
+    )
+}
+
+/// Generates the public getters, translating Java's
+/// `MessageDataGenerator.generateFieldAccessors`. Java names the getter after
+/// the field with no `get` prefix (`nullableStruct()`), so we do the same in
+/// snake_case. Fields are `pub(crate)` — mirroring the package-private fields
+/// Java emits — so these accessors are the only read path for other crates.
+///
+/// Copy scalars are returned by value; everything else is borrowed, because the
+/// data stays owned by the message (CLAUDE.md §12).
+fn generate_field_accessors(file: &mut fs::File, struct_spec: &StructSpec) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file)?;
+    for field in struct_spec.fields() {
+        let field_name = to_snake_case(field.name());
+        let field_name = escape_rust_keyword(&field_name);
+        let rust_type = field_type_to_rust_for_field(field);
+
+        if is_copy_field(field) {
+            writeln!(file, "    pub fn {}(&self) -> {} {{", field_name, rust_type)?;
+            writeln!(file, "        self.{}", field_name)?;
+            writeln!(file, "    }}")?;
+            writeln!(file)?;
+        } else {
+            writeln!(file, "    pub fn {}(&self) -> &{} {{", field_name, rust_type)?;
+            writeln!(file, "        &self.{}", field_name)?;
+            writeln!(file, "    }}")?;
+            writeln!(file)?;
+
+            // Java's getter hands back the object reference itself, so
+            // `data.topics().add(t)` mutates in place. Rust splits that into a
+            // shared and a mutable borrow, so a non-Copy field also gets a
+            // `_mut` accessor — same shape as `unknown_tagged_fields_mut`.
+            let mut_name = field_name.strip_prefix("r#").unwrap_or(&field_name);
+            writeln!(file, "    pub fn {}_mut(&mut self) -> &mut {} {{", mut_name, rust_type)?;
+            writeln!(file, "        &mut self.{}", field_name)?;
+            writeln!(file, "    }}")?;
+            writeln!(file)?;
+        }
+    }
 
     Ok(())
 }
