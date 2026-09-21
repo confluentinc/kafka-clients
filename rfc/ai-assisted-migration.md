@@ -159,7 +159,7 @@ at a time; the new API returns a batch.
     +     records = consumer.poll(Duration.ofSeconds(1))
     +     for msg in records:
     +         process_order(msg.value().decode('utf-8'))
-    +     consumer.commitSync()
+    +     consumer.commit()
       consumer.close()
 
   This change also updates commit() → commitSync() to align with

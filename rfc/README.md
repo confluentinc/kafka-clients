@@ -1,7 +1,6 @@
 # RFCs
 
-This directory holds design proposals (RFCs) for the next-generation Confluent Kafka
-clients. An RFC captures a significant change (architecture, public API, repository model,
+This directory holds design proposals (RFCs) for the next-generation Confluent's clients for Apache Kafka. An RFC captures a significant change (architecture, public API, repository model,
 or release process) so the community can review it before it is implemented.
 
 ## Background

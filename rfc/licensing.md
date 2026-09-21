@@ -48,5 +48,7 @@ Contributions to the core and bindings are accepted under Apache 2.0 (see `CONTR
 
 ## Relationship to the Apache Software Foundation
 
+This repository is not affiliated with the Apache Software Foundation.
+
 Keeping the core and bindings Apache 2.0 keeps open the option of donating them to the Apache
 Software Foundation.
