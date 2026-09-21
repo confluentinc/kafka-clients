@@ -98,7 +98,7 @@ public sealed class PerfV3SmokeTests : IClassFixture<KafkaBrokerFixture>
     // test method) and CA2007 both stay satisfied; the private helpers keep ConfigureAwait(false).
     // [SkippableFact] (not [Fact]) so a Skip.If raised inside those helpers — Docker genuinely absent,
     // or the macOS cross-clock boundary — surfaces as a real Skipped result instead of a silent pass.
-    // It supports async Task methods, so the signatures are unchanged. Murmur2Test stays a plain
+    // It supports async Task methods, so the signatures are unchanged. Crc32Test stays a plain
     // [Theory]: it is pure arithmetic and can never legitimately skip.
     [SkippableFact]
     public Task Producer_Smoke_Sync() => RunProducerSmokeAsync("producer-perf-smoke", asyncMode: false);

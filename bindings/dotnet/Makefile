@@ -111,7 +111,7 @@ test-soak-dotnet: build-dotnet
 # p99 budgets must not fail under the unit suite's contention. Invoked by path.
 #
 # Slice 1 shipped the v3 exe (PerfV3, our binding) + the client-agnostic
-# PerformanceCommon + the murmur2 self-check. Slice 2 adds the v2 exe (PerfV2/ckd
+# PerformanceCommon + the CRC-32 self-check. Slice 2 adds the v2 exe (PerfV2/ckd
 # baseline) and the Docker in-suite smoke (test-integration-perf-dotnet).
 # CLIENT_VERSION now selects the exe: 3 (default) = PerfV3, 2 = PerfV2. PerfV2 and
 # PerfV3 are never in one sln (PLAN §1.1.1 — the same-assembly collision); each is
@@ -128,8 +128,8 @@ CLIENT_VERSION ?= 3
 
 .PHONY: perf-unit-test-dotnet producer-perf-test-dotnet consumer-perf-test-dotnet test-integration-perf-dotnet
 
-# The perf suite's Docker-free automated gate: the murmur2 self-check
-# (UtilsTest.testMurmur2 vectors) plus the engine-level tests (readiness gate,
+# The perf suite's Docker-free automated gate: the CRC-32 self-check
+# (built_in_partitioner.rs golden vectors) plus the engine-level tests (readiness gate,
 # async-producer cancellation, 64-bit message count). No broker, no Docker, no
 # client — runs on net8.0 AND net10.0. (The Docker in-suite smoke is the separate
 # test-integration-perf-dotnet target below.)

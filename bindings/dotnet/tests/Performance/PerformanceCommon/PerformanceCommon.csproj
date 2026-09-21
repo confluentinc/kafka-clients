@@ -4,7 +4,7 @@
     Client-AGNOSTIC shared perf harness (M13/P1, PLAN §2/§4). The C# analog of
     bindings/python/test/performance/performance_common.py: the Metrics harness
     (1 ms latency histogram, PercentileFromHist, metrics.jsonl schema, CPU/RSS
-    sampler), the message generator, env / SASL config helpers, the murmur2
+    sampler), the message generator, env / SASL config helpers, the CRC-32
     partitioner, the two measured-loop engines, and the IProducerBackend /
     IConsumerBackend backend abstraction.
 
@@ -39,5 +39,16 @@
     -->
     <NoWarn>$(NoWarn);CA1031</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Test-only dependency (perf harness, never shipped — IsPackable=false above).
+      Provides the IEEE CRC-32 (zlib/crc32fast-compatible) hash backing Crc32.cs,
+      the C# analog of bindings/python/test/performance/partitioner.py — see
+      design/current/partitioner.md for why the default key partitioner is
+      CRC-32, not murmur2.
+    -->
+    <PackageReference Include="System.IO.Hashing" Version="10.0.12" />
+  </ItemGroup>
 
 </Project>

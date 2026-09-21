@@ -24,9 +24,10 @@ namespace Confluent.Kafka.Performance.V3;
 /// default) — the C# analog of <c>producer_performance_test.py</c>'s <c>get_topic_end_offsets</c> +
 /// <c>verify_consumed_messages</c>. Captures the topic's per-partition end offsets before the run, then
 /// consumes everything produced during the run from those baselines, asserting the count matches and (for
-/// keyed records) that each landed in the partition <see cref="Murmur2"/> would have chosen. Uses our
-/// binding's <see cref="KafkaConsumer{TKey, TValue}"/> query APIs (<c>PartitionsFor</c> / <c>BeginningOffsets</c>
-/// / <c>EndOffsets</c> / <c>Assign</c> / <c>Seek</c> / <c>Poll</c>).
+/// keyed records) that each landed in the partition <see cref="Crc32"/> would have chosen — the v3
+/// producer's actual default partitioner (<c>design/current/partitioner.md</c>); there is no ABI surface to
+/// select anything else. Uses our binding's <see cref="KafkaConsumer{TKey, TValue}"/> query APIs
+/// (<c>PartitionsFor</c> / <c>BeginningOffsets</c> / <c>EndOffsets</c> / <c>Assign</c> / <c>Seek</c> / <c>Poll</c>).
 /// </summary>
 internal static class VerifyConsumed
 {
@@ -63,7 +64,7 @@ internal static class VerifyConsumed
     /// <summary>
     /// Consumes everything produced during the run (from <paramref name="baseline"/> offsets), asserts the
     /// count equals <paramref name="expectedCount"/>, and — when <paramref name="hasKeys"/> — that every
-    /// record landed in the murmur2-chosen partition. Returns 0 on success, 1 on any verification failure.
+    /// record landed in the CRC-32-chosen partition. Returns 0 on success, 1 on any verification failure.
     /// </summary>
     internal static int VerifyConsumedMessages(string bootstrapServers, string topic, Dictionary<int, long> baseline, long expectedCount, bool hasKeys)
     {
@@ -171,7 +172,7 @@ internal static class VerifyConsumed
             return;
         }
 
-        int expectedPartition = Murmur2.PartitionForKey(key, numPartitions);
+        int expectedPartition = Crc32.PartitionForKey(key, numPartitions);
         if (expectedPartition != partition)
         {
             mismatchCount++;
