@@ -169,6 +169,12 @@
 - [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — [export].include lists types/typedefs only (no_mangle fns auto-export); multilang proto/server topology
 - [Python soak client](python_soak_client_notes.md) — bindings are Linux-only (threads.h)…
 - [Soak RSS spike diagnosis](soak_rss_spike_diagnosis.md) — 43 KiB BatchNode per record…
+- [clippy unavailable in nix sandbox](env_clippy_unavailable_nix.md) — cargo xtask lint broken here: rustc 1.95.0 vs nix clippy 1.97.1 version skew, don't re-diagnose
+- [Admin per-key callbacks Phase A](admin_per_key_callbacks_phase_a_notes.md) — mechanism for B-G; bindings/c/tests needs its own build+ctest verification; create_topics dedup must be first-wins; asyncio.Future must be awaited
+- [Admin per-key callbacks Phase B](admin_per_key_callbacks_phase_b_notes.md) — Configs family; composite ConfigResource key as two C params (reuse flattened result's shape); distinct_config_resources for op-rows-to-resource-futures dedup; verified c-tests + temporal-independence sanity check
+- [Admin per-key callbacks Phase C](admin_per_key_callbacks_phase_c_notes.md) — Log dirs family; reused nested LogDirDescriptionMap_t handle verbatim; COMMENTS.67: a key absent from `entries` now gets a generic explicit-error fan-out in admin_async_per_key_op (not a documented hang — "matches Java" was the wrong excuse)
+- [Admin per-key callbacks Phase D](admin_per_key_callbacks_phase_d_notes.md) — Partitions/offsets family; no dedup needed anywhere (both RPCs already dict-keyed); listOffsets uses AdminApiDriver (temporal-independence caveat, doesn't block the direct mechanism test); caught grpc_translate.py docstring drift from Phase C
+- [Admin per-key callbacks Phase G](admin_per_key_callbacks_phase_g_notes.md) — FINAL; producers/transactions family; reuse flattened result handle as single-key value (no standalone value handle in sync path); FenceProducersResult::futures() accessor; listTransactions left joined
 - [Loop 50 split panic (§9.18)](loop50_split_panic_notes.md) — a check narrower than its claim is the default failure; verify the artifact, not the script's exit
 - [§9.1 version-gate guard](generator_version_gate_guard.md) — guard lives in generateClassWriter only; needs curVersions threading; derive counts from specs then diff
 - [New error path needs its catch](new_error_path_needs_its_catch.md) — making a silent path loud is half a translation; §9.1's guard turned a silent drop into an I/O-task panic

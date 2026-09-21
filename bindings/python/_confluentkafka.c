@@ -3351,18 +3351,84 @@ static void admin_op_trampoline(kafka_common_Error_t* error, void* user_data) {
     PyGILState_Release(g);
 }
 
-static void admin_create_topics_trampoline(kafka_admin_CreateTopicsResult_t* r,
-                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_topics_trampoline(kafka_admin_DeleteTopicsResult_t* r,
-                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_topics_trampoline(kafka_admin_ListTopicsResult_t* r,
                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_topics_trampoline(kafka_admin_DescribeTopicsResult_t* r,
-                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_create_partitions_trampoline(kafka_admin_CreatePartitionsResult_t* r,
-                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_records_trampoline(kafka_admin_DeleteRecordsResult_t* r,
-                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// ---- per-key trampolines (Topics family; fire once per key) ----------------
+//
+// Unlike the whole-batch trampolines above (fire_handle_cb: exactly once per
+// call), these fire once PER KEY, independently, as that key's own future
+// resolves - mirroring Java's per-key KafkaFuture<T> (admin-client.md §5)
+// instead of joining every key into one flattened result.
+//
+// `key` (and `topic` for delete_records) is a transient, borrowed C string
+// per the Rust FFI's doc contract (valid only for this call), so it is copied
+// into a Python str immediately via the "s" format unit rather than crossing
+// as a pointer. `value`/`error` are owned handles, passed through as ints for
+// Python to drain/destroy via the matching *_drain function or
+// KafkaError._from_c, exactly like every other admin callback in this file.
+//
+// The Python wrapper functions below Py_INCREF(cb) once per key BEFORE
+// submitting (not once for the whole call, since these fire N times sharing
+// one `user_data`), matching this trampoline's one Py_DECREF(cb) per
+// invocation - see e.g. py_Admin_create_topics_async.
+
+static void admin_create_topics_trampoline(const char* key,
+    kafka_admin_TopicMetadataAndConfig_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_describe_topics_trampoline(const char* key,
+    kafka_admin_TopicDescription_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteTopics (by name and by id share this) / createPartitions: Java's
+// per-key future is KafkaFuture<Void>, so there is no value parameter.
+static void admin_delete_topics_trampoline(const char* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", key, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_create_partitions_trampoline(const char* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", key, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteRecords: the key is a TopicPartition, delivered as a topic name plus
+// a partition id rather than through a single opaque key handle.
+static void admin_delete_records_trampoline(const char* topic, int32_t partition,
+    kafka_admin_DeletedRecords_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siKK", topic, partition,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- constructors / lifecycle ----------------------------------------------
 
@@ -3589,6 +3655,19 @@ static kafka_admin_NewTopic_t** build_new_topics(PyObject* spec, Py_ssize_t* out
     return topics;
 }
 
+// Py_INCREF(cb) once per key about to be submitted, for the Topics-family
+// per-key async ops: the native callback fires `n` times sharing one
+// `user_data`/`cb`, each invocation doing exactly one Py_DECREF(cb) (see the
+// admin_*_trampoline functions above), so the total incref count must match
+// `n` exactly. The Python `admin` module is responsible for `n` already being
+// the deduplicated key count (matching how many times the Rust FFI will
+// actually invoke the callback) before calling into any of these wrappers.
+static void admin_incref_n(PyObject* cb, Py_ssize_t n) {
+    for (Py_ssize_t i = 0; i < n; i++) {
+        Py_INCREF(cb);
+    }
+}
+
 static PyObject* py_Admin_create_topics_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int timeout_ms;
     int validate_only; int retry_on_quota_violation; PyObject* cb;
@@ -3598,7 +3677,9 @@ static PyObject* py_Admin_create_topics_async(PyObject* self, PyObject* args) {
     Py_ssize_t count = 0;
     kafka_admin_NewTopic_t** topics = build_new_topics(spec, &count);
     if (topics == NULL) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per topic (Java's per-key KafkaFuture), not one
+    // for the whole batch - see admin_create_topics_trampoline.
+    admin_incref_n(cb, count);
     // The Rust side copies the NewTopics into owned values before returning, so
     // the handles can be freed as soon as the call returns.
     kafka_admin_AdminClient_create_topics_async(
@@ -3618,7 +3699,7 @@ static PyObject* py_Admin_delete_topics_async(PyObject* self, PyObject* args) {
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(names, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_topics_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, retry ? true : false, admin_delete_topics_trampoline, cb);
     PyMem_Free(arr);
@@ -3631,7 +3712,7 @@ static PyObject* py_Admin_delete_topics_by_ids_async(PyObject* self, PyObject* a
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(ids, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_topics_by_ids_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, retry ? true : false, admin_delete_topics_trampoline, cb);
     PyMem_Free(arr);
@@ -3656,7 +3737,7 @@ static PyObject* py_Admin_describe_topics_async(PyObject* self, PyObject* args) 
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(names, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_topics_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, include_ops ? true : false, partition_size_limit,
         admin_describe_topics_trampoline, cb);
@@ -3673,7 +3754,7 @@ static PyObject* py_Admin_describe_topics_by_ids_async(PyObject* self, PyObject*
     const char** arr = NULL;
     Py_ssize_t n = topics_to_array(ids, &arr);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_topics_by_ids_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         arr, (int32_t)n, timeout_ms, include_ops ? true : false, partition_size_limit,
         admin_describe_topics_trampoline, cb);
@@ -3772,7 +3853,7 @@ static PyObject* py_Admin_create_partitions_async(PyObject* self, PyObject* args
     kafka_admin_NewPartitions_t** specs = NULL;
     Py_ssize_t count = build_new_partitions(spec, &topics, &specs);
     if (count < 0) return NULL;
-    Py_INCREF(cb);
+    admin_incref_n(cb, count);
     // The Rust side copies the NewPartitions into owned values before returning,
     // so the handles can be freed as soon as the call returns.
     kafka_admin_AdminClient_create_partitions_async(
@@ -3810,7 +3891,7 @@ static PyObject* py_Admin_delete_records_async(PyObject* self, PyObject* args) {
         }
         topics[i] = t; partitions[i] = p; offsets[i] = (int64_t)off;
     }
-    Py_INCREF(cb);
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_records_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         topics, partitions, offsets, (int32_t)n, timeout_ms,
         admin_delete_records_trampoline, cb);
@@ -3965,6 +4046,44 @@ static PyObject* topic_description_to_py(const kafka_admin_TopicDescription_t* d
                          kafka_admin_TopicDescription_topic_id(d),
                          kafka_admin_TopicDescription_is_internal(d) ? 1 : 0,
                          partitions, operations);
+}
+
+// ---- standalone per-key value drains (Topics-family per-key async callbacks) -
+//
+// Unlike the *Result_drain functions below (which walk a flattened result
+// handle's N entries), these drain a SINGLE value handle delivered
+// individually by a per-key async callback (admin_create_topics_trampoline
+// and friends, above) - one topic's TopicMetadataAndConfig / TopicDescription,
+// or one partition's DeletedRecords - reusing the same *_to_py converters.
+
+// (topic_id, num_partitions, replication_factor, [config entries], embedded_error)
+static PyObject* py_TopicMetadataAndConfig_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_TopicMetadataAndConfig_t* mc = (kafka_admin_TopicMetadataAndConfig_t*)(uintptr_t)ptr;
+    PyObject* result = topic_metadata_to_py(mc);
+    kafka_admin_TopicMetadataAndConfig_destroy(mc);
+    return result;
+}
+
+// (name, topic_id, is_internal, [partition_info], [acl_operation_codes])
+static PyObject* py_TopicDescription_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_TopicDescription_t* d = (kafka_admin_TopicDescription_t*)(uintptr_t)ptr;
+    PyObject* result = topic_description_to_py(d);
+    kafka_admin_TopicDescription_destroy(d);
+    return result;
+}
+
+// low_watermark (Java's DeletedRecords has only this one field).
+static PyObject* py_DeletedRecords_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DeletedRecords_t* dr = (kafka_admin_DeletedRecords_t*)(uintptr_t)ptr;
+    long long low_watermark = kafka_admin_DeletedRecords_low_watermark(dr);
+    kafka_admin_DeletedRecords_destroy(dr);
+    return PyLong_FromLongLong(low_watermark);
 }
 
 // {topic_name: (error, metadata)}
@@ -4131,20 +4250,84 @@ static PyObject* py_DeleteRecordsResult_drain(PyObject* self, PyObject* args) {
 
 static void admin_describe_cluster_trampoline(kafka_admin_DescribeClusterResult_t* r,
                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_configs_trampoline(kafka_admin_DescribeConfigsResult_t* r,
-                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_configs_trampoline(kafka_admin_AlterConfigsResult_t* r,
-                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// describeConfigs / incrementalAlterConfigs (Configs family; fire once per
+// resource, independently, as that resource's own future resolves) - see the
+// "per-key trampolines (Topics family...)" comment above for the shared
+// contract (transient borrowed strings copied via "s", owned handles passed
+// through as ints, one Py_INCREF(cb) per key before submitting to match one
+// Py_DECREF(cb) per invocation here).
+static void admin_describe_configs_trampoline(int32_t resource_type, const char* resource_name,
+    kafka_admin_Config_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "isKK", (int)resource_type, resource_name,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// incrementalAlterConfigs: Java's per-resource future is KafkaFuture<Void>,
+// so there is no value parameter (as for delete_topics/create_partitions).
+static void admin_alter_configs_trampoline(int32_t resource_type, const char* resource_name,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "isK", (int)resource_type, resource_name,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
 static void admin_list_config_resources_trampoline(kafka_admin_ListConfigResourcesResult_t* r,
                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_client_metrics_trampoline(kafka_admin_ListClientMetricsResourcesResult_t* r,
                                                  kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_log_dirs_trampoline(kafka_admin_DescribeLogDirsResult_t* r,
-                                               kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_replica_log_dirs_trampoline(kafka_admin_AlterReplicaLogDirsResult_t* r,
-                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_replica_log_dirs_trampoline(kafka_admin_DescribeReplicaLogDirsResult_t* r,
-                                                       kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+// describeLogDirs / alterReplicaLogDirs / describeReplicaLogDirs (Log dirs
+// family; fire once per broker/replica, independently, as that key's own
+// future resolves) - see the "per-key trampolines (Topics family...)" comment
+// above for the shared contract. describeLogDirs' key is a broker id (int);
+// alterReplicaLogDirs' and describeReplicaLogDirs' key is a
+// TopicPartitionReplica, delivered as (topic, partition, broker id) rather
+// than through a single opaque key handle, mirroring
+// admin_delete_records_trampoline's two-param TopicPartition handling.
+static void admin_describe_log_dirs_trampoline(int32_t broker_id,
+    kafka_admin_LogDirDescriptionMap_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "iKK", (int)broker_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// alterReplicaLogDirs: Java's per-replica future is KafkaFuture<Void>, so
+// there is no value parameter (as for delete_topics/create_partitions).
+static void admin_alter_replica_log_dirs_trampoline(const char* topic, int32_t partition,
+    int32_t broker_id, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siiK", topic, partition, broker_id,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_describe_replica_log_dirs_trampoline(const char* topic, int32_t partition,
+    int32_t broker_id, kafka_admin_ReplicaLogDirInfo_t* value, kafka_common_Error_t* error,
+    void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siiKK", topic, partition, broker_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- input marshaling helpers ----------------------------------------------
 
@@ -4167,6 +4350,61 @@ static int build_int_array(PyObject* seq, int32_t** out_values, Py_ssize_t* out_
     return 0;
 }
 
+// Distinct-key counters for the per-key async ops whose Rust result map
+// collapses duplicate keys (Java's Map/Set semantics). The native FFI fires the
+// per-key callback once per DISTINCT key, so the Py_INCREF(cb) count must be the
+// distinct count too, not the raw row count - a raw count over-increfs and leaks
+// `cb`. The native side deduplicates its `keys` to match (see each `_async`
+// entry point's dedup comment in `src/ffi/admin.rs`). `n` is one admin call's
+// worth of keys, so the O(n^2) scans are not worth a hash set. Mirrors
+// `count_distinct_config_resources` / `count_distinct_scram_users`.
+
+// Distinct `(resource_type, resource_name)` pairs. Used by describe_configs and
+// incremental_alter_configs (both keyed on `ConfigResource` in Java).
+static Py_ssize_t count_distinct_config_resources(const int32_t* types, const char* const* names, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (types[i] == types[j] && strcmp(names[i], names[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
+// Distinct broker ids, for describe_log_dirs (keyed on broker id in Java).
+static Py_ssize_t count_distinct_i32s(const int32_t* values, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (values[i] == values[j]) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
+// Distinct `(topic, partition, broker)` replicas, for describe_replica_log_dirs
+// (keyed on `TopicPartitionReplica` in Java). The native `read_replicas` drops
+// a NULL-topic row entirely (it produces no key and no future), so such a row
+// is skipped here too, keeping the incref count matched to the firing count.
+static Py_ssize_t count_distinct_replicas(const char* const* topics, const int32_t* partitions,
+                                          const int32_t* brokers, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (topics[i] == NULL) continue;  // dropped by the native layer -> no firing
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (topics[j] != NULL && partitions[i] == partitions[j] && brokers[i] == brokers[j]
+                && strcmp(topics[i], topics[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
 // ---- submits ---------------------------------------------------------------
 
 static PyObject* py_Admin_describe_cluster_async(PyObject* self, PyObject* args) {
@@ -4185,7 +4423,13 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
     if (!PyArg_ParseTuple(args, "KOiiiO", &h, &spec, &timeout_ms, &synonyms, &documentation, &cb))
         return NULL;
 
-    // spec is a sequence of (resource_type:int, resource_name:str).
+    // spec is a sequence of (resource_type:int, resource_name:str), one row
+    // per resource. The Python caller normally deduplicates it (it builds it
+    // from a Set<ConfigResource>-shaped input), but the native FFI keys the
+    // per-resource callback on `ConfigResource` and fires once per DISTINCT
+    // resource regardless, so the incref count is the distinct count too - not
+    // the raw row count - so a direct or non-deduplicating caller cannot leak
+    // `cb`. Mirrors incremental_alter_configs' own count_distinct_config_resources.
     Py_ssize_t n = PySequence_Size(spec);
     if (n < 0) return NULL;
     int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
@@ -4201,7 +4445,10 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
         if (!ok) { PyMem_Free(types); PyMem_Free(names); return NULL; }
         types[i] = (int32_t)t; names[i] = name;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT resource (Java's per-key
+    // KafkaFuture), not one for the whole batch - see
+    // admin_describe_configs_trampoline.
+    admin_incref_n(cb, count_distinct_config_resources(types, names, n));
     kafka_admin_AdminClient_describe_configs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         types, names, (int32_t)n, timeout_ms, synonyms ? true : false,
         documentation ? true : false, admin_describe_configs_trampoline, cb);
@@ -4209,12 +4456,22 @@ static PyObject* py_Admin_describe_configs_async(PyObject* self, PyObject* args)
     Py_RETURN_NONE;
 }
 
+// `count_distinct_config_resources` is defined once near `build_int_array`,
+// shared by describe_configs and incremental_alter_configs. For the latter the
+// C rows are one per *operation*, but Java's incrementalAlterConfigs future is
+// one per *resource*, so the Py_INCREF(cb) count must match the resource count.
+
 static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int timeout_ms; int validate_only; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KOiiO", &h, &spec, &timeout_ms, &validate_only, &cb)) return NULL;
 
     // spec is a sequence of one row per operation:
-    // (resource_type:int, resource_name:str, config_name:str, value:str|None, op_type:int).
+    // (resource_type:int, resource_name:str, config_name:str|None, value:str|None, op_type:int).
+    // A row with config_name=None is the sentinel `read_alter_config_ops`
+    // recognizes as "register this resource with no op contributed" - how a
+    // resource whose op list is empty still reaches the native layer and gets
+    // a real per-key future/callback, matching Java's `configs.keySet()`
+    // iteration (`_incremental_alter_configs_keys_and_spec`'s docstring).
     Py_ssize_t n = PySequence_Size(spec);
     if (n < 0) return NULL;
     int32_t* types = PyMem_Malloc((size_t)(n > 0 ? n : 1) * sizeof(int32_t));
@@ -4231,8 +4488,9 @@ static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObje
         PyObject* item = PySequence_GetItem(spec, i);  // new ref
         int t = 0; int op = 0;
         const char* resource = NULL; const char* key = NULL; const char* value = NULL;
-        // "z" accepts None for the value, which is what DELETE sends.
-        int ok = item && PyArg_ParseTuple(item, "isszi", &t, &resource, &key, &value, &op);
+        // "z" accepts None for both `key` (the no-op sentinel) and `value`
+        // (what DELETE sends).
+        int ok = item && PyArg_ParseTuple(item, "iszzi", &t, &resource, &key, &value, &op);
         Py_XDECREF(item);
         if (!ok) {
             PyMem_Free(types); PyMem_Free(resources); PyMem_Free(keys);
@@ -4242,7 +4500,9 @@ static PyObject* py_Admin_incremental_alter_configs_async(PyObject* self, PyObje
         types[i] = (int32_t)t; resources[i] = resource; keys[i] = key;
         values[i] = value; ops[i] = (int32_t)op;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT resource, not per operation row -
+    // see count_distinct_config_resources and admin_alter_configs_trampoline.
+    admin_incref_n(cb, count_distinct_config_resources(types, resources, n));
     kafka_admin_AdminClient_incremental_alter_configs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, types, resources, keys, values, ops,
         (int32_t)n, timeout_ms, validate_only ? true : false,
@@ -4282,7 +4542,12 @@ static PyObject* py_Admin_describe_log_dirs_async(PyObject* self, PyObject* args
 
     int32_t* brokers = NULL; Py_ssize_t n = 0;
     if (build_int_array(brokers_seq, &brokers, &n) < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT broker (Java's per-key KafkaFuture),
+    // not one for the whole batch - see admin_describe_log_dirs_trampoline. The
+    // native FFI keys the per-broker callback on broker id and fires once per
+    // distinct broker, so the incref count is the distinct count too (not the
+    // raw row count) - so a duplicate broker id cannot leak `cb`.
+    admin_incref_n(cb, count_distinct_i32s(brokers, n));
     kafka_admin_AdminClient_describe_log_dirs_async((kafka_admin_AdminClient_t*)(uintptr_t)h,
         brokers, (int32_t)n, timeout_ms, admin_describe_log_dirs_trampoline, cb);
     PyMem_Free(brokers);
@@ -4315,7 +4580,12 @@ static PyObject* py_Admin_alter_replica_log_dirs_async(PyObject* self, PyObject*
         }
         topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b; log_dirs[i] = dir;
     }
-    Py_INCREF(cb);
+    // One callback invocation per replica (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{TopicPartitionReplica: log_dir}` dict, which
+    // is already unique by construction, so the row count matches the number
+    // of times the native callback will actually fire - see
+    // admin_alter_replica_log_dirs_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_alter_replica_log_dirs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, log_dirs,
         (int32_t)n, timeout_ms, admin_alter_replica_log_dirs_trampoline, cb);
@@ -4348,7 +4618,12 @@ static PyObject* py_Admin_describe_replica_log_dirs_async(PyObject* self, PyObje
         }
         topics[i] = topic; partitions[i] = (int32_t)p; brokers[i] = (int32_t)b;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT replica (Java's per-key
+    // KafkaFuture). The native FFI keys the per-replica callback on
+    // `TopicPartitionReplica` and fires once per distinct replica, so the incref
+    // count is the distinct count too (not the raw row count) - so a duplicate
+    // replica cannot leak `cb` - see admin_describe_replica_log_dirs_trampoline.
+    admin_incref_n(cb, count_distinct_replicas(topics, partitions, brokers, n));
     kafka_admin_AdminClient_describe_replica_log_dirs_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, brokers, (int32_t)n,
         timeout_ms, admin_describe_replica_log_dirs_trampoline, cb);
@@ -4431,6 +4706,21 @@ static PyObject* config_to_py(const kafka_admin_Config_t* config) {
         PyList_SET_ITEM(entries, i, e);
     }
     return entries;
+}
+
+// [config_entry] -- standalone per-key value delivered individually by
+// describe_configs' per-key async callback (admin_describe_configs_trampoline,
+// above), reusing the same config_to_py converter the flattened
+// DescribeConfigsResult path uses. Do NOT call this on a value obtained from
+// the flattened result's DescribeConfigsResult_get_value (borrowed, freed by
+// DescribeConfigsResult_drain instead) - this owns and destroys the handle.
+static PyObject* py_Config_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_Config_t* config = (kafka_admin_Config_t*)(uintptr_t)ptr;
+    PyObject* result = config_to_py(config);
+    kafka_admin_Config_destroy(config);
+    return result;
 }
 
 // {(resource_type, resource_name): (error, [config_entry])}
@@ -4561,6 +4851,44 @@ static PyObject* log_dir_map_to_py(const kafka_admin_LogDirDescriptionMap_t* map
     return d;
 }
 
+// {log_dir: log_dir_description} -- standalone per-key value delivered
+// individually by describe_log_dirs' per-key async callback
+// (admin_describe_log_dirs_trampoline, above), reusing the same
+// log_dir_map_to_py converter the flattened DescribeLogDirsResult path uses.
+// Do NOT call this on a value obtained from the flattened result's
+// DescribeLogDirsResult_get_value (borrowed, freed by
+// DescribeLogDirsResult_drain instead) - this owns and destroys the handle.
+static PyObject* py_LogDirDescriptionMap_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_LogDirDescriptionMap_t* map = (kafka_admin_LogDirDescriptionMap_t*)(uintptr_t)ptr;
+    PyObject* result = log_dir_map_to_py(map);
+    kafka_admin_LogDirDescriptionMap_destroy(map);
+    return result;
+}
+
+// (current_log_dir, current_offset_lag, future_log_dir, future_offset_lag) --
+// standalone per-key value delivered individually by
+// describe_replica_log_dirs' per-key async callback
+// (admin_describe_replica_log_dirs_trampoline, above). Do NOT call this on a
+// value obtained from the flattened result's
+// DescribeReplicaLogDirsResult_get_value (borrowed, freed by
+// DescribeReplicaLogDirsResult_drain instead) - this owns and destroys the
+// handle.
+static PyObject* py_ReplicaLogDirInfo_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ReplicaLogDirInfo_t* info = (kafka_admin_ReplicaLogDirInfo_t*)(uintptr_t)ptr;
+    PyObject* result = Py_BuildValue(
+        "(zLzL)",
+        kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(info),
+        (long long)kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(info),
+        kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(info),
+        (long long)kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(info));
+    kafka_admin_ReplicaLogDirInfo_destroy(info);
+    return result;
+}
+
 // {broker_id: (error, {log_dir: log_dir_description})}
 static PyObject* py_DescribeLogDirsResult_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -4662,14 +4990,41 @@ static PyObject* py_DescribeReplicaLogDirsResult_drain(PyObject* self, PyObject*
 
 static void admin_elect_leaders_trampoline(kafka_admin_ElectLeadersResult_t* r,
                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_partition_reassignments_trampoline(
-    kafka_admin_AlterPartitionReassignmentsResult_t* r,
-    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_partition_reassignments_trampoline(
     kafka_admin_ListPartitionReassignmentsResult_t* r,
     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_list_offsets_trampoline(kafka_admin_ListOffsetsResult_t* r,
-                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// alterPartitionReassignments / listOffsets (Partitions/offsets family; fire
+// once per partition, independently, as that key's own future resolves) - see
+// the "per-key trampolines (Topics family...)" comment above for the shared
+// contract. The key is a `TopicPartition`, delivered as (topic, partition)
+// rather than through a single opaque key handle, mirroring
+// admin_delete_records_trampoline's two-param TopicPartition handling.
+
+// alterPartitionReassignments: Java's per-partition future is
+// KafkaFuture<Void>, so there is no value parameter (as for
+// alter_replica_log_dirs).
+static void admin_alter_partition_reassignments_trampoline(const char* topic, int32_t partition,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_list_offsets_trampoline(const char* topic, int32_t partition,
+    kafka_admin_ListOffsetsResultInfo_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siKK", topic, partition,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- shared (topic, partition) spec reader ---------------------------------
 
@@ -4785,7 +5140,12 @@ static PyObject* py_Admin_alter_partition_reassignments_async(PyObject* self, Py
         PyMem_Free(replica_ptrs); PyMem_Free(replica_counts);
         return NULL;
     }
-    Py_INCREF(cb);
+    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{(topic, partition): NewPartitionReassignment
+    // | None}` dict, which is already unique by construction, so the row count
+    // matches the number of times the native callback will actually fire - see
+    // admin_alter_partition_reassignments_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_alter_partition_reassignments_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, cancel, replica_ptrs,
         replica_counts, (int32_t)n, timeout_ms,
@@ -4843,7 +5203,12 @@ static PyObject* py_Admin_list_offsets_async(PyObject* self, PyObject* args) {
         topics[i] = topic; partitions[i] = (int32_t)p;
         is_timestamp[i] = ts ? true : false; values[i] = (int64_t)value;
     }
-    Py_INCREF(cb);
+    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{(topic, partition): OffsetSpec}` dict, which
+    // is already unique by construction, so the row count matches the number of
+    // times the native callback will actually fire - see
+    // admin_list_offsets_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_list_offsets_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, is_timestamp, values,
         (int32_t)n, timeout_ms, (int32_t)isolation_level, admin_list_offsets_trampoline, cb);
@@ -4962,6 +5327,43 @@ static PyObject* py_ListPartitionReassignmentsResult_drain(PyObject* self, PyObj
     return d;
 }
 
+// (offset, timestamp, leader_epoch_or_None) -- shared between the flattened
+// ListOffsetsResult_drain (below) and the standalone per-key
+// ListOffsetsResultInfo_drain (Phase D), both of which read the same three
+// scalar fields off a (borrowed vs. owned, respectively) info handle.
+static PyObject* list_offsets_info_value_to_py(const kafka_admin_ListOffsetsResultInfo_t* info) {
+    if (info == NULL) {
+        Py_RETURN_NONE;
+    }
+    int32_t epoch = 0;
+    // Java's leaderEpoch() is Optional<Integer>: absent stays None.
+    bool has_epoch = kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &epoch);
+    return has_epoch
+        ? Py_BuildValue("(LLi)",
+                        (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
+                        (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
+                        epoch)
+        : Py_BuildValue("(LLO)",
+                        (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
+                        (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
+                        Py_None);
+}
+
+// (offset, timestamp, leader_epoch_or_None) -- standalone per-key value
+// delivered individually by list_offsets' per-key async callback
+// (admin_list_offsets_trampoline, above), reusing list_offsets_info_value_to_py.
+// Do NOT call this on a value obtained from the flattened result's
+// ListOffsetsResult_get_value (borrowed, freed by ListOffsetsResult_drain
+// instead) - this owns and destroys the handle.
+static PyObject* py_ListOffsetsResultInfo_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ListOffsetsResultInfo_t* info = (kafka_admin_ListOffsetsResultInfo_t*)(uintptr_t)ptr;
+    PyObject* result = list_offsets_info_value_to_py(info);
+    kafka_admin_ListOffsetsResultInfo_destroy(info);
+    return result;
+}
+
 // {(topic, partition): (error, (offset, timestamp, leader_epoch_or_None))}
 static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -4976,24 +5378,7 @@ static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
         PyObject* err = borrowed_error_to_py(kafka_admin_ListOffsetsResult_get_error(r, i));
         const kafka_admin_ListOffsetsResultInfo_t* info =
             kafka_admin_ListOffsetsResult_get_value(r, i);
-        PyObject* value;
-        if (info == NULL) {
-            Py_INCREF(Py_None);
-            value = Py_None;
-        } else {
-            int32_t epoch = 0;
-            // Java's leaderEpoch() is Optional<Integer>: absent stays None.
-            bool has_epoch = kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &epoch);
-            value = has_epoch
-                ? Py_BuildValue("(LLi)",
-                                (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
-                                (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
-                                epoch)
-                : Py_BuildValue("(LLO)",
-                                (long long)kafka_admin_ListOffsetsResultInfo_offset(info),
-                                (long long)kafka_admin_ListOffsetsResultInfo_timestamp(info),
-                                Py_None);
-        }
+        PyObject* value = list_offsets_info_value_to_py(info);
         PyObject* val = error_value_pair(err, value);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
@@ -5013,20 +5398,109 @@ static void admin_list_groups_trampoline(kafka_admin_ListGroupsResult_t* r,
                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_consumer_groups_trampoline(kafka_admin_ListConsumerGroupsResult_t* r,
                                                   kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_consumer_groups_trampoline(kafka_admin_DescribeConsumerGroupsResult_t* r,
-                                                      kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_classic_groups_trampoline(kafka_admin_DescribeClassicGroupsResult_t* r,
-                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_list_consumer_group_offsets_trampoline(kafka_admin_ListConsumerGroupOffsetsResult_t* r,
-                                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_consumer_group_offsets_trampoline(kafka_admin_AlterConsumerGroupOffsetsResult_t* r,
-                                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_consumer_group_offsets_trampoline(kafka_admin_DeleteConsumerGroupOffsetsResult_t* r,
-                                                           kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_consumer_groups_trampoline(kafka_admin_DeleteConsumerGroupsResult_t* r,
-                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_remove_members_trampoline(kafka_admin_RemoveMembersFromConsumerGroupResult_t* r,
-                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// describeConsumerGroups / describeClassicGroups / listConsumerGroupOffsets /
+// deleteConsumerGroups (Phase E; fire once per group, independently, as that
+// key's own future resolves) - see the "per-key trampolines (Topics
+// family...)" comment above for the shared contract. The key is a group id
+// (str).
+
+// describeConsumerGroups: Java's per-group future is
+// KafkaFuture<ConsumerGroupDescription>, so `value` is an owned handle drained
+// by `ConsumerGroupDescription_drain` on the Python side.
+static void admin_describe_consumer_groups_trampoline(const char* group_id,
+    kafka_admin_ConsumerGroupDescription_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", group_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// describeClassicGroups: same shape as describeConsumerGroups, value type
+// ClassicGroupDescription.
+static void admin_describe_classic_groups_trampoline(const char* group_id,
+    kafka_admin_ClassicGroupDescription_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", group_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// listConsumerGroupOffsets: Java's per-group future is
+// KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>, so `value` is an owned
+// OffsetAndMetadataMap handle drained by `OffsetAndMetadataMap_drain`.
+static void admin_list_consumer_group_offsets_trampoline(const char* group_id,
+    kafka_admin_OffsetAndMetadataMap_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", group_id,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteConsumerGroups: Java's per-group future is KafkaFuture<Void>, so there
+// is no value parameter (as for alter_partition_reassignments).
+static void admin_delete_consumer_groups_trampoline(const char* group_id,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", group_id,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// alterConsumerGroupOffsets / deleteConsumerGroupOffsets (Phase E; fire once
+// per partition, independently). The key is a `TopicPartition`, delivered as
+// (topic, partition) - mirrors admin_alter_partition_reassignments_trampoline.
+// Java's per-partition future is KafkaFuture<Void> for both, so there is no
+// value parameter.
+static void admin_alter_consumer_group_offsets_trampoline(const char* topic, int32_t partition,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+static void admin_delete_consumer_group_offsets_trampoline(const char* topic, int32_t partition,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siK", topic, partition,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// removeMembersFromConsumerGroup (Phase E; fires once per member,
+// independently, keyed by group instance id). Java's per-member future is
+// KafkaFuture<Void>, so there is no value parameter. In `removeAll` mode there
+// is no per-member key: the callback fires EXACTLY ONCE with a NULL group
+// instance id (-> Python None), carrying the whole operation's all() outcome.
+static void admin_remove_members_trampoline(const char* group_instance_id,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", group_instance_id,
+        (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- shared string-array reader --------------------------------------------
 
@@ -5099,7 +5573,11 @@ static PyObject* py_Admin_describe_consumer_groups_async(PyObject* self, PyObjec
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(groups, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per group (Java's per-key KafkaFuture). `groups`
+    // is built from the caller's already-deduplicated key list, which matches
+    // the number of times the native callback will actually fire - see
+    // admin_describe_consumer_groups_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_consumer_groups_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         include_authorized ? true : false, admin_describe_consumer_groups_trampoline, cb);
@@ -5115,7 +5593,8 @@ static PyObject* py_Admin_describe_classic_groups_async(PyObject* self, PyObject
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(groups, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per group - see admin_describe_classic_groups_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_classic_groups_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         include_authorized ? true : false, admin_describe_classic_groups_trampoline, cb);
@@ -5171,7 +5650,12 @@ static PyObject* py_Admin_list_consumer_group_offsets_async(PyObject* self, PyOb
     }
 
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per group (Java's per-key KafkaFuture). `spec`
+        // is built from the caller's `{group_id: ListConsumerGroupOffsetsSpec |
+        // None}` dict, already unique by construction, so the row count matches
+        // the number of times the native callback will actually fire - see
+        // admin_list_consumer_group_offsets_trampoline.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_list_consumer_group_offsets_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, groups, all_partitions,
             (const char* const* const*)topics, (const int32_t* const*)partitions, counts,
@@ -5222,7 +5706,15 @@ static PyObject* py_Admin_alter_consumer_group_offsets_async(PyObject* self, PyO
         topics[i] = topic; partitions[i] = (int32_t)p; offsets[i] = (int64_t)offset;
         metadata[i] = meta; epochs[i] = (int32_t)epoch; has_epoch[i] = has ? true : false;
     }
-    Py_INCREF(cb);
+    // One callback invocation per partition (Java's per-key KafkaFuture). `spec`
+    // is built from the caller's `{(topic, partition): OffsetAndMetadata}`
+    // dict, already unique by construction, so the row count matches the
+    // number of times the native callback will actually fire - see
+    // admin_alter_consumer_group_offsets_trampoline. When `n` is 0 (an empty
+    // offsets map) the callback never fires at all - there is no per-key slot
+    // for the outcome, mirroring Java's empty `Map<TopicPartition,
+    // KafkaFuture<Void>>` in that case.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_alter_consumer_group_offsets_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, offsets, metadata,
         epochs, has_epoch, (int32_t)n, timeout_ms, admin_alter_consumer_group_offsets_trampoline,
@@ -5239,7 +5731,10 @@ static PyObject* py_Admin_delete_consumer_group_offsets_async(PyObject* self, Py
     const char** topics = NULL; int32_t* partitions = NULL;
     Py_ssize_t n = build_topic_partitions(spec, &topics, &partitions);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per partition - see
+    // admin_delete_consumer_group_offsets_trampoline. Never fires at all when
+    // `n` is 0, for the same reason given on alter_consumer_group_offsets_async.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_consumer_group_offsets_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, topics, partitions, (int32_t)n,
         timeout_ms, admin_delete_consumer_group_offsets_trampoline, cb);
@@ -5254,7 +5749,8 @@ static PyObject* py_Admin_delete_consumer_groups_async(PyObject* self, PyObject*
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(groups, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per group - see admin_delete_consumer_groups_trampoline.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_delete_consumer_groups_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         admin_delete_consumer_groups_trampoline, cb);
@@ -5272,7 +5768,15 @@ static PyObject* py_Admin_remove_members_from_consumer_group_async(PyObject* sel
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(members, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per member (Java's per-key KafkaFuture), keyed by
+    // group instance id - see admin_remove_members_trampoline. In `removeAll`
+    // mode there is no per-member key: `memberResult` is not applicable, so the
+    // callback fires EXACTLY ONCE with a NULL group instance id, carrying the
+    // whole operation's `all()` outcome. `members` is empty in that mode (n == 0),
+    // so incref once for that single whole-op callback. For an (unsubmittable)
+    // empty member list WITHOUT `removeAll`, `n` is also 0 and the callback never
+    // fires - there is no per-member key to deliver it to, and no incref is owed.
+    admin_incref_n(cb, remove_all ? 1 : n);
     kafka_admin_AdminClient_remove_members_from_consumer_group_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, group_id, remove_all ? true : false, ids,
         (int32_t)n, reason, timeout_ms, admin_remove_members_trampoline, cb);
@@ -5541,6 +6045,25 @@ static PyObject* py_DescribeConsumerGroupsResult_drain(PyObject* self, PyObject*
     return d;
 }
 
+// (group_id, is_simple, members, partition_assignor, group_type, state,
+//  group_state, coordinator, authorized_operations, group_epoch,
+//  target_assignment_epoch) -- standalone per-key value delivered individually
+// by describe_consumer_groups' per-key async callback
+// (admin_describe_consumer_groups_trampoline, above), reusing
+// consumer_group_description_to_py. Do NOT call this on a value obtained from
+// the flattened result's DescribeConsumerGroupsResult_get_value (borrowed,
+// freed by DescribeConsumerGroupsResult_destroy instead) - this owns and
+// destroys the handle.
+static PyObject* py_ConsumerGroupDescription_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ConsumerGroupDescription_t* d =
+        (kafka_admin_ConsumerGroupDescription_t*)(uintptr_t)ptr;
+    PyObject* result = consumer_group_description_to_py(d);
+    kafka_admin_ConsumerGroupDescription_destroy(d);
+    return result;
+}
+
 // {group_id: (error, description_or_None)}
 static PyObject* py_DescribeClassicGroupsResult_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -5566,6 +6089,24 @@ static PyObject* py_DescribeClassicGroupsResult_drain(PyObject* self, PyObject* 
     }
     kafka_admin_DescribeClassicGroupsResult_destroy(r);
     return d;
+}
+
+// (group_id, protocol, protocol_data, is_simple, members, state, coordinator,
+//  authorized_operations) -- standalone per-key value delivered individually
+// by describe_classic_groups' per-key async callback
+// (admin_describe_classic_groups_trampoline, above), reusing
+// classic_group_description_to_py. Do NOT call this on a value obtained from
+// the flattened result's DescribeClassicGroupsResult_get_value (borrowed,
+// freed by DescribeClassicGroupsResult_destroy instead) - this owns and
+// destroys the handle.
+static PyObject* py_ClassicGroupDescription_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_ClassicGroupDescription_t* d =
+        (kafka_admin_ClassicGroupDescription_t*)(uintptr_t)ptr;
+    PyObject* result = classic_group_description_to_py(d);
+    kafka_admin_ClassicGroupDescription_destroy(d);
+    return result;
 }
 
 // {(topic, partition): (offset, metadata, leader_epoch) | None}
@@ -5630,6 +6171,23 @@ static PyObject* py_ListConsumerGroupOffsetsResult_drain(PyObject* self, PyObjec
     }
     kafka_admin_ListConsumerGroupOffsetsResult_destroy(r);
     return d;
+}
+
+// {(topic, partition): (offset, metadata, leader_epoch_or_None) | None} --
+// standalone per-key value delivered individually by
+// list_consumer_group_offsets' per-key async callback
+// (admin_list_consumer_group_offsets_trampoline, above), reusing
+// offset_map_to_py. Do NOT call this on a value obtained from the flattened
+// result's ListConsumerGroupOffsetsResult_get_value (borrowed, freed by
+// ListConsumerGroupOffsetsResult_destroy instead) - this owns and destroys
+// the handle.
+static PyObject* py_OffsetAndMetadataMap_drain(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_OffsetAndMetadataMap_t* map = (kafka_admin_OffsetAndMetadataMap_t*)(uintptr_t)ptr;
+    PyObject* result = offset_map_to_py(map);
+    kafka_admin_OffsetAndMetadataMap_destroy(map);
+    return result;
 }
 
 // {(topic, partition): error_or_None} — per-partition future is
@@ -5740,18 +6298,20 @@ static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, P
 // every drain below is unreachable from the test suite. Their Py_BuildValue
 // arity is instead checked statically by `cargo xtask check-bindings`, and the
 // field *order* by review against the matching `_to_*` unpacker in admin.py.
+//
+// createAcls / deleteAcls / alterClientQuotas fire once PER KEY, independently
+// (Phase F of the per-key-callback reversal), unlike the still-joined
+// describeAcls / describeClientQuotas above and below - each has a single
+// future for the whole call in Java, so nothing here changes for them. Their
+// trampolines are defined further below (after `acl_binding_to_py` /
+// `acl_binding_filter_to_py` / `client_quota_entity_to_py`, which they reuse
+// to decode the owned per-key handle they each receive).
 // ---------------------------------------------------------------------------
 
-static void admin_create_acls_trampoline(kafka_admin_CreateAclsResult_t* r,
-                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_acls_trampoline(kafka_admin_DescribeAclsResult_t* r,
                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_delete_acls_trampoline(kafka_admin_DeleteAclsResult_t* r,
-                                         kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_client_quotas_trampoline(kafka_admin_DescribeClientQuotasResult_t* r,
                                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_client_quotas_trampoline(kafka_admin_AlterClientQuotasResult_t* r,
-                                                 kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
 // ---- ACL request marshaling -------------------------------------------------
 
@@ -5828,6 +6388,38 @@ static int build_acl_arrays(PyObject* seq, int nullable, acl_arrays_t* a) {
     return 0;
 }
 
+// NULL-aware string equality mirroring how the native ACL key types compare:
+// for a filter (nullable form) NULL is Java's "match any", distinct from "";
+// for a binding the strings are never NULL (`s`, non-nullable). Two NULLs are
+// equal; a NULL and a non-NULL differ; otherwise strcmp.
+static int acl_str_eq(const char* a, const char* b) {
+    if (a == NULL || b == NULL) return a == b;
+    return strcmp(a, b) == 0;
+}
+
+// Distinct ACL bindings/filters among the seven parallel arrays, for
+// createAcls (keyed on `AclBinding`) and deleteAcls (keyed on
+// `AclBindingFilter`), both of which the Rust core collapses. The native FFI
+// fires the per-key callback once per DISTINCT key, so the Py_INCREF(cb) count
+// must be the distinct count too, or a duplicate binding/filter leaks `cb`.
+static Py_ssize_t count_distinct_acls(const acl_arrays_t* a) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < a->count; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (a->resource_types[i] == a->resource_types[j]
+                && a->pattern_types[i] == a->pattern_types[j]
+                && a->operations[i] == a->operations[j]
+                && a->permission_types[i] == a->permission_types[j]
+                && acl_str_eq(a->resource_names[i], a->resource_names[j])
+                && acl_str_eq(a->principals[i], a->principals[j])
+                && acl_str_eq(a->hosts[i], a->hosts[j])) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
 // (resource_type, resource_name, pattern_type, principal, host, operation,
 //  permission_type) — the field order `_to_acl_binding` unpacks.
 static PyObject* acl_binding_to_py(const kafka_common_AclBinding_t* b) {
@@ -5873,6 +6465,60 @@ static PyObject* client_quota_entity_to_py(const kafka_common_ClientQuotaEntity_
     return pairs;
 }
 
+// createAcls: the key is delivered as an owned kafka_common_AclBinding_t
+// handle - reuse acl_binding_to_py (already used by the synchronous drain
+// path, on a *borrowed* handle there) to extract its seven fields as a tuple,
+// then destroy the now-owned handle here, since this is its only consumer.
+static void admin_create_acls_trampoline(kafka_common_AclBinding_t* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* key_tuple = acl_binding_to_py(key);
+    kafka_common_AclBinding_destroy(key);
+    PyObject* r = PyObject_CallFunction(cb, "OK", key_tuple,
+        (unsigned long long)(uintptr_t)error);
+    Py_XDECREF(key_tuple);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// deleteAcls: the key is an owned kafka_common_AclBindingFilter_t handle
+// (destroyed here); the value, when present, is an owned
+// kafka_admin_DeleteAclsFilterResults_t handle passed through as an int for
+// `DeleteAclsFilterResults_drain` (below) to drain+destroy - mirroring how
+// every other per-key value handle in this file crosses the boundary.
+static void admin_delete_acls_trampoline(kafka_common_AclBindingFilter_t* key,
+    kafka_admin_DeleteAclsFilterResults_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* key_tuple = acl_binding_filter_to_py(key);
+    kafka_common_AclBindingFilter_destroy(key);
+    PyObject* r = PyObject_CallFunction(cb, "OKK", key_tuple,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    Py_XDECREF(key_tuple);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// alterClientQuotas: the key is an owned kafka_common_ClientQuotaEntity_t
+// handle - reuse client_quota_entity_to_py (also used by the synchronous
+// drain path on a borrowed handle) then destroy it here.
+static void admin_alter_client_quotas_trampoline(kafka_common_ClientQuotaEntity_t* key,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* key_tuple = client_quota_entity_to_py(key);
+    kafka_common_ClientQuotaEntity_destroy(key);
+    PyObject* r = PyObject_CallFunction(cb, "OK", key_tuple,
+        (unsigned long long)(uintptr_t)error);
+    Py_XDECREF(key_tuple);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
 // ---- submits ----------------------------------------------------------------
 
 static PyObject* py_Admin_create_acls_async(PyObject* self, PyObject* args) {
@@ -5881,7 +6527,12 @@ static PyObject* py_Admin_create_acls_async(PyObject* self, PyObject* args) {
 
     acl_arrays_t a;
     if (build_acl_arrays(acls, 0, &a) < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT binding (Java's per-key
+    // KafkaFuture), not one for the whole batch - see
+    // admin_create_acls_trampoline. The native FFI keys on `AclBinding` and
+    // fires once per distinct binding, so the incref count is the distinct
+    // count too (not the raw row count) - a duplicate binding cannot leak `cb`.
+    admin_incref_n(cb, count_distinct_acls(&a));
     kafka_admin_AdminClient_create_acls_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
         a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
@@ -5909,7 +6560,12 @@ static PyObject* py_Admin_delete_acls_async(PyObject* self, PyObject* args) {
 
     acl_arrays_t a;
     if (build_acl_arrays(filters, 1, &a) < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT filter (Java's per-key
+    // KafkaFuture), not one for the whole batch - see
+    // admin_delete_acls_trampoline. The native FFI keys on `AclBindingFilter`
+    // and fires once per distinct filter, so the incref count is the distinct
+    // count too (not the raw row count) - a duplicate filter cannot leak `cb`.
+    admin_incref_n(cb, count_distinct_acls(&a));
     kafka_admin_AdminClient_delete_acls_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, a.resource_types, a.resource_names,
         a.pattern_types, a.principals, a.hosts, a.operations, a.permission_types,
@@ -6057,7 +6713,14 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
     }
 
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per requested row - Java's per-entity
+        // future map collapses a duplicate entity, but the native `keys` for
+        // the fan-out is built from these raw rows, not deduplicated by
+        // entity (see admin_async_per_key_op / read_client_quota_entity_keys
+        // in src/ffi/admin.rs), so the increment count is the row count `n`,
+        // not the (possibly smaller) distinct-entity count the Python
+        // `futures` dict holds.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_alter_client_quotas_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h,
             (const char* const* const*)entity_types, (const char* const* const*)entity_names,
@@ -6078,27 +6741,17 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
 }
 
 // ---- drains -----------------------------------------------------------------
-
-// {binding_tuple: error_or_None}
-static PyObject* py_CreateAclsResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_CreateAclsResult_t* r = (kafka_admin_CreateAclsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_CreateAclsResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_CreateAclsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key = acl_binding_to_py(kafka_admin_CreateAclsResult_get_binding(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_CreateAclsResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_CreateAclsResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_CreateAclsResult_destroy(r);
-    return d;
-}
+//
+// CreateAclsResult_drain / DeleteAclsResult_drain / AlterClientQuotasResult_drain
+// (the whole-batch joined-callback drains for createAcls / deleteAcls /
+// alterClientQuotas) are gone: Phase F moved those three RPCs to per-key
+// delivery, so admin.py no longer calls them — see
+// admin_create_acls_trampoline / admin_delete_acls_trampoline /
+// admin_alter_client_quotas_trampoline above and DeleteAclsFilterResults_drain
+// below for their replacements. The flattened `kafka_admin_CreateAclsResult_t`
+// / `kafka_admin_DeleteAclsResult_t` / `kafka_admin_AlterClientQuotasResult_t`
+// C types themselves are unchanged — they still back the synchronous (blocking)
+// FFI entry points, which this Python binding never calls directly.
 
 // [binding_tuple] — a plain list, because describeAcls has one future for the
 // whole call and so no key to hang an error on.
@@ -6121,44 +6774,29 @@ static PyObject* py_DescribeAclsResult_drain(PyObject* self, PyObject* args) {
     return list;
 }
 
-// {filter_tuple: (error_or_None, [(binding_or_None, error_or_None)])}
-//
-// Two levels, because Java's FilterResults holds one FilterResult per matched
-// ACL and each carries either a binding or its own exception. The outer error
-// is the filter's future failing, which is a different thing.
-static PyObject* py_DeleteAclsResult_drain(PyObject* self, PyObject* args) {
+// [(binding_or_None, error_or_None)] — drains+destroys the owned
+// kafka_admin_DeleteAclsFilterResults_t handle delete_acls's per-key async
+// callback delivers as its value (Phase F), one row per ACL the filter
+// matched. Same per-row shape as the synchronous flattened result's nested
+// `results[i][j]` index level, just for a single filter.
+static PyObject* py_DeleteAclsFilterResults_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_DeleteAclsResult_t* r = (kafka_admin_DeleteAclsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_DeleteAclsResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_DeleteAclsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        int32_t rn = kafka_admin_DeleteAclsResult_get_result_count(r, i);
-        PyObject* results = PyList_New(rn < 0 ? 0 : rn);
-        if (results == NULL) { Py_DECREF(d); kafka_admin_DeleteAclsResult_destroy(r); return NULL; }
-        for (int32_t j = 0; j < rn; j++) {
-            PyObject* b = acl_binding_to_py(kafka_admin_DeleteAclsResult_get_binding(r, i, j));
-            PyObject* e =
-                borrowed_error_to_py(kafka_admin_DeleteAclsResult_get_result_error(r, i, j));
-            PyObject* row = error_value_pair(e, b);
-            if (row == NULL) {
-                Py_DECREF(results); Py_DECREF(d);
-                kafka_admin_DeleteAclsResult_destroy(r); return NULL;
-            }
-            PyList_SET_ITEM(results, j, row);
+    kafka_admin_DeleteAclsFilterResults_t* r = (kafka_admin_DeleteAclsFilterResults_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DeleteAclsFilterResults_count(r);
+    PyObject* list = PyList_New(n < 0 ? 0 : n);
+    if (list == NULL) { kafka_admin_DeleteAclsFilterResults_destroy(r); return NULL; }
+    for (int32_t j = 0; j < n; j++) {
+        PyObject* b = acl_binding_to_py(kafka_admin_DeleteAclsFilterResults_get_binding(r, j));
+        PyObject* e = borrowed_error_to_py(kafka_admin_DeleteAclsFilterResults_get_error(r, j));
+        PyObject* row = error_value_pair(e, b);
+        if (row == NULL) {
+            Py_DECREF(list); kafka_admin_DeleteAclsFilterResults_destroy(r); return NULL;
         }
-        PyObject* key = acl_binding_filter_to_py(kafka_admin_DeleteAclsResult_get_filter(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_DeleteAclsResult_get_error(r, i));
-        PyObject* value = error_value_pair(err, results);
-        if (!key || !value || PyDict_SetItem(d, key, value) < 0) {
-            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
-            kafka_admin_DeleteAclsResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(value);
+        PyList_SET_ITEM(list, j, row);
     }
-    kafka_admin_DeleteAclsResult_destroy(r);
-    return d;
+    kafka_admin_DeleteAclsFilterResults_destroy(r);
+    return list;
 }
 
 // {entity_pairs: [(quota_key, quota_value)]}
@@ -6204,46 +6842,56 @@ static PyObject* py_DescribeClientQuotasResult_drain(PyObject* self, PyObject* a
     return d;
 }
 
-// {entity_pairs: error_or_None}
-static PyObject* py_AlterClientQuotasResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_AlterClientQuotasResult_t* r = (kafka_admin_AlterClientQuotasResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_AlterClientQuotasResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_AlterClientQuotasResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key =
-            client_quota_entity_to_py(kafka_admin_AlterClientQuotasResult_get_entity(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_AlterClientQuotasResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_AlterClientQuotasResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_AlterClientQuotasResult_destroy(r);
-    return d;
-}
-
 // ---------------------------------------------------------------------------
 // B5b — SCRAM, delegation tokens and features
 //
-// Java's MockAdminClient throws for the two SCRAM RPCs
-// (MockAdminClient.java:1251-1259), so the success branch of those two drains
-// is unreachable from the test suite; their Py_BuildValue arity is checked
-// statically by `cargo xtask check-bindings` and their field order by review
+// Java's MockAdminClient throws for describeUserScramCredentials
+// (MockAdminClient.java:1251-1254), so the success branch of that drain is
+// unreachable from the test suite; its Py_BuildValue arity is checked
+// statically by `cargo xtask check-bindings` and its field order by review
 // against the matching `_to_*` unpacker in admin.py. The mock *does* implement
 // the four delegation-token RPCs and both feature RPCs, so those drains are
 // exercised end to end by test_admin.py.
+//
+// alterUserScramCredentials / updateFeatures fire once PER KEY, independently
+// (Phase F), each keyed by a plain string (user / feature name) delivered
+// borrowed - same shape as deleteConsumerGroups' group id
+// (admin_delete_consumer_groups_trampoline) - so there is no handle to decode
+// or destroy here, unlike createAcls/deleteAcls/alterClientQuotas above.
 // ---------------------------------------------------------------------------
 
 static void admin_describe_user_scram_credentials_trampoline(
     kafka_admin_DescribeUserScramCredentialsResult_t* r,
     kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_alter_user_scram_credentials_trampoline(
-    kafka_admin_AlterUserScramCredentialsResult_t* r,
-    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+
+// Distinct-user count for `alterUserScramCredentials`' per-key callback fan-out.
+// Java's result map is keyed by user, so two rows naming the same user collapse
+// to ONE outcome future and therefore ONE callback firing; the incref count
+// must be the distinct-user count, not the row count, or the callback object
+// leaks (over-incref). Mirrors `count_distinct_config_resources` and the Rust
+// `keys` dedup in `kafka_admin_AdminClient_alter_user_scram_credentials_async`.
+static Py_ssize_t count_distinct_scram_users(const char* const* users, Py_ssize_t n) {
+    Py_ssize_t distinct = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (Py_ssize_t j = 0; j < i; j++) {
+            if (strcmp(users[i], users[j]) == 0) { seen = 1; break; }
+        }
+        if (!seen) distinct++;
+    }
+    return distinct;
+}
+
+static void admin_alter_user_scram_credentials_trampoline(const char* user,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", user, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
 static void admin_create_delegation_token_trampoline(kafka_admin_CreateDelegationTokenResult_t* r,
                                                      kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_renew_delegation_token_trampoline(kafka_admin_RenewDelegationTokenResult_t* r,
@@ -6254,8 +6902,15 @@ static void admin_describe_delegation_token_trampoline(kafka_admin_DescribeDeleg
                                                        kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_features_trampoline(kafka_admin_DescribeFeaturesResult_t* r,
                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_update_features_trampoline(kafka_admin_UpdateFeaturesResult_t* r,
-                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+static void admin_update_features_trampoline(const char* feature,
+    kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sK", feature, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 
 // ---- value converters -------------------------------------------------------
 
@@ -6435,7 +7090,14 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
         has_salts[i] = salt_obj != Py_None;
     }
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per DISTINCT user: Java's per-user future map
+        // collapses two rows naming the same user into one outcome, and the
+        // native `keys` fan-out dedupes to match (see
+        // `kafka_admin_AdminClient_alter_user_scram_credentials_async`'s `keys`
+        // in src/ffi/admin.rs). The increment count is therefore the
+        // distinct-user count, not the row count `n`, or the callback object
+        // would be over-increffed and leak.
+        admin_incref_n(cb, count_distinct_scram_users(users, n));
         kafka_admin_AdminClient_alter_user_scram_credentials_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, users, is_deletions, mechanisms, iterations,
             passwords, password_lens, salts, salt_lens, has_salts, (int32_t)n, timeout_ms,
@@ -6540,7 +7202,10 @@ static PyObject* py_Admin_update_features_async(PyObject* self, PyObject* args) 
         upgrade_types[i] = (int32_t)upgrade_type;
     }
     if (!failed) {
-        Py_INCREF(cb);
+        // One callback invocation per feature (Java's per-key KafkaFuture),
+        // not one for the whole batch - see admin_update_features_trampoline.
+        // `rows` comes from a Python dict's keys, already unique.
+        admin_incref_n(cb, n);
         kafka_admin_AdminClient_update_features_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, features, max_version_levels, upgrade_types,
             (int32_t)n, timeout_ms, validate_only ? true : false, admin_update_features_trampoline,
@@ -6630,29 +7295,10 @@ static PyObject* py_DescribeUserScramCredentialsResult_drain(PyObject* self, PyO
     return d;
 }
 
-// {user: error_or_None}
-static PyObject* py_AlterUserScramCredentialsResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_AlterUserScramCredentialsResult_t* r =
-        (kafka_admin_AlterUserScramCredentialsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_AlterUserScramCredentialsResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_AlterUserScramCredentialsResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key =
-            PyUnicode_FromString(kafka_admin_AlterUserScramCredentialsResult_get_user(r, i));
-        PyObject* err =
-            borrowed_error_to_py(kafka_admin_AlterUserScramCredentialsResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_AlterUserScramCredentialsResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_AlterUserScramCredentialsResult_destroy(r);
-    return d;
-}
+// AlterUserScramCredentialsResult_drain (the whole-batch joined-callback
+// drain) is gone: Phase F moved alterUserScramCredentials to per-key
+// delivery, keyed by a plain string with no handle to drain at all — see
+// admin_alter_user_scram_credentials_trampoline above.
 
 // One token tuple.
 static PyObject* py_CreateDelegationTokenResult_drain(PyObject* self, PyObject* args) {
@@ -6763,29 +7409,13 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
     return out;
 }
 
-// {feature: error_or_None}
-static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_UpdateFeaturesResult_t* r = (kafka_admin_UpdateFeaturesResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_UpdateFeaturesResult_count(r);
-    PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_UpdateFeaturesResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* key = PyUnicode_FromString(kafka_admin_UpdateFeaturesResult_get_feature(r, i));
-        PyObject* err = borrowed_error_to_py(kafka_admin_UpdateFeaturesResult_get_error(r, i));
-        if (!key || !err || PyDict_SetItem(d, key, err) < 0) {
-            Py_XDECREF(key); Py_XDECREF(err); Py_DECREF(d);
-            kafka_admin_UpdateFeaturesResult_destroy(r); return NULL;
-        }
-        Py_DECREF(key); Py_DECREF(err);
-    }
-    kafka_admin_UpdateFeaturesResult_destroy(r);
-    return d;
-}
+// UpdateFeaturesResult_drain (the whole-batch joined-callback drain) is gone:
+// Phase F moved updateFeatures to per-key delivery, keyed by a plain string
+// with no handle to drain at all — see admin_update_features_trampoline
+// above.
 
 // ---------------------------------------------------------------------------
-// B6 — producers and transactions
+// B6 — producers and transactions (Phase G: per-key delivery)
 //
 // Java's MockAdminClient throws for all six (MockAdminClient.java:1368-1395),
 // so the *success* branch of every drain below is unreachable from the test
@@ -6795,18 +7425,57 @@ static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
 // error branch of each: the mocks that throw per key still echo the requested
 // key set, so key columns and per-key errors flow end to end.
 //
+// describeProducers / describeTransactions / fenceProducers now fire once PER
+// KEY (Java's per-key KafkaFuture): the per-key value is the flattened result
+// handle carrying a single key, drained at index 0 by the same *_drain +
+// `_to_*` unpacker admin.py already had, then destroyed. listTransactions stays
+// JOINED (one fire_handle_cb): Java's ListTransactionsResult is a single
+// KafkaFuture<Map<broker, KafkaFuture>> with no per-transactional-id future
+// map, like listTopics/listGroups.
+//
 // `abortTransaction` and `forceTerminateTransaction` have no result handle at
 // all (Java's AbortTransactionResult exposes only all(), and
 // TerminateTransactionResult only result()), so they reuse `admin_op_trampoline`
 // and the `_resolve_void` / `_free_void` pair that `close_async` already uses.
 // ---------------------------------------------------------------------------
 
-static void admin_describe_producers_trampoline(kafka_admin_DescribeProducersResult_t* r,
-                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_describe_transactions_trampoline(kafka_admin_DescribeTransactionsResult_t* r,
-                                                   kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_fence_producers_trampoline(kafka_admin_FenceProducersResult_t* r,
-                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
+// describeProducers / describeTransactions / fenceProducers fire once PER KEY
+// (Java's per-key KafkaFuture), independently as that key's future resolves --
+// unlike list_transactions below, which stays joined (Java's
+// ListTransactionsResult has no per-transactional-id future map). `value` is an
+// owned single-key result handle Python drains at index 0 via the matching
+// *_drain function; the Python wrappers Py_INCREF(cb) once per distinct key
+// (admin_incref_n) to match the one Py_DECREF(cb) each invocation does here.
+static void admin_describe_producers_trampoline(const char* topic, int32_t partition,
+    kafka_admin_DescribeProducersResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "siKK", topic, partition,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+static void admin_describe_transactions_trampoline(const char* key,
+    kafka_admin_DescribeTransactionsResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+static void admin_fence_producers_trampoline(const char* key,
+    kafka_admin_FenceProducersResult_t* value, kafka_common_Error_t* error, void* user_data) {
+    PyObject* cb = (PyObject*)user_data;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunction(cb, "sKK", key,
+        (unsigned long long)(uintptr_t)value, (unsigned long long)(uintptr_t)error);
+    if (r) Py_DECREF(r); else PyErr_Print();
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
 static void admin_list_transactions_trampoline(kafka_admin_ListTransactionsResult_t* r,
                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 
@@ -6834,7 +7503,10 @@ static PyObject* py_Admin_describe_producers_async(PyObject* self, PyObject* arg
         if (!ok) { PyMem_Free((void*)topics); PyMem_Free(partitions); return NULL; }
         topics[i] = t; partitions[i] = p;
     }
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT partition. admin.py pre-dedups its
+    // (topic, partition) rows (like describe_configs / remove_members), so raw
+    // `n` already equals the distinct count the Rust FFI will fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_producers_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, topics, partitions, (int32_t)n,
         has_broker_id ? true : false, (int32_t)broker_id, timeout_ms,
@@ -6850,7 +7522,9 @@ static PyObject* py_Admin_describe_transactions_async(PyObject* self, PyObject* 
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(ids_obj, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT id. admin.py pre-dedups its id list,
+    // so raw `n` already equals the distinct count the Rust FFI will fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_describe_transactions_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         admin_describe_transactions_trampoline, cb);
@@ -6865,7 +7539,9 @@ static PyObject* py_Admin_fence_producers_async(PyObject* self, PyObject* args) 
     const char** ids = NULL;
     Py_ssize_t n = build_string_array(ids_obj, &ids);
     if (n < 0) return NULL;
-    Py_INCREF(cb);
+    // One callback invocation per DISTINCT id. admin.py pre-dedups its id list,
+    // so raw `n` already equals the distinct count the Rust FFI will fire.
+    admin_incref_n(cb, n);
     kafka_admin_AdminClient_fence_producers_async(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, ids, (int32_t)n, timeout_ms,
         admin_fence_producers_trampoline, cb);
@@ -7273,14 +7949,14 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_AdminClient_new", py_Admin_AdminClient_new, METH_VARARGS, "Create an AdminClient"},
     {"Admin_destroy", py_Admin_destroy, METH_VARARGS, "Destroy an admin-client handle"},
     {"Admin_close_async", py_Admin_close_async, METH_VARARGS, "Async close; cb(error_int)"},
-    {"Admin_create_topics_async", py_Admin_create_topics_async, METH_VARARGS, "Async createTopics; cb(result_int, error_int)"},
-    {"Admin_delete_topics_async", py_Admin_delete_topics_async, METH_VARARGS, "Async deleteTopics by name; cb(result_int, error_int)"},
-    {"Admin_delete_topics_by_ids_async", py_Admin_delete_topics_by_ids_async, METH_VARARGS, "Async deleteTopics by id; cb(result_int, error_int)"},
+    {"Admin_create_topics_async", py_Admin_create_topics_async, METH_VARARGS, "Async createTopics; per-key cb(name, value_int, error_int), once per topic"},
+    {"Admin_delete_topics_async", py_Admin_delete_topics_async, METH_VARARGS, "Async deleteTopics by name; per-key cb(name, error_int), once per topic"},
+    {"Admin_delete_topics_by_ids_async", py_Admin_delete_topics_by_ids_async, METH_VARARGS, "Async deleteTopics by id; per-key cb(id, error_int), once per topic"},
     {"Admin_list_topics_async", py_Admin_list_topics_async, METH_VARARGS, "Async listTopics; cb(result_int, error_int)"},
-    {"Admin_describe_topics_async", py_Admin_describe_topics_async, METH_VARARGS, "Async describeTopics by name; cb(result_int, error_int)"},
-    {"Admin_describe_topics_by_ids_async", py_Admin_describe_topics_by_ids_async, METH_VARARGS, "Async describeTopics by id; cb(result_int, error_int)"},
-    {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; cb(result_int, error_int)"},
-    {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; cb(result_int, error_int)"},
+    {"Admin_describe_topics_async", py_Admin_describe_topics_async, METH_VARARGS, "Async describeTopics by name; per-key cb(name, value_int, error_int), once per topic"},
+    {"Admin_describe_topics_by_ids_async", py_Admin_describe_topics_by_ids_async, METH_VARARGS, "Async describeTopics by id; per-key cb(id, value_int, error_int), once per topic"},
+    {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; per-key cb(name, error_int), once per topic"},
+    {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; per-key cb(topic, partition, value_int, error_int), once per partition"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock: time out the next N requests; returns error_int"},
     {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets,
      METH_VARARGS, "Mock: seed beginning offsets; returns error_int"},
@@ -7292,22 +7968,28 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"DescribeTopicsResult_drain", py_DescribeTopicsResult_drain, METH_VARARGS, "Drain+destroy a DescribeTopicsResult handle into a dict"},
     {"CreatePartitionsResult_drain", py_CreatePartitionsResult_drain, METH_VARARGS, "Drain+destroy a CreatePartitionsResult handle into a dict"},
     {"DeleteRecordsResult_drain", py_DeleteRecordsResult_drain, METH_VARARGS, "Drain+destroy a DeleteRecordsResult handle into a dict"},
+    {"TopicMetadataAndConfig_drain", py_TopicMetadataAndConfig_drain, METH_VARARGS, "Drain+destroy a standalone TopicMetadataAndConfig handle (per-key create_topics callback) into a tuple"},
+    {"TopicDescription_drain", py_TopicDescription_drain, METH_VARARGS, "Drain+destroy a standalone TopicDescription handle (per-key describe_topics callbacks) into a tuple"},
+    {"DeletedRecords_drain", py_DeletedRecords_drain, METH_VARARGS, "Drain+destroy a DeletedRecords handle (per-key delete_records callback) into its low_watermark"},
+    {"Config_drain", py_Config_drain, METH_VARARGS, "Drain+destroy a standalone Config handle (per-key describe_configs callback) into a list of config entries"},
     {"Admin_describe_cluster_async", py_Admin_describe_cluster_async, METH_VARARGS,
      "Async describeCluster; cb(result_int, error_int)"},
     {"Admin_describe_configs_async", py_Admin_describe_configs_async, METH_VARARGS,
-     "Async describeConfigs; cb(result_int, error_int)"},
+     "Async describeConfigs; per-key cb(resource_type, resource_name, value_int, error_int), once per resource"},
     {"Admin_incremental_alter_configs_async", py_Admin_incremental_alter_configs_async, METH_VARARGS,
-     "Async incrementalAlterConfigs; cb(result_int, error_int)"},
+     "Async incrementalAlterConfigs; per-key cb(resource_type, resource_name, error_int), once per resource"},
     {"Admin_list_config_resources_async", py_Admin_list_config_resources_async, METH_VARARGS,
      "Async listConfigResources; cb(result_int, error_int)"},
     {"Admin_list_client_metrics_resources_async", py_Admin_list_client_metrics_resources_async, METH_VARARGS,
      "Async listClientMetricsResources; cb(result_int, error_int)"},
     {"Admin_describe_log_dirs_async", py_Admin_describe_log_dirs_async, METH_VARARGS,
-     "Async describeLogDirs; cb(result_int, error_int)"},
+     "Async describeLogDirs; per-key cb(broker_id, value_int, error_int), once per broker"},
     {"Admin_alter_replica_log_dirs_async", py_Admin_alter_replica_log_dirs_async, METH_VARARGS,
-     "Async alterReplicaLogDirs; cb(result_int, error_int)"},
+     "Async alterReplicaLogDirs; per-key cb(topic, partition, broker_id, error_int), once per replica"},
     {"Admin_describe_replica_log_dirs_async", py_Admin_describe_replica_log_dirs_async, METH_VARARGS,
-     "Async describeReplicaLogDirs; cb(result_int, error_int)"},
+     "Async describeReplicaLogDirs; per-key cb(topic, partition, broker_id, value_int, error_int), once per replica"},
+    {"LogDirDescriptionMap_drain", py_LogDirDescriptionMap_drain, METH_VARARGS, "Drain+destroy a standalone LogDirDescriptionMap handle (per-key describe_log_dirs callback) into a dict"},
+    {"ReplicaLogDirInfo_drain", py_ReplicaLogDirInfo_drain, METH_VARARGS, "Drain+destroy a standalone ReplicaLogDirInfo handle (per-key describe_replica_log_dirs callback) into a tuple"},
     {"DescribeClusterResult_drain", py_DescribeClusterResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeClusterResult handle into a tuple"},
     {"DescribeConfigsResult_drain", py_DescribeConfigsResult_drain, METH_VARARGS,
@@ -7327,11 +8009,12 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_elect_leaders_async", py_Admin_elect_leaders_async, METH_VARARGS,
      "Async electLeaders; cb(result_int, error_int)"},
     {"Admin_alter_partition_reassignments_async", py_Admin_alter_partition_reassignments_async,
-     METH_VARARGS, "Async alterPartitionReassignments; cb(result_int, error_int)"},
+     METH_VARARGS, "Async alterPartitionReassignments; cb(topic, partition, error_int) fires "
+     "once per partition"},
     {"Admin_list_partition_reassignments_async", py_Admin_list_partition_reassignments_async,
      METH_VARARGS, "Async listPartitionReassignments; cb(result_int, error_int)"},
     {"Admin_list_offsets_async", py_Admin_list_offsets_async, METH_VARARGS,
-     "Async listOffsets; cb(result_int, error_int)"},
+     "Async listOffsets; cb(topic, partition, value_int, error_int) fires once per partition"},
     {"ElectLeadersResult_drain", py_ElectLeadersResult_drain, METH_VARARGS,
      "Drain+destroy an ElectLeadersResult handle into a dict"},
     {"AlterPartitionReassignmentsResult_drain", py_AlterPartitionReassignmentsResult_drain,
@@ -7340,6 +8023,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      METH_VARARGS, "Drain+destroy a ListPartitionReassignmentsResult handle into a dict"},
     {"ListOffsetsResult_drain", py_ListOffsetsResult_drain, METH_VARARGS,
      "Drain+destroy a ListOffsetsResult handle into a dict"},
+    {"ListOffsetsResultInfo_drain", py_ListOffsetsResultInfo_drain, METH_VARARGS,
+     "Drain+destroy a standalone ListOffsetsResultInfo handle (per-key list_offsets callback) into a tuple"},
     {"MockAdminClient_update_consumer_group_offsets",
      py_MockAdminClient_update_consumer_group_offsets, METH_VARARGS,
      "Mock: seed committed consumer-group offsets; returns error_int"},
@@ -7348,30 +8033,36 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_list_consumer_groups_async", py_Admin_list_consumer_groups_async, METH_VARARGS,
      "Async listConsumerGroups; cb(result_int, error_int)"},
     {"Admin_describe_consumer_groups_async", py_Admin_describe_consumer_groups_async,
-     METH_VARARGS, "Async describeConsumerGroups; cb(result_int, error_int)"},
+     METH_VARARGS, "Async describeConsumerGroups; cb(group_id, value_int, error_int) per group"},
     {"Admin_describe_classic_groups_async", py_Admin_describe_classic_groups_async, METH_VARARGS,
-     "Async describeClassicGroups; cb(result_int, error_int)"},
+     "Async describeClassicGroups; cb(group_id, value_int, error_int) per group"},
     {"Admin_list_consumer_group_offsets_async", py_Admin_list_consumer_group_offsets_async,
-     METH_VARARGS, "Async listConsumerGroupOffsets; cb(result_int, error_int)"},
+     METH_VARARGS, "Async listConsumerGroupOffsets; cb(group_id, value_int, error_int) per group"},
     {"Admin_alter_consumer_group_offsets_async", py_Admin_alter_consumer_group_offsets_async,
-     METH_VARARGS, "Async alterConsumerGroupOffsets; cb(result_int, error_int)"},
+     METH_VARARGS, "Async alterConsumerGroupOffsets; cb(topic, partition, error_int) per partition"},
     {"Admin_delete_consumer_group_offsets_async", py_Admin_delete_consumer_group_offsets_async,
-     METH_VARARGS, "Async deleteConsumerGroupOffsets; cb(result_int, error_int)"},
+     METH_VARARGS, "Async deleteConsumerGroupOffsets; cb(topic, partition, error_int) per partition"},
     {"Admin_delete_consumer_groups_async", py_Admin_delete_consumer_groups_async, METH_VARARGS,
-     "Async deleteConsumerGroups; cb(result_int, error_int)"},
+     "Async deleteConsumerGroups; cb(group_id, error_int) per group"},
     {"Admin_remove_members_from_consumer_group_async",
      py_Admin_remove_members_from_consumer_group_async, METH_VARARGS,
-     "Async removeMembersFromConsumerGroup; cb(result_int, error_int)"},
+     "Async removeMembersFromConsumerGroup; cb(group_instance_id, error_int) per member"},
     {"ListGroupsResult_drain", py_ListGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a ListGroupsResult handle into (valid, errors)"},
     {"ListConsumerGroupsResult_drain", py_ListConsumerGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a ListConsumerGroupsResult handle into (valid, errors)"},
     {"DescribeConsumerGroupsResult_drain", py_DescribeConsumerGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeConsumerGroupsResult handle into a dict"},
+    {"ConsumerGroupDescription_drain", py_ConsumerGroupDescription_drain, METH_VARARGS,
+     "Drain+destroy a standalone ConsumerGroupDescription handle (per-key describe_consumer_groups callback) into a tuple"},
     {"DescribeClassicGroupsResult_drain", py_DescribeClassicGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeClassicGroupsResult handle into a dict"},
+    {"ClassicGroupDescription_drain", py_ClassicGroupDescription_drain, METH_VARARGS,
+     "Drain+destroy a standalone ClassicGroupDescription handle (per-key describe_classic_groups callback) into a tuple"},
     {"ListConsumerGroupOffsetsResult_drain", py_ListConsumerGroupOffsetsResult_drain,
      METH_VARARGS, "Drain+destroy a ListConsumerGroupOffsetsResult handle into a dict"},
+    {"OffsetAndMetadataMap_drain", py_OffsetAndMetadataMap_drain, METH_VARARGS,
+     "Drain+destroy a standalone OffsetAndMetadataMap handle (per-key list_consumer_group_offsets callback) into a dict"},
     {"AlterConsumerGroupOffsetsResult_drain", py_AlterConsumerGroupOffsetsResult_drain,
      METH_VARARGS, "Drain+destroy an AlterConsumerGroupOffsetsResult handle into a dict"},
     {"DeleteConsumerGroupOffsetsResult_drain", py_DeleteConsumerGroupOffsetsResult_drain,
@@ -7382,29 +8073,25 @@ static PyMethodDef ProducerNativeMethods[] = {
      py_RemoveMembersFromConsumerGroupResult_drain, METH_VARARGS,
      "Drain+destroy a RemoveMembersFromConsumerGroupResult handle into a dict"},
     {"Admin_create_acls_async", py_Admin_create_acls_async, METH_VARARGS,
-     "Async createAcls; cb(result_int, error_int)"},
+     "Async createAcls; cb(key_tuple, error_int) once per binding"},
     {"Admin_describe_acls_async", py_Admin_describe_acls_async, METH_VARARGS,
      "Async describeAcls; cb(result_int, error_int)"},
     {"Admin_delete_acls_async", py_Admin_delete_acls_async, METH_VARARGS,
-     "Async deleteAcls; cb(result_int, error_int)"},
+     "Async deleteAcls; cb(key_tuple, value_int, error_int) once per filter"},
     {"Admin_describe_client_quotas_async", py_Admin_describe_client_quotas_async, METH_VARARGS,
      "Async describeClientQuotas; cb(result_int, error_int)"},
     {"Admin_alter_client_quotas_async", py_Admin_alter_client_quotas_async, METH_VARARGS,
-     "Async alterClientQuotas; cb(result_int, error_int)"},
-    {"CreateAclsResult_drain", py_CreateAclsResult_drain, METH_VARARGS,
-     "Drain+destroy a CreateAclsResult handle into a dict"},
+     "Async alterClientQuotas; cb(key_tuple, error_int) once per entity"},
     {"DescribeAclsResult_drain", py_DescribeAclsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeAclsResult handle into a list"},
-    {"DeleteAclsResult_drain", py_DeleteAclsResult_drain, METH_VARARGS,
-     "Drain+destroy a DeleteAclsResult handle into a dict"},
+    {"DeleteAclsFilterResults_drain", py_DeleteAclsFilterResults_drain, METH_VARARGS,
+     "Drain+destroy a DeleteAclsFilterResults handle (deleteAcls's per-key value) into a list"},
     {"DescribeClientQuotasResult_drain", py_DescribeClientQuotasResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeClientQuotasResult handle into a dict"},
-    {"AlterClientQuotasResult_drain", py_AlterClientQuotasResult_drain, METH_VARARGS,
-     "Drain+destroy an AlterClientQuotasResult handle into a dict"},
     {"Admin_describe_user_scram_credentials_async", py_Admin_describe_user_scram_credentials_async,
      METH_VARARGS, "Async describeUserScramCredentials; cb(result_int, error_int)"},
     {"Admin_alter_user_scram_credentials_async", py_Admin_alter_user_scram_credentials_async,
-     METH_VARARGS, "Async alterUserScramCredentials; cb(result_int, error_int)"},
+     METH_VARARGS, "Async alterUserScramCredentials; cb(user, error_int) once per user"},
     {"Admin_create_delegation_token_async", py_Admin_create_delegation_token_async, METH_VARARGS,
      "Async createDelegationToken; cb(result_int, error_int)"},
     {"Admin_renew_delegation_token_async", py_Admin_renew_delegation_token_async, METH_VARARGS,
@@ -7416,13 +8103,11 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_describe_features_async", py_Admin_describe_features_async, METH_VARARGS,
      "Async describeFeatures; cb(result_int, error_int)"},
     {"Admin_update_features_async", py_Admin_update_features_async, METH_VARARGS,
-     "Async updateFeatures; cb(result_int, error_int)"},
+     "Async updateFeatures; cb(feature, error_int) once per feature"},
     {"MockAdminClient_set_feature_levels", py_MockAdminClient_set_feature_levels, METH_VARARGS,
      "Mock: seed the feature-level maps; returns error_int"},
     {"DescribeUserScramCredentialsResult_drain", py_DescribeUserScramCredentialsResult_drain,
      METH_VARARGS, "Drain+destroy a DescribeUserScramCredentialsResult handle into a dict"},
-    {"AlterUserScramCredentialsResult_drain", py_AlterUserScramCredentialsResult_drain,
-     METH_VARARGS, "Drain+destroy an AlterUserScramCredentialsResult handle into a dict"},
     {"CreateDelegationTokenResult_drain", py_CreateDelegationTokenResult_drain, METH_VARARGS,
      "Drain+destroy a CreateDelegationTokenResult handle into a token tuple"},
     {"RenewDelegationTokenResult_drain", py_RenewDelegationTokenResult_drain, METH_VARARGS,
@@ -7433,16 +8118,14 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Drain+destroy a DescribeDelegationTokenResult handle into a list"},
     {"DescribeFeaturesResult_drain", py_DescribeFeaturesResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeFeaturesResult handle into (finalized, epoch, supported)"},
-    {"UpdateFeaturesResult_drain", py_UpdateFeaturesResult_drain, METH_VARARGS,
-     "Drain+destroy an UpdateFeaturesResult handle into a dict"},
     {"Admin_describe_producers_async", py_Admin_describe_producers_async, METH_VARARGS,
-     "Async describeProducers; cb(result_int, error_int)"},
+     "Async describeProducers; per-key cb(topic, partition, value_int, error_int), once per partition"},
     {"Admin_describe_transactions_async", py_Admin_describe_transactions_async, METH_VARARGS,
-     "Async describeTransactions; cb(result_int, error_int)"},
+     "Async describeTransactions; per-key cb(id, value_int, error_int), once per transactional id"},
     {"Admin_fence_producers_async", py_Admin_fence_producers_async, METH_VARARGS,
-     "Async fenceProducers; cb(result_int, error_int)"},
+     "Async fenceProducers; per-key cb(id, value_int, error_int), once per transactional id"},
     {"Admin_list_transactions_async", py_Admin_list_transactions_async, METH_VARARGS,
-     "Async listTransactions; cb(result_int, error_int)"},
+     "Async listTransactions; joined cb(result_int, error_int) (no per-key future map)"},
     {"Admin_abort_transaction_async", py_Admin_abort_transaction_async, METH_VARARGS,
      "Async abortTransaction; cb(error_int) -- Java's result carries no value"},
     {"Admin_force_terminate_transaction_async", py_Admin_force_terminate_transaction_async,

@@ -36,7 +36,7 @@ use crate::common::Error;
 /// This is the Rust equivalent of the abstract method set in Java's `KafkaFuture<T>`.
 /// Different internal types (e.g., `FutureRecordMetadata` for the producer)
 /// implement this trait and are wrapped in a `KafkaFuture<T>`.
-pub(crate) trait KafkaFutureOps<T: Send>: Send + Sync {
+pub(crate) trait KafkaFutureOps<T: Send + 'static>: Send + Sync {
     /// Await the result of this future.
     fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, Error>> + Send + '_>>;
 
@@ -48,6 +48,28 @@ pub(crate) trait KafkaFutureOps<T: Send>: Send + Sync {
 
     /// Whether this future is complete.
     fn is_done(&self) -> bool;
+
+    /// Registers `callback` to run when this future completes. Backs the public
+    /// [`KafkaFuture::when_complete`].
+    ///
+    /// Default implementation: spawn a task that awaits [`get`](Self::get) and
+    /// then invokes `callback` — correct for any implementor, but costs an extra
+    /// task hop and requires a Tokio runtime context. [`Completable`] (the
+    /// backing state of every [`KafkaFutureImpl`]-issued future — i.e. every
+    /// per-key admin future) overrides this to fire eagerly and synchronously
+    /// instead, with no task hop, matching Java's `KafkaFutureImpl`. The
+    /// combinator futures below (`all_of`/`then_apply`/`join_map`/
+    /// `join_map_results`) keep the default: they have no eager completion hook
+    /// of their own, and nothing currently calls `when_complete` on one of them.
+    fn register_completion(self: Arc<Self>, callback: CompletionCallback<T>)
+    where
+        Self: 'static,
+    {
+        tokio::spawn(async move {
+            let result = self.get().await;
+            callback(&result);
+        });
+    }
 }
 
 /// A flexible future which supports async result retrieval.
@@ -216,6 +238,47 @@ impl<T: Send + 'static> KafkaFuture<T> {
     {
         KafkaFuture::new(Arc::new(ThenApplyFuture { source: self.clone(), function: Arc::new(function) }))
     }
+
+    /// Registers `action` to run when this future completes, passing a
+    /// reference to the result. If the future is already complete, `action`
+    /// runs immediately rather than being queued.
+    ///
+    /// Translated from `org.apache.kafka.common.KafkaFuture.whenComplete`.
+    /// Unlike Java (whose `whenComplete` returns a new chainable
+    /// `KafkaFuture<T>`), this Rust version returns nothing: its callers (the
+    /// admin client's per-key async FFI delivery, `admin-client.md` §4) only
+    /// need to be notified, not to chain a follow-up future off the result. Add
+    /// a chaining return type if a future admin tier needs it.
+    ///
+    /// `action` may run on whichever thread completes the underlying future —
+    /// eagerly, with no extra latency, for the `KafkaFutureImpl`-backed futures
+    /// every admin per-key result returns — or on a spawned Tokio task for the
+    /// combinator futures (`all_of`/`then_apply`/`join_map`/
+    /// `join_map_results`), which have no built-in completion hook and so are
+    /// lazily awaited instead via a spawned task. The spawned-task path
+    /// requires a Tokio runtime context; the eager path does not.
+    ///
+    /// This is `pub(crate)` rather than `pub`, and exposing it publicly is a
+    /// footgun: calling it on a combinator future (`then_apply`/`all_of`/...)
+    /// from ordinary sync code with no Tokio runtime panics on the spawn
+    /// fallback described above. Callers inside the crate always run inside a
+    /// runtime context.
+    ///
+    /// `allow(dead_code)`: this public-view hook mirrors Java's
+    /// `KafkaFuture.whenComplete` (required by `admin-client.md` §4), but the
+    /// crate's own completion paths — the FFI per-key delivery and the
+    /// group-describe chain (`kafka_admin_client.rs`) — register their callbacks
+    /// on the `KafkaFutureImpl` handle instead (see
+    /// [`KafkaFutureImpl::when_complete`]), so this method currently has no
+    /// in-tree caller in any build configuration. It is retained as the mandated
+    /// public-mirror completion hook.
+    #[allow(dead_code)]
+    pub(crate) fn when_complete<F>(&self, action: F)
+    where
+        F: FnOnce(&Result<T, Error>) + Send + 'static,
+    {
+        Arc::clone(&self.inner).register_completion(Box::new(action));
+    }
 }
 
 impl<T: Send + 'static> Clone for KafkaFuture<T> {
@@ -255,6 +318,11 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for CompletedFuture<T> 
 
     fn is_done(&self) -> bool {
         true
+    }
+
+    fn register_completion(self: Arc<Self>, callback: CompletionCallback<T>) {
+        // The result is already known: fire immediately, no spawn needed.
+        callback(&self.result);
     }
 }
 
@@ -313,10 +381,13 @@ impl<T: Clone + Send + Sync + 'static> Completable<T> {
     /// Register a callback to run when this future completes. If the future is
     /// already complete, the callback runs immediately on the calling task.
     ///
-    /// Only reached via [`KafkaFutureImpl::when_complete`], whose sole consumer
-    /// (the `AdminApiDriver` `describeCluster().nodes()` chaining) arrives with
-    /// a later admin tier.
-    #[allow(dead_code)]
+    /// Reached two ways: via [`KafkaFutureImpl::when_complete`] (crate-internal,
+    /// pre-erasure — its sole consumer, the `AdminApiDriver`
+    /// `describeCluster().nodes()` chaining, arrives with a later admin tier),
+    /// and via this type's [`KafkaFutureOps::register_completion`] override,
+    /// which is how the public, post-erasure [`KafkaFuture::when_complete`]
+    /// reaches it — the mechanism the admin client's per-key async FFI delivery
+    /// (`admin-client.md` §4) actually uses today.
     fn on_complete(&self, callback: CompletionCallback<T>) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(result) = guard.result.clone() {
@@ -364,6 +435,12 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
 
     fn is_done(&self) -> bool {
         self.inner.lock().unwrap().result.is_some()
+    }
+
+    fn register_completion(self: Arc<Self>, callback: CompletionCallback<T>) {
+        // Delegate to the inherent `on_complete` above (eager, zero-latency,
+        // already tested) rather than the trait default's spawn-and-await.
+        Completable::on_complete(&self, callback);
     }
 }
 
@@ -748,6 +825,67 @@ mod tests {
             *seen_clone.lock().unwrap() = result.as_ref().ok().copied();
         });
         assert_eq!(*seen.lock().unwrap(), Some(5));
+    }
+
+    /// The public `KafkaFuture::when_complete` (not `KafkaFutureImpl::when_complete`
+    /// above) is what the admin client's per-key async FFI delivery actually
+    /// calls, since by the time a `*Result` hands out a per-key future it has
+    /// already been erased to the public `KafkaFuture<T>` type
+    /// (`admin-client.md` §4). This covers the not-yet-complete case: the
+    /// future is backed by `Completable` (via `KafkaFutureImpl`), so the
+    /// callback must fire exactly once and eagerly — no polling, no missed
+    /// wakeup — the instant `complete` is called.
+    #[tokio::test]
+    async fn public_when_complete_fires_exactly_once_when_not_yet_complete() {
+        let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let future = handle.future();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        future.when_complete(move |result| {
+            calls_clone.lock().unwrap().push(result.as_ref().ok().copied());
+        });
+        assert!(calls.lock().unwrap().is_empty(), "must not fire before completion");
+        handle.complete(11);
+        assert_eq!(*calls.lock().unwrap(), vec![Some(11)]);
+    }
+
+    /// Same as above, but the future is already resolved when `when_complete`
+    /// is registered — the callback must still fire exactly once, immediately.
+    #[tokio::test]
+    async fn public_when_complete_fires_exactly_once_when_already_complete() {
+        let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        handle.complete_with_error(Error::local_illegal_argument("boom"));
+        let future = handle.future();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = Arc::clone(&calls);
+        future.when_complete(move |result| {
+            calls_clone
+                .lock()
+                .unwrap()
+                .push(matches!(result, Err(Error::LocalIllegalArgument(_))));
+        });
+        assert_eq!(*calls.lock().unwrap(), vec![true]);
+    }
+
+    /// Futures produced by combinators (no eager completion hook of their own)
+    /// fall back to `KafkaFutureOps::register_completion`'s default: spawn a
+    /// task that awaits `get()`. Exercises that path specifically, using
+    /// `then_apply` as a representative combinator future.
+    #[tokio::test]
+    async fn public_when_complete_on_a_combinator_future_uses_spawn_fallback() {
+        let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let mapped = handle.future().then_apply(|v| v * 2);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = Mutex::new(Some(tx));
+        mapped.when_complete(move |result| {
+            let _ = tx.lock().unwrap().take().unwrap().send(result.as_ref().ok().copied());
+        });
+        handle.complete(21);
+        let seen = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("spawn-based when_complete must still fire")
+            .unwrap();
+        assert_eq!(seen, Some(42));
     }
 
     #[tokio::test]
