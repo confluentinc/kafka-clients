@@ -53,49 +53,83 @@ from threading import Event, Thread
 MAX_LATENCY_MS = 10000
 
 
-def recreate_topic(bootstrap_servers, topic, sasl_conf=None, partitions=-1):
+def recreate_topic(config, topic, partitions=-1):
     """Delete `topic` (ignoring "does not exist"), wait 10s, re-create it, wait
-    10s — using confluent-kafka's AdminClient (librdkafka). Replication factor
-    and (unless `partitions` > 0) partition count use the broker default
-    (`-1`), so this works on Confluent Cloud where RF=1 is rejected. The two
-    sleeps let the delete/create metadata propagate across the cluster.
+    10s — using this repo's Rust-backed AdminClient (bindings/python/admin.py).
+    Replication factor and (unless `partitions` > 0) partition count use the
+    broker default (`-1`), so this works on Confluent Cloud where RF=1 is
+    rejected. The two sleeps let the delete/create metadata propagate across the
+    cluster.
 
-    `sasl_conf` is the librdkafka-form SASL dict (security.protocol,
-    sasl.mechanism, sasl.username, sasl.password) or None/empty for PLAINTEXT.
+    `config` is the soak's Java-style admin config dict (bootstrap.servers,
+    security.protocol, sasl.mechanism, sasl.jaas.config, ssl.*) — the same
+    namespace the Rust producer/consumer use, so no credential translation is
+    needed; the Rust admin client parses `sasl.jaas.config` itself.
+
+    Each RPC returns one already-resolved result per key (`create_topics`
+    -> `{name: TopicMetadataAndConfig | KafkaError}`, `delete_topics`
+    -> `{name: None | KafkaError}`): a per-key `KafkaError` (whose `.code` is
+    the wire error code) marks that key's failure, and the whole call raises a
+    `KafkaError` on a call-level failure.
+
+    The admin binding is imported lazily so this module stays importable (and
+    unit-testable) without the Rust bindings, which build on Linux only.
     """
-    from confluent_kafka.admin import AdminClient, NewTopic
-    from confluent_kafka import KafkaException, KafkaError
+    from admin import AdminClient, NewTopic
+    from producer import KafkaError
 
-    admin = AdminClient({"bootstrap.servers": bootstrap_servers, **(sasl_conf or {})})
+    # `Errors` wire codes (src/common/protocol/errors.rs); a per-key value is a
+    # `KafkaError` carrying one of these on a per-key failure, and the whole
+    # call raises a `KafkaError` on a call-level failure.
+    UNKNOWN_TOPIC_OR_PARTITION = 3
+    TOPIC_ALREADY_EXISTS = 36
 
-    print(f">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...", flush=True)
-    for _t, fut in admin.delete_topics([topic], operation_timeout=30).items():
+    admin = AdminClient(dict(config))
+    try:
+        print(f">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...", flush=True)
         try:
-            fut.result()
-            print(f">>> deleted '{_t}'", flush=True)
-        except KafkaException as e:
-            if e.args[0].code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
-                print(f">>> '{_t}' did not exist (ok)", flush=True)
+            del_results = admin.delete_topics([topic], timeout=30)
+        except KafkaError as e:
+            if e.code == UNKNOWN_TOPIC_OR_PARTITION:
+                print(f">>> '{topic}' did not exist (ok)", flush=True)
             else:
                 raise
-    print(">>> waiting 10s after delete ...", flush=True)
-    time.sleep(10)
+        else:
+            for _t, result in del_results.items():
+                if isinstance(result, KafkaError):
+                    if result.code == UNKNOWN_TOPIC_OR_PARTITION:
+                        print(f">>> '{_t}' did not exist (ok)", flush=True)
+                    else:
+                        raise result
+                else:
+                    print(f">>> deleted '{_t}'", flush=True)
+        print(">>> waiting 10s after delete ...", flush=True)
+        time.sleep(10)
 
-    print(f">>> CREATE_TOPIC: creating topic '{topic}' "
-          f"(partitions={'broker-default' if partitions < 0 else partitions}, "
-          f"rf=broker-default) ...", flush=True)
-    new_topic = NewTopic(topic, num_partitions=partitions, replication_factor=-1)
-    for _t, fut in admin.create_topics([new_topic]).items():
+        print(f">>> CREATE_TOPIC: creating topic '{topic}' "
+              f"(partitions={'broker-default' if partitions < 0 else partitions}, "
+              f"rf=broker-default) ...", flush=True)
+        new_topic = NewTopic(topic, num_partitions=partitions, replication_factor=-1)
         try:
-            fut.result()
-            print(f">>> created '{_t}'", flush=True)
-        except KafkaException as e:
-            if e.args[0].code() == KafkaError.TOPIC_ALREADY_EXISTS:
-                print(f">>> '{_t}' already exists (ok)", flush=True)
+            create_results = admin.create_topics([new_topic])
+        except KafkaError as e:
+            if e.code == TOPIC_ALREADY_EXISTS:
+                print(f">>> '{topic}' already exists (ok)", flush=True)
             else:
                 raise
-    print(">>> waiting 10s after create ...", flush=True)
-    time.sleep(10)
+        else:
+            for _t, result in create_results.items():
+                if isinstance(result, KafkaError):
+                    if result.code == TOPIC_ALREADY_EXISTS:
+                        print(f">>> '{_t}' already exists (ok)", flush=True)
+                    else:
+                        raise result
+                else:
+                    print(f">>> created '{_t}'", flush=True)
+        print(">>> waiting 10s after create ...", flush=True)
+        time.sleep(10)
+    finally:
+        admin.close()
 
 
 def percentile_from_hist(hist, p):

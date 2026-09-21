@@ -19,6 +19,11 @@
 use std::collections::HashMap;
 
 use crate::common::Error;
+use crate::common::config::sasl_configs;
+use crate::common::config::ssl_configs;
+use crate::common::config::{SaslConfig, SslConfig};
+use crate::common::security::SecurityProtocol;
+use crate::common_client_configs;
 
 /// Configuration for the admin client.
 ///
@@ -38,6 +43,17 @@ pub struct AdminClientConfig {
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+
+    // --- Security ---
+    /// `security.protocol` - Protocol used to communicate with brokers.
+    /// Default: `SecurityProtocol::Plaintext`.
+    security_protocol: SecurityProtocol,
+
+    /// SASL configuration (mechanism, JAAS config, credentials).
+    sasl_config: SaslConfig,
+
+    /// SSL/TLS configuration.
+    ssl_config: SslConfig,
 }
 
 impl AdminClientConfig {
@@ -65,6 +81,12 @@ impl AdminClientConfig {
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
+    /// `security.protocol`
+    pub const SECURITY_PROTOCOL_CONFIG: &'static str = common_client_configs::SECURITY_PROTOCOL_CONFIG;
+    /// `sasl.mechanism`
+    pub const SASL_MECHANISM_CONFIG: &'static str = sasl_configs::SASL_MECHANISM;
+    /// `sasl.jaas.config`
+    pub const SASL_JAAS_CONFIG: &'static str = sasl_configs::SASL_JAAS_CONFIG;
 
     /// Creates a config from a property map. `bootstrap.servers` is required.
     ///
@@ -94,6 +116,28 @@ impl AdminClientConfig {
                 Self::METADATA_MAX_AGE_MS_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
                     config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
+                },
+                Self::SECURITY_PROTOCOL_CONFIG => {
+                    config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
+                        Error::config_value_message(
+                            key,
+                            value,
+                            format!("Valid values are: {:?}", SecurityProtocol::names()),
+                        )
+                    })?;
+                },
+                Self::SASL_MECHANISM_CONFIG => {
+                    config.sasl_config.mechanism = value.to_string();
+                },
+                Self::SASL_JAAS_CONFIG => {
+                    config.sasl_config.jaas_config = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                },
+                key if key.starts_with("ssl.") => {
+                    ssl_configs::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 // Unknown keys are accepted silently, as in Java.
                 _ => {},
@@ -168,6 +212,21 @@ impl AdminClientConfig {
     pub fn socket_connection_setup_timeout_ms(&self) -> i64 {
         self.socket_connection_setup_timeout_ms
     }
+
+    /// `security.protocol`.
+    pub fn security_protocol(&self) -> SecurityProtocol {
+        self.security_protocol
+    }
+
+    /// SASL configuration (mechanism, JAAS config, credentials).
+    pub fn sasl_config(&self) -> &SaslConfig {
+        &self.sasl_config
+    }
+
+    /// SSL/TLS configuration.
+    pub fn ssl_config(&self) -> &SslConfig {
+        &self.ssl_config
+    }
 }
 
 impl Default for AdminClientConfig {
@@ -186,6 +245,9 @@ impl Default for AdminClientConfig {
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
+            security_protocol: SecurityProtocol::Plaintext,
+            sasl_config: SaslConfig::default(),
+            ssl_config: SslConfig::default(),
         }
     }
 }
@@ -211,6 +273,7 @@ mod tests {
         assert_eq!(config.request_timeout_ms(), 30_000);
         assert_eq!(config.default_api_timeout_ms(), 60_000);
         assert_eq!(config.retries(), i32::MAX);
+        assert_eq!(config.security_protocol(), SecurityProtocol::Plaintext);
     }
 
     #[test]
@@ -241,5 +304,64 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
         props.insert("request.timeout.ms".to_string(), "not-a-number".to_string());
         assert!(AdminClientConfig::from_properties(&props).is_err());
+    }
+
+    /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted
+    /// to `AdminClientConfig`.
+    #[test]
+    fn test_invalid_security_protocol() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("security.protocol".to_string(), "abc".to_string());
+        let err = AdminClientConfig::from_properties(&props).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("security.protocol"),
+            "Error message should contain config key, got: {}",
+            msg
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testCaseInsensitiveSecurityProtocol`,
+    /// adapted to `AdminClientConfig`.
+    #[test]
+    fn test_case_insensitive_security_protocol() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        assert_eq!(config.security_protocol(), SecurityProtocol::SaslSsl);
+    }
+
+    #[test]
+    fn test_sasl_config_from_properties() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert(
+            "sasl.jaas.config".to_string(),
+            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"secret\";"
+                .to_string(),
+        );
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        assert_eq!(config.sasl_config().mechanism, "PLAIN");
+        assert_eq!(config.sasl_config().resolve_username(), Some("alice"));
+        assert_eq!(config.sasl_config().resolve_password(), Some("secret"));
+    }
+
+    #[test]
+    fn test_ssl_config_from_properties() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
+        props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
+        props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        assert_eq!(
+            config.ssl_config().truststore_location.as_deref(),
+            Some("/path/to/truststore.pem")
+        );
+        assert_eq!(config.ssl_config().keystore_location.as_deref(), Some("/path/to/keystore.pem"));
+        assert_eq!(config.ssl_config().endpoint_identification_algorithm, "");
     }
 }
