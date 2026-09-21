@@ -731,12 +731,29 @@ impl KafkaClient for MockClient {
             // `send`) and then evaluates the matcher — unconditionally because its
             // matcher-less overloads default to `ALWAYS_TRUE` (`:49`, used at `:432` /
             // `:458`), so there is always a matcher to run. This port builds it only when a
-            // matcher is
-            // present, because `build()` on a `ProduceRequestBuilder` *moves* the
-            // serialized records out of the batch (PLAN §9.18) — a side effect Java's
-            // `build()` does not have. Nothing downstream of a matched future response
-            // reads the request body, so the narrower build is equivalent; doing it
-            // unconditionally would make every existing matcher-less test pay it.
+            // matcher is present, for two reasons:
+            //
+            //   - Cost: doing it unconditionally would make every existing matcher-less
+            //     test pay for a build it never reads. Nothing downstream of a matched
+            //     future response reads the request body, so the narrower build is
+            //     equivalent.
+            //   - Safety: `ProduceRequestBuilder::build_version` *drains* its builder —
+            //     `std::mem::replace(&mut self.data, ProduceRequestData::new())`
+            //     (`common/requests/produce_request.rs:307`) — so a second build of the
+            //     same request yields empty `topic_data`. Java's
+            //     `ProduceRequest.Builder.build` does not do this
+            //     (`ProduceRequest.java:68-74` returns `new ProduceRequest(data, version)`,
+            //     sharing the reference), and it is the only one of this crate's 52
+            //     `RequestBuilder` impls that drains. Tracked as
+            //     **PLAN §9.30**, with a reproducer. Building here unconditionally would
+            //     put a second build in reach of `respond_matcher` (`:391-401`),
+            //     which builds the queued request again.
+            //
+            // (An earlier revision of this comment cited PLAN §9.18 and attributed the
+            // move to `ProducerBatch`. That was the wrong object and is now the wrong
+            // section: §9.18 was `MemoryRecordsBuilder::take_built_records`, which is
+            // fixed, and the two were always independent — the `mem::replace` alone
+            // drains the builder. Critic 50 issue 1.)
             if let Some(matcher) = future_resp.request_matcher {
                 let built = request.request_builder_mut().build().expect("the request builds");
                 assert!(matcher(&built), "Request matcher did not match next-in-line request {built}");

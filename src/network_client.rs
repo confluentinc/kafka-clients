@@ -611,20 +611,34 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             latest
         };
 
-        // Build the request at the determined version
+        // Build the request at the determined version, then serialize it.
+        //
+        // Java wraps **both** steps in one `try`: `NetworkClient.send` catches
+        // `UnsupportedVersionException` around `doSend(.., builder.build(version))`
+        // (`NetworkClient.java:582-583`), and `doSend` calls `request.toSend(header)`
+        // at `:608` — inside that same `try`. Serialization is a second place the
+        // exception is raised, because the generated `write` refuses to encode a
+        // non-default field the chosen version cannot carry
+        // (`FieldSpec.generateNonIgnorableFieldCheck`). Both failures must therefore
+        // reach the same aborted-send path; treating the serialize error as
+        // unreachable would turn a condition Java retries or falls back from into a
+        // crash of the I/O task.
         match client_request.request_builder_mut().build_version(version) {
             Ok(request) => {
-                self.do_send_with_request(&mut client_request, is_internal_request, now, request);
+                if let Err(e) = self.do_send_with_request(&mut client_request, is_internal_request, now, request) {
+                    kafka_warn!(
+                        self.log_context,
+                        "Failed to serialize {} v{} with correlation id {} to {}: {}",
+                        client_request.request_builder().api_key().name(),
+                        version,
+                        client_request.correlation_id(),
+                        client_request.destination(),
+                        e
+                    );
+                    self.abort_send_with_unsupported_version(&mut client_request, is_internal_request, now, &e);
+                }
             },
             Err(e) => {
-                // Java propagates the `UnsupportedVersionException` the builder
-                // threw (`NetworkClient.java:588-595`), so the builder's own
-                // diagnostic is what the caller reads. `RequestBuilder::build`
-                // reports through `io::Error`, whose `Display` is that bare text;
-                // prefixing it with the class name here rendered
-                // "UnsupportedVersionError: UnsupportedVersionError: .." once
-                // `Error`'s `Display` added its own (finding 232).
-                let error_msg = e.to_string();
                 kafka_warn!(
                     self.log_context,
                     "Failed to build {} v{} with correlation id {} to {}: {}",
@@ -634,26 +648,52 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     client_request.destination(),
                     e
                 );
-                let header = client_request
-                    .make_header(client_request.request_builder().latest_allowed_version())
-                    .expect("Failed to create header");
-                let client_response = ClientResponse::new(
-                    header,
-                    client_request.take_callback(),
-                    client_request.destination(),
-                    now,
-                    now,
-                    false,
-                    Some(error_msg.clone()),
-                    None,
-                    None,
-                );
-                if !is_internal_request {
-                    self.aborted_sends.push(client_response);
-                } else if *client_request.api_key() == ApiKeys::METADATA {
-                    self.handle_failed_request(now, Some(Error::unsupported_version(error_msg)));
-                }
+                self.abort_send_with_unsupported_version(&mut client_request, is_internal_request, now, &e);
             },
+        }
+    }
+
+    /// Turns a request that cannot be represented at the negotiated version into an
+    /// aborted send, instead of putting it on the wire.
+    ///
+    /// This is the body of Java's `catch (UnsupportedVersionException)` in
+    /// `NetworkClient.send` (`NetworkClient.java:583-597`), shared by the two failures
+    /// that `try` covers: `builder.build(version)` and `request.toSend(header)`.
+    fn abort_send_with_unsupported_version(
+        &mut self,
+        client_request: &mut ClientRequest,
+        is_internal_request: bool,
+        now: i64,
+        error: &std::io::Error,
+    ) {
+        // Java propagates the `UnsupportedVersionException` the builder
+        // threw (`NetworkClient.java:588-595`), so the builder's own
+        // diagnostic is what the caller reads. `RequestBuilder::build`
+        // reports through `io::Error`, whose `Display` is that bare text;
+        // prefixing it with the class name here rendered
+        // "UnsupportedVersionError: UnsupportedVersionError: .." once
+        // `Error`'s `Display` added its own (finding 232).
+        let error_msg = error.to_string();
+        // Java builds the response header at `builder.latestAllowedVersion()`, not at
+        // the version that failed (`NetworkClient.java:589`).
+        let header = client_request
+            .make_header(client_request.request_builder().latest_allowed_version())
+            .expect("Failed to create header");
+        let client_response = ClientResponse::new(
+            header,
+            client_request.take_callback(),
+            client_request.destination(),
+            now,
+            now,
+            false,
+            Some(error_msg.clone()),
+            None,
+            None,
+        );
+        if !is_internal_request {
+            self.aborted_sends.push(client_response);
+        } else if *client_request.api_key() == ApiKeys::METADATA {
+            self.handle_failed_request(now, Some(Error::unsupported_version(error_msg)));
         }
     }
 
@@ -663,7 +703,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         is_internal_request: bool,
         now: i64,
         mut request: ConcreteRequest,
-    ) {
+    ) -> std::io::Result<()> {
         let destination = client_request.destination().to_string();
         let header = client_request
             .make_header(request.version())
@@ -681,10 +721,19 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             );
         }
 
-        let send = request.to_send(&header).expect("Failed to serialize request");
+        // NOT `.expect(..)`: the generated `write` returns an error when a non-default
+        // field cannot be encoded at this version, and the caller maps that onto Java's
+        // aborted-send path. See the comment in `do_send`.
+        let send = request.to_send(&header)?;
 
         // The selector gets the serialized send for actual I/O.
-        let selector_send = NetworkSend::new(&destination, Box::new(send));
+        let mut selector_send = NetworkSend::new(&destination, Box::new(send));
+        // Fire-and-forget requests (producer `acks=0`) never get a response, so
+        // the selector must treat the send completing as the terminal event and
+        // break its poll loop — otherwise the synthesized completion (see
+        // `handle_completed_sends`) is delayed until the poll deadline. All
+        // response-expecting requests leave this `false` (unchanged behavior).
+        selector_send.set_fire_and_forget(!client_request.expect_response());
 
         // InFlightRequest stores a placeholder send — the real send is owned
         // by the selector. The `send` field is not read after construction.
@@ -702,6 +751,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.in_flight_requests.add(in_flight_request);
 
         let _ = self.selector.send(selector_send);
+        Ok(())
     }
 
     /// Handle any completed request sends. If no response is expected, consider the request complete.
@@ -1695,6 +1745,7 @@ mod tests {
     use crate::ApiVersionsResponseData;
     use crate::HostResolver;
     use crate::KafkaClient;
+    use crate::MetadataRequestData;
     use crate::MetadataResponseData;
     use crate::MetadataUpdater;
     use crate::api_message_type::ListenerType;
@@ -2469,6 +2520,85 @@ mod tests {
         // but the send_internal_metadata_request will have triggered handle_failed_request.
         // The best we can verify here is that no in-flight requests remain.
         assert_eq!(0, client.in_flight_request_count());
+    }
+
+    /// A request that builds cleanly but cannot be **serialized** at the negotiated
+    /// version becomes an aborted send, exactly like one that fails to build.
+    ///
+    /// Java covers both with a single `try`: `NetworkClient.send` catches
+    /// `UnsupportedVersionException` around `doSend(.., builder.build(version))`
+    /// (`NetworkClient.java:582-583`), and `doSend` calls `request.toSend(header)`
+    /// inside it at `:608`. The serialize half became reachable when the generator
+    /// gained Java's non-default-at-unsupported-version guard (PLAN §9.1); before
+    /// that fix this call site was an `.expect(..)`, so the whole class of condition
+    /// would have panicked the I/O task instead of taking the path the callers'
+    /// `handle_unsupported_version` hooks are written to expect.
+    ///
+    /// The scenario is an old broker: it advertises Metadata up to v7, and the caller
+    /// asks for topic authorized operations, a v8+ non-ignorable field.
+    /// `AllowAutoTopicCreation` is left at `true` so the builder's own v<4 gate (Java
+    /// `MetadataRequest.java:60-73`) does not fire first — the point is to reach
+    /// `write`.
+    #[tokio::test]
+    async fn test_unsupported_version_during_serialization_aborts_send() {
+        let mut client = create_network_client_with_no_version_discovery();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node).await;
+        client.poll(1, now).await;
+        client
+            .api_versions
+            .update(node.id_string(), NodeApiVersions::create_single(ApiKeys::METADATA.id(), 0, 7));
+
+        let mut data = MetadataRequestData::new();
+        data.set_topics(Some(Vec::new()));
+        data.set_allow_auto_topic_creation(true);
+        data.set_include_topic_authorized_operations(true);
+        let builder = MetadataRequestBuilder::with_data(data);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+
+        let responses = client.poll(1, now).await;
+
+        assert_eq!(1, responses.len(), "the failed send must surface exactly one response");
+        let mismatch = responses[0]
+            .version_mismatch()
+            .expect("an aborted send carries the version mismatch, not a successful response");
+        assert!(
+            mismatch.contains("Attempted to write a non-default includeTopicAuthorizedOperations at version 7"),
+            "got: {mismatch}"
+        );
+        assert!(!responses[0].has_response());
+        assert_eq!(0, client.in_flight_request_count(), "nothing may be left in flight");
+    }
+
+    /// The negative half of `test_unsupported_version_during_serialization_aborts_send`:
+    /// the same request against the same v7-capped broker, with the v8+ field left at
+    /// its default, serializes and goes on the wire. Without this, the test above would
+    /// still pass if `do_send` started aborting every send.
+    #[tokio::test]
+    async fn test_default_valued_version_gated_field_still_sends() {
+        let mut client = create_network_client_with_no_version_discovery();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node).await;
+        client.poll(1, now).await;
+        client
+            .api_versions
+            .update(node.id_string(), NodeApiVersions::create_single(ApiKeys::METADATA.id(), 0, 7));
+
+        let mut data = MetadataRequestData::new();
+        data.set_topics(Some(Vec::new()));
+        data.set_allow_auto_topic_creation(true);
+        let builder = MetadataRequestBuilder::with_data(data);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+
+        let responses = client.poll(1, now).await;
+        assert!(responses.is_empty(), "a serializable request produces no aborted send");
+        assert_eq!(1, client.in_flight_request_count(), "it must be in flight, awaiting a response");
     }
 
     /// Translated from `NetworkClientTest.testHasNodeAvailableOrConnectionReady`.

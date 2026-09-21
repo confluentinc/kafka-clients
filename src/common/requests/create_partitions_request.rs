@@ -194,15 +194,48 @@ mod tests {
     ///   topics: compact array (len+1 = 0x02)
     ///     name: compact string "t" (len+1 = 0x02, 0x74)
     ///     count: int32 = 3 (00 00 00 03)
-    ///     assignments: compact nullable array = null (0x00)
+    ///     assignments: compact nullable array, **empty** (len+1 = 0x01)
     ///     _tagged_fields: 0x00
     ///   timeout_ms: int32 = 100 (00 00 00 64)
     ///   validate_only: bool = false (0x00)
     ///   _tagged_fields: 0x00
+    ///
+    /// `assignments` is left unset here, and an unset nullable array is **empty**, not
+    /// null: `FieldSpec.fieldDefault` returns `new <List>(0)` for an array unless the
+    /// spec says `"default": "null"` (`FieldSpec.java:465-475`), and this spec does not.
+    /// The explicitly-null encoding is pinned by the sibling test below.
     #[test]
     fn serialize_known_byte_vector_v3() {
         let mut data = CreatePartitionsRequestData::new();
         data.set_topics(vec![topic("t", 3)]);
+        data.set_timeout_ms(100);
+        data.set_validate_only(false);
+        let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
+        let bytes = request.serialize().unwrap();
+        let expected: &[u8] = &[
+            0x02, // topics array length + 1
+            0x02, 0x74, // name "t"
+            0x00, 0x00, 0x00, 0x03, // count = 3
+            0x01, // assignments = empty array (length 0 + 1)
+            0x00, // topic tagged fields
+            0x00, 0x00, 0x00, 0x64, // timeout_ms = 100
+            0x00, // validate_only = false
+            0x00, // request tagged fields
+        ];
+        assert_eq!(bytes.into_buffer().as_slice(), expected);
+    }
+
+    /// Companion to `serialize_known_byte_vector_v3`: an explicitly-null `assignments`
+    /// encodes as compact-array length 0 (`0x00`), which is a different wire value from
+    /// the empty array above. Keeping both pinned is what makes the empty/null
+    /// distinction a regression-detectable property rather than an accident of the
+    /// field's default.
+    #[test]
+    fn serialize_known_byte_vector_v3_null_assignments() {
+        let mut data = CreatePartitionsRequestData::new();
+        let mut t = topic("t", 3);
+        t.set_assignments(None);
+        data.set_topics(vec![t]);
         data.set_timeout_ms(100);
         data.set_validate_only(false);
         let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));

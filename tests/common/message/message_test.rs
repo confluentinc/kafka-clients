@@ -37,10 +37,7 @@ use confluent_kafka::DescribeClusterRequestData;
 use confluent_kafka::DescribeClusterResponseData;
 use confluent_kafka::DescribeGroupsRequestData;
 use confluent_kafka::DescribeGroupsResponseData;
-use confluent_kafka::add_partitions_to_txn_request_data::{AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction};
-use confluent_kafka::describe_cluster_response_data::DescribeClusterBroker;
-use confluent_kafka::describe_groups_response_data::{DescribedGroup, DescribedGroupMember};
-// FetchRequestData and ForgottenTopic are used by testDefaultValues (not yet translated)
+use confluent_kafka::FetchRequestData;
 use confluent_kafka::HeartbeatRequestData;
 use confluent_kafka::JoinGroupRequestData;
 use confluent_kafka::JoinGroupResponseData;
@@ -57,6 +54,10 @@ use confluent_kafka::ProduceResponseData;
 use confluent_kafka::SyncGroupRequestData;
 use confluent_kafka::TxnOffsetCommitRequestData;
 use confluent_kafka::TxnOffsetCommitResponseData;
+use confluent_kafka::add_partitions_to_txn_request_data::{AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction};
+use confluent_kafka::describe_cluster_response_data::DescribeClusterBroker;
+use confluent_kafka::describe_groups_response_data::{DescribedGroup, DescribedGroupMember};
+use confluent_kafka::fetch_request_data::{ForgottenTopic, ReplicaState};
 use confluent_kafka::join_group_response_data::JoinGroupResponseMember;
 use confluent_kafka::leave_group_response_data::MemberResponse;
 use confluent_kafka::list_offsets_request_data::{ListOffsetsPartition, ListOffsetsTopic};
@@ -1587,19 +1588,148 @@ fn test_produce_response_versions() {
     }
 }
 
-// testDefaultValues: Requires per-field version validation in the generator.
-// The Java generator produces "Attempted to write a non-default X at version Y"
-// errors when writing non-default values at unsupported versions, but our Rust
-// generator silently ignores out-of-range fields. The version-gated UVE checks
-// are a generator-level feature not yet implemented, so this test cannot be
-// faithfully translated yet.
+/// Translated from `MessageTest.testDefaultValues`.
+///
+/// Was skipped on "requires per-field version validation in the generator"; that
+/// blocker closed with PLAN §9.1.
+///
+/// Covers the **array** branch of the non-default check
+/// (`FieldSpec.generateNonDefaultValueCheck`'s `isArray()` arm): a populated
+/// `ForgottenTopicsData` (v7+, non-ignorable) cannot be written at v5, while the
+/// same message with the field at its default can — and at v7 the populated one
+/// writes cleanly.
+///
+/// `verify_write_succeeds((short) 5, new FetchRequestData())` is the case that
+/// depends on the empty array being the field's default rather than null: with the
+/// pre-`d0dd3b52` `None` default, null counts as non-default
+/// (`field == null || !field.isEmpty()`) and this line would raise.
+#[test]
+fn test_default_values() {
+    let mut offset_commit = OffsetCommitRequestData::new();
+    offset_commit.set_retention_time_ms(123);
+    verify_write_succeeds(2, &offset_commit);
+
+    let mut forgotten = ForgottenTopic::new();
+    forgotten.set_topic("foo".to_string());
+    let mut fetch_with_forgotten = FetchRequestData::new();
+    fetch_with_forgotten.set_forgotten_topics_data(vec![forgotten]);
+
+    verify_write_raises_uve(5, "forgotten", &fetch_with_forgotten);
+    verify_write_succeeds(5, &FetchRequestData::new());
+    verify_write_succeeds(7, &fetch_with_forgotten);
+}
+
+/// Translated from `MessageTest.testNonIgnorableFieldWithDefaultNull`.
+///
+/// Was skipped on the same (now closed) blocker as `test_default_values`.
+///
+/// Covers the **nullable string with `"default": "null"`** branch, whose check is a
+/// bare presence test (`is_some()`): a `groupInstanceId` set at v0 raises, while
+/// both an explicit null and an unset field write cleanly there. The two negative
+/// cases are what stop the guard from being over-eager on a nullable field.
+#[test]
+fn test_non_ignorable_field_with_default_null() {
+    let member_id = "memberId".to_string();
+    let instance_id = "instanceId".to_string();
+
+    let base = || {
+        let mut data = HeartbeatRequestData::new();
+        data.set_group_id("groupId".to_string())
+            .set_generation_id(15)
+            .set_member_id(member_id.clone());
+        data
+    };
+
+    let mut with_instance = base();
+    with_instance.set_group_instance_id(Some(instance_id.clone()));
+    verify_write_raises_uve(0, "groupInstanceId", &with_instance);
+
+    let mut explicit_null = base();
+    explicit_null.set_group_instance_id(None);
+    verify_write_succeeds(0, &explicit_null);
+
+    verify_write_succeeds(0, &base());
+}
+
+/// The guard on a **tagged** field.
+///
+/// Java guards tagged fields too: the version conditional at
+/// `MessageDataGenerator.java:721` wraps both the tagged and untagged branches, and
+/// `cond.ifNotMember` (`:792`) sits outside it. This generator writes tagged fields
+/// from a separate block, so their guard comes from a second emission site with its
+/// own hand-built "unsupported version" expression — untested until now, while the
+/// other guard tests (`producerId`, `processId`, and the two above) are all on
+/// untagged fields.
+///
+/// `FetchRequest.ReplicaState` is a tagged struct field, v15+, non-ignorable, in a
+/// 4-18 message, so v14 is the boundary.
+#[test]
+fn test_tagged_non_ignorable_field_raises_uve_below_its_version() {
+    let mut replica_state = ReplicaState::new();
+    replica_state.set_replica_id(7);
+    let mut fetch = FetchRequestData::new();
+    fetch.set_replica_state(replica_state);
+
+    verify_write_raises_uve(14, "replicaState", &fetch);
+    verify_write_succeeds(15, &fetch);
+
+    // A tagged field left at its default is omitted, not rejected — the same
+    // predicate decides both, so this pins that the guard tests the value.
+    verify_write_succeeds(14, &FetchRequestData::new());
+}
+
+/// Translated from `MessageTest.testWriteNullForNonNullableFieldRaisesException`,
+/// second half. The first half is not representable here — see the note further
+/// down this file.
+///
+/// `MetadataRequest.Topics` declares `"nullableVersions": "1+"`, so null is legal
+/// from v1 but **not** at v0. Java's generated `write` throws `NullPointerException`
+/// there: `IsNullConditional`'s `ifNull` arm emits the length marker only for
+/// versions inside `nullableVersions`, and `ifNotMember` emits the throw
+/// (`MessageDataGenerator.java:967-969`). Java's builder does not gate it either
+/// (`MetadataRequest.java:57-65` sets null unconditionally), so the generated check
+/// is the only thing standing between an all-topics request and a v0 broker.
+///
+/// # `#[ignore]`: PLAN §9.32, a generator-wide gap
+///
+/// This assertion is correct and currently FAILS: our generated `write` emits the
+/// null marker at *any* version, with no gate on `nullableVersions` — visible in
+/// `metadata_request_data.rs`'s `else { .. write_int(-1) }`, which carries no
+/// version check at all. It is pre-existing and affects every nullable
+/// string/bytes/array field whose `nullableVersions` starts above the message's
+/// lowest version, so it is filed rather than fixed alongside §9.1 (same
+/// "do not bundle" reasoning §9.31 gives).
+///
+/// Un-ignore to verify the fix. Do **not** weaken it to match current behaviour.
+#[test]
+#[ignore = "PLAN §9.32: generated write emits the null marker at versions outside nullableVersions, where Java throws"]
+fn test_write_null_for_non_nullable_field_raises_error() {
+    let mut metadata = MetadataRequestData::new();
+    metadata.set_topics(None);
+
+    let mut cache = ObjectSerializationCache::new();
+    let size = metadata.size(&mut cache, 0).expect("size");
+    let mut buf = ByteBufferAccessor::new(Vec::with_capacity(size as usize * 2));
+    assert!(
+        Message::write(&mut metadata, &mut buf, &cache, 0).is_err(),
+        "a null Topics at v0 is outside nullableVersions (1+) and must be rejected"
+    );
+
+    // v1 is where null becomes legal, so it must still write cleanly there.
+    let mut metadata = MetadataRequestData::new();
+    metadata.set_topics(None);
+    verify_write_succeeds(1, &metadata);
+}
+
 //
-// testNonIgnorableFieldWithDefaultNull: Same blocker as testDefaultValues — requires
-// per-field version validation. Java test verifies that writing a HeartbeatRequest
-// with groupInstanceId="instanceId" at version 0 (where the field doesn't exist)
-// raises UnsupportedVersionException.
+// testWriteNullForNonNullableFieldRaisesException, FIRST half only:
+// `new CreateTopicsRequestData().setTopics(null)` at every CreateTopics version.
+// `CreateTopicsRequestData.topics` is a `Vec` here, not an `Option<Vec>`, so it
+// cannot be set to null at all — the type system rules it out at compile time and
+// there is nothing to assert at runtime.
 //
-// testWriteNullForNonNullableFieldRaisesException: Tests that setting a non-nullable
-// field to null raises NullPointerException in Java. In Rust, CreateTopicsRequestData.topics
-// is a Vec (not Option<Vec>), so it cannot be set to null/None. The type system
-// prevents this at compile time — no runtime test needed.
+// The SECOND half — `new MetadataRequestData().setTopics(null)` at v0 — *is*
+// representable here, and is translated below as
+// `test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on PLAN §9.32.
+// An earlier version of this comment covered the whole test with the type-system
+// argument, which is true of only one of its two halves.
