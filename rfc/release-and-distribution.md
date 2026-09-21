@@ -13,9 +13,9 @@ the registry.
 ## Release cadence
 
 Releases track Apache Kafka. A client `MAJOR.MINOR` corresponds to an Apache Kafka
-binding release together at the same `MAJOR.MINOR`. Patch releases follow the three-stream patch
+`MAJOR.MINOR` (see [Client versioning](versioning.md)); the Rust core and every binding
+release together at the same `MAJOR.MINOR`. Patch releases follow the three-stream patch
 encoding defined in the versioning proposal, so each binding's patch number may differ.
-encoding defined in the versioning proposal.
 
 ## Preview and GA
 
