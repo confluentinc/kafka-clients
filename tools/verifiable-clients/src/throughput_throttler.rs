@@ -16,7 +16,7 @@
 //!
 //! Pulled into this tool crate as a producer dependency: there is no
 //! `server-common` crate to host it, and `VerifiableProducer` is its only
-//! consumer here (Milestone 14, PLAN §6).
+//! consumer here.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
@@ -47,7 +47,7 @@ const MIN_SLEEP_NS: i64 = 2 * NS_PER_MS;
 /// # Async translation
 ///
 /// Java blocks the throttling task with `Object.wait()` on an intrinsic monitor.
-/// The Rust translation is non-blocking (CLAUDE.md §8/§9.6): the timed path uses
+/// The Rust translation is non-blocking: the timed path uses
 /// [`tokio::time::sleep`] and the `targetThroughput == 0` block-until-wakeup path
 /// uses a [`tokio::sync::Notify`]. The `wakeup` flag is preserved as an
 /// [`AtomicBool`] so [`wakeup`](Self::wakeup) can be called from any task while
@@ -136,17 +136,25 @@ impl ThroughputThrottler {
         if sleep_deficit_ns >= MIN_SLEEP_NS {
             let sleep_start = Instant::now();
             let mut remaining = sleep_deficit_ns;
-            while !self.wakeup.load(Ordering::Acquire) && remaining > 0 {
+            loop {
+                // Register the `notified()` waiter *before* checking the flag so
+                // a `wakeup()` racing between the check and the await is not lost
+                // (same ordering as the `target == 0` path above).
+                let notified = self.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.wakeup.load(Ordering::Acquire) || remaining <= 0 {
+                    break;
+                }
                 let sleep_dur = Duration::from_nanos(remaining as u64);
-                // Wake either when the timer elapses or when `wakeup()` fires
-                // its `Notify` — the Rust equivalent of `wait(sleepMs, sleepNs)`
+                // Wake either when the timer elapses or when `wakeup()` fires its
+                // `Notify` — the Rust equivalent of `wait(sleepMs, sleepNs)`
                 // returning on timeout or `notifyAll()`. Both arms are
-                // cancellation-safe (a dropped timer / dropped waiter has no
-                // side effect), and the `wakeup` flag re-checked at the top of
-                // the loop is the source of truth (CLAUDE.md §9.6).
+                // cancellation-safe (a dropped timer / dropped waiter has no side
+                // effect), and the `wakeup` flag is the source of truth.
                 tokio::select! {
                     _ = tokio::time::sleep(sleep_dur) => {}
-                    _ = self.notify.notified() => {}
+                    _ = notified.as_mut() => {}
                 }
                 let elapsed = sleep_start.elapsed().as_nanos() as i64;
                 remaining = sleep_deficit_ns - elapsed;
@@ -248,5 +256,58 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), throttler.throttle())
             .await
             .expect("throttle() should return immediately when already woken");
+    }
+
+    #[test]
+    fn should_throttle_with_zero_target() {
+        // targetThroughput == 0 is not < 0, so the rate check applies: any
+        // positive rate over positive elapsed time throttles.
+        let throttler = ThroughputThrottler::new(0.0, 0);
+        // 1 msg after 1s => rate 1/s > 0 => throttle.
+        assert!(throttler.should_throttle(1, 1000));
+        // 0 msgs => rate 0, not > 0 => no throttle.
+        assert!(!throttler.should_throttle(0, 1000));
+        // elapsed == 0 => guard `elapsedSec > 0` is false => no throttle.
+        assert!(!throttler.should_throttle(1, 0));
+    }
+
+    #[tokio::test]
+    async fn timed_path_sleeps_then_wakeup_interrupts() {
+        use std::sync::Arc;
+
+        // target == 1/sec => sleepTimeNs == 1s, so a single throttle() accrues
+        // enough deficit to enter the timed-sleep branch and would sleep ~1s.
+        let throttler = Arc::new(ThroughputThrottler::new(1.0, 0));
+        let t2 = Arc::clone(&throttler);
+        let started = Instant::now();
+        let handle = tokio::spawn(async move {
+            t2.throttle().await;
+        });
+        // Let the task reach the sleep, then wake it. If wakeup() failed to
+        // interrupt the timed sleep, throttle() would run out the full ~1s;
+        // the assertion is that the wakeup returns it far sooner.
+        tokio::task::yield_now().await;
+        throttler.wakeup();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("throttle() should return after wakeup()")
+            .expect("task should not panic");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "wakeup() should interrupt the ~1s timed sleep promptly, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_path_wakeup_before_throttle_is_not_lost() {
+        // Regression: a wakeup() that fires before throttle() reaches its await
+        // must not be lost. The timed path registers the waiter and checks the
+        // flag before sleeping, so throttle() returns without sleeping at all.
+        let throttler = ThroughputThrottler::new(1.0, 0);
+        throttler.wakeup();
+        tokio::time::timeout(Duration::from_secs(5), throttler.throttle())
+            .await
+            .expect("throttle() should return immediately when woken before the sleep");
     }
 }

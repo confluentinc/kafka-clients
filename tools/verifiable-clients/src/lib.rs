@@ -14,13 +14,12 @@
 
 //! Rust translations of Apache Kafka's client-facing system-test tools.
 //!
-//! Milestone 14 delivers `org.apache.kafka.tools.VerifiableProducer` and
+//! This crate delivers `org.apache.kafka.tools.VerifiableProducer` and
 //! `VerifiableConsumer` (plus their dependencies) as runnable system-test
 //! clients over the already-translated producer/consumer. Each tool mirrors
 //! Java's **stdout JSON contract** exactly (event `name`s, field names, field
 //! order), because that contract is what a downstream ducktape-style harness
-//! parses — the tool equivalent of the wire-level fidelity the client crate's
-//! generated types hold.
+//! parses.
 
 #![deny(warnings)]
 
@@ -48,9 +47,8 @@ pub use verifiable_producer::VerifiableProducer;
 ///
 /// `tokio::signal::unix` is Unix-only; on other platforms this falls back to
 /// Ctrl-C alone. The function only *detects* the signal — it performs no side
-/// effects — so racing the two arms in a `select!` loses nothing
-/// (`consumer-threading.md` §10 spirit: no irreversible work inside a racing
-/// select arm).
+/// effects — so racing the two arms in a `select!` loses nothing: no
+/// irreversible work happens inside a racing select arm.
 pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {

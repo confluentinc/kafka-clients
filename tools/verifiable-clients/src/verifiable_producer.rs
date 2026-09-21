@@ -30,7 +30,7 @@
 //!
 //! Every printed event mirrors Java's Jackson output exactly — event `name`,
 //! field names, and field order — because that stdout contract is what a
-//! downstream ducktape-style harness parses (Milestone 14, PLAN §1). serde
+//! downstream ducktape-style harness parses. serde
 //! serializes struct fields in declaration order, so each event struct declares
 //! its fields in the same order Java's `@JsonPropertyOrder({"timestamp","name"})`
 //! plus `@JsonProperty` method declaration order produces.
@@ -71,9 +71,9 @@ fn print_json<T: Serialize>(data: &T) {
 /// Java's `FailedSend.exception()` is `Exception.getClass().toString()` — a JVM
 /// class name that has no Rust equivalent. We emit the error's protocol
 /// classification (`Errors` variant) as the closest stable analog. The JSON
-/// *field name* `exception` is Java's wire contract and is preserved unchanged
-/// (CLAUDE.md §4); only this value differs, unavoidably. The Rust identifier
-/// deliberately avoids the word "exception" (CLAUDE.md §2).
+/// *field name* `exception` is Java's wire contract and is preserved unchanged;
+/// only this value differs, unavoidably. The Rust identifier deliberately
+/// avoids the word "exception".
 fn error_class_name(error: &Error) -> String {
     format!("{:?}", error.error())
 }
@@ -151,8 +151,8 @@ struct FailedSend {
     // The serialized key `exception` is the Java event's field name (Jackson
     // `@JsonProperty` on `exception()`), part of the stdout wire contract. The
     // Rust field is named `error_class` because the word "exception" must not
-    // appear in Rust identifiers (CLAUDE.md §2); `#[serde(rename)]` restores the
-    // Java wire key. See `error_class_name` for how the value is derived.
+    // appear in Rust identifiers; `#[serde(rename)]` restores the Java wire key.
+    // See `error_class_name` for how the value is derived.
     #[serde(rename = "exception")]
     error_class: String,
     // Java `message()` is `exception.getMessage()`, which may be null and is
@@ -232,8 +232,8 @@ pub struct VerifiableProducer<P: Producer<String, String>> {
     max_messages: i64,
     // Number of messages for which acks were received. Shared with the send
     // callback (which runs on the producer's completion path), so it is an
-    // `Arc<AtomicI64>` rather than a plain field (CLAUDE.md §11: a counter shared
-    // across tasks is atomic, not a lock).
+    // `Arc<AtomicI64>` rather than a plain field: a counter shared across tasks
+    // is atomic, not a lock.
     num_acked: Arc<AtomicI64>,
     // Number of send attempts.
     num_sent: i64,
@@ -310,8 +310,8 @@ impl<P: Producer<String, String>> VerifiableProducer<P> {
     pub async fn send(&mut self, key: Option<String>, value: String) {
         // Build the record (Java 285-290). Java performs this outside its
         // try/catch, so a negative create-time would propagate (crash). We
-        // surface it as a FailedSend instead of aborting (CLAUDE.md §10.1: no
-        // panic on a recoverable path); `numSent` is left un-incremented,
+        // surface it as a FailedSend instead of aborting (no panic on a
+        // recoverable path); `numSent` is left un-incremented,
         // matching Java's ordering (the increment follows construction).
         let record = if let Some(create_time) = self.create_time {
             let record = ProducerRecord::with_timestamp(
@@ -341,8 +341,8 @@ impl<P: Producer<String, String>> VerifiableProducer<P> {
         // PrintInfoCallback (Java 496-516): exactly one JSON line per completed
         // send — success increments numAcked and prints producer_send_success,
         // failure prints producer_send_error. The producer invokes this callback
-        // exactly once when the send completes (CLAUDE.md §9.5 callback
-        // obligation is met by passing it through, not by re-implementing it).
+        // exactly once when the send completes; we pass it through rather than
+        // re-implementing it.
         let cb_key = key.clone();
         let cb_value = value.clone();
         let cb_topic = self.topic.clone();
@@ -462,8 +462,8 @@ struct ParsedArgs {
 
 /// Build a command-line argument error. Java raises
 /// `ArgumentParserException`; the word "exception" must not appear in Rust
-/// identifiers (CLAUDE.md §2, §10), so this maps to a recoverable
-/// `LocalIllegalArgument` error carrying the same message.
+/// identifiers, so this maps to a recoverable `LocalIllegalArgument` error
+/// carrying the same message.
 fn arg_error(message: impl Into<String>) -> Error {
     Error::local_illegal_argument(message)
 }
@@ -730,8 +730,7 @@ mod tests {
     #[tokio::test]
     async fn send_increments_sent_and_acked_via_callback() {
         // With an auto-completing MockProducer the callback fires synchronously
-        // on send, so exactly one ack is recorded per completed send (the
-        // CLAUDE.md §9.5 callback obligation).
+        // on send, so exactly one ack is recorded per completed send.
         let mut producer = verifiable_with(None, None);
         assert_eq!(producer.num_sent(), 0);
         assert_eq!(producer.num_acked(), 0);
@@ -836,8 +835,8 @@ mod tests {
     // These two go through the real `from_error` derivation path (not a
     // hand-built struct), so they prove `message` is `getMessage()` (bare text,
     // no class-name prefix) AND that an empty message renders as JSON `null`,
-    // exactly as Java's `FailedSend` does (DoD §12: pin the mechanism, not the
-    // fixture). The timestamp is overwritten so the wire string is exact.
+    // exactly as Java's `FailedSend` does. The timestamp is overwritten so the
+    // wire string is exact.
     #[test]
     fn failed_send_from_error_present_message_json() {
         let error = Error::with_message(Errors::RequestTimedOut, "boom");
