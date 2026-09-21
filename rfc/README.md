@@ -10,7 +10,7 @@ Confluent is building a new generation of its non-Java Kafka clients on a shared
 core** translated from the Apache Kafka Java client. The Rust core is a native Rust client
 and, through thin bindings, also powers the Python, .NET, JavaScript, and C/C++ clients,
 replacing the librdkafka C core those clients use today. The aim is feature and behavior
-parity with the Java client within weeks of a Java release, a memory-safe core, a
+parity with the Java client within weeks of a new Java release, a memory-safe core, a
 Java-aligned API across languages, and one place to contribute.
 
 The proposals below break that effort into focused pieces that can be reviewed on their own.
