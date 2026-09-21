@@ -323,7 +323,10 @@ impl<P: Producer<String, String>> VerifiableProducer<P> {
             )
             .map_err(|e| Error::local_illegal_argument(e.message()));
             // Java 287: advance createTime by wall-clock progress since start.
-            self.create_time = Some(create_time + (now_millis() - self.start_time));
+            // Java `long` addition wraps silently on overflow; `wrapping_add`
+            // matches that and avoids a debug-build panic in the send loop when
+            // `--message-create-time` is set near `i64::MAX`.
+            self.create_time = Some(create_time.wrapping_add(now_millis() - self.start_time));
             record
         } else {
             Ok(ProducerRecord::with_key(self.topic.clone(), key.clone(), Some(value.clone())))
