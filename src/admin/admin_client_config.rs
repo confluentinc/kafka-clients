@@ -72,7 +72,7 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
     /// or a numeric value fails to parse.
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
+    pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
         let mut bootstrap_set = false;
 
@@ -101,7 +101,7 @@ impl AdminClientConfig {
         }
 
         if !bootstrap_set || config.bootstrap_servers.is_empty() {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Missing required configuration \"{}\" which has no default value.",
                 Self::BOOTSTRAP_SERVERS_CONFIG
             )));
@@ -191,11 +191,11 @@ impl Default for AdminClientConfig {
 }
 
 fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
 #[cfg(test)]
@@ -206,7 +206,7 @@ mod tests {
     fn defaults_and_required_bootstrap() {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "a:9092, b:9092".to_string());
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_servers(), &["a:9092".to_string(), "b:9092".to_string()]);
         assert_eq!(config.request_timeout_ms(), 30_000);
         assert_eq!(config.default_api_timeout_ms(), 60_000);
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn missing_bootstrap_is_error_with_exact_message() {
         let props = HashMap::new();
-        let err = AdminClientConfig::from_properties(&props).unwrap_err();
+        let err = AdminClientConfig::new(&props).unwrap_err();
         assert_eq!(
             err.message(),
             "Missing required configuration \"bootstrap.servers\" which has no default value."
@@ -230,7 +230,7 @@ mod tests {
         props.insert("client.id".to_string(), "admin-1".to_string());
         props.insert("request.timeout.ms".to_string(), "5000".to_string());
         props.insert("some.unknown.key".to_string(), "ignored".to_string());
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.client_id(), "admin-1");
         assert_eq!(config.request_timeout_ms(), 5000);
     }
@@ -240,6 +240,6 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
         props.insert("request.timeout.ms".to_string(), "not-a-number".to_string());
-        assert!(AdminClientConfig::from_properties(&props).is_err());
+        assert!(AdminClientConfig::new(&props).is_err());
     }
 }

@@ -17,7 +17,7 @@
 //! See [`LocalIllegalArgumentError`](crate::common::LocalIllegalArgumentError)
 //! for why the four JDK classes carry the `Local` prefix and no wire code.
 
-use crate::common::kafka_error::message_only_error;
+use crate::common::error::message_only_error;
 
 message_only_error! {
     /// Illegal state error — a method was called in an invalid state.

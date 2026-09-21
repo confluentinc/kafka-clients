@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.MemberIdRequiredException`.
 
-use crate::common::kafka_error::kafka_error_class;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// The group member needs to have a valid member id before actually entering

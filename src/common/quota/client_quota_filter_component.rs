@@ -110,56 +110,56 @@ impl std::fmt::Display for ClientQuotaFilterComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::quota::client_quota_entity::USER;
+    use crate::common::quota::ClientQuotaEntity;
 
     /// Translated from `KafkaAdminClientTest.testEqualsOfClientQuotaFilterComponent`.
     #[test]
     fn test_equals_of_client_quota_filter_component() {
         assert_eq!(
-            ClientQuotaFilterComponent::of_default_entity(USER),
-            ClientQuotaFilterComponent::of_default_entity(USER)
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER),
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER)
         );
 
         assert_eq!(
-            ClientQuotaFilterComponent::of_entity_type(USER),
-            ClientQuotaFilterComponent::of_entity_type(USER)
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER)
         );
 
         // match = null is different from match = Empty
         assert_ne!(
-            ClientQuotaFilterComponent::of_default_entity(USER),
-            ClientQuotaFilterComponent::of_entity_type(USER)
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER)
         );
 
         assert_eq!(
-            ClientQuotaFilterComponent::of_entity(USER, "user"),
-            ClientQuotaFilterComponent::of_entity(USER, "user")
+            ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "user"),
+            ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "user")
         );
 
         assert_ne!(
-            ClientQuotaFilterComponent::of_entity(USER, "user"),
-            ClientQuotaFilterComponent::of_default_entity(USER)
+            ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "user"),
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER)
         );
 
         assert_ne!(
-            ClientQuotaFilterComponent::of_entity(USER, "user"),
-            ClientQuotaFilterComponent::of_entity_type(USER)
+            ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "user"),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER)
         );
     }
 
     // New test, no Java original.
     #[test]
     fn accessors_return_expected_values() {
-        let c = ClientQuotaFilterComponent::of_entity(USER, "u1");
-        assert_eq!(c.entity_type(), USER);
+        let c = ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1");
+        assert_eq!(c.entity_type(), ClientQuotaEntity::USER);
         assert_eq!(c.match_spec(), &ClientQuotaMatch::Exact("u1".to_string()));
 
         assert_eq!(
-            ClientQuotaFilterComponent::of_default_entity(USER).match_spec(),
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER).match_spec(),
             &ClientQuotaMatch::Default
         );
         assert_eq!(
-            ClientQuotaFilterComponent::of_entity_type(USER).match_spec(),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER).match_spec(),
             &ClientQuotaMatch::Any
         );
     }

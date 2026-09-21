@@ -32,7 +32,7 @@ use crate::producer::Callback;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
 
-/// The interface for the [`KafkaProducer`](super::kafka_producer::KafkaProducer).
+/// The interface for the [`KafkaProducer`](super::KafkaProducer).
 ///
 /// Translated from `org.apache.kafka.clients.producer.Producer`.
 #[allow(async_fn_in_trait)]
@@ -40,7 +40,7 @@ pub trait Producer<K, V> {
     /// Needs to be called before any other method when the `transactional.id` is
     /// set in the configuration.
     ///
-    /// See [`KafkaProducer::init_transactions`](super::kafka_producer::KafkaProducer::init_transactions).
+    /// See [`KafkaProducer::init_transactions`](super::KafkaProducer::init_transactions).
     ///
     /// # Errors
     ///
@@ -58,7 +58,7 @@ pub trait Producer<K, V> {
 
     /// Should be called before the start of each new transaction.
     ///
-    /// See [`KafkaProducer::begin_transaction`](super::kafka_producer::KafkaProducer::begin_transaction).
+    /// See [`KafkaProducer::begin_transaction`](super::KafkaProducer::begin_transaction).
     ///
     /// Stays synchronous because Java's `beginTransaction`
     /// (`KafkaProducer.java:674-681`) is a pure state transition and never
@@ -75,7 +75,7 @@ pub trait Producer<K, V> {
     /// Sends a list of specified offsets to the consumer group coordinator, and
     /// also marks those offsets as part of the current transaction.
     ///
-    /// See [`KafkaProducer::send_offsets_to_transaction`](super::kafka_producer::KafkaProducer::send_offsets_to_transaction).
+    /// See [`KafkaProducer::send_offsets_to_transaction`](super::KafkaProducer::send_offsets_to_transaction).
     ///
     /// # Errors
     ///
@@ -91,7 +91,7 @@ pub trait Producer<K, V> {
 
     /// Commits the ongoing transaction.
     ///
-    /// See [`KafkaProducer::commit_transaction`](super::kafka_producer::KafkaProducer::commit_transaction).
+    /// See [`KafkaProducer::commit_transaction`](super::KafkaProducer::commit_transaction).
     ///
     /// # Errors
     ///
@@ -103,7 +103,7 @@ pub trait Producer<K, V> {
 
     /// Aborts the ongoing transaction.
     ///
-    /// See [`KafkaProducer::abort_transaction`](super::kafka_producer::KafkaProducer::abort_transaction).
+    /// See [`KafkaProducer::abort_transaction`](super::KafkaProducer::abort_transaction).
     ///
     /// # Errors
     ///
@@ -193,5 +193,5 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error>;
+    async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error>;
 }

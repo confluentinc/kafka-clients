@@ -19,8 +19,8 @@
 use std::fmt;
 use std::io;
 
-use crate::common::protocol::ApiKeys;
-use crate::common::requests::{RequestBuilder, RequestHeader};
+use crate::common::ApiKeys;
+use crate::common::requests::{RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder};
 
 use super::RequestCompletionHandler;
 
@@ -101,7 +101,15 @@ impl ClientRequest {
     ///
     /// Returns an error if the API key is not recognized.
     pub fn make_header(&self, version: i16) -> io::Result<RequestHeader> {
-        RequestHeader::new(self.api_key(), version, &self.client_id, self.correlation_id)
+        RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(self.api_key())
+                .set_request_version(version)
+                .set_client_id(&self.client_id)
+                .set_correlation_id(self.correlation_id)
+                .build()
+                .expect("RequestHeaderOptionsBuilder::build: every mandatory parameter is set above"),
+        )
     }
 
     /// Returns a reference to the request builder.

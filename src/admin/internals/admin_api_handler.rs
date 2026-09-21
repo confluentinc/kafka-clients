@@ -23,7 +23,7 @@ use std::hash::Hash;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 use crate::common::{Error, Node};
 
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
+use super::AdminApiLookupStrategy;
 
 /// The result of handling a fulfillment response: which keys completed, which
 /// failed fatally, and which must be sent back to the lookup stage.

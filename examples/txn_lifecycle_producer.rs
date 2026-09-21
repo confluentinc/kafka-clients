@@ -38,7 +38,7 @@
 
 mod txn_common;
 
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 
 use txn_common::close_producer;
 use txn_common::plain_producer;

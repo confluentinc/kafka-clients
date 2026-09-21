@@ -24,12 +24,12 @@
 use std::io;
 
 use crate::common::Uuid;
+use crate::common::Writable;
 use crate::common::network::ByteBufferSend;
+use crate::common::protocol::ByteUtils;
 use crate::common::protocol::Message;
 use crate::common::protocol::MessageSizeAccumulator;
 use crate::common::protocol::ObjectSerializationCache;
-use crate::common::protocol::Writable;
-use crate::common::protocol::varint;
 
 use super::RequestHeader;
 use super::ResponseHeader;
@@ -157,15 +157,15 @@ impl Writable for SendBuilderWritable {
     }
 
     fn write_unsigned_varint(&mut self, val: u32) -> io::Result<()> {
-        varint::write_unsigned_varint(val, &mut self.current_buffer)
+        ByteUtils::write_unsigned_varint(val, &mut self.current_buffer)
     }
 
     fn write_varint(&mut self, val: i32) -> io::Result<()> {
-        varint::write_varint(val, &mut self.current_buffer)
+        ByteUtils::write_varint(val, &mut self.current_buffer)
     }
 
     fn write_varlong(&mut self, val: i64) -> io::Result<()> {
-        varint::write_varlong(val, &mut self.current_buffer)
+        ByteUtils::write_varlong(val, &mut self.current_buffer)
     }
 
     fn write_uuid(&mut self, uuid: &Uuid) -> io::Result<()> {
@@ -188,14 +188,23 @@ impl Writable for SendBuilderWritable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MetadataRequestData;
+    use crate::common::ApiKeys;
     use crate::common::network::KafkaSend;
-    use crate::common::protocol::ApiKeys;
-    use crate::metadata_request_data::MetadataRequestData;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
     #[test]
     fn test_send_builder_creates_size_prefixed_buffer() {
-        let header =
-            RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.latest_version(), "test-client", 42).unwrap();
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.latest_version())
+                .set_client_id("test-client")
+                .set_correlation_id(42)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
 
         let mut body = MetadataRequestData::new();
 

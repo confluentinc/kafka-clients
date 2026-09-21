@@ -23,20 +23,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::common::Error;
 use crate::common::LocalIllegalArgumentError;
 
-/// `ListOffsetsRequest.EARLIEST_TIMESTAMP` — the sentinel passed to the
-/// broker to request the earliest available offset.
-///
-/// NOTE: a later phase translating `ListOffsetsRequest` will replace this
-/// constant with a re-export from there. The numeric value is fixed by the
-/// Kafka protocol and will not change.
-pub const EARLIEST_TIMESTAMP: i64 = -2;
-
-/// `ListOffsetsRequest.LATEST_TIMESTAMP` — the sentinel passed to the broker
-/// to request the latest available offset.
-///
-/// NOTE: see [`EARLIEST_TIMESTAMP`].
-pub const LATEST_TIMESTAMP: i64 = -1;
-
 /// The kind of auto-offset-reset strategy.
 ///
 /// Corresponds to Java's nested `AutoOffsetResetStrategy.StrategyType` enum.
@@ -76,6 +62,26 @@ pub struct AutoOffsetResetStrategy {
 }
 
 impl AutoOffsetResetStrategy {
+    /// `ListOffsetsRequest.EARLIEST_TIMESTAMP` — the sentinel passed to the
+    /// broker to request the earliest available offset.
+    ///
+    /// NOTE: a later phase translating `ListOffsetsRequest` will replace this
+    /// constant with a re-export from there. The numeric value is fixed by the
+    /// Kafka protocol and will not change.
+    pub const EARLIEST_TIMESTAMP: i64 = -2;
+
+    /// `ListOffsetsRequest.LATEST_TIMESTAMP` — the sentinel passed to the broker
+    /// to request the latest available offset.
+    ///
+    /// NOTE: see [`Self::EARLIEST_TIMESTAMP`].
+    pub const LATEST_TIMESTAMP: i64 = -1;
+
+    /// Java's `IllegalArgumentException("Negative duration is not supported in
+    /// by_duration offset reset strategy.")` (`AutoOffsetResetStrategy.java:90`),
+    /// which `fromString`'s own `catch (Exception e)` immediately re-catches and
+    /// carries as the cause of its outer error.
+    const NEGATIVE_DURATION_MESSAGE: &str = "Negative duration is not supported in by_duration offset reset strategy.";
+
     /// The "earliest" strategy.
     pub const EARLIEST: Self = AutoOffsetResetStrategy { strategy_type: StrategyType::Earliest, duration: None };
 
@@ -159,7 +165,7 @@ impl AutoOffsetResetStrategy {
         match Self::from_string(value) {
             Ok(_) => Ok(()),
             // Java's `catch (Exception e)` drops `e` entirely.
-            Err(_) => Err(Error::config_value_message(
+            Err(_) => Err(Error::config_name_value_message(
                 name,
                 value,
                 format!(
@@ -191,8 +197,8 @@ impl AutoOffsetResetStrategy {
     /// - [`StrategyType::None_`] → `None`
     pub fn timestamp(&self) -> Option<i64> {
         match self.strategy_type {
-            StrategyType::Earliest => Some(EARLIEST_TIMESTAMP),
-            StrategyType::Latest => Some(LATEST_TIMESTAMP),
+            StrategyType::Earliest => Some(AutoOffsetResetStrategy::EARLIEST_TIMESTAMP),
+            StrategyType::Latest => Some(AutoOffsetResetStrategy::LATEST_TIMESTAMP),
             StrategyType::ByDuration => {
                 let now_millis = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -250,12 +256,6 @@ impl fmt::Display for AutoOffsetResetStrategy {
     }
 }
 
-/// Java's `IllegalArgumentException("Negative duration is not supported in
-/// by_duration offset reset strategy.")` (`AutoOffsetResetStrategy.java:90`),
-/// which `fromString`'s own `catch (Exception e)` immediately re-catches and
-/// carries as the cause of its outer error.
-const NEGATIVE_DURATION_MESSAGE: &str = "Negative duration is not supported in by_duration offset reset strategy.";
-
 /// Stands in for the `java.time.format.DateTimeParseException` that
 /// `Duration.parse` raises on a malformed duration, carrying that class's own
 /// message. `DateTimeParseException` has no Rust counterpart in
@@ -289,7 +289,9 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, Error> {
     // thing that tells a negative value apart from a malformed one once both
     // are wrapped by the caller's identical outer message.
     if input.starts_with('-') {
-        return Err(Error::local_illegal_argument(NEGATIVE_DURATION_MESSAGE));
+        return Err(Error::local_illegal_argument(
+            AutoOffsetResetStrategy::NEGATIVE_DURATION_MESSAGE,
+        ));
     }
     let rest = input.strip_prefix('P').ok_or_else(parse_failure)?;
     if rest.is_empty() {
@@ -561,20 +563,20 @@ mod tests {
         }
     }
 
-    /// The validator is wired into `ConsumerConfig::from_properties`, which is
+    /// The validator is wired into `ConsumerConfig::new`, which is
     /// Java's `ConfigDef` validation point — so a bad `auto.offset.reset` is
     /// rejected at config construction with the `ConfigException`, not later.
     #[test]
     fn test_consumer_config_rejects_invalid_auto_offset_reset() {
         use std::collections::HashMap;
 
-        use crate::consumer::consumer_config::ConsumerConfig;
+        use crate::consumer::ConsumerConfig;
 
         let props = HashMap::from([
             ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
             ("auto.offset.reset".to_string(), "bogus".to_string()),
         ]);
-        let err = ConsumerConfig::from_properties(&props).expect_err("bogus strategy must be rejected");
+        let err = ConsumerConfig::new(&props).expect_err("bogus strategy must be rejected");
         assert!(matches!(err, Error::Config(_)), "must be a config error: {err:?}");
         assert_eq!(
             "Invalid value bogus for configuration auto.offset.reset: Invalid value `bogus` for \
@@ -591,8 +593,14 @@ mod tests {
 
     #[test]
     fn test_timestamp_for_each_strategy() {
-        assert_eq!(AutoOffsetResetStrategy::EARLIEST.timestamp(), Some(EARLIEST_TIMESTAMP));
-        assert_eq!(AutoOffsetResetStrategy::LATEST.timestamp(), Some(LATEST_TIMESTAMP));
+        assert_eq!(
+            AutoOffsetResetStrategy::EARLIEST.timestamp(),
+            Some(AutoOffsetResetStrategy::EARLIEST_TIMESTAMP)
+        );
+        assert_eq!(
+            AutoOffsetResetStrategy::LATEST.timestamp(),
+            Some(AutoOffsetResetStrategy::LATEST_TIMESTAMP)
+        );
         assert_eq!(AutoOffsetResetStrategy::NONE.timestamp(), None);
 
         let s = AutoOffsetResetStrategy::from_string("by_duration:PT1H").unwrap();

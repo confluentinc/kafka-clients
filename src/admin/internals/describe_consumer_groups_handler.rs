@@ -24,26 +24,26 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use crate::admin::internals::admin_utils::valid_acl_operations;
+use crate::ConsumerGroupDescribeRequestData;
+use crate::DescribeGroupsRequestData;
+use crate::admin::internals::AdminUtils;
 use crate::admin::{ConsumerGroupDescription, MemberAssignment, MemberDescription};
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::requests::{
     ConcreteResponse, ConsumerGroupDescribeRequestBuilder, CoordinatorType, DescribeGroupsRequestBuilder,
     RequestBuilder,
 };
 use crate::common::utils::LogContext;
 use crate::common::{Error, GroupState, GroupType, Node, TopicPartition};
-use crate::consumer::internals::consumer_protocol::{ConsumerProtocol, PROTOCOL_TYPE};
-use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
+use crate::consumer::internals::ConsumerProtocol;
 use crate::consumer_group_describe_response_data::Assignment as WireAssignment;
-use crate::describe_groups_request_data::DescribeGroupsRequestData;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The `describeConsumerGroups` handler.
 ///
@@ -97,7 +97,7 @@ impl DescribeConsumerGroupsHandler {
     fn handle_consumer_group_response(
         &self,
         coordinator: &Node,
-        response: &crate::consumer_group_describe_response_data::ConsumerGroupDescribeResponseData,
+        response: &crate::ConsumerGroupDescribeResponseData,
         completed: &mut HashMap<CoordinatorKey, ConsumerGroupDescription>,
         failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
@@ -117,7 +117,7 @@ impl DescribeConsumerGroupsHandler {
                 continue;
             }
 
-            let authorized_operations = valid_acl_operations(described_group.authorized_operations);
+            let authorized_operations = AdminUtils::valid_acl_operations(described_group.authorized_operations);
             let mut member_descriptions = Vec::with_capacity(described_group.members.len());
             for group_member in &described_group.members {
                 let upgraded = match group_member.member_type {
@@ -156,7 +156,7 @@ impl DescribeConsumerGroupsHandler {
     fn handle_classic_group_response(
         &self,
         coordinator: &Node,
-        response: &crate::describe_groups_response_data::DescribeGroupsResponseData,
+        response: &crate::DescribeGroupsResponseData,
         completed: &mut HashMap<CoordinatorKey, ConsumerGroupDescription>,
         failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
@@ -176,8 +176,8 @@ impl DescribeConsumerGroupsHandler {
                 continue;
             }
             let protocol_type = &described_group.protocol_type;
-            if protocol_type == PROTOCOL_TYPE || protocol_type.is_empty() {
-                let authorized_operations = valid_acl_operations(described_group.authorized_operations);
+            if protocol_type == ConsumerProtocol::PROTOCOL_TYPE || protocol_type.is_empty() {
+                let authorized_operations = AdminUtils::valid_acl_operations(described_group.authorized_operations);
                 let mut member_descriptions = Vec::with_capacity(described_group.members.len());
                 let mut deserialize_error = None;
                 for group_member in &described_group.members {
@@ -459,18 +459,18 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::admin::internals::admin_api_handler::ApiResult;
+    use crate::ConsumerGroupDescribeResponseData;
+    use crate::DescribeGroupsResponseData;
+    use crate::admin::internals::ApiResult;
     use crate::common::requests::{
         ConcreteResponse, ConsumerGroupDescribeResponse, DescribeGroupsResponse, RequestBuilder,
     };
     use crate::consumer::consumer_partition_assignor::Assignment;
     use crate::consumer_group_describe_response_data::{
-        Assignment as WireResponseAssignment, ConsumerGroupDescribeResponseData, DescribedGroup as CgDescribedGroup,
-        Member as CgMember, TopicPartitions as CgTopicPartitions,
+        Assignment as WireResponseAssignment, DescribedGroup as CgDescribedGroup, Member as CgMember,
+        TopicPartitions as CgTopicPartitions,
     };
-    use crate::describe_groups_response_data::{
-        DescribeGroupsResponseData, DescribedGroup as ClassicDescribedGroup, DescribedGroupMember,
-    };
+    use crate::describe_groups_response_data::{DescribedGroup as ClassicDescribedGroup, DescribedGroupMember};
 
     fn log_context() -> LogContext {
         LogContext::new(String::new())
@@ -664,7 +664,7 @@ mod tests {
     }
 
     fn build_describe_groups_response(error: Errors, protocol_type: &str) -> ConcreteResponse {
-        let assignment_bytes = ConsumerProtocol::serialize_assignment(&Assignment::with_partitions(tps())).unwrap();
+        let assignment_bytes = ConsumerProtocol::serialize_assignment(&Assignment::new(tps())).unwrap();
         let mut member = DescribedGroupMember::new();
         member
             .set_client_host("host".to_string())

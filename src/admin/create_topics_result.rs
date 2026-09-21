@@ -21,9 +21,6 @@ use std::collections::HashMap;
 use crate::admin::Config;
 use crate::common::{Error, KafkaFuture, Uuid};
 
-/// Sentinel used when the broker did not return partition/replication metadata.
-pub(crate) const UNKNOWN: i32 = -1;
-
 /// Topic metadata and configuration returned per created topic.
 ///
 /// Corresponds to `CreateTopicsResult.TopicMetadataAndConfig`. Carries either
@@ -50,8 +47,8 @@ impl TopicMetadataAndConfig {
         Self {
             error: Some(error),
             topic_id: Uuid::zero(),
-            num_partitions: UNKNOWN,
-            replication_factor: UNKNOWN,
+            num_partitions: CreateTopicsResult::UNKNOWN,
+            replication_factor: CreateTopicsResult::UNKNOWN,
             config: None,
         }
     }
@@ -98,6 +95,9 @@ pub struct CreateTopicsResult {
 }
 
 impl CreateTopicsResult {
+    /// Sentinel used when the broker did not return partition/replication metadata.
+    pub(crate) const UNKNOWN: i32 = -1;
+
     /// Creates a result from a map of topic name to per-topic future.
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
         Self { futures }
@@ -182,7 +182,7 @@ impl CreateTopicsResult {
 mod tests {
     use super::*;
     use crate::admin::ConfigEntry;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn config() -> Config {
         Config::new([ConfigEntry::new("k".to_string(), Some("v".to_string()))])

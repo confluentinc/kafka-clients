@@ -34,14 +34,14 @@ impl AlterClientQuotasOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
@@ -50,7 +50,7 @@ impl AlterClientQuotasOptions {
     ///
     /// Mirrors `AlterClientQuotasOptions.validateOnly(boolean)`.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
@@ -59,7 +59,7 @@ impl AlterClientQuotasOptions {
     /// configs.
     ///
     /// Mirrors `AlterClientQuotasOptions.validateOnly()`.
-    pub fn is_validate_only(&self) -> bool {
+    pub fn validate_only(&self) -> bool {
         self.validate_only
     }
 }
@@ -71,11 +71,13 @@ mod tests {
     #[test]
     fn defaults_and_setters() {
         let opts = AlterClientQuotasOptions::new();
-        assert_eq!(opts.timeout(), None);
-        assert!(!opts.is_validate_only());
+        assert_eq!(opts.timeout_ms(), None);
+        assert!(!opts.validate_only());
 
-        let opts = AlterClientQuotasOptions::new().timeout_ms(Some(5000)).validate_only(true);
-        assert_eq!(opts.timeout(), Some(5000));
-        assert!(opts.is_validate_only());
+        let opts = AlterClientQuotasOptions::new()
+            .set_timeout_ms(Some(5000))
+            .set_validate_only(true);
+        assert_eq!(opts.timeout_ms(), Some(5000));
+        assert!(opts.validate_only());
     }
 }
