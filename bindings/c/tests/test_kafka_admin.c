@@ -24,7 +24,7 @@
 //
 // test_mock_admin.c covers the RPC semantics against MockAdminClient. What only
 // this file can cover is the production path: building and *entering* the tokio
-// runtime so `new_admin_client` can spawn its background task, close/destroy
+// runtime so `KafkaAdminClient::new` can spawn its background task, close/destroy
 // against `AdminKind::Kafka` rather than `AdminKind::Mock`, and `mock_ref`
 // rejecting a production handle.
 
@@ -40,6 +40,17 @@ void tearDown(void) {}
 
 /* An RPC timeout short enough that an unreachable bootstrap fails fast. */
 #define RPC_TIMEOUT_MS (1000)
+
+/* A bootstrap address that is genuinely dead, for the one test below that
+ * asserts a *specific* failure rather than merely accepting both outcomes.
+ * Port 1 (tcpmux) is privileged, so no unprivileged developer process can be
+ * squatting on it, and it is effectively never served -- unlike 9092, which on
+ * a Kafka developer's machine frequently has a real broker on it. The literal
+ * 127.0.0.1 rather than `localhost` pins the stack, since `localhost` may
+ * resolve to ::1 first. A refused connection also returns immediately, so the
+ * "comes back inside the explicit timeout" property holds deterministically
+ * instead of incidentally. */
+#define NO_BROKER_BOOTSTRAP "127.0.0.1:1"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,11 +68,11 @@ static int wait_for(atomic_int *flag, int expected) {
     return atomic_load(flag) >= expected;
 }
 
-/* Builds a production AdminClient against an unreachable bootstrap. Asserts the
- * construction succeeded (the address is only parsed, not connected). */
-static kafka_admin_AdminClient_t *create_admin(void) {
+/* Builds a production AdminClient against `bootstrap`. Asserts the construction
+ * succeeded (the address is only parsed, not connected). */
+static kafka_admin_AdminClient_t *create_admin_at(const char *bootstrap) {
     const char *configs[] = {
-        "bootstrap.servers",     "localhost:9092",
+        "bootstrap.servers",     bootstrap,
         "client.id",             "c-kafka-admin-test",
         "default.api.timeout.ms", "1000",
         "request.timeout.ms",     "500",
@@ -77,6 +88,17 @@ static kafka_admin_AdminClient_t *create_admin(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(admin);
     return admin;
+}
+
+/* The default: `localhost:9092`, which may or may not have a broker on it. Every
+ * caller of this form accepts both outcomes, per the note at the top of the file. */
+static kafka_admin_AdminClient_t *create_admin(void) {
+    return create_admin_at("localhost:9092");
+}
+
+/* For assertions that only hold with nothing listening. */
+static kafka_admin_AdminClient_t *create_admin_no_broker(void) {
+    return create_admin_at(NO_BROKER_BOOTSTRAP);
 }
 
 // ---------------------------------------------------------------------------
@@ -455,9 +477,16 @@ static void test_kafka_admin_b2_empty_batches_need_no_broker(void) {
 /* B3, on the production client with no broker reachable. Empty batches resolve
  * with no network round trip; `listPartitionReassignments` with
  * `all_partitions = true` does need the controller, so it must *time out*
- * rather than hang, which is the property this suite exists to check. */
+ * rather than hang, which is the property this suite exists to check.
+ *
+ * This is the one test in the file that asserts a specific *failure* rather
+ * than accepting either outcome, so it is the one that needs the bootstrap to
+ * be genuinely dead -- hence NO_BROKER_BOOTSTRAP rather than the shared
+ * `create_admin()`. Against `localhost:9092` it fails on any machine that
+ * happens to have a broker there (a stray container from another project is
+ * enough), because the controller answers and the call succeeds. */
 static void test_kafka_admin_b3_empty_batches_need_no_broker(void) {
-    kafka_admin_AdminClient_t *admin = create_admin();
+    kafka_admin_AdminClient_t *admin = create_admin_no_broker();
 
     kafka_admin_AlterPartitionReassignmentsResult_t *altered = NULL;
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_partition_reassignments(

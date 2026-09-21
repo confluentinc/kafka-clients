@@ -18,12 +18,14 @@
 
 use std::io;
 
+use crate::CreateAclsRequestData;
+use crate::CreateAclsResponseData;
 use crate::common::Error;
 use crate::common::acl::{AccessControlEntry, AclBinding, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePattern, ResourceType};
-use crate::create_acls_request_data::{AclCreation, CreateAclsRequestData};
-use crate::create_acls_response_data::{AclCreationResult, CreateAclsResponseData};
+use crate::create_acls_request_data::AclCreation;
+use crate::create_acls_response_data::AclCreationResult;
 
 use super::{ConcreteRequest, ConcreteResponse, CreateAclsResponse, RequestBuilder};
 
@@ -150,7 +152,7 @@ pub struct CreateAclsRequestBuilder {
 
 impl CreateAclsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateAclsRequestData) -> Self {
+    pub fn new(data: CreateAclsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_ACLS.oldest_version(),
@@ -216,7 +218,7 @@ mod tests {
         let version = ApiKeys::CREATE_ACLS.latest_version();
         let mut request = ConcreteRequest::CreateAcls(CreateAclsRequest::new(data, version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.acl_creations().len(), 1);
         assert_eq!(CreateAclsRequest::acl_binding(&parsed.acl_creations()[0]).unwrap(), binding());

@@ -21,12 +21,6 @@ use std::fmt;
 use crate::common::TopicPartition;
 use crate::common::record::internal::RecordBatch;
 
-/// Value used when the offset is unknown (i.e., `ProduceResponse.INVALID_OFFSET`).
-pub const INVALID_OFFSET: i64 = -1;
-
-/// Partition value for record without partition assigned.
-pub const UNKNOWN_PARTITION: i32 = -1;
-
 /// The metadata for a record that has been acknowledged by the server.
 #[derive(Clone, Debug)]
 pub struct RecordMetadata {
@@ -48,6 +42,12 @@ pub struct RecordMetadata {
 }
 
 impl RecordMetadata {
+    /// Value used when the offset is unknown (i.e., `ProduceResponse.INVALID_OFFSET`).
+    pub const INVALID_OFFSET: i64 = -1;
+
+    /// Partition value for record without partition assigned.
+    pub const UNKNOWN_PARTITION: i32 = -1;
+
     /// Creates a new instance with the provided parameters.
     pub fn new(
         topic_partition: TopicPartition,
@@ -69,7 +69,7 @@ impl RecordMetadata {
 
     /// Indicates whether the record metadata includes the offset.
     pub fn has_offset(&self) -> bool {
-        self.offset != INVALID_OFFSET
+        self.offset != RecordMetadata::INVALID_OFFSET
     }
 
     /// The offset of the record in the topic/partition.

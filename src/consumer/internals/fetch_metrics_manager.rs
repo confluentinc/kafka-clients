@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 use crate::common::metrics::stats::WindowedCount;
 use crate::common::metrics::{ClosureGauge, MetricValue, MetricValueProvider, Metrics, RecordingLevel, Sensor};
 use crate::common::{Error, TopicPartition};
-use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
-use crate::consumer::internals::sensor_builder::SensorBuilder;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::consumer::internals::FetchMetricsRegistry;
+use crate::consumer::internals::SensorBuilder;
+use crate::consumer::internals::SubscriptionState;
 
 /// Records lag, lead, latency, and fetch metrics. It keeps an internal ID of
 /// the assigned set of partitions which is updated to ensure the set of metrics
@@ -56,6 +56,92 @@ struct AssignmentTracking {
 }
 
 impl FetchMetricsManager {
+    fn topic_bytes_fetched_metric_name(topic: &str) -> String {
+        format!("topic.{topic}.bytes-fetched")
+    }
+
+    fn topic_records_fetched_metric_name(topic: &str) -> String {
+        format!("topic.{topic}.records-fetched")
+    }
+
+    fn partition_records_lead_metric_name(tp: &TopicPartition) -> String {
+        format!("{tp}.records-lead")
+    }
+
+    fn partition_records_lag_metric_name(tp: &TopicPartition) -> String {
+        format!("{tp}.records-lag")
+    }
+
+    fn deprecated_metric_name(name: &str) -> String {
+        format!("{name}.deprecated")
+    }
+
+    fn should_report_deprecated_metric(topic: &str) -> bool {
+        topic.contains('.')
+    }
+
+    /// Unwraps a lazily-built per-topic / per-partition sensor, logging and skipping
+    /// the recording instead of panicking when registration fails.
+    ///
+    /// These builders run on the per-fetch record path, so a `.expect()` here turned
+    /// a recoverable registration error into a panic that killed the consumer task
+    /// (CLAUDE.md §10.1 — do not panic where recovery is possible).
+    ///
+    /// The error is reachable, not theoretical. Two topics differing only by `.` vs
+    /// `_` — say `my.topic` and `my_topic` — produce *distinct* sensor names, so
+    /// `SensorBuilder::with_tags` does not find and reuse the first sensor; but the
+    /// deprecated variants replace periods in the tag value, so both resolve to the
+    /// same `MetricName` (`fetch-size-avg{client-id, topic=my_topic}`). The second
+    /// `Sensor::add` then returns `Err`.
+    ///
+    /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
+    /// (`Metrics.java:506`) and lets it propagate out of the fetch path. We
+    /// deliberately do NOT propagate: these `record_*` methods are a side channel,
+    /// and failing a user's fetch because two topic names collide after period
+    /// replacement is worse than the metric being absent. The collision is reported
+    /// rather than hidden.
+    ///
+    /// Note the log fires per record while the collision persists. That is intended:
+    /// it is a genuine misconfiguration, and the volume is the signal.
+    fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
+        match built {
+            Ok(sensor) => Some(sensor),
+            Err(err) => {
+                log::warn!("Skipping {what} recording: sensor registration failed: {err}");
+                None
+            },
+        }
+    }
+
+    fn single_tag(key: &str, value: &str) -> BTreeMap<String, String> {
+        let mut tags = BTreeMap::new();
+        tags.insert(key.to_string(), value.to_string());
+        tags
+    }
+
+    /// `{topic, partition}` tags with the actual topic name (non-deprecated form).
+    fn topic_partition_tags_raw(tp: &TopicPartition) -> BTreeMap<String, String> {
+        let mut tags = BTreeMap::new();
+        tags.insert("topic".to_string(), tp.topic().to_string());
+        tags.insert("partition".to_string(), tp.partition().to_string());
+        tags
+    }
+
+    /// Deprecated topic tag: periods replaced with underscores
+    /// (Java `topicTags`).
+    pub(crate) fn topic_tags(topic: &str) -> BTreeMap<String, String> {
+        Self::single_tag("topic", &topic.replace('.', "_"))
+    }
+
+    /// Deprecated `{topic, partition}` tags: topic periods replaced with
+    /// underscores (Java `topicPartitionTags`).
+    pub(crate) fn topic_partition_tags(tp: &TopicPartition) -> BTreeMap<String, String> {
+        let mut tags = BTreeMap::new();
+        tags.insert("topic".to_string(), tp.topic().replace('.', "_"));
+        tags.insert("partition".to_string(), tp.partition().to_string());
+        tags
+    }
+
     /// Builds the manager and registers the six client-level sensors.
     ///
     /// All six client-level sensors are registered at INFO, matching Java
@@ -192,68 +278,71 @@ impl FetchMetricsManager {
     /// Records the latency of a fetch request against the client-level sensor
     /// and, if present, the per-node latency sensor.
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
-        self.fetch_latency.record(request_latency_ms as f64);
+        self.fetch_latency.record_value(request_latency_ms as f64);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
-                node_request_time.record(request_latency_ms as f64);
+                node_request_time.record_value(request_latency_ms as f64);
             }
         }
     }
 
     /// Records the number of bytes fetched at the client level.
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
-        self.bytes_fetched.record(bytes as f64);
+        self.bytes_fetched.record_value(bytes as f64);
     }
 
     /// Records the number of records fetched at the client level.
     pub(crate) fn record_records_fetched(&self, records: i32) {
-        self.records_fetched.record(records as f64);
+        self.records_fetched.record_value(records as f64);
     }
 
     /// Records the number of bytes fetched for a single topic.
     pub(crate) fn record_bytes_fetched_topic(&self, topic: &str, bytes: i32) {
-        let name = topic_bytes_fetched_metric_name(topic);
+        let name = FetchMetricsManager::topic_bytes_fetched_metric_name(topic);
         self.maybe_record_deprecated_bytes_fetched(&name, topic, bytes);
 
         let bytes_fetched = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
-                    .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
-                    .with_max(&self.metrics_registry.topic_fetch_size_max)?
-                    .with_meter(
-                        &self.metrics_registry.topic_bytes_consumed_rate,
-                        &self.metrics_registry.topic_bytes_consumed_total,
-                    )?
-                    .build(),
-            )
+            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+                FetchMetricsManager::single_tag("topic", topic)
+            })?
+            .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
+            .with_max(&self.metrics_registry.topic_fetch_size_max)?
+            .with_meter(
+                &self.metrics_registry.topic_bytes_consumed_rate,
+                &self.metrics_registry.topic_bytes_consumed_total,
+            )?
+            .build())
         })();
-        let Some(bytes_fetched) = resolve_sensor(bytes_fetched, "topic bytes-fetched sensor") else {
+        let Some(bytes_fetched) = FetchMetricsManager::resolve_sensor(bytes_fetched, "topic bytes-fetched sensor")
+        else {
             return;
         };
-        bytes_fetched.record(bytes as f64);
+        bytes_fetched.record_value(bytes as f64);
     }
 
     /// Records the number of records fetched for a single topic.
     pub(crate) fn record_records_fetched_topic(&self, topic: &str, records: i32) {
-        let name = topic_records_fetched_metric_name(topic);
+        let name = FetchMetricsManager::topic_records_fetched_metric_name(topic);
         self.maybe_record_deprecated_records_fetched(&name, topic, records);
 
         let records_fetched = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
-                    .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
-                    .with_meter(
-                        &self.metrics_registry.topic_records_consumed_rate,
-                        &self.metrics_registry.topic_records_consumed_total,
-                    )?
-                    .build(),
-            )
+            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+                FetchMetricsManager::single_tag("topic", topic)
+            })?
+            .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
+            .with_meter(
+                &self.metrics_registry.topic_records_consumed_rate,
+                &self.metrics_registry.topic_records_consumed_total,
+            )?
+            .build())
         })();
-        let Some(records_fetched) = resolve_sensor(records_fetched, "topic records-fetched sensor") else {
+        let Some(records_fetched) =
+            FetchMetricsManager::resolve_sensor(records_fetched, "topic records-fetched sensor")
+        else {
             return;
         };
-        records_fetched.record(records as f64);
+        records_fetched.record_value(records as f64);
     }
 
     /// Records the lag for a single partition.
@@ -264,24 +353,24 @@ impl FetchMetricsManager {
     /// DEBUG gating: a default (INFO) consumer records the full per-partition
     /// metric set per partition per poll — the accepted Java-parity cost.
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
-        self.records_lag.record(lag as f64);
+        self.records_lag.record_value(lag as f64);
 
-        let name = partition_records_lag_metric_name(tp);
+        let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
         self.maybe_record_deprecated_partition_lag(&name, tp, lag);
 
         let records_lag = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
-                    .with_value(&self.metrics_registry.partition_records_lag)?
-                    .with_max(&self.metrics_registry.partition_records_lag_max)?
-                    .with_avg(&self.metrics_registry.partition_records_lag_avg)?
-                    .build(),
-            )
+            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+                FetchMetricsManager::topic_partition_tags_raw(tp)
+            })?
+            .with_value(&self.metrics_registry.partition_records_lag)?
+            .with_max(&self.metrics_registry.partition_records_lag_max)?
+            .with_avg(&self.metrics_registry.partition_records_lag_avg)?
+            .build())
         })();
-        let Some(records_lag) = resolve_sensor(records_lag, "partition records-lag sensor") else {
+        let Some(records_lag) = FetchMetricsManager::resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
         };
-        records_lag.record(lag as f64);
+        records_lag.record_value(lag as f64);
     }
 
     /// Records the lead for a single partition.
@@ -290,24 +379,25 @@ impl FetchMetricsManager {
     /// per-partition lead sensors are INFO and recorded unconditionally, exactly
     /// as Java does (see [`Self::record_partition_lag`]).
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
-        self.records_lead.record(lead as f64);
+        self.records_lead.record_value(lead as f64);
 
-        let name = partition_records_lead_metric_name(tp);
+        let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
         self.maybe_record_deprecated_partition_lead(&name, tp, lead as f64);
 
         let records_lead = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
-                    .with_value(&self.metrics_registry.partition_records_lead)?
-                    .with_min(&self.metrics_registry.partition_records_lead_min)?
-                    .with_avg(&self.metrics_registry.partition_records_lead_avg)?
-                    .build(),
-            )
+            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+                FetchMetricsManager::topic_partition_tags_raw(tp)
+            })?
+            .with_value(&self.metrics_registry.partition_records_lead)?
+            .with_min(&self.metrics_registry.partition_records_lead_min)?
+            .with_avg(&self.metrics_registry.partition_records_lead_avg)?
+            .build())
         })();
-        let Some(records_lead) = resolve_sensor(records_lead, "partition records-lead sensor") else {
+        let Some(records_lead) = FetchMetricsManager::resolve_sensor(records_lead, "partition records-lead sensor")
+        else {
             return;
         };
-        records_lead.record(lead as f64);
+        records_lead.record_value(lead as f64);
     }
 
     /// Called before requesting fetches to update the set of per-partition
@@ -342,16 +432,20 @@ impl FetchMetricsManager {
 
         for tp in &assignment.assigned_partitions {
             if !new_assigned_partitions.contains(tp) {
-                self.metrics.remove_sensor(&partition_records_lag_metric_name(tp));
-                self.metrics.remove_sensor(&partition_records_lead_metric_name(tp));
+                self.metrics
+                    .remove_sensor(&FetchMetricsManager::partition_records_lag_metric_name(tp));
+                self.metrics
+                    .remove_sensor(&FetchMetricsManager::partition_records_lead_metric_name(tp));
                 if let Some(metric_name) = self.partition_preferred_read_replica_metric_name(tp) {
                     self.metrics.remove_metric(&metric_name);
                 }
                 // Remove deprecated metrics.
-                self.metrics
-                    .remove_sensor(&deprecated_metric_name(&partition_records_lag_metric_name(tp)));
-                self.metrics
-                    .remove_sensor(&deprecated_metric_name(&partition_records_lead_metric_name(tp)));
+                self.metrics.remove_sensor(&FetchMetricsManager::deprecated_metric_name(
+                    &FetchMetricsManager::partition_records_lag_metric_name(tp),
+                ));
+                self.metrics.remove_sensor(&FetchMetricsManager::deprecated_metric_name(
+                    &FetchMetricsManager::partition_records_lead_metric_name(tp),
+                ));
                 if let Some(metric_name) = self.deprecated_partition_preferred_read_replica_metric_name(tp) {
                     self.metrics.remove_metric(&metric_name);
                 }
@@ -387,95 +481,106 @@ impl FetchMetricsManager {
 
     // To be removed in Kafka 5.0 release.
     fn maybe_record_deprecated_bytes_fetched(&self, name: &str, topic: &str, bytes: i32) {
-        if !should_report_deprecated_metric(topic) {
+        if !FetchMetricsManager::should_report_deprecated_metric(topic) {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
-                    topic_tags(topic)
-                })?
-                .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
-                .with_max(&self.metrics_registry.topic_fetch_size_max)?
-                .with_meter(
-                    &self.metrics_registry.topic_bytes_consumed_rate,
-                    &self.metrics_registry.topic_bytes_consumed_total,
-                )?
-                .build(),
-            )
+            Ok(SensorBuilder::with_tags(
+                &self.metrics,
+                &FetchMetricsManager::deprecated_metric_name(name),
+                RecordingLevel::Info,
+                || FetchMetricsManager::topic_tags(topic),
+            )?
+            .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
+            .with_max(&self.metrics_registry.topic_fetch_size_max)?
+            .with_meter(
+                &self.metrics_registry.topic_bytes_consumed_rate,
+                &self.metrics_registry.topic_bytes_consumed_total,
+            )?
+            .build())
         })();
-        let Some(deprecated) = resolve_sensor(deprecated, "deprecated topic bytes-fetched sensor") else {
+        let Some(deprecated) = FetchMetricsManager::resolve_sensor(deprecated, "deprecated topic bytes-fetched sensor")
+        else {
             return;
         };
-        deprecated.record(bytes as f64);
+        deprecated.record_value(bytes as f64);
     }
 
     // To be removed in Kafka 5.0 release.
     fn maybe_record_deprecated_records_fetched(&self, name: &str, topic: &str, records: i32) {
-        if !should_report_deprecated_metric(topic) {
+        if !FetchMetricsManager::should_report_deprecated_metric(topic) {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
-                    topic_tags(topic)
-                })?
-                .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
-                .with_meter(
-                    &self.metrics_registry.topic_records_consumed_rate,
-                    &self.metrics_registry.topic_records_consumed_total,
-                )?
-                .build(),
-            )
+            Ok(SensorBuilder::with_tags(
+                &self.metrics,
+                &FetchMetricsManager::deprecated_metric_name(name),
+                RecordingLevel::Info,
+                || FetchMetricsManager::topic_tags(topic),
+            )?
+            .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
+            .with_meter(
+                &self.metrics_registry.topic_records_consumed_rate,
+                &self.metrics_registry.topic_records_consumed_total,
+            )?
+            .build())
         })();
-        let Some(deprecated) = resolve_sensor(deprecated, "deprecated topic records-fetched sensor") else {
+        let Some(deprecated) =
+            FetchMetricsManager::resolve_sensor(deprecated, "deprecated topic records-fetched sensor")
+        else {
             return;
         };
-        deprecated.record(records as f64);
+        deprecated.record_value(records as f64);
     }
 
     // To be removed in Kafka 5.0 release.
     fn maybe_record_deprecated_partition_lag(&self, name: &str, tp: &TopicPartition, lag: i64) {
-        if !should_report_deprecated_metric(tp.topic()) {
+        if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
-                    topic_partition_tags(tp)
-                })?
-                .with_value(&self.metrics_registry.partition_records_lag)?
-                .with_max(&self.metrics_registry.partition_records_lag_max)?
-                .with_avg(&self.metrics_registry.partition_records_lag_avg)?
-                .build(),
-            )
+            Ok(SensorBuilder::with_tags(
+                &self.metrics,
+                &FetchMetricsManager::deprecated_metric_name(name),
+                RecordingLevel::Info,
+                || FetchMetricsManager::topic_partition_tags(tp),
+            )?
+            .with_value(&self.metrics_registry.partition_records_lag)?
+            .with_max(&self.metrics_registry.partition_records_lag_max)?
+            .with_avg(&self.metrics_registry.partition_records_lag_avg)?
+            .build())
         })();
-        let Some(deprecated) = resolve_sensor(deprecated, "deprecated partition records-lag sensor") else {
+        let Some(deprecated) =
+            FetchMetricsManager::resolve_sensor(deprecated, "deprecated partition records-lag sensor")
+        else {
             return;
         };
-        deprecated.record(lag as f64);
+        deprecated.record_value(lag as f64);
     }
 
     // To be removed in Kafka 5.0 release.
     fn maybe_record_deprecated_partition_lead(&self, name: &str, tp: &TopicPartition, lead: f64) {
-        if !should_report_deprecated_metric(tp.topic()) {
+        if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(
-                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
-                    topic_partition_tags(tp)
-                })?
-                .with_value(&self.metrics_registry.partition_records_lead)?
-                .with_min(&self.metrics_registry.partition_records_lead_min)?
-                .with_avg(&self.metrics_registry.partition_records_lead_avg)?
-                .build(),
-            )
+            Ok(SensorBuilder::with_tags(
+                &self.metrics,
+                &FetchMetricsManager::deprecated_metric_name(name),
+                RecordingLevel::Info,
+                || FetchMetricsManager::topic_partition_tags(tp),
+            )?
+            .with_value(&self.metrics_registry.partition_records_lead)?
+            .with_min(&self.metrics_registry.partition_records_lead_min)?
+            .with_avg(&self.metrics_registry.partition_records_lead_avg)?
+            .build())
         })();
-        let Some(deprecated) = resolve_sensor(deprecated, "deprecated partition records-lead sensor") else {
+        let Some(deprecated) =
+            FetchMetricsManager::resolve_sensor(deprecated, "deprecated partition records-lead sensor")
+        else {
             return;
         };
-        deprecated.record(lead);
+        deprecated.record_value(lead);
     }
 
     // To be removed in Kafka 5.0 release.
@@ -484,7 +589,7 @@ impl FetchMetricsManager {
         tp: &TopicPartition,
         subscription: &Arc<Mutex<SubscriptionState>>,
     ) {
-        if !should_report_deprecated_metric(tp.topic()) {
+        if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
             return;
         }
         if let Some(metric_name) = self.deprecated_partition_preferred_read_replica_metric_name(tp) {
@@ -506,9 +611,9 @@ impl FetchMetricsManager {
     }
 
     fn partition_preferred_read_replica_metric_name(&self, tp: &TopicPartition) -> Option<crate::common::MetricName> {
-        let tags = topic_partition_tags_raw(tp);
+        let tags = FetchMetricsManager::topic_partition_tags_raw(tp);
         self.metrics
-            .metric_instance_with_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
+            .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
             .ok()
     }
 
@@ -516,108 +621,22 @@ impl FetchMetricsManager {
         &self,
         tp: &TopicPartition,
     ) -> Option<crate::common::MetricName> {
-        let tags = topic_partition_tags(tp);
+        let tags = FetchMetricsManager::topic_partition_tags(tp);
         self.metrics
-            .metric_instance_with_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
+            .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
             .ok()
     }
-}
-
-fn topic_bytes_fetched_metric_name(topic: &str) -> String {
-    format!("topic.{topic}.bytes-fetched")
-}
-
-fn topic_records_fetched_metric_name(topic: &str) -> String {
-    format!("topic.{topic}.records-fetched")
-}
-
-fn partition_records_lead_metric_name(tp: &TopicPartition) -> String {
-    format!("{tp}.records-lead")
-}
-
-fn partition_records_lag_metric_name(tp: &TopicPartition) -> String {
-    format!("{tp}.records-lag")
-}
-
-fn deprecated_metric_name(name: &str) -> String {
-    format!("{name}.deprecated")
-}
-
-fn should_report_deprecated_metric(topic: &str) -> bool {
-    topic.contains('.')
-}
-
-/// Unwraps a lazily-built per-topic / per-partition sensor, logging and skipping
-/// the recording instead of panicking when registration fails.
-///
-/// These builders run on the per-fetch record path, so a `.expect()` here turned
-/// a recoverable registration error into a panic that killed the consumer task
-/// (CLAUDE.md §10.1 — do not panic where recovery is possible).
-///
-/// The error is reachable, not theoretical. Two topics differing only by `.` vs
-/// `_` — say `my.topic` and `my_topic` — produce *distinct* sensor names, so
-/// `SensorBuilder::with_tags` does not find and reuse the first sensor; but the
-/// deprecated variants replace periods in the tag value, so both resolve to the
-/// same `MetricName` (`fetch-size-avg{client-id, topic=my_topic}`). The second
-/// `Sensor::add` then returns `Err`.
-///
-/// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
-/// (`Metrics.java:506`) and lets it propagate out of the fetch path. We
-/// deliberately do NOT propagate: these `record_*` methods are a side channel,
-/// and failing a user's fetch because two topic names collide after period
-/// replacement is worse than the metric being absent. The collision is reported
-/// rather than hidden.
-///
-/// Note the log fires per record while the collision persists. That is intended:
-/// it is a genuine misconfiguration, and the volume is the signal.
-fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
-    match built {
-        Ok(sensor) => Some(sensor),
-        Err(err) => {
-            log::warn!("Skipping {what} recording: sensor registration failed: {err}");
-            None
-        },
-    }
-}
-
-fn single_tag(key: &str, value: &str) -> BTreeMap<String, String> {
-    let mut tags = BTreeMap::new();
-    tags.insert(key.to_string(), value.to_string());
-    tags
-}
-
-/// `{topic, partition}` tags with the actual topic name (non-deprecated form).
-fn topic_partition_tags_raw(tp: &TopicPartition) -> BTreeMap<String, String> {
-    let mut tags = BTreeMap::new();
-    tags.insert("topic".to_string(), tp.topic().to_string());
-    tags.insert("partition".to_string(), tp.partition().to_string());
-    tags
-}
-
-/// Deprecated topic tag: periods replaced with underscores
-/// (Java `topicTags`).
-pub(crate) fn topic_tags(topic: &str) -> BTreeMap<String, String> {
-    single_tag("topic", &topic.replace('.', "_"))
-}
-
-/// Deprecated `{topic, partition}` tags: topic periods replaced with
-/// underscores (Java `topicPartitionTags`).
-pub(crate) fn topic_partition_tags(tp: &TopicPartition) -> BTreeMap<String, String> {
-    let mut tags = BTreeMap::new();
-    tags.insert("topic".to_string(), tp.topic().replace('.', "_"));
-    tags.insert("partition".to_string(), tp.partition().to_string());
-    tags
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metric::Metric;
+    use crate::common::Metric;
     use crate::common::metrics::MetricConfig;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{Avg, Max};
-    use crate::common::metrics::time::mock::MockTime;
     use crate::common::{MetricName, MetricNameTemplate};
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::AutoOffsetResetStrategy;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -639,8 +658,12 @@ mod tests {
 
     fn setup() -> Fixture {
         let time = Arc::new(MockTime::new());
-        let config = Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info));
-        let metrics = Arc::new(Metrics::with_config_reporters_time(config, Vec::new(), time.clone() as Arc<_>));
+        let config = Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info));
+        let metrics = Arc::new(Metrics::with_default_config_reporters_time(
+            config,
+            Vec::new(),
+            time.clone() as Arc<_>,
+        ));
         // Java: `new FetchMetricsRegistry(metrics.config().tags().keySet(), "test")`.
         // Default config has no tags, so the registry tag set is empty.
         let registry = FetchMetricsRegistry::new(indexmap::IndexSet::new(), "test");
@@ -653,12 +676,12 @@ mod tests {
     }
 
     fn metric_value_template(f: &Fixture, template: &MetricNameTemplate) -> f64 {
-        let name = f.metrics.metric_instance(template, &[]).expect("metric instance");
+        let name = f.metrics.metric_instance_key_value(template, &[]).expect("metric instance");
         metric_value(f, &name)
     }
 
     fn metric_value_tags(f: &Fixture, template: &MetricNameTemplate, tags: &[&str]) -> f64 {
-        let name = f.metrics.metric_instance(template, tags).expect("metric instance");
+        let name = f.metrics.metric_instance_key_value(template, tags).expect("metric instance");
         metric_value(f, &name)
     }
 
@@ -671,7 +694,7 @@ mod tests {
     }
 
     fn read_replica_metric_value(f: &Fixture, template: &MetricNameTemplate, tags: &[&str]) -> i32 {
-        let name = f.metrics.metric_instance(template, tags).expect("metric instance");
+        let name = f.metrics.metric_instance_key_value(template, tags).expect("metric instance");
         let metric = f.metrics.metric(&name).expect("metric registered");
         match metric.metric_value() {
             MetricValue::Int(v) => v,
@@ -682,8 +705,12 @@ mod tests {
     fn register_node_latency_metric(f: &Fixture, connection_id: &str, avg: &MetricName, max: &MetricName) {
         let node_time_name = format!("node-{connection_id}.latency");
         let node_request_time = f.metrics.sensor(&node_time_name).expect("sensor");
-        node_request_time.add(avg.clone(), Box::new(Avg::new())).expect("add avg");
-        node_request_time.add(max.clone(), Box::new(Max::new())).expect("add max");
+        node_request_time
+            .add_metric_name(avg.clone(), Box::new(Avg::new()))
+            .expect("add avg");
+        node_request_time
+            .add_metric_name(max.clone(), Box::new(Max::new()))
+            .expect("add max");
     }
 
     /// `FetchMetricsManagerTest.testLatency`
@@ -703,8 +730,8 @@ mod tests {
     fn test_node_latency() {
         let f = setup();
         let connection_id = "0";
-        let node_latency_avg = f.metrics.metric_name_group("request-latency-avg", "group");
-        let node_latency_max = f.metrics.metric_name_group("request-latency-max", "group");
+        let node_latency_avg = f.metrics.metric_name("request-latency-avg", "group");
+        let node_latency_max = f.metrics.metric_name("request-latency-max", "group");
         register_node_latency_metric(&f, connection_id, &node_latency_avg, &node_latency_max);
 
         f.manager.record_latency(connection_id, 123);
@@ -747,7 +774,7 @@ mod tests {
         let topic_name2 = "another.topic";
         let tags1 = ["topic", topic_name1];
         let tags2 = ["topic", topic_name2];
-        let deprecated = topic_tags(topic_name2);
+        let deprecated = FetchMetricsManager::topic_tags(topic_name2);
         let deprecated_topic = deprecated.get("topic").unwrap().clone();
         let deprecated_tags = ["topic", deprecated_topic.as_str()];
         let initial = f.metrics.metrics().len();
@@ -803,7 +830,7 @@ mod tests {
         let topic_name2 = "another.topic";
         let tags1 = ["topic", topic_name1];
         let tags2 = ["topic", topic_name2];
-        let deprecated = topic_tags(topic_name2);
+        let deprecated = FetchMetricsManager::topic_tags(topic_name2);
         let deprecated_topic = deprecated.get("topic").unwrap().clone();
         let deprecated_tags = ["topic", deprecated_topic.as_str()];
         let initial = f.metrics.metrics().len();
@@ -852,7 +879,7 @@ mod tests {
         let p2 = tp2.partition().to_string();
         let tags1 = ["topic", tp1.topic(), "partition", p1.as_str()];
         let tags2 = ["topic", tp2.topic(), "partition", p2.as_str()];
-        let deprecated = topic_partition_tags(&tp2);
+        let deprecated = FetchMetricsManager::topic_partition_tags(&tp2);
         let dep_topic = deprecated.get("topic").unwrap().clone();
         let dep_part = deprecated.get("partition").unwrap().clone();
         let deprecated_tags = ["topic", dep_topic.as_str(), "partition", dep_part.as_str()];
@@ -902,7 +929,7 @@ mod tests {
         let p2 = tp2.partition().to_string();
         let tags1 = ["topic", tp1.topic(), "partition", p1.as_str()];
         let tags2 = ["topic", tp2.topic(), "partition", p2.as_str()];
-        let deprecated = topic_partition_tags(&tp2);
+        let deprecated = FetchMetricsManager::topic_partition_tags(&tp2);
         let dep_topic = deprecated.get("topic").unwrap().clone();
         let dep_part = deprecated.get("partition").unwrap().clone();
         let deprecated_tags = ["topic", dep_topic.as_str(), "partition", dep_part.as_str()];
@@ -979,7 +1006,7 @@ mod tests {
         let p2 = tp2.partition().to_string();
         let tags1 = ["topic", tp1.topic(), "partition", p1.as_str()];
         let tags2 = ["topic", tp2.topic(), "partition", p2.as_str()];
-        let deprecated = topic_partition_tags(&tp2);
+        let deprecated = FetchMetricsManager::topic_partition_tags(&tp2);
         let dep_topic = deprecated.get("topic").unwrap().clone();
         let dep_part = deprecated.get("partition").unwrap().clone();
         let deprecated_tags = ["topic", dep_topic.as_str(), "partition", dep_part.as_str()];
@@ -1142,9 +1169,9 @@ mod tests {
     fn test_throttle_time_sensor_records() {
         let f = setup();
         let sensor = f.manager.throttle_time_sensor();
-        sensor.record(100.0);
+        sensor.record_value(100.0);
         f.time.sleep(time_window_ms(&f) + 1);
-        sensor.record(200.0);
+        sensor.record_value(200.0);
 
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_avg) - 150.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_max) - 200.0).abs() < EPSILON);

@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::common::TopicPartition;
-use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
+use crate::consumer::internals::FetchMetricsManager;
 
 /// Since we parse the message data for each partition from each fetch response
 /// lazily, fetch-level metrics need to be aggregated as the messages from each
@@ -116,7 +116,7 @@ impl FetchMetricsAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metric::Metric;
+    use crate::common::Metric;
     use crate::common::metrics::MetricValue;
 
     /// The aggregator records the fetch-level bytes/records exactly once, after
@@ -136,14 +136,16 @@ mod tests {
 
         // First partition reported: nothing recorded yet (still one unrecorded).
         aggregator.record(&tp0, 10, 2);
-        let total_name = metrics.metric_instance(&registry.bytes_consumed_total, &[]).unwrap();
+        let total_name = metrics.metric_instance_key_value(&registry.bytes_consumed_total, &[]).unwrap();
         assert_eq!(MetricValue::Double(0.0), metrics.metric(&total_name).unwrap().metric_value());
 
         // Last partition reported: fetch-level totals recorded once (10 + 30 = 40 bytes).
         aggregator.record(&tp1, 30, 4);
         assert_eq!(MetricValue::Double(40.0), metrics.metric(&total_name).unwrap().metric_value());
 
-        let records_total_name = metrics.metric_instance(&registry.records_consumed_total, &[]).unwrap();
+        let records_total_name = metrics
+            .metric_instance_key_value(&registry.records_consumed_total, &[])
+            .unwrap();
         assert_eq!(
             MetricValue::Double(6.0),
             metrics.metric(&records_total_name).unwrap().metric_value()

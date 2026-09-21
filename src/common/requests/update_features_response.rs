@@ -25,10 +25,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 
+use crate::UpdateFeaturesResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::update_features_response_data::{UpdatableFeatureResult, UpdateFeaturesResponseData};
+use crate::update_features_response_data::UpdatableFeatureResult;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An UpdateFeatures response.
 ///
@@ -120,9 +121,9 @@ impl UpdateFeaturesResponse {
     /// per-feature results.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         for result in &self.data.results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }
@@ -190,7 +191,7 @@ mod tests {
         let response = UpdateFeaturesResponse::create_with_errors(Errors::None, None, &updates, 5);
         let mut concrete = super::super::ConcreteResponse::UpdateFeatures(response);
         let bytes = concrete.serialize(1).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = UpdateFeaturesResponse::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 5);
         assert_eq!(parsed.data().error_code, Errors::None.code());

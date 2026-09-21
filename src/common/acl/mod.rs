@@ -16,13 +16,13 @@
 //!
 //! Corresponds to the `org.apache.kafka.common.acl` package.
 
-pub mod access_control_entry;
+mod access_control_entry;
 mod access_control_entry_data;
-pub mod access_control_entry_filter;
-pub mod acl_binding;
-pub mod acl_binding_filter;
-pub mod acl_operation;
-pub mod acl_permission_type;
+mod access_control_entry_filter;
+mod acl_binding;
+mod acl_binding_filter;
+mod acl_operation;
+mod acl_permission_type;
 
 pub use access_control_entry::AccessControlEntry;
 pub use access_control_entry_filter::AccessControlEntryFilter;

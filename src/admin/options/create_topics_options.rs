@@ -42,21 +42,21 @@ impl CreateTopicsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set to true if the request should be validated without creating the
     /// topic.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
@@ -69,7 +69,7 @@ impl CreateTopicsOptions {
 
     /// Set to true if quota violation should be automatically retried.
     #[must_use]
-    pub fn retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
+    pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
         self.retry_on_quota_violation = retry_on_quota_violation;
         self
     }
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn defaults_match_java() {
         let options = CreateTopicsOptions::new();
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_validate_only());
         assert!(options.should_retry_on_quota_violation());
     }
@@ -95,10 +95,10 @@ mod tests {
     #[test]
     fn fluent_setters() {
         let options = CreateTopicsOptions::new()
-            .timeout_ms(Some(5000))
-            .validate_only(true)
-            .retry_on_quota_violation(false);
-        assert_eq!(options.timeout(), Some(5000));
+            .set_timeout_ms(Some(5000))
+            .set_validate_only(true)
+            .set_retry_on_quota_violation(false);
+        assert_eq!(options.timeout_ms(), Some(5000));
         assert!(options.should_validate_only());
         assert!(!options.should_retry_on_quota_violation());
     }

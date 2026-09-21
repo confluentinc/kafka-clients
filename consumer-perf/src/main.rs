@@ -49,7 +49,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 
 /// Zero-copy deserializer: returns the byte length instead of the bytes, so the
@@ -281,7 +281,7 @@ struct Args {
     /// Override the producer's `--num-records` (else derived from throughput×duration).
     num_records: Option<u64>,
     /// Fetch-config overrides injected into the consumer via
-    /// `ConsumerConfig::from_properties`. `None` => use the client default.
+    /// `ConsumerConfig::new`. `None` => use the client default.
     fetch_min_bytes: Option<i64>,
     fetch_max_wait_ms: Option<i64>,
     max_partition_fetch_bytes: Option<i64>,
@@ -587,17 +587,17 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.fetch_max_bytes.map_or("default".to_string(), |v| v.to_string()),
         args.max_poll_records.map_or("default".to_string(), |v| v.to_string()),
     );
-    let config = ConsumerConfig::from_properties(&props)?
-        .with_client_id("consumer-perf")
-        .with_group_id(args.group_id.clone())
-        .with_group_protocol("consumer")
-        .with_auto_offset_reset(args.offset_reset.clone())
-        .with_enable_auto_commit(true);
+    let config = ConsumerConfig::new(&props)?
+        .set_client_id("consumer-perf")
+        .set_group_id(args.group_id.clone())
+        .set_group_protocol("consumer")
+        .set_auto_offset_reset(args.offset_reset.clone())
+        .set_enable_auto_commit(true);
 
     let mut consumer: Box<dyn Consumer<usize, usize>> =
-        new_consumer::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
+        KafkaConsumer::new::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
-    consumer.subscribe(vec![args.topic.clone()]).await?;
+    consumer.subscribe_with_topics(vec![args.topic.clone()]).await?;
     println!("\n>>> Subscribed; waiting for partition assignment (KIP-848 join)...");
 
     // Wait for assignment before starting the producer, so the very first

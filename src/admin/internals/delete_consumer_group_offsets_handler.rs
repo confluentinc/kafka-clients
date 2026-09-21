@@ -22,20 +22,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::OffsetDeleteRequestData;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetDeleteRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_warn;
-use crate::offset_delete_request_data::{
-    OffsetDeleteRequestData, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
-};
+use crate::offset_delete_request_data::{OffsetDeleteRequestPartition, OffsetDeleteRequestTopic};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The per-partition delete result value produced by this handler.
 type PartitionErrors = HashMap<TopicPartition, Errors>;
@@ -233,10 +232,9 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for DeleteConsumerGroupOff
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OffsetDeleteResponseData;
     use crate::common::requests::{ConcreteResponse, OffsetDeleteResponse};
-    use crate::offset_delete_response_data::{
-        OffsetDeleteResponseData, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
-    };
+    use crate::offset_delete_response_data::{OffsetDeleteResponsePartition, OffsetDeleteResponseTopic};
 
     const GROUP_ID: &str = "group-id";
 

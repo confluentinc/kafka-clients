@@ -24,9 +24,9 @@
 
 use std::io;
 
+use crate::OffsetDeleteRequestData;
+use crate::OffsetDeleteResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::offset_delete_request_data::OffsetDeleteRequestData;
-use crate::offset_delete_response_data::OffsetDeleteResponseData;
 
 use super::ConcreteResponse;
 use super::OffsetDeleteResponse;

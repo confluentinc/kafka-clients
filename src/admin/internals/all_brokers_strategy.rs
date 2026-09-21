@@ -19,13 +19,13 @@
 //! `org.apache.kafka.clients.admin.internals.AllBrokersStrategy`.
 //!
 //! This is a slightly degenerate lookup strategy: the broker ids are both the
-//! keys and the values, and — unlike [`CoordinatorStrategy`](super::coordinator_strategy::CoordinatorStrategy)
-//! and [`PartitionLeaderStrategy`](super::partition_leader_strategy::PartitionLeaderStrategy)
+//! keys and the values, and — unlike [`CoordinatorStrategy`](super::CoordinatorStrategy)
+//! and [`PartitionLeaderStrategy`](super::PartitionLeaderStrategy)
 //! — the set of keys is *not* known ahead of time. A single lookup
 //! ([`Metadata`]) request discovers the broker ids, which then become the
 //! fulfillment keys. This dynamic-key discovery is expressed through the
 //! [`LookupResult`]'s `mapped_keys` (brand-new keys the driver did not start
-//! with) plus `completed_keys` (the sentinel [`any_broker`] lookup key), and is
+//! with) plus `completed_keys` (the sentinel [`AllBrokersStrategy::any_broker`] lookup key), and is
 //! surfaced to the caller through the more complex
 //! `Future<Map<Integer, Future<V>>>` shape of [`AllBrokersFuture::all`].
 
@@ -33,23 +33,24 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::common::Error;
-use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
+use crate::common::KafkaFuture;
+use crate::common::internals::KafkaFutureImpl;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::kafka_debug;
 
-use super::admin_api_future::AdminApiFuture;
-use super::admin_api_lookup_strategy::{AdminApiLookupStrategy, LookupResult};
-use super::api_request_scope::ApiRequestScope;
+use super::AdminApiFuture;
+use super::ApiRequestScope;
+use super::{AdminApiLookupStrategy, LookupResult};
 
 /// A key used by [`AllBrokersStrategy`]. The sentinel key (broker id `None`,
-/// [`any_broker`]) drives the single lookup request; each discovered broker
+/// [`AllBrokersStrategy::any_broker`]) drives the single lookup request; each discovered broker
 /// becomes a key with `Some(broker_id)`.
 ///
 /// Corresponds to `AllBrokersStrategy.BrokerKey`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BrokerKey {
-    /// The broker id, or `None` for the pre-lookup sentinel ([`any_broker`]).
+    /// The broker id, or `None` for the pre-lookup sentinel ([`AllBrokersStrategy::any_broker`]).
     pub(crate) broker_id: Option<i32>,
 }
 
@@ -66,20 +67,6 @@ impl std::fmt::Display for BrokerKey {
     }
 }
 
-/// The sentinel "any broker" lookup key.
-///
-/// Mirrors `AllBrokersStrategy.ANY_BROKER`.
-pub(crate) fn any_broker() -> BrokerKey {
-    BrokerKey::new(None)
-}
-
-/// The (single) set of lookup keys, containing only [`any_broker`].
-///
-/// Mirrors `AllBrokersStrategy.LOOKUP_KEYS`.
-pub(crate) fn lookup_keys() -> HashSet<BrokerKey> {
-    HashSet::from([any_broker()])
-}
-
 /// The lookup strategy for use cases which require requests to be sent to all
 /// brokers in the cluster.
 ///
@@ -89,6 +76,20 @@ pub(crate) struct AllBrokersStrategy {
 }
 
 impl AllBrokersStrategy {
+    /// The sentinel "any broker" lookup key.
+    ///
+    /// Mirrors `AllBrokersStrategy.ANY_BROKER`.
+    pub(crate) fn any_broker() -> BrokerKey {
+        BrokerKey::new(None)
+    }
+
+    /// The (single) set of lookup keys, containing only [`any_broker`].
+    ///
+    /// Mirrors `AllBrokersStrategy.LOOKUP_KEYS`.
+    pub(crate) fn lookup_keys() -> HashSet<BrokerKey> {
+        HashSet::from([Self::any_broker()])
+    }
+
     /// Creates a strategy.
     pub(crate) fn new(log_context: LogContext) -> Self {
         Self { log_context }
@@ -101,7 +102,7 @@ impl AllBrokersStrategy {
     fn validate_lookup_keys(keys: &HashSet<BrokerKey>) {
         assert!(keys.len() == 1, "Unexpected key set: {keys:?}");
         let key = keys.iter().next().expect("checked len == 1");
-        assert!(key == &any_broker(), "Unexpected key set: {keys:?}");
+        assert!(key == &AllBrokersStrategy::any_broker(), "Unexpected key set: {keys:?}");
     }
 }
 
@@ -115,7 +116,7 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
         Self::validate_lookup_keys(keys);
         // Send an empty `Metadata` request; we are only interested in the
         // brokers from the response.
-        Box::new(MetadataRequestBuilder::new(Some(&[]), false))
+        Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), false))
     }
 
     fn handle_response(&self, keys: &HashSet<BrokerKey>, response: &ConcreteResponse) -> LookupResult<BrokerKey> {
@@ -153,7 +154,11 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
 
         // The sentinel lookup key is "completed" by the lookup itself; every
         // discovered broker id is a brand-new mapped fulfillment key.
-        LookupResult { completed_keys: vec![any_broker()], mapped_keys, failed_keys: HashMap::new() }
+        LookupResult {
+            completed_keys: vec![AllBrokersStrategy::any_broker()],
+            mapped_keys,
+            failed_keys: HashMap::new(),
+        }
     }
 }
 
@@ -204,7 +209,7 @@ impl<V: Clone + Send + Sync + 'static> AllBrokersFuture<V> {
 
 impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBrokersFuture<V> {
     fn lookup_keys(&self) -> HashSet<BrokerKey> {
-        lookup_keys()
+        AllBrokersStrategy::lookup_keys()
     }
 
     fn complete_lookup(&self, broker_id_mapping: HashMap<BrokerKey, i32>) {
@@ -227,7 +232,7 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
 
     fn complete_lookup_with_error(&self, lookup_errors: HashMap<BrokerKey, Error>) {
         assert!(
-            lookup_errors.keys().cloned().collect::<HashSet<_>>() == lookup_keys(),
+            lookup_errors.keys().cloned().collect::<HashSet<_>>() == AllBrokersStrategy::lookup_keys(),
             "Unexpected keys among lookup errors: {lookup_errors:?}"
         );
         let error = lookup_errors.into_values().next().expect("lookup_keys is non-empty");
@@ -236,7 +241,10 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
 
     fn complete(&self, values: HashMap<BrokerKey, V>) {
         for (key, value) in values {
-            assert!(key != any_broker(), "Invalid attempt to complete with lookup key sentinel");
+            assert!(
+                key != AllBrokersStrategy::any_broker(),
+                "Invalid attempt to complete with lookup key sentinel"
+            );
             let broker_id = key.broker_id.expect("non-sentinel broker key has a broker id");
             self.complete_broker(broker_id, value);
         }
@@ -257,9 +265,10 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::ApiKeys;
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::requests::MetadataResponse;
-    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData};
+    use crate::metadata_response_data::MetadataResponseBroker;
 
     fn log_context() -> LogContext {
         LogContext::new("[test] ")
@@ -278,14 +287,14 @@ mod tests {
             })
             .collect();
         data.set_brokers(brokers);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     // Mirrors `AllBrokersStrategyTest.testBuildRequest`.
     #[test]
     fn build_request() {
         let strategy = AllBrokersStrategy::new(log_context());
-        let request = strategy.build_request(&lookup_keys()).build().unwrap();
+        let request = strategy.build_request(&AllBrokersStrategy::lookup_keys()).build().unwrap();
         let crate::common::requests::ConcreteRequest::Metadata(m) = request else {
             panic!("expected metadata request");
         };
@@ -296,7 +305,7 @@ mod tests {
     #[test]
     fn build_request_with_invalid_lookup_keys() {
         let strategy = AllBrokersStrategy::new(log_context());
-        let key1 = any_broker();
+        let key1 = AllBrokersStrategy::any_broker();
         let key2 = BrokerKey::new(Some(1));
         for keys in [
             HashSet::from([key2.clone()]),
@@ -305,7 +314,7 @@ mod tests {
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| strategy.build_request(&keys))).is_err());
         }
         // A superset of the lookup keys is also invalid.
-        let mut keys = lookup_keys();
+        let mut keys = AllBrokersStrategy::lookup_keys();
         keys.insert(key2);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| strategy.build_request(&keys))).is_err());
     }
@@ -314,7 +323,7 @@ mod tests {
     #[test]
     fn handle_response() {
         let strategy = AllBrokersStrategy::new(log_context());
-        let result = strategy.handle_response(&lookup_keys(), &metadata_response(&[1, 2]));
+        let result = strategy.handle_response(&AllBrokersStrategy::lookup_keys(), &metadata_response(&[1, 2]));
         assert!(result.failed_keys.is_empty());
         assert_eq!(
             result.mapped_keys.keys().cloned().collect::<HashSet<_>>(),
@@ -323,14 +332,14 @@ mod tests {
         for (broker_key, broker_id) in &result.mapped_keys {
             assert_eq!(broker_key.broker_id, Some(*broker_id));
         }
-        assert_eq!(result.completed_keys, vec![any_broker()]);
+        assert_eq!(result.completed_keys, vec![AllBrokersStrategy::any_broker()]);
     }
 
     // Mirrors `AllBrokersStrategyTest.testHandleResponseWithNoBrokers`.
     #[test]
     fn handle_response_with_no_brokers() {
         let strategy = AllBrokersStrategy::new(log_context());
-        let result = strategy.handle_response(&lookup_keys(), &metadata_response(&[]));
+        let result = strategy.handle_response(&AllBrokersStrategy::lookup_keys(), &metadata_response(&[]));
         assert!(result.failed_keys.is_empty());
         assert!(result.mapped_keys.is_empty());
     }
@@ -339,7 +348,7 @@ mod tests {
     #[test]
     fn handle_response_with_invalid_lookup_keys() {
         let strategy = AllBrokersStrategy::new(log_context());
-        let key1 = any_broker();
+        let key1 = AllBrokersStrategy::any_broker();
         let key2 = BrokerKey::new(Some(1));
         let response = metadata_response(&[]);
         for keys in [
@@ -351,7 +360,7 @@ mod tests {
                     .is_err()
             );
         }
-        let mut keys = lookup_keys();
+        let mut keys = AllBrokersStrategy::lookup_keys();
         keys.insert(key2);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| strategy.handle_response(&keys, &response)))
@@ -361,19 +370,20 @@ mod tests {
 }
 
 /// Translation of `AllBrokersStrategyIntegrationTest`: drives the real
-/// [`AdminApiDriver`](super::admin_api_driver::AdminApiDriver) with
+/// [`AdminApiDriver`](super::AdminApiDriver) with
 /// [`AllBrokersStrategy`] + [`AllBrokersFuture`] end-to-end, proving the Tier-1
 /// driver cleanly supports dynamically-discovered lookup keys.
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::admin::internals::admin_api_driver::AdminApiDriver;
-    use crate::admin::internals::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
+    use crate::MetadataResponseData;
+    use crate::admin::internals::AdminApiDriver;
+    use crate::admin::internals::{AdminApiHandler, ApiResult, RequestAndKeys};
     use crate::common::Node;
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::requests::MetadataResponse;
     use crate::common::utils::ExponentialBackoff;
-    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData};
+    use crate::metadata_response_data::MetadataResponseBroker;
 
     const TIMEOUT_MS: i64 = 5000;
     const RETRY_BACKOFF_MS: i64 = 100;
@@ -392,7 +402,7 @@ mod integration_tests {
 
         fn build_request(&self, _broker_id: i32, keys: &HashSet<BrokerKey>) -> Vec<RequestAndKeys<BrokerKey>> {
             vec![RequestAndKeys {
-                request: Box::new(MetadataRequestBuilder::new(Some(&[]), false)),
+                request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), false)),
                 keys: keys.clone(),
             }]
         }
@@ -436,11 +446,11 @@ mod integration_tests {
             })
             .collect();
         data.set_brokers(brokers);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn placeholder_response() -> ConcreteResponse {
-        ConcreteResponse::Metadata(MetadataResponse::new(
+        ConcreteResponse::Metadata(MetadataResponse::with_version(
             MetadataResponseData::new(),
             ApiKeys::METADATA.latest_version(),
         ))
@@ -465,7 +475,7 @@ mod integration_tests {
 
         let specs = driver.poll();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].keys, lookup_keys());
+        assert_eq!(specs[0].keys, AllBrokersStrategy::lookup_keys());
 
         driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &unknown_server_error());
         assert!(all.is_done());
@@ -481,12 +491,12 @@ mod integration_tests {
 
         let specs = driver.poll();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].keys, lookup_keys());
+        assert_eq!(specs[0].keys, AllBrokersStrategy::lookup_keys());
 
         driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_error());
         let retry_specs = driver.poll();
         assert_eq!(retry_specs.len(), 1);
-        assert_eq!(retry_specs[0].keys, lookup_keys());
+        assert_eq!(retry_specs[0].keys, AllBrokersStrategy::lookup_keys());
         assert_eq!(retry_specs[0].next_allowed_try_ms, NOW);
         assert!(driver.poll().is_empty());
     }

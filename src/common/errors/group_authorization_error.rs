@@ -18,14 +18,12 @@ use std::fmt;
 
 use ambassador::Delegate;
 
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::{Error, KafkaError};
 // Ambassador exports its generated helper macros at the crate root; a
 // `#[delegate]` outside the trait's own module has to import them.
-use crate::common::kafka_error::{
-    ambassador_impl_ErrorCode, ambassador_impl_ErrorMessage, ambassador_impl_ErrorSource,
-};
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::{ambassador_impl_ErrorCode, ambassador_impl_ErrorMessage, ambassador_impl_ErrorSource};
 
 /// Group authorization failure with the group ID.
 ///
@@ -82,10 +80,16 @@ impl GroupAuthorizationError {
 
     /// Create a group authorization error carrying a custom message.
     ///
-    /// Mirrors Java's `GroupAuthorizationException(String message, String groupId)`,
-    /// where the exception message is caller-supplied rather than the default
-    /// error text.
-    pub fn with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Mirrors Java's `GroupAuthorizationException(String message, String groupId)`
+    /// (`GroupAuthorizationException.java:22`), where the error message is
+    /// caller-supplied rather than the default error text.
+    ///
+    /// It is the only Java constructor this struct translates as a constructor —
+    /// [`for_group_id`](Self::for_group_id) translates the `forGroupId` static
+    /// factory and [`with_default_message`](Self::with_default_message) the
+    /// `Errors` one — so the intersection is its own parameter list and it keeps
+    /// the plain name (CLAUDE.md §2).
+    pub fn new(group_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
             group_id: group_id.into(),

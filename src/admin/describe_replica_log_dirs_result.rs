@@ -16,11 +16,11 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult`.
 
+use crate::common::requests::DescribeLogDirsResponse;
 use std::collections::HashMap;
 
 use crate::common::KafkaFuture;
 use crate::common::TopicPartitionReplica;
-use crate::common::requests::describe_log_dirs_response::INVALID_OFFSET_LAG;
 
 /// The result of the `Admin::describe_replica_log_dirs` call.
 ///
@@ -110,7 +110,12 @@ impl Default for ReplicaLogDirInfo {
     /// The no-argument default, mirroring Java's `ReplicaLogDirInfo()`:
     /// `(null, INVALID_OFFSET_LAG, null, INVALID_OFFSET_LAG)`.
     fn default() -> Self {
-        Self::new(None, INVALID_OFFSET_LAG, None, INVALID_OFFSET_LAG)
+        Self::new(
+            None,
+            DescribeLogDirsResponse::INVALID_OFFSET_LAG,
+            None,
+            DescribeLogDirsResponse::INVALID_OFFSET_LAG,
+        )
     }
 }
 

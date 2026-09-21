@@ -26,8 +26,8 @@
 use bytes::Bytes;
 use std::io;
 
+use super::ByteUtils;
 use super::Readable;
-use super::varint;
 
 /// A [`Readable`] over a [`bytes::Bytes`] buffer with position tracking.
 ///
@@ -156,21 +156,21 @@ impl Readable for BytesReader {
     }
 
     fn read_unsigned_varint(&mut self) -> io::Result<u32> {
-        let (value, size) = varint::read_unsigned_varint(&self.buf[self.position..])
+        let (value, size) = ByteUtils::read_unsigned_varint(&self.buf[self.position..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.position += size;
         Ok(value)
     }
 
     fn read_varint(&mut self) -> io::Result<i32> {
-        let (value, size) = varint::read_varint(&self.buf[self.position..])
+        let (value, size) = ByteUtils::read_varint(&self.buf[self.position..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.position += size;
         Ok(value)
     }
 
     fn read_varlong(&mut self) -> io::Result<i64> {
-        let (value, size) = varint::read_varlong(&self.buf[self.position..])
+        let (value, size) = ByteUtils::read_varlong(&self.buf[self.position..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.position += size;
         Ok(value)
@@ -228,7 +228,7 @@ mod tests {
     fn test_varint_and_uuid_reads() {
         // Build a buffer via the writable accessor to ensure encodings match.
         use crate::common::protocol::{ByteBufferAccessor, Writable};
-        let mut w = ByteBufferAccessor::new(64);
+        let mut w = ByteBufferAccessor::new(Vec::with_capacity(64));
         w.write_unsigned_varint(16384).unwrap();
         w.write_varint(-300).unwrap();
         w.write_varlong(-1_000_000_000).unwrap();

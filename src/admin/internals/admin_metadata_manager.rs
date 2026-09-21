@@ -19,12 +19,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::MetadataUpdater;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
 use crate::common::utils::LogContext;
 use crate::common::{Cluster, Error, Node, Uuid};
 use crate::kafka_warn;
-use crate::metadata_updater::MetadataUpdater;
 use std::collections::HashMap;
 
 /// The metadata-refresh state machine, mirroring Java's `State` enum.
@@ -205,7 +205,7 @@ impl AdminMetadataManager {
         let mut inner = self.inner.lock().unwrap();
         inner.state = State::Quiescent;
         // We depend on pending calls to request another metadata update.
-        if crate::common::requests::request_utils::is_fatal_error(&error) {
+        if crate::common::requests::RequestUtils::is_fatal_error(&error) {
             inner.fatal_error = Some(error);
         }
     }
@@ -225,7 +225,7 @@ fn rebuild_without_controller(cluster: &Cluster) -> Cluster {
         .map(|t| (t.to_string(), cluster.topic_id(t)))
         .filter(|(_, id)| *id != Uuid::zero())
         .collect();
-    Cluster::new(
+    Cluster::with_invalid_topics_controller_topic_ids(
         cluster.cluster_resource().cluster_id().map(str::to_string),
         cluster.nodes().to_vec(),
         partitions,

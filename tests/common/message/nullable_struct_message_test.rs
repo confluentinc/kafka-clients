@@ -21,12 +21,12 @@
 use crate::common::nullable_struct_message_data::{
     MyStruct, MyStruct2, MyStruct3, MyStruct4, NullableStructMessageData,
 };
-use confluent_kafka::common::protocol::message_util::to_byte_buffer_accessor;
+use confluent_kafka::common::protocol::MessageUtil;
 use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 
 /// Deserialize a NullableStructMessageData from a buffer at a given version.
 fn deserialize(buf: &[u8], version: i16) -> NullableStructMessageData {
-    let mut accessor = ByteBufferAccessor::from_bytes(buf.to_vec());
+    let mut accessor = ByteBufferAccessor::new(buf.to_vec());
     let mut message = NullableStructMessageData::new();
     Message::read(&mut message, &mut accessor, version).unwrap();
     message
@@ -34,7 +34,7 @@ fn deserialize(buf: &[u8], version: i16) -> NullableStructMessageData {
 
 /// Serialize a NullableStructMessageData to a buffer at a given version.
 fn serialize(message: &mut NullableStructMessageData, version: i16) -> Vec<u8> {
-    let acc = to_byte_buffer_accessor(message, version).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(message, version).unwrap();
     acc.buffer().to_vec()
 }
 
@@ -121,7 +121,7 @@ fn test_nullable_struct2_can_not_be_null_in_version0() {
     let mut cache = ObjectSerializationCache::new();
     let size_result = message.size(&mut cache, 0);
     if let Ok(size) = size_result {
-        let mut buf = ByteBufferAccessor::new(size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         let write_result = Message::write(&mut message, &mut buf, &cache, 0);
         if write_result.is_ok() {
             // If write succeeded, the read should either fail or produce wrong data

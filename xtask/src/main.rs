@@ -351,6 +351,10 @@ fn lint() -> anyhow::Result<()> {
     // failures are always real.
     doc_hygiene()?;
 
+    // CLAUDE.md §2's import rule, in the one place the compiler cannot enforce it:
+    // a file module stays visible inside its own subtree even when declared `mod x;`.
+    module_path_hygiene()?;
+
     println!("🔍 Running clippy lints...");
 
     // Two passes over the whole workspace are needed to cover every module:
@@ -644,6 +648,177 @@ fn doc_hygiene() -> anyhow::Result<()> {
         eprintln!("  {finding}");
     }
     Err(anyhow::anyhow!("{} doc-hygiene finding(s)", findings.len()))
+}
+
+/// CLAUDE.md §2: a translated Java class is imported through its parent module's
+/// re-export (`crate::producer::ProducerRecord`), never through the file module that
+/// holds it (the same type spelled with a `producer_record` segment in between). The
+/// file module path is reserved for Java *nested* types, e.g. `ConfigSource` reached
+/// through `config_entry`.
+///
+/// Most of that rule is enforced by the compiler, because the file modules are
+/// declared `mod x;` — but a private module stays visible to the declaring module and
+/// all of its descendants, so a sibling reaching through `super::<file module>::<Type>`
+/// still compiles. This check covers exactly that blind spot.
+///
+/// It flags a `<file module>::<Name>` segment pair only when the file module's own
+/// parent re-exports that exact `Name`, and only when the pair is reached through a
+/// longer path (preceded by `::`). Both conditions matter: the first leaves Java nested
+/// types alone (`common::network` re-exports `ChannelState` but not the nested `State`,
+/// so only the former is a violation), and the second leaves the defining
+/// `pub use` line in the parent's own `mod.rs` alone.
+///
+/// A file module whose name is also a directory module's name is skipped, because the
+/// pair is keyed on the bare segment rather than the full path: the three
+/// module-inception files (`metrics`, `utils`, `resource`) sit inside a directory of
+/// the same name, so `common::metrics::Metrics` — the *correct* path — is
+/// indistinguishable from a violation by segment name alone.
+fn module_path_hygiene() -> anyhow::Result<()> {
+    println!("🔍 Checking module-path hygiene...");
+
+    // (file module segment, re-exported name) for every hand-written parent module.
+    let mut reexports: Vec<(String, String)> = Vec::new();
+    let mut directory_modules: Vec<String> = Vec::new();
+    for path in rust_sources("src")? {
+        if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+            if let Some(name) = path.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) {
+                directory_modules.push(name.to_string());
+            }
+        }
+    }
+    for path in rust_sources("src")? {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if file_name != "mod.rs" && file_name != "lib.rs" {
+            continue;
+        }
+        let dir = path.parent().unwrap_or(&path);
+        let text = fs::read_to_string(&path)?;
+        for body in use_statements(&text) {
+            // Only a re-export of a *direct child file module* counts: `<seg>::<Name>`
+            // or `self::<seg>::<Name>`, with `<seg>.rs` sitting next to this `mod.rs`.
+            let body = body.trim_start_matches("self::");
+            let Some((segment, tail)) = body.split_once("::") else {
+                continue;
+            };
+            if segment.contains(' ') || !dir.join(format!("{segment}.rs")).is_file() {
+                continue;
+            }
+            if directory_modules.iter().any(|name| name == segment) {
+                continue;
+            }
+            for name in brace_list(tail) {
+                // `pub use x::y as z;` re-exports under `z`; the path a caller must not
+                // write is still `x::y`, so key on the original name.
+                let original = name.split(" as ").next().unwrap_or(&name).trim().to_string();
+                if !original.is_empty() && original != "*" && original != "self" {
+                    reexports.push((segment.to_string(), original));
+                }
+            }
+        }
+    }
+    reexports.sort();
+    reexports.dedup();
+
+    // A path is only ours to judge if its first segment names this crate. Without
+    // that guard a file module sharing a name with a std one — `common/error.rs`
+    // against `std::error` — matches every `std::error::Error` in the repo.
+    let mut crate_roots: Vec<String> = ["crate", "self", "super", "confluent_kafka"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    crate_roots.extend(directory_modules.iter().cloned());
+    crate_roots.sort();
+    crate_roots.dedup();
+
+    let mut findings: Vec<String> = Vec::new();
+    for root in ["src", "tests", "examples", "consumer-perf/src"] {
+        if !PathBuf::from(root).is_dir() {
+            continue;
+        }
+        for path in rust_sources(root)? {
+            let text = fs::read_to_string(&path)?;
+            for (number, line) in text.lines().enumerate() {
+                for (segment, name) in &reexports {
+                    let needle = format!("::{segment}::{name}");
+                    let mut from = 0;
+                    while let Some(at) = line[from..].find(&needle) {
+                        let start = from + at;
+                        let end = start + needle.len();
+                        from = start + 1;
+                        // Reject a longer identifier on either side (`::topic::TopicX`).
+                        if line[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        let head: String = line[..start]
+                            .chars()
+                            .rev()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
+                        if !crate_roots.iter().any(|allowed| allowed == root) {
+                            continue;
+                        }
+                        findings.push(format!(
+                            "{}:{} reaches `{name}` through the file module `{segment}` — \
+                             import it from the parent re-export instead (CLAUDE.md §2)",
+                            path.display(),
+                            number + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!("✅ Module-path hygiene clean!");
+        return Ok(());
+    }
+    for finding in &findings {
+        eprintln!("  {finding}");
+    }
+    Err(anyhow::anyhow!("{} module-path finding(s)", findings.len()))
+}
+
+/// The body of every `use` statement in `text`, whitespace-collapsed and with the
+/// leading visibility/keyword and trailing `;` stripped. Multi-line statements are
+/// joined, so a braced list arrives as one string.
+fn use_statements(text: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("use ") {
+        let before_is_boundary = rest[..at].ends_with('\n')
+            || rest[..at].trim_end().ends_with("pub")
+            || rest[..at].trim_end().ends_with("(crate)")
+            || rest[..at].chars().rev().take_while(|c| *c == ' ').count() == at;
+        let after = &rest[at + 4..];
+        let Some(end) = after.find(';') else { break };
+        if before_is_boundary {
+            bodies.push(after[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        rest = &after[end + 1..];
+    }
+    bodies
+}
+
+/// `Name` -> `["Name"]`; `{A, B as C}` -> `["A", "B as C"]`. Nested braces are skipped,
+/// since this check only needs the simple shapes the repo's `mod.rs` files use.
+fn brace_list(tail: &str) -> Vec<String> {
+    let tail = tail.trim();
+    let Some(inner) = tail.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else {
+        return vec![tail.to_string()];
+    };
+    if inner.contains('{') {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 /// Every `.rs` file under `root`, recursively, in a deterministic order.

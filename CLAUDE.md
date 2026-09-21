@@ -5,6 +5,8 @@ Rust Kafka client implementation translated from the Java Kafka client (client o
 Any change to this prompt is to be avoided by automatic agents.
 Suggestions for changes are possible through the process highlighted in [agent-roles.md](.claude/rules/agent-roles.md).
 
+**The public API in Rust is not stable in versions <1.0, no issue in changing it**
+
 ## Translation Rules
 1. **Classes outside the repository**: when you find classes outside of the Kafka repository:
     1. In case code with same behaviour and equal or better performance is found in Rust standard library use that one.
@@ -16,15 +18,14 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Java package `org.apache.kafka.clients.consumer` → Rust module `consumer`. `clients` MUST NOT appear in folder name or Rust module.
    - Java class names (PascalCase) → Rust struct/enum names (PascalCase)
    - Java method names (camelCase) → Rust function names (snake_case)
-   - Java const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE → Rust `common_client_configs::RETRY_BACKOFF_EXP_BASE`
-   - Each Java class MUST be in its own file, but internal imports for the struct MUST use the parent module re-export, not the file module path. For example,
-   `ProducerRecord` is defined in `producer_record.rs` but imported preferably as
-   `use crate::producer::ProducerRecord;` not `use crate::producer::producer_record::ProducerRecord;`. Externally it's possible to use both
-   - Constant MUST be exported only by the file defining them. E.g.:
+   - Java const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE → Rust `CommonClientConfigs::RETRY_BACKOFF_EXP_BASE`
+   - Each Java class MUST be in its own file, with all its nested classes and enums, but imports for the struct MUST use the parent module re-export, not the file module path. For example, `ProducerRecord` is defined in `producer_record.rs` but imported ONLY as
+   `use crate::producer::ProducerRecord;` not `use crate::producer::producer_record::ProducerRecord;`. Only when there are nested classes, or nested enums, they can be available through the submodule, for example: `use crate::producer::producer_record::NestedStaticClassInJava`.
+   - Constant MUST be exported only by the struct defining them. E.g.:
      `GROUP_METADATA_TOPIC_NAME` is accessible through
-     `::common::internals::topic::GROUP_METADATA_TOPIC_NAME`
-   - Static functions MUST be exported only by the file defining them. E.g:
-     `to_byte_buffer_accessor` is accessible through `::common::protocol::message_util::to_byte_buffer_accessor`
+     `::common::internals::Topic::GROUP_METADATA_TOPIC_NAME`
+   - Static functions MUST be exported through only by the struct defining them. E.g:
+     `to_byte_buffer_accessor` is accessible through `::common::protocol::MessageUtil::to_byte_buffer_accessor`
    - Classes whose package contains `internal` MUST  use only `pub(crate)`
    - Java `Exception` → Rust `Error` (e.g. `TopicAuthorizationException` → `TopicAuthorizationError`)
      - they're all enums of Error
@@ -37,7 +38,28 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Preserve original architecture and logical structure
    - Java `long` fields used in comparison (e.g. `Uuid`, producer IDs, offsets) must use `i64` in Rust, not `u64` — signed vs unsigned comparison produces different ordering for values with the high bit set
    - Nullable `string`/`bytes` fields in the Kafka message specs without an explicit `"default": "null"` must default to empty (`Some(String::new())` / `Some(Vec::new())`), not `None`. Only use `None` when the spec explicitly sets `"default": "null"`
+   - Java interfaces become traits in Rust, except those translated to std traits or to functions, default method implementation on an interface become a default trait function implementation in Rust
+    If a Java class implements multiple interfaces and that have a function in common with same signature, implement the function on the struct and delegate to it in both implementations.
+    Constants that should be associated to the trait are exported through the module containing the trait, like nested structs or enums, to make sure they're dyn compatible
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
+   - Overloaded methods: make sure there's:
+     - a method with same name (after translation) that has the intersection of parameters from all overloaded methods, if that method exists in Java.
+     - additional methods with <base_name>_with_<param1_name>_<param2_name> (ALWAYS using the "with" keyword in between).
+     - when parameters have the same name and different type,
+     **in case if the final names would collide**, use the Rust parameter type name instead of the parameter name to discriminate, only for the parameters with same name while continue using the parameter name for rest of parameters.
+     In case the difference is **only** Optional use Rust's `Option` and a single method name
+     - constructor translation from Java always uses `new`, not `from`. If there are parameters use `.with_<a>_<b>_<c>(a,b,c)`, not `.new_with_<a>_<b>_<c>(a,b,c)`
+     - if there a static method `from_<something>` that is translated from Java and a corresponding constructor `with_<something>` with same final signature, keep only the method `with_<something>`
+     - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct that is the only parameter to the method name with `_with_options` suffix. Also in case Java API makes some parameters of the intersection set optional in a later version, add this method with only the `options` parameter
+     The `Options` struct must have a `OptionsBuilder` with a `new` parameterless constructor. All optional parameters have fluent setters in the builder. Finally the user calls `build` before passing the `Options` struct, there the different sets of mandatory parameters are validated and a `IllegalArgumentError` error is returned in case they weren't passed. Semantic validation is left to the method where the `Options` is passed.
+     - getters and setters with same name: use `<field_name>` for the getter and `set_<field_name>` for the setter. If a method is a setter,
+       use `set_<field_name>` even if there's no corresponding getter
+     - examples:
+       - `fooBar(a, b)`, `fooBar(a, c)` -> `foo_bar_with_b(a, b)`, `foo_bar_with_c(a, c)`
+       - `fooBaz(a)`, `fooBaz(a, c)` -> `foo_baz(a)`, `foo_baz_with_c(a, c)`
+       - `fooBar(a, b)`, `fooBar(a, c)`, `fooBar(a, b, c, d)`  -> `foo_bar_with_b(a, b)`, `foo_bar_with_c(a, c)`, `foo_bar_with_b_c_d(a, b, c, d)`
+        - later: `foo_bar_with_b(a, b, c, d, e)` -> `foo_bar_with_options(options)`, `FooBarOptionsBuilder::new().set_a(a).build()`
+        - later: `fooBar(b)`, `fooBar(c)` -> `FooBarOptionsBuilder::new().build()`
 3. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
@@ -52,6 +74,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the
       only way a C caller can classify an error beyond its numeric code.
+    - Exceptions having additional fields in Java: expose the corresponding C opaque type that can be retrieved from the `kafka_common_Error_t` like `kafka_common_Error_resource_not_found`. In case that error is not that type it returns `NULL`, otherwise the returned pointer can be used to access the additional fields with accessor functions. An example of these types and accessors is `kafka_common_ResourceNotFoundError_t` and `kafka_common_ResourceNotFoundError_resource`.
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
@@ -164,6 +187,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
 ## Agent Role
 
 Follow the role assigned to you as described in [agent-roles.md](.claude/rules/agent-roles.md).
+Use LSP plugins when available and working, notify when it's not working, avoid grepping when unnecessary.
 
 ## Source Reference
 Java source in `kafka/` directory (Apache Kafka 4.3.1)

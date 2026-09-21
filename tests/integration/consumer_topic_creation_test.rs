@@ -49,7 +49,7 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
@@ -94,15 +94,15 @@ fn make_consumer(bootstrap: &str, group_id: &str, allow_auto_create: bool) -> Bo
             if allow_auto_create { "true" } else { "false" }.to_string(),
         ),
     ]);
-    let config = ConsumerConfig::from_properties(&props).expect("invalid test config");
-    new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("new_consumer should succeed")
+    let config = ConsumerConfig::new(&props).expect("invalid test config");
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
+        .expect("KafkaConsumer::new should succeed")
 }
 
 /// Java's `subscribeAndPoll`: subscribe to the topic, poll once (1000ms).
 async fn subscribe_and_poll(consumer: &mut BytesConsumer, topic: &str) {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_with_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     let _ = consumer.poll(Duration::from_millis(1000)).await;

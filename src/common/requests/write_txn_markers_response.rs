@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::WriteTxnMarkersResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::write_txn_markers_response_data::WriteTxnMarkersResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A WriteTxnMarkers response.
 ///
@@ -83,7 +83,7 @@ impl WriteTxnMarkersResponse {
         for marker in &self.data.markers {
             for topic in &marker.topics {
                 for partition in &topic.partitions {
-                    update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                    AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
                 }
             }
         }
@@ -142,7 +142,7 @@ mod tests {
         data.set_markers(vec![marker_result(42, Errors::None)]);
         let mut concrete = super::super::ConcreteResponse::WriteTxnMarkers(WriteTxnMarkersResponse::new(data));
         let bytes = concrete.serialize(1).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = WriteTxnMarkersResponse::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().markers.len(), 1);
         assert_eq!(parsed.data().markers[0].producer_id, 42);

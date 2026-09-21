@@ -14,6 +14,6 @@
 
 //! SSL/TLS security utilities (org.apache.kafka.common.security.ssl).
 
-pub mod ssl_factory;
+mod ssl_factory;
 
 pub use ssl_factory::SslFactory;

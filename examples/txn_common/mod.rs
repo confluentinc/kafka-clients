@@ -33,12 +33,12 @@ use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRecords;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
-use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::RecordMetadata;
+use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 /// Every manual-test producer sends `String` keys and values.
 pub type StringProducer = KafkaProducer<String, String>;
@@ -92,8 +92,8 @@ pub fn transactional_producer_with(
     for (key, value) in overrides {
         props.insert((*key).to_string(), (*value).to_string());
     }
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+    let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
+    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
         .map_err(|e| format!("building the producer: {e}"))
 }
 
@@ -107,8 +107,8 @@ pub fn plain_producer(bootstrap: &str, client_id: &str) -> Result<StringProducer
         ("linger.ms".to_string(), "0".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("invalid producer config: {e}"))?;
-    KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+    let config = ProducerConfig::new(&props).map_err(|e| format!("invalid producer config: {e}"))?;
+    KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
         .map_err(|e| format!("building the producer: {e}"))
 }
 
@@ -139,29 +139,28 @@ pub fn build_consumer_with(
     for (key, value) in overrides {
         props.insert((*key).to_string(), (*value).to_string());
     }
-    let config = ConsumerConfig::from_properties(&props).map_err(|e| format!("invalid consumer config: {e}"))?;
-    new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
+    let config = ConsumerConfig::new(&props).map_err(|e| format!("invalid consumer config: {e}"))?;
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
         .map_err(|e| format!("building the consumer: {e}"))
 }
 
 /// Builds a record for partition 0 with key `key-{value}`.
 pub fn string_record(topic: &str, value: &str) -> Result<ProducerRecord<String, String>, String> {
-    ProducerRecord::new(
-        topic.to_string(),
-        Some(0),
-        None,
-        Some(format!("key-{value}")),
-        Some(value.to_string()),
-        None,
-    )
-    .map_err(|e| format!("building the record {value}: {e}"))
+    let options = ProducerRecordOptionsBuilder::new()
+        .set_topic(topic.to_string())
+        .set_value(Some(value.to_string()))
+        .set_partition(Some(0))
+        .set_key(Some(format!("key-{value}")))
+        .build()
+        .map_err(|e| format!("building the record {value}: {e}"))?;
+    ProducerRecord::with_options(options).map_err(|e| format!("building the record {value}: {e}"))
 }
 
 /// Sends one record to partition 0 and awaits its broker ack.
 pub async fn send_value(producer: &StringProducer, topic: &str, value: &str) -> Result<RecordMetadata, String> {
     let record = string_record(topic, value)?;
     let ack = producer.send(record).await.map_err(|e| format!("send {value}: {e}"))?;
-    ack.get_timeout(SEND_ACK_TIMEOUT)
+    ack.get_with_timeout(SEND_ACK_TIMEOUT)
         .await
         .map_err(|e| format!("waiting for the ack of {value}: {e}"))
 }
@@ -245,7 +244,7 @@ pub async fn send_expect_failure(producer: &StringProducer, topic: &str, value: 
     let record = string_record(topic, value)?;
     match producer.send(record).await {
         Err(error) => Ok(SendFailure::Synchronous(error)),
-        Ok(future) => match future.get_timeout(SEND_ACK_TIMEOUT).await {
+        Ok(future) => match future.get_with_timeout(SEND_ACK_TIMEOUT).await {
             Err(error) => Ok(SendFailure::ViaFuture(error)),
             Ok(metadata) => Err(format!(
                 "the send of {value} was unexpectedly acked at {}-{}@{}",

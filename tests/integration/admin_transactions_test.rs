@@ -28,7 +28,7 @@
 //!
 //! The Rust `Producer` trait does not implement the transactional API
 //! (`init_transactions` / `begin_transaction` / ... — see
-//! `src/producer/producer_trait.rs`), and `enable.idempotence` defaults to `true`
+//! `src/producer/producer.rs`), and `enable.idempotence` defaults to `true`
 //! in `ProducerConfig` but nothing on the send path ever calls
 //! `ProducerBatch::set_producer_state`, so every record this client produces
 //! carries `RecordBatch::NO_PRODUCER_ID` (`src/producer/internals/sender.rs`).
@@ -86,8 +86,8 @@ use confluent_kafka::admin::{
     FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, OffsetSpec, TerminateTransactionOptions,
     TransactionListing, TransactionState,
 };
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::protocol::Errors;
 
 use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -524,7 +524,7 @@ async fn describe_producers_reports_no_active_producers<F: AdminBackendFactory>(
 
     let broker_id = broker_ids(&admin).await[0];
     let by_broker = admin
-        .describe_producers(partitions, DescribeProducersOptions::new().broker_id(broker_id))
+        .describe_producers(partitions, DescribeProducersOptions::new().set_broker_id(broker_id))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe producers on broker {broker_id}: {e}"));
     all_of_exactly(&admin, &by_broker, partitions, "describeProducers(brokerId)");
@@ -670,7 +670,7 @@ async fn describe_transactions_reports_a_fenced_transaction<F: AdminBackendFacto
     let fenced = admin
         .fence_producers(
             std::slice::from_ref(&transactional_id),
-            FenceProducersOptions::new().timeout_ms(Some(TXN_TIMEOUT_MS)),
+            FenceProducersOptions::new().set_timeout_ms(Some(TXN_TIMEOUT_MS)),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: fence producers: {e}"));

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::common::Cluster;
 use crate::common::utils::LogContext;
-use crate::common::utils::{murmur2, to_positive};
+use crate::common::utils::Utils;
 use crate::kafka_trace;
 
 /// Hash function used to map a serialized record key to a partition.
@@ -217,7 +217,7 @@ impl BuiltInPartitioner {
     ///
     /// This method can be overridden in tests to provide deterministic behavior.
     fn random_partition(&mut self) -> i32 {
-        to_positive(rand::random::<i32>())
+        Utils::to_positive(rand::random::<i32>())
     }
 
     /// Test-only function. When partition load stats are defined, return the end
@@ -413,7 +413,7 @@ impl BuiltInPartitioner {
     pub fn partition_for_key(serialized_key: &[u8], num_partitions: i32, hasher: KeyHasher) -> i32 {
         match hasher {
             KeyHasher::Crc32 => (crc32fast::hash(serialized_key) % (num_partitions as u32)) as i32,
-            KeyHasher::Murmur2 => to_positive(murmur2(serialized_key)) % num_partitions,
+            KeyHasher::Murmur2 => Utils::to_positive(Utils::murmur2(serialized_key)) % num_partitions,
         }
     }
 }
@@ -490,7 +490,7 @@ mod tests {
         }
 
         fn next_partition(&mut self, cluster: &Cluster) -> i32 {
-            let random = to_positive(self.mock_random.fetch_add(1, Ordering::Relaxed));
+            let random = Utils::to_positive(self.mock_random.fetch_add(1, Ordering::Relaxed));
             if let Some(ref stats) = self.inner.partition_load_stats {
                 debug_assert!(stats.length > 0);
                 let cft = &stats.cumulative_frequency_table;
@@ -528,7 +528,7 @@ mod tests {
     }
 
     fn make_cluster(nodes: &[Node], partitions: Vec<PartitionInfo>) -> Cluster {
-        Cluster::new(
+        Cluster::with_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             nodes.to_vec(),
             partitions,
@@ -803,12 +803,12 @@ mod tests {
         assert_eq!((crc % 3) as i32, 0);
 
         // A masked modulo would give a DIFFERENT partition — this is the bug we
-        // avoid by not calling `to_positive`.
-        assert_eq!(to_positive(crc as i32) % 3, 1);
+        // avoid by not calling `Utils::to_positive`.
+        assert_eq!(Utils::to_positive(crc as i32) % 3, 1);
     }
 
     /// `partition_for_key` under [`KeyHasher::Murmur2`] is byte-for-byte the old
-    /// (Java-parity) behaviour: `to_positive(murmur2(key)) % n`.
+    /// (Java-parity) behaviour: `Utils::to_positive(Utils::murmur2(key)) % n`.
     #[test]
     fn test_murmur2_key_to_partition_matches_java_formula() {
         let keys: &[&[u8]] = &[b"a", b"abc", b"kafka", b"hello", b"123456789", b""];
@@ -816,7 +816,7 @@ mod tests {
             for key in keys {
                 assert_eq!(
                     BuiltInPartitioner::partition_for_key(key, n, KeyHasher::Murmur2),
-                    to_positive(murmur2(key)) % n,
+                    Utils::to_positive(Utils::murmur2(key)) % n,
                     "murmur2 key={:?} n={}",
                     String::from_utf8_lossy(key),
                     n

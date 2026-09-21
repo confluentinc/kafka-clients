@@ -18,9 +18,10 @@
 
 use std::io;
 
+use crate::DescribeTransactionsRequestData;
+use crate::DescribeTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_transactions_request_data::DescribeTransactionsRequestData;
-use crate::describe_transactions_response_data::{DescribeTransactionsResponseData, TransactionState};
+use crate::describe_transactions_response_data::TransactionState;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeTransactionsResponse, RequestBuilder};
 
@@ -157,7 +158,7 @@ mod tests {
         let mut builder = DescribeTransactionsRequestBuilder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeTransactionsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().transactional_ids, vec!["t1".to_string()]);
     }

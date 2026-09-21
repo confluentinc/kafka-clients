@@ -86,7 +86,7 @@ impl std::fmt::Display for GroupListing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
+    use crate::consumer::internals::ConsumerProtocol;
 
     const GROUP_ID: &str = "mygroup";
 
@@ -96,7 +96,12 @@ mod tests {
         let gl = GroupListing::new(GROUP_ID, Some(GroupType::Classic), "", Some(GroupState::Empty));
         assert!(gl.is_simple_consumer_group());
 
-        let gl = GroupListing::new(GROUP_ID, Some(GroupType::Classic), PROTOCOL_TYPE, Some(GroupState::Stable));
+        let gl = GroupListing::new(
+            GROUP_ID,
+            Some(GroupType::Classic),
+            ConsumerProtocol::PROTOCOL_TYPE,
+            Some(GroupState::Stable),
+        );
         assert!(!gl.is_simple_consumer_group());
 
         let gl = GroupListing::new(GROUP_ID, Some(GroupType::Consumer), "", Some(GroupState::Empty));

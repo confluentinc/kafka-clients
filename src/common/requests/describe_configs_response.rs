@@ -19,11 +19,12 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeConfigsResponseData;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_configs_response_data::{DescribeConfigsResponseData, DescribeConfigsResult};
+use crate::describe_configs_response_data::DescribeConfigsResult;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DescribeConfigs response.
 ///
@@ -84,7 +85,7 @@ impl DescribeConfigsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }

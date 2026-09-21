@@ -17,8 +17,8 @@
 //! Note the package: this class sits in `org.apache.kafka.common`, beside
 //! `KafkaException`, not in `common.errors` with the rest of the family.
 
-use crate::common::kafka_error::kafka_error_class;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// This record has failed the validation on broker and hence will be
