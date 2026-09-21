@@ -1,0 +1,45 @@
+[package]
+name = "verifiable-clients"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Rust translations of Apache Kafka's client-facing system-test tools
+# (`org.apache.kafka.tools.VerifiableProducer` / `VerifiableConsumer`) plus
+# their out-of-crate dependency `org.apache.kafka.server.util.ThroughputThrottler`.
+# Kept as a separate workspace crate so the client crate's dependency tree stays
+# clean, mirroring Java's separate `tools` module (Milestone 14, PLAN §2/§5).
+
+[lib]
+name = "verifiable_clients"
+path = "src/lib.rs"
+
+[[bin]]
+name = "verifiable_producer"
+path = "src/bin/verifiable_producer.rs"
+
+[[bin]]
+name = "verifiable_consumer"
+path = "src/bin/verifiable_consumer.rs"
+
+[dependencies]
+confluent-kafka-rust = { path = "../.." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# VerifiableConsumer implements the client's `ConsumerRebalanceListener` and
+# `OffsetCommitCallback` traits, which are `#[async_trait]` in this repo, so the
+# tool must depend on async-trait to write those impls.
+async-trait = "0.1"
+# Java's VerifiableProducer/Consumer emit runtime logs through log4j (configured
+# by the system tests via KAFKA_LOG4J_OPTS). The Rust client uses the `log`
+# facade, so the tool binaries install `env_logger` (stderr, driven by RUST_LOG)
+# as the faithful analog — without it every `log::*` call in the client is a
+# no-op and the tool is undebuggable in a system-test run.
+env_logger = "0.11"
+
+[dev-dependencies]
+# Test-only: `ConsumerRecords::new` takes an `IndexMap`, so the
+# `on_records_received` offset-math unit tests build fixture record batches with
+# it. Not used by the shipped binaries. Same major version the client crate uses.
+indexmap = "2"
