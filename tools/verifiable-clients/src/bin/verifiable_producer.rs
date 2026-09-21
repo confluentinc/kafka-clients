@@ -15,7 +15,7 @@
 //! Command-line entry point for the `VerifiableProducer` system-test tool.
 //!
 //! Translated from `VerifiableProducer.main`. A thin `#[tokio::main] async fn`
-//! delegating to the library (precedent: `src/bin/consumer_test.rs`).
+//! delegating to the library.
 //!
 //! Run, e.g.:
 //!
@@ -26,6 +26,7 @@
 
 #![deny(warnings)]
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,19 +71,24 @@ async fn run(args: &[String]) -> Result<(), Error> {
     let mut producer = create_from_args(args).await?;
 
     let start_ms = now_millis();
-    let throttler = ThroughputThrottler::new(producer.throughput() as f64, start_ms);
+    let throttler = Arc::new(ThroughputThrottler::new(producer.throughput() as f64, start_ms));
 
-    // Java can't use `Runtime.addShutdownHook`'s exact semantics here; CLAUDE.md
-    // §9 maps the JVM shutdown hook to a signal task that flips the stop flag.
+    // Java maps the JVM shutdown hook to a signal task that flips the stop flag.
     // Java's shutdown hook fires on both SIGINT and SIGTERM, and ducktape's
     // clean shutdown of a verifiable client sends **SIGTERM** by default and
     // then waits for the flush/close output, so we wait on either signal (see
     // [`wait_for_shutdown_signal`]) rather than SIGINT alone. The producing loop
     // observes the flag between iterations and stops.
     let stop = producer.stop_producing_handle();
+    let signal_throttler = Arc::clone(&throttler);
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         stop.store(true, Ordering::Release);
+        // Wake the throttler so a producing loop parked inside `throttle()`
+        // observes the stop flag and exits. Without this a run with
+        // `--throughput 0` (which blocks until woken) would never see the flag,
+        // never print `shutdown_complete`, and hang the harness.
+        signal_throttler.wakeup();
     });
 
     producer.run(&throttler).await;

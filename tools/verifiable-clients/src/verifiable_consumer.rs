@@ -34,12 +34,12 @@
 //!
 //! Every printed event mirrors Java's Jackson output exactly — event `name`,
 //! field names, and field order — because that stdout contract is what a
-//! downstream ducktape-style harness parses (Milestone 14, PLAN §1).
+//! downstream ducktape-style harness parses.
 //!
 //! # Group-protocol scope
 //!
-//! This client supports only the KIP-848 (`consumer`) group protocol
-//! (`consumer-threading.md` §20). The classic-protocol arguments
+//! This client supports only the KIP-848 (`consumer`) group protocol.
+//! The classic-protocol arguments
 //! (`--assignment-strategy`, `--session-timeout` for classic) are still parsed
 //! so ducktape command lines are accepted, but selecting
 //! `--group-protocol classic` fails at consumer construction with the factory's
@@ -346,7 +346,7 @@ impl OffsetsCommitted {
 /// [`Consumer::subscribe_with_listener`] and
 /// [`Consumer::commit_async_offsets_with_callback`] take
 /// `Arc<dyn ConsumerRebalanceListener>` / `Arc<dyn OffsetCommitCallback>` shared
-/// across the caller task (`consumer-threading.md` §31). A single `&mut` owner
+/// across the caller task. A single `&mut` owner
 /// cannot also be an `Arc<dyn …>`, so the shareable half is split out here.
 ///
 /// The split is clean because the shared half is exactly the part that only
@@ -678,8 +678,8 @@ struct ParsedArgs {
 
 /// Java class name of `RangeAssignor`, the `--assignment-strategy` default. Java
 /// uses `RangeAssignor.class.getName()`; the assignor types themselves are not
-/// translated (classic-protocol only, `consumer-threading.md` §20), so the
-/// default is reproduced as a literal string.
+/// translated (classic-protocol only), so the default is reproduced as a
+/// literal string.
 const DEFAULT_ASSIGNMENT_STRATEGY: &str = "org.apache.kafka.clients.consumer.RangeAssignor";
 
 /// An example assignor class name used only in the `--assignment-strategy` help
@@ -688,8 +688,8 @@ const EXAMPLE_ASSIGNMENT_STRATEGY: &str = "org.apache.kafka.clients.consumer.Rou
 
 /// Build a command-line argument error. Java raises
 /// `ArgumentParserException`; the word "exception" must not appear in Rust
-/// identifiers (CLAUDE.md §2, §10), so this maps to a recoverable
-/// `LocalIllegalArgument` error carrying the same message.
+/// identifiers, so this maps to a recoverable `LocalIllegalArgument` error
+/// carrying the same message.
 fn arg_error(message: impl Into<String>) -> Error {
     Error::local_illegal_argument(message)
 }
@@ -828,8 +828,7 @@ fn parse_properties(contents: &str) -> Vec<(String, String)> {
 /// Returns `Err` for any argument-parsing failure, an unreadable config file, an
 /// invalid group protocol, an invalid consumer configuration, or a consumer that
 /// cannot be constructed. In particular, `--group-protocol classic` fails at
-/// [`new_consumer`] with an `unsupported_version` error
-/// (`consumer-threading.md` §20).
+/// [`new_consumer`] with an `unsupported_version` error.
 pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
     let parsed = parse_args(args)?;
 
@@ -1100,8 +1099,7 @@ mod tests {
     // ---- exact JSON vectors (the stdout wire contract) ---------------------
     //
     // Each vector goes through the real event-construction path (constructor /
-    // `from_*`), then overwrites `timestamp` so the wire string is exact
-    // (DoD §12: pin the mechanism, not a hand-built fixture).
+    // `from_*`), then overwrites `timestamp` so the wire string is exact.
 
     #[test]
     fn startup_complete_json() {
@@ -1316,10 +1314,8 @@ mod tests {
 
     #[test]
     fn create_from_args_classic_protocol_is_unsupported() {
-        // The client is KIP-848-only; classic fails at `new_consumer`
-        // (consumer-threading.md §20). This is the documented, faithful
-        // behavior. (The default protocol is `classic`, so the minimal args
-        // already select it.)
+        // The client is KIP-848-only; classic fails at `new_consumer`. (The
+        // default protocol is `classic`, so the minimal args already select it.)
         // `VerifiableConsumer` (the Ok type) is not `Debug`, so match rather
         // than `unwrap_err`.
         let error = match create_from_args(&minimal()) {

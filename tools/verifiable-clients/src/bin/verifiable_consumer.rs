@@ -15,11 +15,11 @@
 //! Command-line entry point for the `VerifiableConsumer` system-test tool.
 //!
 //! Translated from `VerifiableConsumer.main`. A thin `#[tokio::main] async fn`
-//! delegating to the library (precedent: `src/bin/verifiable_producer.rs`).
+//! delegating to the library.
 //!
-//! This client supports only the KIP-848 `consumer` group protocol
-//! (`consumer-threading.md` §20); running with `--group-protocol classic` fails
-//! at startup with an unsupported-version error.
+//! This client supports only the KIP-848 `consumer` group protocol; running
+//! with `--group-protocol classic` fails at startup with an unsupported-version
+//! error.
 //!
 //! Run, e.g.:
 //!
@@ -38,9 +38,9 @@ use verifiable_clients::wait_for_shutdown_signal;
 async fn run(args: &[String]) -> Result<(), Error> {
     let mut consumer = create_from_args(args)?;
 
-    // Java maps this to `Runtime.addShutdownHook(new Thread(consumer::close))`.
-    // CLAUDE.md §9 maps the JVM shutdown hook to a signal task. Java's shutdown
-    // hook fires on both SIGINT and SIGTERM; ducktape's clean shutdown of a
+    // Java maps this to `Runtime.addShutdownHook(new Thread(consumer::close))`;
+    // here the JVM shutdown hook becomes a signal task. Java's shutdown hook
+    // fires on both SIGINT and SIGTERM; ducktape's clean shutdown of a
     // verifiable client sends **SIGTERM** by default and then waits for
     // `shutdown_complete`, so we wait on either signal (see
     // [`wait_for_shutdown_signal`]) rather than SIGINT alone. Java's `close()`
