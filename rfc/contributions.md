@@ -6,7 +6,7 @@
 ## Summary
 
 Establish how users contribute code, where issues and pull requests are raised, what kinds of
-contribution are expected, how review and merge rights work, and the licensing terms
+contribution are encouraged, how review and merge rights work, and the licensing terms
 (including CLA) for contributions. Feedback here will be used to update `CONTRIBUTING.md`.
 
 ## Where issues and pull requests are raised
