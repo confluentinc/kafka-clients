@@ -19,7 +19,7 @@ endif
 	build-grpc-images build-grpc-images-python build-grpc-images-c build-grpc-images-dotnet init init-hooks \
 	test test-rust test-integration test-integration-python test-integration-c test-integration-dotnet \
 	test-c test-python test-dotnet test-rust-all-features \
-	test-c-macos-docker test-python-macos-docker \
+	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -27,6 +27,7 @@ endif
 	producer-perf-test-dotnet consumer-perf-test-dotnet \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
+	verify-dotnet-macos-docker \
 	verify-sandbox format-check lint clean
 
 build: init-hooks build-all
@@ -412,6 +413,16 @@ test-python: build-python
 test-dotnet:
 	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test-dotnet
 
+# macOS variant of test-dotnet: same target verbatim (native build -> dotnet
+# build matrix -> dotnet format -> unit tests on net8.0 + net10.0). Unlike
+# test-c-macos-docker / test-python-macos-docker, .NET has no OS-specific
+# recipe to swap in -- the delegated bindings/dotnet Makefile step is already
+# platform-agnostic -- so this is a thin alias, kept for naming symmetry with
+# the other macOS-block targets. The gRPC multilanguage arm runs on Linux only
+# (verify-dotnet); this build never touches grpc-server (not in the .sln), so
+# .NET's Linux-only Grpc.Tools/protoc constraint does not apply here.
+test-dotnet-macos-docker: test-dotnet
+
 # macOS variant of test-python: Python unit tests (pytest test/unit). The gRPC
 # multilanguage arm runs on Linux only (verify-python).
 test-python-macos-docker: build-python
@@ -438,6 +449,11 @@ verify-python: test-python check-bindings
 verify-dotnet: test-dotnet
 	$(MAKE) test-integration-dotnet
 	$(MAKE) test-integration-perf-dotnet
+
+# macOS verify-dotnet: unit tests only, no integration/perf (mirrors
+# verify-c-macos-docker / verify-python-macos-docker, which also drop the
+# Linux-only integration stage).
+verify-dotnet-macos-docker: test-dotnet-macos-docker
 
 # macOS perf p99 budget (ms), used by verify-rust-macos-docker.
 MACOS_P99_LIMIT_MS ?= 150

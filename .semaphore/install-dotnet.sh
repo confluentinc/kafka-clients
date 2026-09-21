@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 #
-# Job-scoped .NET SDK provisioning for the verify-dotnet job in the "Verify
-# language bindings (Linux amd64)" CI block (M10/P1, Decision 1). This lives
-# OUTSIDE the shared `.semaphore/dependencies.sh` -- and outside that block's
-# shared task prologue -- on purpose: no other job in the block (verify-rust /
-# verify-c / verify-python) needs a .NET SDK, so the install stays local to the
-# one job that does.
+# Job-scoped .NET SDK provisioning, shared by the verify-dotnet job in the
+# "Verify language bindings (Linux amd64)" CI block (M10/P1, Decision 1) and
+# the "verify-dotnet (macOS arm64)" job in "Build + unit test bindings
+# (macOS)". This lives OUTSIDE the shared dependency-install scripts --
+# `.semaphore/dependencies.sh` on Linux, `.semaphore/dependencies-macos.sh` on
+# macOS -- and outside either block's shared task prologue, on purpose: no
+# other job in either block needs a .NET SDK, so the install stays local to
+# the one job that does. The official `dotnet-install.sh` this script fetches
+# is cross-platform (Linux + macOS, both have bash + curl), so the same
+# script and the same job-level export sequence work unmodified on both.
 #
 # Two installs into a single DOTNET_ROOT ($HOME/.dotnet), coexisting:
 #   1. SDK 10.0            — builds every TFM (netstandard2.0 / net462 / net8.0 /
@@ -42,10 +46,11 @@ chmod +x "${INSTALL_SCRIPT}"
 # This script INSTALLS only -- it deliberately does NOT export DOTNET_ROOT/PATH.
 # Semaphore runs a job's prologue + job `commands:` in ONE persistent shell
 # session, but this script executes in a child subshell, so any `export` here
-# would die on return and never reach the later `make verify-dotnet` command. The
-# SDK env is therefore set by top-level `export` commands in the verify-dotnet
-# job's own `commands:` (`.semaphore/semaphore.yml`, right after this script
-# runs), which mutate that shared session directly. This matches the
+# would die on return and never reach the later `make verify-dotnet` /
+# `make verify-dotnet-macos-docker` command. The SDK env is therefore set by
+# top-level `export` commands in each verify-dotnet job's own `commands:`
+# (`.semaphore/semaphore.yml`, right after this script runs), which mutate
+# that shared session directly. This matches the
 # confluent-kafka-dotnet precedent, whose .semaphore/semaphore.yml sets
 # DOTNET_ROOT/PATH/DOTNET_MULTILEVEL_LOOKUP as top-level job commands and writes
 # no profile file. Keep the install dir here (${DOTNET_ROOT}) identical to the
