@@ -211,9 +211,18 @@ Newest first.
   `message_generator` hard-fail; the v2 sync producer's `QUEUE_FULL` retry loop now checks
   `PerfSignals.Terminating` so a shutdown during a stuck queue exits promptly instead of spinning
   forever. Build/format clean on `PerformanceCommon`/`PerfV3`/`PerfV2`/the test project (all 4 TFM
-  combinations); 25/25 Docker-free unit tests pass on net8.0 and net10.0. **Not re-verified against a
-  live broker** — the topic-provisioning and queue-sizing paths in particular would benefit from a
-  manual `CREATE_TOPIC=True` / `ASYNC=True` run before relying on them.
+  combinations); 25/25 Docker-free unit tests pass on net8.0 and net10.0. **Re-verified against a live
+  broker (2026-09-21):** three separate runs against the same single-broker KRaft container, each on a
+  topic that did not yet exist, `CREATE_TOPIC` left at its new default (`true`): (1) `CLIENT_VERSION=3`,
+  `KEY_SIZE=16 VERIFY_CONSUMED=True` — our own `KafkaAdminClient`-backed `TopicProvisioning` deleted
+  (no-op, didn't exist), created with `PARTITIONS=6`, and the run reported `count_ok=True`/
+  `partitions_ok=True` on the freshly-created topic; (2) `CLIENT_VERSION=2` sync — ckd's
+  `AdminClientBuilder`-backed path created the topic cleanly; (3) `CLIENT_VERSION=2` async, no
+  `BUFFER_MEMORY` set (the exact path the queue-sizing fix targets) — ~9.7M messages at ~461k msg/s with
+  p90 latency 2.7s (implying well over librdkafka's default 100k-message in-flight cap was legitimately
+  outstanding at once) completed with **zero** `QUEUE_FULL errors` reported, where the prior unsized
+  default would have hit `Local: Queue full` almost immediately at that rate. All three topics confirmed
+  via `kafka-topics.sh --describe` to have the requested 6 partitions.
 
 - **Milestone 13 — partitioner fix (2026-09-21): default key partitioner corrected from murmur2 to
   CRC-32. Mode A / .NET test-harness only.** The Rust core's default key partitioner changed from
