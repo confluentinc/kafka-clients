@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 #
-# Job-scoped .NET SDK provisioning for the "Verify .NET binding" CI block
-# (M10/P1, Decision 1). This lives OUTSIDE the shared `.semaphore/dependencies.sh`
-# on purpose: no other job (verify-rust / verify-c / verify-python) needs a .NET
-# SDK, so the install stays local to the one block that does.
+# Job-scoped .NET SDK provisioning for the verify-dotnet job in the "Verify
+# language bindings (Linux amd64)" CI block (M10/P1, Decision 1). This lives
+# OUTSIDE the shared `.semaphore/dependencies.sh` -- and outside that block's
+# shared task prologue -- on purpose: no other job in the block (verify-rust /
+# verify-c / verify-python) needs a .NET SDK, so the install stays local to the
+# one job that does.
 #
 # Two installs into a single DOTNET_ROOT ($HOME/.dotnet), coexisting:
 #   1. SDK 10.0            — builds every TFM (netstandard2.0 / net462 / net8.0 /
@@ -41,15 +43,17 @@ chmod +x "${INSTALL_SCRIPT}"
 # Semaphore runs a job's prologue + job `commands:` in ONE persistent shell
 # session, but this script executes in a child subshell, so any `export` here
 # would die on return and never reach the later `make verify-dotnet` command. The
-# SDK env is therefore set by top-level `export` commands in the block prologue
-# (`.semaphore/semaphore.yml`), which mutate that shared session directly. This
-# matches the confluent-kafka-dotnet precedent, whose .semaphore/semaphore.yml
-# sets DOTNET_ROOT/PATH/DOTNET_MULTILEVEL_LOOKUP as top-level job commands and
-# writes no profile file. Keep the install dir here (${DOTNET_ROOT}) identical to
-# the DOTNET_ROOT/PATH set in that prologue.
+# SDK env is therefore set by top-level `export` commands in the verify-dotnet
+# job's own `commands:` (`.semaphore/semaphore.yml`, right after this script
+# runs), which mutate that shared session directly. This matches the
+# confluent-kafka-dotnet precedent, whose .semaphore/semaphore.yml sets
+# DOTNET_ROOT/PATH/DOTNET_MULTILEVEL_LOOKUP as top-level job commands and writes
+# no profile file. Keep the install dir here (${DOTNET_ROOT}) identical to the
+# DOTNET_ROOT/PATH set in those job commands.
 
 # Validate the install using an absolute path -- `dotnet` is NOT on PATH inside
-# this script (the PATH export lives in the prologue, not here). Both net8 and
-# net10 runtimes must be present, or the net8.0 test leg fails.
+# this script (the PATH export happens after this script returns, in the job's
+# own commands). Both net8 and net10 runtimes must be present, or the net8.0
+# test leg fails.
 "${DOTNET_ROOT}/dotnet" --list-sdks
 "${DOTNET_ROOT}/dotnet" --list-runtimes
