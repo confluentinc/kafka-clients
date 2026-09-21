@@ -33,11 +33,14 @@ public sealed class LoadDriver
 {
     private readonly Process _process;
     private readonly string _propsPath;
+    private readonly StreamWriter _log;
+    private readonly object _logLock = new();
 
-    private LoadDriver(Process process, string propsPath)
+    private LoadDriver(Process process, string propsPath, StreamWriter log)
     {
         _process = process;
         _propsPath = propsPath;
+        _log = log;
     }
 
     /// <summary>
@@ -96,9 +99,43 @@ public sealed class LoadDriver
         startInfo.ArgumentList.Add(propsPath);
 
         Console.WriteLine($">>> Launching producer: throughput={config.Throughput} msg/s, {config.MessageSize} bytes, ~{total} records");
+
+        // Capture the feeder's stdout+stderr to producer.log (cwd is the results dir) instead of leaving
+        // the pipes undrained — the C# analog of Python's spawn_producer opening "producer.log" and
+        // merging stderr into it. A silent producer failure looks identical to "no data" on the consumer
+        // side, so its output must remain inspectable; undrained, the OS pipe buffer (~64 KiB) fills once
+        // kafka-producer-perf-test.sh's periodic progress lines accumulate, and the feeder BLOCKS on the
+        // next write — starving the very consumer benchmark it exists to feed.
+        var log = new StreamWriter(Path.Combine(Environment.CurrentDirectory, "producer.log"), append: false)
+        {
+            AutoFlush = true,
+        };
         var process = new Process { StartInfo = startInfo };
+        var driver = new LoadDriver(process, propsPath, log);
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is not null)
+            {
+                lock (driver._logLock)
+                {
+                    log.WriteLine(e.Data);
+                }
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null)
+            {
+                lock (driver._logLock)
+                {
+                    log.WriteLine(e.Data);
+                }
+            }
+        };
         process.Start();
-        return new LoadDriver(process, propsPath);
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        return driver;
     }
 
     /// <summary>Kills the load-driver process and removes its temporary properties file (best-effort).</summary>
@@ -109,8 +146,13 @@ public sealed class LoadDriver
             if (!_process.HasExited)
             {
                 _process.Kill();
-                _process.WaitForExit(5000);
             }
+
+            // The parameterless overload additionally waits for the redirected-output event handlers to
+            // finish draining the pipes (MSDN: needed for that guarantee; the timed overload alone does
+            // not give it). Best-effort: a process Kill() should already have made this fast.
+            _process.WaitForExit(5000);
+            _process.WaitForExit();
         }
         catch (Exception)
         {
@@ -118,6 +160,12 @@ public sealed class LoadDriver
         }
         finally
         {
+            lock (_logLock)
+            {
+                _log.Flush();
+            }
+
+            _log.Dispose();
             _process.Dispose();
             try
             {

@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -37,6 +38,14 @@ internal static class ProducerMain
     internal static async Task<int> Run()
     {
         ProducerBenchmarkConfig config = ProducerBenchmarkConfig.FromEnv();
+        string bootstrapServers = PerfEnv.GetString("BOOTSTRAP_SERVERS", "localhost:9092");
+
+        // Optionally start from a clean topic before producing (Python's main(): recreate_topic runs
+        // regardless of CLIENT_VERSION, right at the top).
+        if (config.CreateTopic)
+        {
+            TopicProvisioning.RecreateTopic(bootstrapServers, config.TopicName, config.Partitions);
+        }
 
         if (PerfEnv.GetBool("VERIFY_CONSUMED", false))
         {
@@ -87,6 +96,7 @@ internal static class ProducerMain
         if (config.Async)
         {
             Console.WriteLine("Running async producer performance test v2 (confluent-kafka-dotnet)...");
+            ApplyDefaultAsyncQueueSizing(producerConfig, config);
             var backend = new V2AsyncProducerBackend(producerConfig);
             try
             {
@@ -109,6 +119,30 @@ internal static class ProducerMain
         {
             CloseQuietly(syncBackend);
             syncBackend.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Sizes the librdkafka send queue to the run — Python's <c>AsyncCompatibleProducer.__init__</c>
+    /// (v2-async only; the sync path has no such default and relies on <c>producer.poll()</c>-driven
+    /// backpressure instead). Without this, an unsized queue defaults to librdkafka's 100,000-message /
+    /// 1,048,576 KiB caps, hits <c>QUEUE_FULL</c> far sooner than Python's v2-async baseline does, making
+    /// the two not comparable. Skipped for a key already set by the <c>BUFFER_MEMORY</c> block above —
+    /// same precedence as Python's dict merge, where the explicit config overrides these defaults.
+    /// </summary>
+    private static void ApplyDefaultAsyncQueueSizing(Dictionary<string, string> producerConfig, ProducerBenchmarkConfig config)
+    {
+        if (!producerConfig.ContainsKey("queue.buffering.max.messages"))
+        {
+            long numMessagesConf = config.NumMessages > 0 ? Math.Min(config.NumMessages, int.MaxValue) : int.MaxValue;
+            producerConfig["queue.buffering.max.messages"] = numMessagesConf.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (!producerConfig.ContainsKey("queue.buffering.max.kbytes"))
+        {
+            long totalSize = config.NumMessages * config.MessageSize;
+            long totalSizeConf = totalSize > 0 ? Math.Min(totalSize, int.MaxValue) : int.MaxValue;
+            producerConfig["queue.buffering.max.kbytes"] = totalSizeConf.ToString(CultureInfo.InvariantCulture);
         }
     }
 

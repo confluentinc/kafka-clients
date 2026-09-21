@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+
 namespace Confluent.Kafka.Performance;
 
 /// <summary>
@@ -32,10 +34,20 @@ public sealed class ProducerBenchmarkConfig
         TestDurationSeconds = 600;
         WarmupSeconds = 120;
         DoVerify = true;
+        ClientVersion = "3";
     }
 
     /// <summary>The destination topic (<c>TOPIC_NAME</c>, default <c>test-topic</c>).</summary>
     public string TopicName { get; private set; }
+
+    /// <summary>
+    /// Cross-language client selector (<c>CLIENT_VERSION</c>, default <c>3</c>); each exe's
+    /// <c>Program.Main</c> pins it up front. <see cref="ProducerBenchmark"/>'s verify predicate reads it —
+    /// Python's <c>verify_message</c> (v2/ckd) requires <c>timestamp &gt; 0</c> while
+    /// <c>verify_record_metadata</c> (v3) requires <c>timestamp &gt;= 0</c>, and that asymmetry is
+    /// preserved rather than smoothed over.
+    /// </summary>
+    public string ClientVersion { get; private set; }
 
     /// <summary>Key size in bytes (<c>KEY_SIZE</c>, default 0 = no key).</summary>
     public int KeySize { get; private set; }
@@ -74,6 +86,18 @@ public sealed class ProducerBenchmarkConfig
     /// <summary>Whether to drive the async (pipelined) path instead of the sync (serial-blocking) path (<c>ASYNC</c>, default false).</summary>
     public bool Async { get; private set; }
 
+    /// <summary>
+    /// Whether the harness should (re)create the topic before producing (<c>CREATE_TOPIC</c>, default
+    /// <b>true</b>, matching Python). Provisioning is per-exe (<c>PerfV3</c>/<c>PerfV2</c>'s own
+    /// <c>TopicProvisioning.RecreateTopic</c>) rather than in this client-agnostic config type, since an
+    /// AdminClient is unavoidably client-specific and <c>PerformanceCommon</c> carries no client
+    /// dependency (M13/P1 D8).
+    /// </summary>
+    public bool CreateTopic { get; private set; }
+
+    /// <summary>Partition count for topic (re)creation (<c>PARTITIONS</c>, default -1 = broker default).</summary>
+    public int Partitions { get; private set; } = -1;
+
     /// <summary>Parses the producer benchmark run-shape config from the environment (§5.2).</summary>
     public static ProducerBenchmarkConfig FromEnv()
     {
@@ -88,12 +112,24 @@ public sealed class ProducerBenchmarkConfig
             P99LimitMs = PerfEnv.GetInt("P99_LIMIT_MS", 0),
             DoVerify = PerfEnv.GetBool("DO_VERIFY", true),
             Async = PerfEnv.GetBool("ASYNC", false),
+            CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", true),
+            Partitions = PerfEnv.GetInt("PARTITIONS", -1),
+            ClientVersion = PerfEnv.GetString("CLIENT_VERSION", "3"),
         };
 
         string? limitRps = PerfEnv.GetStringOrNull("LIMIT_RPS");
         if (!string.IsNullOrEmpty(limitRps))
         {
             config.LimitRps = PerfEnv.GetInt("LIMIT_RPS", 0);
+            if (config.LimitRps.Value <= 0)
+            {
+                // Python's message_generator hard-fails on limit_rps <= 0 ("limit_rps must be positive")
+                // rather than treating 0/negative as "unbounded" — that meaning belongs to LIMIT_RPS being
+                // unset entirely. Match that instead of silently falling through to max-rate, which would
+                // run a materially different benchmark than what was asked for.
+                throw new ArgumentException("LIMIT_RPS must be positive");
+            }
+
             // Run for the specified duration at the target rate (Python: num_messages = limit_rps * duration).
             // (long) on the FIRST operand, so the multiplication itself is 64-bit — casting the result
             // would truncate before the widening (Python: num_messages = int(limit_rps * test_duration_s)).

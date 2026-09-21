@@ -66,10 +66,12 @@ public sealed class ConsumerBenchmarkResult
 /// </summary>
 /// <remarks>
 /// <para>
-/// Topic (re)creation is <b>not</b> performed here (D6 — .NET ships no in-harness AdminClient; provisioning
-/// is external), so the engine never calls a <c>recreate_topic</c> analog. When <c>KAFKA_BIN</c> is set it
-/// self-spawns <c>kafka-producer-perf-test.sh</c> as the load driver (mirroring Python's <c>spawn_producer</c>);
-/// otherwise an external producer must feed the topic.
+/// Topic (re)creation is <b>not</b> performed here — it runs in the calling exe's <c>ConsumerMain</c>
+/// (each exe's own <c>TopicProvisioning.RecreateTopic</c>, called when <see cref="ConsumerBenchmarkConfig.CreateTopic"/>
+/// is set) <b>before</b> this engine is invoked, since an AdminClient is unavoidably client-specific and
+/// this class carries no client dependency (M13/P1 D8) — see <c>PerfV3/TopicProvisioning.cs</c>'s remarks.
+/// When <c>KAFKA_BIN</c> is set this engine self-spawns <c>kafka-producer-perf-test.sh</c> as the load
+/// driver (mirroring Python's <c>spawn_producer</c>); otherwise an external producer must feed the topic.
 /// </para>
 /// <para>
 /// Before the timed window opens, a <b>readiness gate</b> waits for

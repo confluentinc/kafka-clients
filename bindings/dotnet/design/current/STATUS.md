@@ -184,6 +184,37 @@ Newest first.
   - **Verification (Actor + Critic independently, every cycle):** `cargo build --features ffi` **both profiles** exit 0, header hash unchanged; `dotnet build -c Release --no-incremental` **0W/0E across all 6 TFM outputs** (lib ns2.0/net8.0/net10.0 + tests net462/net8.0/net10.0) — with the **xmldoc gate proven non-vacuous** (new strings present exactly once in all three emitted `Confluent.Kafka.xml`, removed strings absent from all three; `TreatWarningsAsErrors` + CS0419 also proves every requalified `<see cref>` resolves to the right overload); `dotnet test -f net10.0` **818 passed / 0 failed**, and **net8.0 also 818/0** — ⚠ **correcting a long-standing STATUS claim: net8.0 IS executable locally** (`~/.dotnet` carries `Microsoft.NETCore.App` 8.0.30 **and** 10.0.11); only **net462** is genuinely build-only (no Mono host); `dotnet format --verify-no-changes` clean; `cargo xtask format-check` (**from the repo root** — it false-fails from `bindings/dotnet`) and `cargo xtask lint` clean; `cargo test --lib` **3693 / 0 / 3**; `grpc-server/**` untouched. **No Java classes translated (binding API only), so `marked_classes.txt` is unchanged.** NOT pushed (user manages pushes).
   - **Carried forward, all deliberately out of scope:** (i) **finding 9 (LOW)** — `ffi §A6`'s walk narrative counts "sites" twice at `:711-713`/`:727`; both sentences are **TRUE**, but the round-5 prohibition read literally forbids them, so the closing sentence needs narrowing. Folded into M14/P2's doc-sync as a one-line strictly-shrinking deletion (the Critic's own recommendation). (ii) `RunLoop`'s `DrainAll()` sits **outside** the `try` guarding `ProcessBatch`, so an OOM there kills the pump thread without `Stop` setting `_stopped` — dequeued sends are **stranded** (never completed, not merely faulted) and their futures leak. Outside the residual definition (it strands rather than faults/throws), OOM-only, and closing it is a pump-loop restructure. (iii) The Critic's own persona lens (`dotnet-critic.md:22`) enumerates only two callback families and predates form C — Manager-owned, personas are never edited by the agents themselves. (iv) ⚠ **`[DllImport]` counting correction for future gates: use `internal static extern` = 218.** The "227" quoted in earlier phases is `grep -c 'DllImport'`, which over-counts by 9 (6 prose mentions + 3 xmldoc `<c>[DllImport]</c>`); "221" over-counts by 3.
 
+- **Milestone 13 — perf-suite/Python re-alignment round 2 (2026-09-21). Mode A / .NET test-harness
+  only.** A second, more thorough diff against `bindings/python/test/performance/`'s current-master
+  content (not the still-open PR #170) surfaced three real behavioral divergences plus three minor
+  ones, all fixed:
+  1. **Topic (re)creation was parsed but never wired.** `CREATE_TOPIC`/`PARTITIONS` were read into
+     `ConsumerBenchmarkConfig` but never acted on (stale D6 rationale: "no in-harness AdminClient" —
+     false since the .NET binding shipped `CreateTopics`/`DeleteTopics`), and `ProducerBenchmarkConfig`
+     didn't read them at all. Added `PerfV3/TopicProvisioning.cs` (our own `KafkaAdminClient`, Java-form)
+     and `PerfV2/TopicProvisioning.cs` (ckd's `AdminClientBuilder`, librdkafka-form) — one per exe rather
+     than a `PerformanceCommon` helper, because an AdminClient is unavoidably client-specific and
+     `PerformanceCommon` carries no client dependency (D8; both assemblies are literally named
+     `Confluent.Kafka`). Wired into all four mains; `CREATE_TOPIC` now defaults `true` (was `false`),
+     matching Python.
+  2. **`LoadDriver`'s redirected stdout/stderr were never drained.** Nothing read the pipes, so once the
+     ~64 KiB OS buffer filled from the feeder's periodic progress lines, the feeder would block —
+     starving the consumer benchmark it exists to feed, and discarding all diagnostics. Now drains both
+     streams into `producer.log` (already gitignored), matching Python's `spawn_producer`.
+  3. **v2-async producer's librdkafka send queue was unsized** when `BUFFER_MEMORY` was unset, hitting
+     `QUEUE_FULL` far sooner than Python's `AsyncCompatibleProducer` (which sizes
+     `queue.buffering.max.messages`/`max.kbytes` to the run). Added the same default sizing in
+     `PerfV2/ProducerMain.cs`, v2-async only (Python's sync path has no such default either).
+  Minor: the verify predicate's timestamp bound now differs by client version (`> 0` for v2, `>= 0` for
+  v3, `ProducerBenchmark.cs`'s `Verify`, keyed off a new `ProducerBenchmarkConfig.ClientVersion`);
+  `LIMIT_RPS=0` now throws (`ArgumentException`) instead of silently running unbounded, matching Python's
+  `message_generator` hard-fail; the v2 sync producer's `QUEUE_FULL` retry loop now checks
+  `PerfSignals.Terminating` so a shutdown during a stuck queue exits promptly instead of spinning
+  forever. Build/format clean on `PerformanceCommon`/`PerfV3`/`PerfV2`/the test project (all 4 TFM
+  combinations); 25/25 Docker-free unit tests pass on net8.0 and net10.0. **Not re-verified against a
+  live broker** — the topic-provisioning and queue-sizing paths in particular would benefit from a
+  manual `CREATE_TOPIC=True` / `ASYNC=True` run before relying on them.
+
 - **Milestone 13 — partitioner fix (2026-09-21): default key partitioner corrected from murmur2 to
   CRC-32. Mode A / .NET test-harness only.** The Rust core's default key partitioner changed from
   murmur2 to CRC-32 (`KeyHasher::Crc32`, `design/current/partitioner.md`) on **2026-09-08** — after

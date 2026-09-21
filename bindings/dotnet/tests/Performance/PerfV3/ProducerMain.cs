@@ -34,6 +34,13 @@ internal static class ProducerMain
         bool verifyConsumed = PerfEnv.GetBool("VERIFY_CONSUMED", false);
         string bootstrapServers = PerfEnv.GetString("BOOTSTRAP_SERVERS", "localhost:9092");
 
+        // Optionally start from a clean topic before producing (Python's main(): recreate_topic before
+        // the baseline-offset capture below).
+        if (config.CreateTopic)
+        {
+            TopicProvisioning.RecreateTopic(bootstrapServers, config.TopicName, config.Partitions);
+        }
+
         PerfMessage[] messages = MessageGenerator.Generate(config.KeySize, config.ValueSize, MessageGenerator.DefaultCount);
 
         Dictionary<string, string> producerConfig = V3Config.BuildProducerConfig();

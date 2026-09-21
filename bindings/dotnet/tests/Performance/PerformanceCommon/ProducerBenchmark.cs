@@ -350,7 +350,11 @@ public static class ProducerBenchmark
             return true;
         }
 
-        return meta.Offset >= 0 && meta.Partition >= 0 && meta.Topic == config.TopicName && meta.Timestamp >= 0;
+        // Python's verify_message (v2/ckd) requires timestamp > 0; verify_record_metadata (v3) requires
+        // timestamp >= 0. Preserved rather than smoothed to one shared bound (producer_performance_test.py
+        // :234 vs :248).
+        bool timestampOk = config.ClientVersion == "2" ? meta.Timestamp > 0 : meta.Timestamp >= 0;
+        return meta.Offset >= 0 && meta.Partition >= 0 && meta.Topic == config.TopicName && timestampOk;
     }
 
     private static bool FinishAndSummarize(

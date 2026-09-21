@@ -62,8 +62,12 @@ internal sealed class V2SyncProducerBackend : IProducerBackend
         // while suppressing CS8601 — the correct interop idiom for ckd's un-annotated surface.
         var message = new Message<byte[], byte[]> { Key = key!, Value = value! };
 
-        // Retry on a full local queue, mirroring CompatibleProducer.send's BufferError sleep-and-retry.
-        while (true)
+        // Retry on a full local queue, mirroring CompatibleProducer.send's "while not terminating:
+        // ... except BufferError: sleep-and-retry" — checking the termination signal on every attempt so
+        // a shutdown during a sustained QUEUE_FULL condition (e.g. an unreachable broker) doesn't spin
+        // forever, and so the process actually exits promptly on Ctrl+C/SIGTERM.
+        bool produced = false;
+        while (!PerfSignals.Terminating)
         {
             try
             {
@@ -79,12 +83,21 @@ internal sealed class V2SyncProducerBackend : IProducerBackend
                             report.Topic, report.Partition.Value, report.Offset.Value, report.Message.Timestamp.UnixTimestampMs));
                     }
                 });
+                produced = true;
                 break;
             }
             catch (ProduceException<byte[], byte[]> ex) when (ex.Error.Code == ErrorCode.Local_QueueFull)
             {
                 Thread.Sleep(1);
             }
+        }
+
+        if (!produced)
+        {
+            // Bailed out on termination before Produce ever accepted the record. Python leaves the
+            // Future unresolved here (a latent hang if anything ever awaits it); cancel instead so the
+            // blocking wait below returns promptly rather than hanging the shutdown path.
+            tcs.TrySetCanceled();
         }
 
         // Serial blocking: wait for the delivery report before returning (the shared RunSync engine

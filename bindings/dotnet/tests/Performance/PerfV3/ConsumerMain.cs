@@ -29,6 +29,15 @@ internal static class ConsumerMain
     internal static async Task<int> Run()
     {
         ConsumerBenchmarkConfig config = ConsumerBenchmarkConfig.FromEnv();
+
+        // Optionally start from a clean topic before consuming (Python's run()/run_async(): recreate_topic
+        // before build_consumer). Runs here, before the shared ConsumerBenchmark engine, because an
+        // AdminClient is client-specific and ConsumerBenchmark carries no client dependency (M13/P1 D8).
+        if (config.CreateTopic)
+        {
+            TopicProvisioning.RecreateTopic(config.BootstrapServers, config.Topic, config.Partitions);
+        }
+
         Dictionary<string, string> consumerConfig = V3Config.BuildConsumerConfig(config);
 
         using var metrics = new Metrics();

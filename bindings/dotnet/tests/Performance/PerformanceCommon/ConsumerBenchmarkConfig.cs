@@ -110,7 +110,14 @@ public sealed class ConsumerBenchmarkConfig
     /// <summary>Whether to skip the explicit consumer config keys (<c>USE_DEFAULTS</c>, default false).</summary>
     public bool UseDefaults { get; private set; }
 
-    /// <summary>Whether the harness should (re)create the topic (<c>CREATE_TOPIC</c>); default <b>false</b> for .NET (no AdminClient, D6).</summary>
+    /// <summary>
+    /// Whether the harness should (re)create the topic before consuming (<c>CREATE_TOPIC</c>, default
+    /// <b>true</b>, matching Python). Provisioning is per-exe (<c>PerfV3</c>/<c>PerfV2</c>'s own
+    /// <c>TopicProvisioning.RecreateTopic</c>, called from each exe's <c>ConsumerMain</c> before the
+    /// shared <see cref="ConsumerBenchmark"/> engine runs) rather than inside this client-agnostic engine,
+    /// since an AdminClient is unavoidably client-specific and <c>PerformanceCommon</c> carries no client
+    /// dependency (M13/P1 D8).
+    /// </summary>
     public bool CreateTopic { get; private set; }
 
     /// <summary>
@@ -153,8 +160,7 @@ public sealed class ConsumerBenchmarkConfig
             AsyncMode = PerfEnv.GetBool("ASYNC", false),
             PollSingle = PerfEnv.GetBool("POLL_SINGLE", false),
             UseDefaults = PerfEnv.GetBool("USE_DEFAULTS", false),
-            // D6: default False for .NET (no in-harness AdminClient); provisioning is external.
-            CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", false),
+            CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", true),
             ReadinessMinRecords = PerfEnv.GetInt("READINESS_MIN_RECORDS", 20),
             ReadinessTimeoutSeconds = PerfEnv.GetInt("READINESS_TIMEOUT_SECONDS", 20),
         };

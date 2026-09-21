@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    In-suite perf tests (xUnit) for the M13/P1 perf suite. Slice 1 holds the murmur2 self-check (the
+    In-suite perf tests (xUnit) for the M13/P1 perf suite. Slice 1 holds the CRC-32 self-check (the
     automated Slice-1 gate — no broker, no Docker, no client). Slice 2 adds the Testcontainers-backed
     producer/consumer smoke (subprocess-invoking the built PerfV3 exe BY PATH under the budget config,
     v3-only gate — D10) to this same project.
