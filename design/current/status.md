@@ -91,13 +91,17 @@ All three `#[ignore]`d tests are reproducers for open defects, not gaps in
 translation, and each is tracked in `design/history/Milestone-11/PLAN.md` §9 with a
 fix direction:
 
-  - `test_too_large_batches_are_safely_removed` — §9.18, the
-    split-on-`MESSAGE_TOO_LARGE` panic on the write path.
   - `test_transactional_unknown_producer_handling_when_retention_limit_reached` —
     §9.25, an empty batch pool on the transactional log-truncation retry.
   - `test_init_producer_id_request_versions` — §9.1, the code generator omitting
     Java's non-default-at-unsupported-version guard. Systemic across all 197
     generated message types, so it predates Milestone 11.
+  - `test_build_is_repeatable` — §9.30, `ProduceRequestBuilder::build_version`
+    draining its builder where Java's `Builder.build` does not. Latent rather than
+    live; the section carries the reachability derivation.
+
+(`test_too_large_batches_are_safely_removed` was the third until loop 50 fixed
+§9.18, the split-on-`MESSAGE_TOO_LARGE` panic on the write path. It now runs.)
 
 (Separately, the integration suite `#[ignore]`s 10 tests that need harness
 capabilities the pooled cluster does not expose, such as shutting down a broker;

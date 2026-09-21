@@ -619,15 +619,20 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     let data_class_name = format!("{}Data", spec.name());
     let flexible_versions = spec.flexible_versions();
 
-    // Generate common structs first (defined at message level)
+    // Generate common structs first (defined at message level).
+    // Java: `generateClass(commonStruct, commonStruct.versions())`
+    // (`MessageDataGenerator.java:129-134`) — a common struct is its own version root.
     for common_struct in spec.common_structs() {
         generate_common_struct(file, common_struct, flexible_versions)?;
     }
 
-    // Generate nested structs (for array element types and direct struct types)
+    // Generate nested structs (for array element types and direct struct types).
+    // Java threads `parentVersions.intersect(struct.versions())` into each subclass
+    // (`MessageDataGenerator.java:170-184`); at the top level that is just the
+    // message's own version range.
     for field in struct_spec.fields() {
         // Always try to generate nested struct - the function will determine if it's needed
-        generate_nested_struct(file, field, flexible_versions)?;
+        generate_nested_struct(file, field, flexible_versions, struct_spec.versions())?;
     }
 
     // Generate main struct
@@ -700,8 +705,9 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     generate_read_method(file, &data_class_name, struct_spec, flexible_versions)?;
     writeln!(file)?;
 
-    // write() method
-    generate_write_method(file, &data_class_name, struct_spec, flexible_versions)?;
+    // write() method. Java's top-level call passes the message's own range as
+    // `parentVersions` (`MessageDataGenerator.java:65-68`).
+    generate_write_method(file, &data_class_name, struct_spec, flexible_versions, struct_spec.versions())?;
     writeln!(file)?;
 
     // schema() method
@@ -732,10 +738,17 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     Ok(())
 }
 
+/// `parent_versions` is Java's `parentVersions` for this subclass: the enclosing
+/// struct's *effective* range (`MessageDataGenerator.java:176`,
+/// `parentVersions.intersect(struct.versions())`). It is intersected with this
+/// struct's own declared range to obtain the versions at which `write()` can actually
+/// be invoked — which is what decides whether a field's version gate has a reachable
+/// `else` half. See [`non_ignorable_check_applies`].
 fn generate_nested_struct(
     file: &mut fs::File,
     field: &FieldSpec,
     flexible_versions: Versions,
+    parent_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Get the struct name from either direct Struct type or Array(Struct) type
     let struct_name = match field.field_type() {
@@ -759,10 +772,14 @@ fn generate_nested_struct(
         return Ok(());
     }
 
+    // Java's `curVersions` for this struct: the versions at which the enclosing struct
+    // can actually reach it (`MessageDataGenerator.java:718`).
+    let cur_versions = parent_versions.intersect(field.versions());
+
     // First, recursively generate any nested structs within this nested struct
     for nested_field in field.fields() {
         if !nested_field.fields().is_empty() {
-            generate_nested_struct(file, nested_field, flexible_versions)?;
+            generate_nested_struct(file, nested_field, flexible_versions, cur_versions)?;
         }
     }
 
@@ -811,7 +828,7 @@ fn generate_nested_struct(
     writeln!(file)?;
 
     // Generate write method
-    generate_write_method(file, &struct_name, &struct_spec, flexible_versions)?;
+    generate_write_method(file, &struct_name, &struct_spec, flexible_versions, parent_versions)?;
 
     // Builder setters
     generate_builder_setters(file, &struct_spec)?;
@@ -841,7 +858,7 @@ fn generate_common_struct(
     // First, recursively generate any nested structs within this common struct
     for field in struct_spec.fields() {
         if !field.fields().is_empty() {
-            generate_nested_struct(file, field, flexible_versions)?;
+            generate_nested_struct(file, field, flexible_versions, struct_spec.versions())?;
         }
     }
 
@@ -891,8 +908,10 @@ fn generate_common_struct(
     generate_read_method(file, struct_name, struct_spec, flexible_versions)?;
     writeln!(file)?;
 
-    // Generate write method for common struct
-    generate_write_method(file, struct_name, struct_spec, flexible_versions)?;
+    // Generate write method for common struct. Java treats a common struct as its own
+    // version root: `generateClass(commonStruct, commonStruct.versions())`
+    // (`MessageDataGenerator.java:129-134`).
+    generate_write_method(file, struct_name, struct_spec, flexible_versions, struct_spec.versions())?;
 
     // Builder setters
     generate_builder_setters(file, struct_spec)?;
@@ -1686,52 +1705,133 @@ fn generate_tagged_field_add_size(
     Ok(())
 }
 
-/// Get the default check expression for a tagged field.
+/// True when Java's `FieldSpec.fieldDefault` would render this field's default as
+/// the literal `null` (`FieldSpec.java:400-475`).
 ///
-/// Returns a condition string that is true when the field has a non-default value
-/// and should be written to the wire. Tagged fields at their default value are NOT
-/// written, matching Java behavior.
+/// Only `string` / `bytes` / `struct` / `array` reach it through an explicit
+/// `"default": "null"` in the spec. `records` reaches it *unconditionally* — Java has a
+/// bare `else if (type.isRecords()) return "null";` (`FieldSpec.java:452-453`) with no
+/// nullability or explicit-default test, which is why it is checked first here.
+fn field_default_is_null(field: &FieldSpec) -> bool {
+    if matches!(field.field_type(), FieldType::Records) {
+        return true;
+    }
+    matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null")
+}
+
+/// The "is this field set to something other than its default?" condition.
+///
+/// Mirrors `FieldSpec.generateNonDefaultValueCheck`
+/// (`kafka/generator/.../FieldSpec.java:587-641`), always with Java's
+/// `nullableVersions = field.nullableVersions()` argument.
+///
+/// Java uses this one predicate for **two** purposes, and so does this generator:
+///
+///   1. "should this tagged field be serialised at all?" — a tagged field at its
+///      default is omitted from the wire (`MessageDataGenerator.java:779`, `:1163`);
+///   2. "is a value being dropped by a version gate?" — the guard emitted by
+///      [`generate_non_ignorable_field_error`] (`MessageDataGenerator.java:794`).
+///
+/// Keep the two uses on this single function: divergence between them is exactly the
+/// class of bug the guard exists to catch.
 fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
+    // Java's `nullableVersions.empty()` test. `is_nullable_field` is its negation.
     let nullable = is_nullable_field(field);
-    if nullable {
-        // Check if this is a nullable field with default "null"
-        let has_null_default = matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null");
-        if has_null_default {
-            // For fields defaulting to null, only write when non-null
-            return format!("self.{}.is_some()", field_name);
-        }
-        // For nullable fields with non-null default, write when the value differs from default.
-        // Java defaults nullable string/bytes to "" / Bytes.EMPTY (not null).
-        // Write when null (to encode the null state) OR when the value differs from default.
-        match field.field_type() {
-            FieldType::Struct(struct_name) => {
-                // Java: field == null || !field.equals(new StructName())
-                return format!(
+    let default_is_null = field_default_is_null(field);
+
+    match field.field_type() {
+        // Java `type().isArray()` branch (FieldSpec.java:593-601).
+        FieldType::Array(_) => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("!self.{}.is_empty()", field_name)
+            } else {
+                format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name)
+            }
+        },
+        // Java `type().isBytes()` branch (FieldSpec.java:602-621). `records` is NOT
+        // `isBytes()` in Java — only `BytesFieldType` overrides it (`FieldType.java:257`)
+        // — so `records` falls through to the final `else` below.
+        FieldType::Bytes => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("!self.{}.is_empty()", field_name)
+            } else {
+                format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name)
+            }
+        },
+        // Java `isString() || isStruct() || UUIDFieldType` branch (FieldSpec.java:622-632).
+        FieldType::String => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else {
+                // Java compares against `fieldDefault`, which is `""` when the spec sets no
+                // default. Comparing against a borrowed `&str` rather than an owned
+                // `String::new()` keeps the emitted code free of `clippy::cmp_owned`, and
+                // `!is_empty()` is the same predicate as `!equals("")`.
+                let literal = match field.field_default() {
+                    Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                };
+                match (literal, nullable) {
+                    (None, false) => format!("!self.{}.is_empty()", field_name),
+                    (None, true) => format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name),
+                    (Some(d), false) => format!("self.{} != \"{}\"", field_name, d),
+                    (Some(d), true) => format!("self.{}.as_deref() != Some(\"{}\")", field_name, d),
+                }
+            }
+        },
+        FieldType::Struct(struct_name) => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("self.{} != {}::new()", field_name, struct_name)
+            } else {
+                format!(
                     "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}::new()",
                     field_name, field_name, struct_name
-                );
-            },
-            FieldType::String => {
-                // Java: field == null || !field.isEmpty()
-                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
-            },
-            FieldType::Bytes | FieldType::Records => {
-                // Java: field == null || field.length != 0
-                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
-            },
-            _ => {
-                // For other nullable fields with non-null default, just check is_some
-                return format!("self.{}.is_some()", field_name);
-            },
-        }
-    }
-    match field.field_type() {
-        FieldType::String => format!("!self.{}.is_empty()", field_name),
-        FieldType::Array(_) => format!("!self.{}.is_empty()", field_name),
-        FieldType::Bytes | FieldType::Records => format!("!self.{}.is_empty()", field_name),
+                )
+            }
+        },
+        FieldType::Uuid => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            if !nullable {
+                format!("self.{} != {}", field_name, default_val)
+            } else {
+                format!(
+                    "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}",
+                    field_name, field_name, default_val
+                )
+            }
+        },
+        // Java `BoolFieldType` branch (FieldSpec.java:633-636): a bare `if (field)` when
+        // the default is false, `if (!field)` when it is true. Spelling it that way
+        // rather than `!= false` also keeps `clippy::bool_comparison` quiet.
         FieldType::Bool => {
             let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
+            if default_val == "true" {
+                format!("!self.{}", field_name)
+            } else {
+                format!("self.{}", field_name)
+            }
+        },
+        // Java's final `else` (FieldSpec.java:637-639): `field != <default>`. `records`
+        // lands here with a `null` default, i.e. a plain presence test.
+        FieldType::Records => {
+            if nullable {
+                format!("self.{}.is_some()", field_name)
+            } else {
+                // No spec in the corpus declares a non-nullable `records` field; the Rust
+                // type is then a bare `Bytes`, which has no `null` state to test.
+                format!("!self.{}.is_empty()", field_name)
+            }
+        },
+        FieldType::Float64 => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
+            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
         },
         FieldType::Int8
         | FieldType::Int16
@@ -1742,20 +1842,55 @@ fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
             let default_val = get_default_value(field.field_type(), field.field_default());
             format!("self.{} != {}", field_name, default_val)
         },
-        FieldType::Float64 => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
-            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
-        },
-        FieldType::Uuid => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
-        },
-        FieldType::Struct(_) => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
-        },
     }
+}
+
+/// True when Java's generator would emit the "non-default value at an unsupported
+/// version" guard for `field` inside `write()`.
+///
+/// Two conditions, both taken from Java:
+///
+///   - `!field.ignorable()` — `MessageDataGenerator.java:792`. An `"ignorable": true`
+///     field is silently dropped by Java too, so adding the guard there would reject
+///     encodings Java accepts (see `.claude/rules/producer-transactions.md` §11).
+///   - the `else` half of the field's version conditional is reachable —
+///     `VersionConditional.generate` (`VersionConditional.java:189-218`) only emits
+///     `ifNotMember` when `possibleVersions - containingVersions` is non-empty.
+///     `possibleVersions` is the struct's own range, because the generated `write()`
+///     has already rejected every version outside it.
+fn non_ignorable_check_applies(field: &FieldSpec, struct_versions: Versions) -> bool {
+    if field.ignorable() {
+        return false;
+    }
+    field.versions().lowest() > struct_versions.lowest() || field.versions().highest() < struct_versions.highest()
+}
+
+/// Emits the body of Java's non-ignorable-field guard: the `throw` that refuses to
+/// encode a message the requested version cannot represent.
+///
+/// Mirrors `FieldSpec.generateNonIgnorableFieldCheck` (`FieldSpec.java:652-665`). The
+/// caller supplies the surrounding `if` / `else if`, because the two call sites reach
+/// this branch differently.
+///
+/// The message names the field with `FieldSpec::camel_case_name` — Java's
+/// `camelCaseName()` (`FieldSpec.java:188-190`, `:661`), i.e. the spec name with a
+/// lower-cased first letter, not the snake_case Rust identifier — so the text is
+/// byte-identical to the Java client's for the same field.
+fn generate_non_ignorable_field_error(
+    file: &mut fs::File,
+    field: &FieldSpec,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{}return Err(std::io::Error::new(", indent)?;
+    writeln!(file, "{}    std::io::ErrorKind::InvalidData,", indent)?;
+    writeln!(
+        file,
+        "{}    format!(\"Attempted to write a non-default {} at version {{}}\", version),",
+        indent,
+        field.camel_case_name()
+    )?;
+    writeln!(file, "{}));", indent)?;
+    Ok(())
 }
 
 /// Generate the content size for a tagged field (the data portion, plus the size varint wrapper).
@@ -3102,11 +3237,15 @@ fn generate_read_method(
     Ok(())
 }
 
+/// `parent_versions` mirrors Java's `generateClassWriter(className, struct, parentVersions)`
+/// (`MessageDataGenerator.java:702-703`). Only the non-ignorable-field guard consults it,
+/// via `curVersions = parentVersions.intersect(struct.versions())` (`:718`).
 fn generate_write_method(
     file: &mut fs::File,
     class_name: &str,
     struct_spec: &StructSpec,
     flexible_versions: Versions,
+    parent_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         file,
@@ -3134,11 +3273,38 @@ fn generate_write_method(
     writeln!(file, "        }}")?;
     writeln!(file)?;
 
-    // Generate write for each non-tagged field
+    // Generate write for each non-tagged field.
+    //
+    // Java walks *every* field here and wraps each one in a version conditional whose
+    // `else` half carries the non-ignorable guard (`MessageDataGenerator.java:720-798`).
+    // This generator writes tagged fields from a separate block further down, so a
+    // tagged field only contributes its guard at this point in field order — which is
+    // where Java emits it too.
+    let struct_versions = struct_spec.versions().intersect(parent_versions);
     for field in struct_spec.fields() {
         if field.tagged_versions().empty() {
             let effective_flex = field_flexible_versions(field, flexible_versions);
-            generate_field_write(file, field, effective_flex)?;
+            generate_field_write(file, field, effective_flex, struct_versions)?;
+        } else if non_ignorable_check_applies(field, struct_versions) {
+            let field_name = escape_rust_keyword(&to_snake_case(field.name()));
+            let versions = field.versions();
+            let unsupported =
+                if versions.lowest() > struct_versions.lowest() && versions.highest() < struct_versions.highest() {
+                    format!("(version < {} || version > {})", versions.lowest(), versions.highest())
+                } else if versions.lowest() > struct_versions.lowest() {
+                    format!("version < {}", versions.lowest())
+                } else {
+                    format!("version > {}", versions.highest())
+                };
+            writeln!(
+                file,
+                "        if {} && ({}) {{",
+                unsupported,
+                get_default_check(field, &field_name)
+            )?;
+            generate_non_ignorable_field_error(file, field, "            ")?;
+            writeln!(file, "        }}")?;
+            writeln!(file)?;
         }
     }
 
@@ -3859,6 +4025,7 @@ fn generate_field_write(
     file: &mut fs::File,
     field: &FieldSpec,
     flexible_versions: Versions,
+    struct_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let field_name = to_snake_case(field.name());
     let field_name = escape_rust_keyword(&field_name);
@@ -4061,6 +4228,13 @@ fn generate_field_write(
     }
 
     if has_version_check {
+        // The `else` half of Java's field version conditional: refuse to encode a value
+        // the requested version has no room for, instead of dropping it.
+        // `MessageDataGenerator.java:792-797`.
+        if non_ignorable_check_applies(field, struct_versions) {
+            writeln!(file, "        }} else if {} {{", get_default_check(field, &field_name))?;
+            generate_non_ignorable_field_error(file, field, "            ")?;
+        }
         writeln!(file, "        }}")?;
     }
     writeln!(file)?;
@@ -4603,15 +4777,27 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
             return "None".to_string();
         }
         // Nullable with no explicit default: Java defaults to non-null empty values
-        // for String, Bytes and Struct. Only fields with an explicit
+        // for String, Bytes, Struct and Array. Only fields with an explicit
         // "default": "null" in the JSON spec default to null/None.
+        //
+        // The array arm is the same rule CLAUDE.md §2 states for string/bytes, and it
+        // comes from the same place: `FieldSpec.fieldDefault`'s `type.isArray()` branch
+        // returns `new <List>(0)` and only returns `"null"` when the spec asks for it
+        // (`FieldSpec.java:465-475`) — `validateNullDefault()` is reached *only* on that
+        // explicit path. Defaulting these to `None` instead made a default-constructed
+        // message encode a null array where Java encodes an empty one, and made Java's
+        // own `MessageTest.testOffsetFetchRequestVersions` (which leaves `Topics` unset
+        // at v8+) trip the non-default-at-unsupported-version guard.
         if default.is_none() {
             match field.field_type() {
                 FieldType::String => return "Some(String::new())".to_string(),
                 FieldType::Bytes => return "Some(Vec::new())".to_string(),
+                FieldType::Array(_) => return "Some(Vec::new())".to_string(),
                 FieldType::Struct(struct_name) => {
                     return format!("Some({}::new())", struct_name);
                 },
+                // No spec in either corpus declares a nullable field of any other type,
+                // so this arm is unreachable; Java has no `null` default for them either.
                 _ => return "None".to_string(),
             }
         }
@@ -4902,5 +5088,199 @@ mod tests {
         assert!(!stripped.contains("// inline comment"));
         assert!(stripped.contains("\"name\""));
         assert!(stripped.contains("\"test\""));
+    }
+
+    fn field(json: &str) -> FieldSpec {
+        let mut spec: FieldSpec = serde_json::from_str(json).expect("valid field spec");
+        spec.validate().expect("field spec validates");
+        spec
+    }
+
+    fn versions(lowest: i16, highest: i16) -> Versions {
+        Versions::new(lowest, highest).expect("valid range")
+    }
+
+    /// Java names the field in the guard message with `camelCaseName()`
+    /// (`FieldSpec.java:188-190`, used at `:661`), not the snake_case Rust identifier,
+    /// so the emitted text is byte-identical to the Java client's for the same field.
+    #[test]
+    fn test_camel_case_name_matches_java_lower_case_first() {
+        let name = |n: &str| field(&format!(r#"{{ "name": "{n}", "type": "int32", "versions": "0+" }}"#));
+        assert_eq!(name("ProducerId").camel_case_name(), "producerId");
+        assert_eq!(name("Enable2Pc").camel_case_name(), "enable2Pc");
+        assert_eq!(name("KeepPreparedTxn").camel_case_name(), "keepPreparedTxn");
+        // Already-camelCase spec names (the test corpus uses these) are unchanged.
+        assert_eq!(name("processId").camel_case_name(), "processId");
+    }
+
+    /// The `"ignorable"` flag is the whole gate: Java emits the guard only under
+    /// `if (!field.ignorable())` (`MessageDataGenerator.java:792`), and adding it to an
+    /// ignorable field would start rejecting encodings Java accepts
+    /// (`.claude/rules/producer-transactions.md` §11).
+    #[test]
+    fn test_non_ignorable_check_skips_ignorable_fields() {
+        // InitProducerIdRequest.ProducerId: v3+ in a 0-6 message, not ignorable.
+        let producer_id = field(r#"{ "name": "ProducerId", "type": "int64", "versions": "3+", "default": "-1" }"#);
+        assert!(non_ignorable_check_applies(&producer_id, versions(0, 6)));
+
+        // TxnOffsetCommitRequest.CommittedLeaderEpoch: v2+ but "ignorable": true.
+        let leader_epoch = field(
+            r#"{ "name": "CommittedLeaderEpoch", "type": "int32", "versions": "2+",
+                 "default": "-1", "ignorable": true }"#,
+        );
+        assert!(!non_ignorable_check_applies(&leader_epoch, versions(0, 5)));
+    }
+
+    /// Java only emits the `else` half when `possibleVersions - containingVersions` is
+    /// non-empty (`VersionConditional.java:189-218`). A field spanning the whole struct
+    /// range has no unsupported version to guard against.
+    #[test]
+    fn test_non_ignorable_check_needs_a_reachable_unsupported_version() {
+        let all_versions = field(r#"{ "name": "GroupId", "type": "string", "versions": "0+" }"#);
+        assert!(!non_ignorable_check_applies(&all_versions, versions(0, 6)));
+
+        // The nested-struct case: `ListOffsetsResponse` is 1-11 and its `Partitions`
+        // struct is declared "0+", but `Timestamp` is "1+" — so once the struct range is
+        // intersected with the parent's, v0 is unreachable and Java emits no guard.
+        let timestamp = field(r#"{ "name": "Timestamp", "type": "int64", "versions": "1+", "default": "-1" }"#);
+        assert!(!non_ignorable_check_applies(&timestamp, versions(1, 11)));
+        // Without that intersection the same field would be guarded — this is the
+        // difference `generate_write_method`'s `parent_versions` argument exists for.
+        assert!(non_ignorable_check_applies(&timestamp, versions(0, 11)));
+
+        // A field removed in later versions is guarded on the upper side too.
+        let replica_id = field(r#"{ "name": "ReplicaId", "type": "int32", "versions": "0-14", "default": "-1" }"#);
+        assert!(non_ignorable_check_applies(&replica_id, versions(0, 18)));
+    }
+
+    /// `get_default_check` mirrors `FieldSpec.generateNonDefaultValueCheck`
+    /// (`FieldSpec.java:587-641`), which Java reuses verbatim for both the tagged-field
+    /// "should this be written?" test and this guard.
+    #[test]
+    fn test_get_default_check_mirrors_java_per_type() {
+        // Numeric: `field != <default>`.
+        let producer_id = field(r#"{ "name": "ProducerId", "type": "int64", "versions": "3+", "default": "-1" }"#);
+        assert_eq!(get_default_check(&producer_id, "producer_id"), "self.producer_id != -1");
+
+        // Bool: Java writes a bare `if (field)` / `if (!field)` rather than `!= false`.
+        let enable_2pc = field(r#"{ "name": "Enable2Pc", "type": "bool", "versions": "6+", "default": "false" }"#);
+        assert_eq!(get_default_check(&enable_2pc, "enable2_pc"), "self.enable2_pc");
+        let auto_create =
+            field(r#"{ "name": "AllowAutoTopicCreation", "type": "bool", "versions": "4+", "default": "true" }"#);
+        assert_eq!(
+            get_default_check(&auto_create, "allow_auto_topic_creation"),
+            "!self.allow_auto_topic_creation"
+        );
+
+        // Explicit `"default": "null"` — Java's `field != null`.
+        let instance_id = field(
+            r#"{ "name": "GroupInstanceId", "type": "string", "versions": "3+",
+                 "nullableVersions": "3+", "default": "null" }"#,
+        );
+        assert_eq!(
+            get_default_check(&instance_id, "group_instance_id"),
+            "self.group_instance_id.is_some()"
+        );
+
+        // Nullable without an explicit null default — Java's `field == null || !field.isEmpty()`.
+        // Null counts as *non*-default here, which is why the field's own default has to
+        // be the empty collection (see `get_default_value_for_field`).
+        let topics = field(
+            r#"{ "name": "Topics", "type": "[]OffsetFetchRequestTopic", "versions": "0-7",
+                 "nullableVersions": "2-7" }"#,
+        );
+        assert_eq!(
+            get_default_check(&topics, "topics"),
+            "self.topics.as_ref().map_or(true, |v| !v.is_empty())"
+        );
+
+        // Non-nullable string with no default — Java's `!field.equals("")`.
+        let member_id = field(r#"{ "name": "MemberId", "type": "string", "versions": "3+", "default": "" }"#);
+        assert_eq!(get_default_check(&member_id, "member_id"), "!self.member_id.is_empty()");
+
+        // Non-nullable array — Java's `!field.isEmpty()`.
+        let keys = field(r#"{ "name": "CoordinatorKeys", "type": "[]string", "versions": "4+" }"#);
+        assert_eq!(
+            get_default_check(&keys, "coordinator_keys"),
+            "!self.coordinator_keys.is_empty()"
+        );
+
+        // Struct — Java's `!field.equals(new Struct())`.
+        let leader = field(r#"{ "name": "CurrentLeader", "type": "LeaderIdAndEpoch", "versions": "12+" }"#);
+        assert_eq!(
+            get_default_check(&leader, "current_leader"),
+            "self.current_leader != LeaderIdAndEpoch::new()"
+        );
+    }
+
+    /// Generates a nested struct into a scratch file and returns the emitted Rust.
+    fn emit_nested_struct(field: &FieldSpec, parent_versions: Versions) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ckr-gen-{}-{}-{}.rs",
+            std::process::id(),
+            parent_versions.lowest(),
+            parent_versions.highest()
+        ));
+        {
+            let mut file = fs::File::create(&path).expect("create scratch file");
+            generate_nested_struct(&mut file, field, Versions::NONE, parent_versions).expect("generate");
+        }
+        let emitted = fs::read_to_string(&path).expect("read scratch file");
+        let _ = fs::remove_file(&path);
+        emitted
+    }
+
+    /// Pins the `parent_versions` threading at the **emission** level, not just in the
+    /// predicate.
+    ///
+    /// Java hands each subclass `parentVersions.intersect(struct.versions())`
+    /// (`MessageDataGenerator.java:176`, `:183`) and intersects again at `:718`, so a
+    /// nested struct declared wider than its enclosing message is still only guarded
+    /// over versions the message can reach. This is the `ListOffsetsResponse` shape:
+    /// the message is 1-11, its `Partitions` struct is declared `0+`, and `Timestamp`
+    /// is `1+` — so v0 is unreachable and Java emits no guard.
+    ///
+    /// Reverting the threading (passing the field's own range as the parent) puts the
+    /// guard back, which is exactly the 7-guard over-emission this argument suppressed.
+    /// Nothing else in the suite fails if it regresses: the spurious guards land on
+    /// versions no message-level round-trip can reach.
+    #[test]
+    fn test_nested_struct_guard_respects_the_enclosing_message_versions() {
+        let partitions = field(
+            r#"{ "name": "Partitions", "type": "[]ListOffsetsPartitionResponse", "versions": "0+",
+                 "fields": [
+                   { "name": "Timestamp", "type": "int64", "versions": "1+", "default": "-1" }
+                 ] }"#,
+        );
+
+        let within_reach = emit_nested_struct(&partitions, versions(1, 11));
+        assert!(
+            !within_reach.contains("Attempted to write a non-default timestamp"),
+            "v0 is unreachable from a 1-11 message, so Java emits no guard:\n{within_reach}"
+        );
+
+        let v0_reachable = emit_nested_struct(&partitions, versions(0, 11));
+        assert!(
+            v0_reachable.contains("Attempted to write a non-default timestamp at version"),
+            "with v0 reachable the guard is required:\n{v0_reachable}"
+        );
+    }
+
+    /// An unset nullable array is the **empty** list, not null: `FieldSpec.fieldDefault`
+    /// returns `new <List>(0)` and only yields `"null"` on an explicit
+    /// `"default": "null"` (`FieldSpec.java:465-475`).
+    #[test]
+    fn test_nullable_array_defaults_to_empty_not_none() {
+        let implicit = field(
+            r#"{ "name": "Topics", "type": "[]OffsetFetchRequestTopic", "versions": "0-7",
+                 "nullableVersions": "2-7" }"#,
+        );
+        assert_eq!(get_default_value_for_field(&implicit), "Some(Vec::new())");
+
+        let explicit = field(
+            r#"{ "name": "Topics", "type": "[]MetadataRequestTopic", "versions": "0+",
+                 "nullableVersions": "0+", "default": "null" }"#,
+        );
+        assert_eq!(get_default_value_for_field(&explicit), "None");
     }
 }
