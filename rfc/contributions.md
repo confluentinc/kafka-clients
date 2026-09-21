@@ -26,7 +26,7 @@ templates.
 
 ## What to contribute
 
-Changes in AK are automatically translated from the Java client, not through community pull
+Changes in Apache Kafka are automatically translated from the Java client, not through community pull
 requests. Community contributions are the changes *not* in Apache Kafka:
 
 - **Bug fixes and performance enhancements**, for example, fixing memory leaks.
