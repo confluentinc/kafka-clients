@@ -651,6 +651,17 @@ async fn test_async_consumer_async_commit() {
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
+    // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic up front to
+    // prevent transient RetriableCommitFailed errors during the async commits
+    // below (`PlaintextConsumerCommitTest.java:192-198`). The Rust harness has no
+    // admin client; the equivalent is to discover the coordinator and materialize
+    // the offsets topic via a `committed()` query before committing, so the five
+    // async commits all succeed rather than racing coordinator load.
+    let _ = consumer
+        .committed(std::slice::from_ref(&tp))
+        .await
+        .expect("committed (coordinator readiness) should succeed");
+
     let cb = CountConsumerCommitCallback::new();
     let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
     let count = 5;
