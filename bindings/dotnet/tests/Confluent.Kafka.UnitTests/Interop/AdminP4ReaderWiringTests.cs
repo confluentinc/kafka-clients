@@ -181,6 +181,10 @@ public sealed class AdminP4ReaderWiringTests
         nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
         "kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic",
         "kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition")]
+    [InlineData(
+        nameof(AdminCallbacks.DescribeProducersKey),
+        "kafka_admin_DescribeProducersResult_get_topic",
+        "kafka_admin_DescribeProducersResult_get_partition")]
     public void EachCompositeKeyReader_CapturesItsOwnAccessors(
         string readerName, string getTopic, string getPartition) =>
         Assert.Equal(
@@ -320,6 +324,64 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(new[] { entryPoint }, CapturedEntryPoints(Reader(readerName)));
 
     /// <summary>
+    /// <c>fenceProducers</c>' <b>key</b> reader captures
+    /// <c>kafka_admin_FenceProducersResult_get_transactional_id</c> — not
+    /// <c>describeTransactions</c>' byte-identical twin (M15/P8).
+    /// </summary>
+    [Fact]
+    public void FenceProducersKey_CapturesItsOwnTransactionalIdAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_FenceProducersResult_get_transactional_id" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.FenceProducersKey))));
+
+    /// <summary>
+    /// ⚠⚠ <c>fenceProducers</c>' <b>value</b> reader captures <b>both</b> of its own inline
+    /// scalars. The pair is the hazard: the producer id and the epoch are read at the same
+    /// index from two accessors, and both report <c>-1</c> for a failed id, so a transposition
+    /// returns a plausible answer (M15/P8).
+    /// </summary>
+    /// <remarks>
+    /// The capture set is order-independent, so it catches a cross-wire to another RPC's
+    /// accessors but says nothing about which slot each lands in. That axis needs no guard
+    /// <em>here</em>: the two factory parameters have distinct delegate types
+    /// (<c>…, long&gt;</c> and <c>…, short&gt;</c>), so transposing them does not compile —
+    /// unlike the same-typed bundles below. The reader's <em>body</em> — which field each
+    /// scalar reaches, and at which index — is asserted in <c>AdminP8ResultMarshalTests</c>
+    /// over injected accessors.
+    /// </remarks>
+    [Fact]
+    public void FenceProducersValue_CapturesBothOfItsOwnScalarAccessors() =>
+        Assert.Equal(
+            new[]
+            {
+                "kafka_admin_FenceProducersResult_get_epoch_id",
+                "kafka_admin_FenceProducersResult_get_producer_id",
+            },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.FenceProducersValue))));
+
+    /// <summary>
+    /// <c>listTransactions</c>' per-broker optional-error <b>value</b> reader captures
+    /// <c>kafka_admin_ListTransactionsResult_get_error</c> — its own, not one of the four
+    /// byte-identical twins already tracked above (M15/P8).
+    /// </summary>
+    [Fact]
+    public void ListTransactionsOptionalError_CapturesItsOwnErrorAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_ListTransactionsResult_get_error" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.ListTransactionsOptionalError))));
+
+    /// <summary>
+    /// <c>describeTransactions</c>' <b>key</b> reader captures
+    /// <c>kafka_admin_DescribeTransactionsResult_get_transactional_id</c> — not
+    /// <c>fenceProducers</c>' byte-identical twin (M15/P8).
+    /// </summary>
+    [Fact]
+    public void DescribeTransactionsKey_CapturesItsOwnTransactionalIdAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_DescribeTransactionsResult_get_transactional_id" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeTransactionsKey))));
+
+    /// <summary>
     /// <c>describeDelegationToken</c>' <b>element</b> reader captures
     /// <c>kafka_admin_DescribeDelegationTokenResult_get_token</c> (M15/P7).
     /// </summary>
@@ -413,6 +475,11 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.DescribeDelegationTokenValue),
             nameof(AdminCallbacks.AlterUserScramCredentialsKey),
             nameof(AdminCallbacks.UpdateFeaturesKey),
+            nameof(AdminCallbacks.FenceProducersKey),
+            nameof(AdminCallbacks.FenceProducersValue),
+            nameof(AdminCallbacks.DescribeTransactionsKey),
+            nameof(AdminCallbacks.DescribeProducersKey),
+            nameof(AdminCallbacks.ListTransactionsOptionalError),
         };
 
         List<string> signatures = readers
@@ -479,10 +546,15 @@ public sealed class AdminP4ReaderWiringTests
                 nameof(AdminCallbacks.DescribeClientQuotasKey),
                 nameof(AdminCallbacks.DescribeClientQuotasValue),
                 nameof(AdminCallbacks.DescribeDelegationTokenValue),
+                nameof(AdminCallbacks.DescribeProducersKey),
+                nameof(AdminCallbacks.DescribeTransactionsKey),
                 nameof(AdminCallbacks.ElectLeadersKey),
                 nameof(AdminCallbacks.ElectLeadersOptionalError),
+                nameof(AdminCallbacks.FenceProducersKey),
+                nameof(AdminCallbacks.FenceProducersValue),
                 nameof(AdminCallbacks.ListOffsetsKey),
                 nameof(AdminCallbacks.ListPartitionReassignmentsKey),
+                nameof(AdminCallbacks.ListTransactionsOptionalError),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
                 nameof(AdminCallbacks.UpdateFeaturesKey),
             },
@@ -678,6 +750,124 @@ public sealed class AdminP4ReaderWiringTests
     }
 
     /// <summary>
+    /// ⚠⚠ Every member of <c>describeTransactions</c>' bundle is bound to <b>its own</b> ABI
+    /// symbol, positionally (M15/P8).
+    /// </summary>
+    /// <remarks>
+    /// Three same-typed groups are transposable here and every transposition is silent:
+    /// <c>GetCoordinatorId</c>/<c>GetProducerEpoch</c>/<c>GetTopicPartitionCount</c> are all
+    /// <c>…, int&gt;</c> — and a count read from the coordinator id would drive the inner walk
+    /// off the end of the row — while <c>GetProducerId</c>/<c>GetTransactionTimeoutMs</c> are
+    /// both <c>…, long&gt;</c>, and both report <c>-1</c> for a failed row, so a swap returns a
+    /// plausible number. The remaining four each have a unique delegate type.
+    /// </remarks>
+    [Fact]
+    public void TransactionDescriptionAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        TransactionDescriptionMarshal.Accessors accessors =
+            TransactionDescriptionMarshal.NativeAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "GetCoordinatorId=kafka_admin_DescribeTransactionsResult_get_coordinator_id",
+                "GetState=kafka_admin_DescribeTransactionsResult_get_state",
+                "GetProducerId=kafka_admin_DescribeTransactionsResult_get_producer_id",
+                "GetProducerEpoch=kafka_admin_DescribeTransactionsResult_get_producer_epoch",
+                "GetTransactionTimeoutMs=kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms",
+                "TryGetTransactionStartTimeMs=kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms",
+                "GetTopicPartitionCount=kafka_admin_DescribeTransactionsResult_get_topic_partition_count",
+                "GetTopicPartitionTopic=kafka_admin_DescribeTransactionsResult_get_topic_partition_topic",
+                "GetTopicPartitionPartition=kafka_admin_DescribeTransactionsResult_get_topic_partition_partition",
+            },
+            new[]
+            {
+                "GetCoordinatorId=" + EntryPointOf(accessors.GetCoordinatorId),
+                "GetState=" + EntryPointOf(accessors.GetState),
+                "GetProducerId=" + EntryPointOf(accessors.GetProducerId),
+                "GetProducerEpoch=" + EntryPointOf(accessors.GetProducerEpoch),
+                "GetTransactionTimeoutMs=" + EntryPointOf(accessors.GetTransactionTimeoutMs),
+                "TryGetTransactionStartTimeMs=" + EntryPointOf(accessors.TryGetTransactionStartTimeMs),
+                "GetTopicPartitionCount=" + EntryPointOf(accessors.GetTopicPartitionCount),
+                "GetTopicPartitionTopic=" + EntryPointOf(accessors.GetTopicPartitionTopic),
+                "GetTopicPartitionPartition=" + EntryPointOf(accessors.GetTopicPartitionPartition),
+            });
+    }
+
+    /// <summary>
+    /// ⚠⚠ Every member of <c>describeProducers</c>' bundle is bound to <b>its own</b> ABI
+    /// symbol, positionally (M15/P8).
+    /// </summary>
+    /// <remarks>
+    /// Two same-typed pairs are transposable and both are silent:
+    /// <c>GetProducerId</c>/<c>GetLastTimestamp</c> are both <c>(i, j) -&gt; long</c> and
+    /// <c>GetProducerEpoch</c>/<c>GetLastSequence</c> are both <c>(i, j) -&gt; int</c>, and
+    /// every one of the four reports <c>-1</c> for an out-of-range index, so a swap returns a
+    /// plausible number. The two optionals and the count each have a unique delegate type.
+    /// </remarks>
+    [Fact]
+    public void PartitionProducerStateAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        PartitionProducerStateMarshal.Accessors accessors =
+            PartitionProducerStateMarshal.NativeAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "GetProducerCount=kafka_admin_DescribeProducersResult_get_producer_count",
+                "GetProducerId=kafka_admin_DescribeProducersResult_get_producer_id",
+                "GetProducerEpoch=kafka_admin_DescribeProducersResult_get_producer_epoch",
+                "GetLastSequence=kafka_admin_DescribeProducersResult_get_last_sequence",
+                "GetLastTimestamp=kafka_admin_DescribeProducersResult_get_last_timestamp",
+                "TryGetCurrentTransactionStartOffset=kafka_admin_DescribeProducersResult_get_current_transaction_start_offset",
+                "TryGetCoordinatorEpoch=kafka_admin_DescribeProducersResult_get_coordinator_epoch",
+            },
+            new[]
+            {
+                "GetProducerCount=" + EntryPointOf(accessors.GetProducerCount),
+                "GetProducerId=" + EntryPointOf(accessors.GetProducerId),
+                "GetProducerEpoch=" + EntryPointOf(accessors.GetProducerEpoch),
+                "GetLastSequence=" + EntryPointOf(accessors.GetLastSequence),
+                "GetLastTimestamp=" + EntryPointOf(accessors.GetLastTimestamp),
+                "TryGetCurrentTransactionStartOffset="
+                    + EntryPointOf(accessors.TryGetCurrentTransactionStartOffset),
+                "TryGetCoordinatorEpoch=" + EntryPointOf(accessors.TryGetCoordinatorEpoch),
+            });
+    }
+
+    /// <summary>
+    /// ⚠⚠ Every member of <c>listTransactions</c>' bundle is bound to <b>its own</b> ABI
+    /// symbol, positionally (M15/P8).
+    /// </summary>
+    /// <remarks>
+    /// <c>GetTransactionalId</c>/<c>GetState</c> are the same-typed pair, and transposing them
+    /// is the worst of the three P8 bundles: a transactional id decodes through
+    /// <see cref="TransactionMarshal"/> to <c>Unknown</c> rather than throwing, so every
+    /// listing would report a plausible state and an id that is a state name.
+    /// </remarks>
+    [Fact]
+    public void TransactionListingAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        TransactionListingMarshal.Accessors accessors = TransactionListingMarshal.NativeAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "GetListingCount=kafka_admin_ListTransactionsResult_get_listing_count",
+                "GetTransactionalId=kafka_admin_ListTransactionsResult_get_transactional_id",
+                "GetProducerId=kafka_admin_ListTransactionsResult_get_producer_id",
+                "GetState=kafka_admin_ListTransactionsResult_get_state",
+            },
+            new[]
+            {
+                "GetListingCount=" + EntryPointOf(accessors.GetListingCount),
+                "GetTransactionalId=" + EntryPointOf(accessors.GetTransactionalId),
+                "GetProducerId=" + EntryPointOf(accessors.GetProducerId),
+                "GetState=" + EntryPointOf(accessors.GetState),
+            });
+    }
+
+    /// <summary>
     /// ⚠⚠ <b>The four count-less P7 trampolines each destroy THEIR OWN result root.</b> The
     /// four types declare byte-identical destroys, so a cross-wired one frees the right
     /// pointer through the wrong destructor — undetectable by any behavioural assertion
@@ -751,6 +941,9 @@ public sealed class AdminP4ReaderWiringTests
                 "AdminCallbacks.s_offsetAndMetadataMapAccessors",
                 "ClientQuotaMarshal.NativeEntityAccessors",
                 "FeatureMetadataMarshal.NativeAccessors",
+                "PartitionProducerStateMarshal.NativeAccessors",
+                "TransactionDescriptionMarshal.NativeAccessors",
+                "TransactionListingMarshal.NativeAccessors",
                 "UserScramCredentialMarshal.NativeAccessors",
             },
             discovered);

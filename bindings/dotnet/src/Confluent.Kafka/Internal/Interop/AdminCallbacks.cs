@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
@@ -1402,6 +1403,333 @@ internal static class AdminCallbacks
             UpdateFeaturesAccessors,
             UpdateFeaturesKey,
             s_destroyUpdateFeaturesResult);
+
+    // ---- M15/P8: producers & transactions ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_abort_transaction_callback_t</c> (<c>h:1390</c>). ⚠ There is
+    /// <b>no result handle</b> — Java's <c>AbortTransactionResult</c> carries nothing but the
+    /// future's success — so the signature is <c>(error, user_data)</c> and
+    /// <paramref name="error"/> is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void AbortTransactionCallback(IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_force_terminate_transaction_callback_t</c> (<c>h:1403</c>).
+    /// Its own delegate type although the signature matches
+    /// <see cref="AbortTransactionCallback"/>, for the reason stated on
+    /// <see cref="ListConsumerGroupsCallback"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ForceTerminateTransactionCallback(IntPtr error, IntPtr userData);
+
+    /// <summary>The rooted instance passed to every <c>abort_transaction_async</c> submission.</summary>
+    internal static readonly AbortTransactionCallback AbortTransaction = OnAbortTransaction;
+
+    /// <summary>The rooted instance passed to every <c>force_terminate_transaction_async</c> submission.</summary>
+    internal static readonly ForceTerminateTransactionCallback ForceTerminateTransaction =
+        OnForceTerminateTransaction;
+
+    /// <summary>
+    /// The completion body the two <b>result-handle-less</b> P8 trampolines share: there is
+    /// nothing to read and nothing to destroy, so the callback only resolves or faults the
+    /// single awaiter.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ This can run <b>synchronously on the submitting thread</b> — the ABI unwraps its
+    /// marshalling result inside the submit closure, so a rejected input completes inline
+    /// before the entry point returns (<c>h:10474-10486</c>). The context is therefore already
+    /// published by the submitter before the P/Invoke, and the source's
+    /// <c>RunContinuationsAsynchronously</c> keeps the awaiter's continuation off that thread.
+    /// </remarks>
+    /// <param name="error">The operation's failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    private static void CompleteVoidRpc(IntPtr error, IntPtr userData)
+    {
+        SingleAdminOperation<bool>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (SingleAdminOperation<bool>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                context.SetException(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                context.SetResult(true);
+            }
+        }
+        catch (Exception exception)
+        {
+            context?.SetException(exception);
+        }
+        finally
+        {
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+    private static void OnAbortTransaction(IntPtr error, IntPtr userData) =>
+        CompleteVoidRpc(error, userData);
+
+    private static void OnForceTerminateTransaction(IntPtr error, IntPtr userData) =>
+        CompleteVoidRpc(error, userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_fence_producers_callback_t</c> (<c>h:1414</c>). ⚠ A
+    /// <b>per-id</b> failure arrives inside <paramref name="result"/>, borrowed;
+    /// <paramref name="error"/> is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void FenceProducersCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>The rooted instance passed to every <c>fence_producers_async</c> submission.</summary>
+    internal static readonly FenceProducersCallback FenceProducers = OnFenceProducers;
+
+    /// <summary>
+    /// <c>fenceProducers</c>' universal accessors — result <b>shape 1</b>: Java's per-id future
+    /// carries a <c>ProducerIdAndEpoch</c> (<c>FenceProducersResult.java:33</c>).
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors FenceProducersAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.FenceProducersResultCount,
+            NativeMethods.FenceProducersResultGetError);
+
+    /// <summary>
+    /// <c>fenceProducers</c>' key reader, built over <b>its own</b>
+    /// <c>get_transactional_id(i)</c>. ⚠ See <see cref="AlterUserScramCredentialsKey"/> on
+    /// byte-identical twins.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> FenceProducersKey =
+        KeyedResultMarshal.StringKeyReader(NativeMethods.FenceProducersResultGetTransactionalId);
+
+    /// <summary>
+    /// <c>fenceProducers</c>' value reader — the two inline scalars, read together so the pair
+    /// cannot be transposed by a caller wiring them separately.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Both accessors return <c>-1</c> for a failed id (Java's
+    /// <c>ProducerIdAndEpoch.NONE</c>), which is a <b>value</b>, not a verdict — the per-id
+    /// error is the authoritative signal and the walker reads it first.
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, ProducerIdAndEpoch> FenceProducersValue =
+        FenceProducersValueReader(
+            NativeMethods.FenceProducersResultGetProducerId,
+            NativeMethods.FenceProducersResultGetEpochId);
+
+    private static readonly Action<IntPtr> s_destroyFenceProducersResult =
+        NativeMethods.FenceProducersResultDestroy;
+
+    /// <summary>
+    /// Builds <see cref="FenceProducersValue"/> from its two accessors so that the wiring guard
+    /// can read them back off the closure (the <see cref="KeyedResultMarshal.StringKeyReader"/>
+    /// rationale, applied to a two-accessor bundle).
+    /// </summary>
+    /// <param name="getProducerId">That result's <c>get_producer_id(i)</c>.</param>
+    /// <param name="getEpochId">That result's <c>get_epoch_id(i)</c>.</param>
+    /// <returns>A reader over <c>(result, index)</c>.</returns>
+    internal static Func<IntPtr, int, ProducerIdAndEpoch> FenceProducersValueReader(
+        Func<IntPtr, int, long> getProducerId,
+        Func<IntPtr, int, short> getEpochId) =>
+        (result, index) =>
+            new ProducerIdAndEpoch(getProducerId(result, index), getEpochId(result, index));
+
+    private static void OnFenceProducers(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            FenceProducersAccessors,
+            FenceProducersKey,
+            FenceProducersValue,
+            s_destroyFenceProducersResult);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_transactions_callback_t</c> (<c>h:1378</c>). ⚠ A
+    /// <b>per-id</b> failure arrives inside <paramref name="result"/>, borrowed;
+    /// <paramref name="error"/> is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeTransactionsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>The rooted instance passed to every <c>describe_transactions_async</c> submission.</summary>
+    internal static readonly DescribeTransactionsCallback DescribeTransactions = OnDescribeTransactions;
+
+    /// <summary>
+    /// <c>describeTransactions</c>' universal accessors — result <b>shape 1</b>: Java's per-id
+    /// future carries a <c>TransactionDescription</c> (<c>DescribeTransactionsResult.java:28</c>).
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DescribeTransactionsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeTransactionsResultCount,
+            NativeMethods.DescribeTransactionsResultGetError);
+
+    /// <summary>
+    /// <c>describeTransactions</c>' key reader, built over <b>its own</b>
+    /// <c>get_transactional_id(i)</c> — not <c>fenceProducers</c>' byte-identical twin.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> DescribeTransactionsKey =
+        KeyedResultMarshal.StringKeyReader(NativeMethods.DescribeTransactionsResultGetTransactionalId);
+
+    /// <summary>
+    /// <c>describeTransactions</c>' row reader: six inline scalars plus the nested
+    /// <c>(i, j)</c> partition walk.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The inner walk is bounded by <c>get_topic_partition_count(i)</c> — <b>never</b> by the
+    /// outer <c>count</c>, which is <c>0</c> for a failed row (<c>h:10062-10065</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, TransactionDescription> DescribeTransactionsValue =
+        TransactionDescriptionMarshal.ReadDescription;
+
+    private static readonly Action<IntPtr> s_destroyDescribeTransactionsResult =
+        NativeMethods.DescribeTransactionsResultDestroy;
+
+    private static void OnDescribeTransactions(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeTransactionsAccessors,
+            DescribeTransactionsKey,
+            DescribeTransactionsValue,
+            s_destroyDescribeTransactionsResult);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_producers_callback_t</c> (<c>h:1365</c>). ⚠ A
+    /// <b>per-partition</b> failure arrives inside <paramref name="result"/>, borrowed;
+    /// <paramref name="error"/> is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeProducersCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>The rooted instance passed to every <c>describe_producers_async</c> submission.</summary>
+    internal static readonly DescribeProducersCallback DescribeProducers = OnDescribeProducers;
+
+    /// <summary>
+    /// <c>describeProducers</c>' universal accessors — result <b>shape 1</b>: Java's
+    /// per-partition future carries a <c>PartitionProducerState</c>
+    /// (<c>DescribeProducersResult.java:30</c>).
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors DescribeProducersAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.DescribeProducersResultCount,
+            NativeMethods.DescribeProducersResultGetError);
+
+    /// <summary>
+    /// <c>describeProducers</c>' composite key reader, built over <b>its own</b>
+    /// <c>get_topic</c>/<c>get_partition</c> pair.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, TopicPartition> DescribeProducersKey =
+        TopicPartitionKey(
+            NativeMethods.DescribeProducersResultGetTopic,
+            NativeMethods.DescribeProducersResultGetPartition);
+
+    /// <summary>
+    /// <c>describeProducers</c>' row reader: the nested <c>(i, j)</c> walk over that
+    /// partition's active producers.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The inner walk is bounded by <c>get_producer_count(i)</c> — <b>never</b> by the outer
+    /// <c>count</c>, which is <c>0</c> for a failed partition (<c>h:9828-9831</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, DescribeProducersResult.PartitionProducerState>
+        DescribeProducersValue = PartitionProducerStateMarshal.ReadPartitionProducerState;
+
+    private static readonly Action<IntPtr> s_destroyDescribeProducersResult =
+        NativeMethods.DescribeProducersResultDestroy;
+
+    private static void OnDescribeProducers(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyed(
+            result,
+            error,
+            userData,
+            DescribeProducersAccessors,
+            DescribeProducersKey,
+            DescribeProducersValue,
+            s_destroyDescribeProducersResult);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_list_transactions_callback_t</c> (<c>h:1426</c>). ⚠ A
+    /// <b>per-broker</b> failure arrives inside <paramref name="result"/>, borrowed;
+    /// <paramref name="error"/> — a broker-discovery failure — is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListTransactionsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>The rooted instance passed to every <c>list_transactions_async</c> submission.</summary>
+    internal static readonly ListTransactionsCallback ListTransactions = OnListTransactions;
+
+    /// <summary>
+    /// <c>listTransactions</c>' broker-id key reader. ⚠ <c>TKey</c> is an <see langword="int"/>
+    /// — the first non-reference key in the binding — which the walker's
+    /// <c>where TKey : notnull</c> accepts unchanged.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, int> ListTransactionsKey =
+        static (result, index) => NativeMethods.ListTransactionsResultGetBrokerId(result, index);
+
+    /// <summary>
+    /// <c>listTransactions</c>' per-broker error, read as a <b>value</b>: Java keeps it inside
+    /// the map its one future carries (<c>ListTransactionsResult.java:36</c>), so a broker
+    /// failing does not fault the call.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, KafkaException?> ListTransactionsOptionalError =
+        BorrowedOptionalError(NativeMethods.ListTransactionsResultGetError);
+
+    /// <summary>
+    /// <c>listTransactions</c>' per-broker value: Java's own
+    /// <c>KafkaFuture&lt;Collection&lt;TransactionListing&gt;&gt;</c>, already settled —
+    /// faulted from that broker's borrowed error, or carrying its listing walk.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The inner walk is bounded by <c>get_listing_count(i)</c> — <b>never</b> by the outer
+    /// count, which counts <em>brokers</em> (<c>h:10225-10228</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, Task<IReadOnlyCollection<TransactionListing>>>
+        ListTransactionsValue = static (result, index) =>
+        {
+            KafkaException? error = ListTransactionsOptionalError(result, index);
+            return error is not null
+                ? FaultedListings(error)
+                : Task.FromResult(TransactionListingMarshal.ReadListings(result, index));
+        };
+
+    private static readonly KeyedResultMarshal.CountAccessor s_listTransactionsCount =
+        NativeMethods.ListTransactionsResultCount;
+
+    private static readonly Action<IntPtr> s_destroyListTransactionsResult =
+        NativeMethods.ListTransactionsResultDestroy;
+
+    /// <summary>
+    /// ⚠⚠ <c>listTransactions</c>' shape-3 trampoline — <b>the aggregate walker, with the
+    /// per-broker error supplied inside the VALUE reader.</b> Java holds one
+    /// <c>KafkaFuture&lt;Map&lt;Integer, KafkaFutureImpl&lt;…&gt;&gt;&gt;</c>
+    /// (<c>ListTransactionsResult.java:35</c>), so only the broker-discovery failure is the
+    /// call's error; the per-broker futures live inside the map.
+    /// </summary>
+    private static void OnListTransactions(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteAggregateRpc(
+            result,
+            error,
+            userData,
+            s_listTransactionsCount,
+            ListTransactionsKey,
+            ListTransactionsValue,
+            EqualityComparer<int>.Default,
+            s_destroyListTransactionsResult);
+
+    private static Task<IReadOnlyCollection<TransactionListing>> FaultedListings(KafkaException error)
+    {
+        TaskCompletionSource<IReadOnlyCollection<TransactionListing>> source =
+            new TaskCompletionSource<IReadOnlyCollection<TransactionListing>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        source.SetException(error);
+        return source.Task;
+    }
 
     /// <summary>
     /// <c>deleteConsumerGroups</c>' universal accessors — result <b>shape 2</b>: Java's

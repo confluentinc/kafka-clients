@@ -360,6 +360,35 @@ public sealed class MockAdminClient : IAdmin
         _native.UpdateFeatures(featureUpdates, options);
 
     /// <inheritdoc/>
+    public FenceProducersResult FenceProducers(
+        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null) =>
+        _native.FenceProducers(transactionalIds, options);
+
+    /// <inheritdoc/>
+    public DescribeTransactionsResult DescribeTransactions(
+        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null) =>
+        _native.DescribeTransactions(transactionalIds, options);
+
+    /// <inheritdoc/>
+    public DescribeProducersResult DescribeProducers(
+        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null) =>
+        _native.DescribeProducers(partitions, options);
+
+    /// <inheritdoc/>
+    public ListTransactionsResult ListTransactions(ListTransactionsOptions? options = null) =>
+        _native.ListTransactions(options);
+
+    /// <inheritdoc/>
+    public AbortTransactionResult AbortTransaction(
+        AbortTransactionSpec spec, AbortTransactionOptions? options = null) =>
+        _native.AbortTransaction(spec, options);
+
+    /// <inheritdoc/>
+    public TerminateTransactionResult ForceTerminateTransaction(
+        string transactionalId, TerminateTransactionOptions? options = null) =>
+        _native.ForceTerminateTransaction(transactionalId, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

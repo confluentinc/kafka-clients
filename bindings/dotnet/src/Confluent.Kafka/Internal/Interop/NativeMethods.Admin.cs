@@ -3814,4 +3814,260 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void UpdateFeaturesResultDestroy(IntPtr result);
+
+    // ---- M15/P8: abortTransaction / forceTerminateTransaction (result shape 6) ----
+
+    /// <summary>
+    /// ⚠ No result handle — the callback is <c>(error, user_data)</c>. A NULL
+    /// <paramref name="topic"/> or a <paramref name="producerEpoch"/> outside 16 bits fires
+    /// the callback <b>synchronously on the calling thread</b> (<c>h:10474-10486</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_abort_transaction_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientAbortTransactionAsync(
+        IntPtr admin,
+        IntPtr topic,
+        int partition,
+        long producerId,
+        int producerEpoch,
+        int coordinatorEpoch,
+        int timeoutMs,
+        AdminCallbacks.AbortTransactionCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// ⚠ No result handle. A NULL <paramref name="transactionalId"/> fires the callback
+    /// <b>synchronously on the calling thread</b> (<c>h:10535-10546</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_force_terminate_transaction_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientForceTerminateTransactionAsync(
+        IntPtr admin,
+        IntPtr transactionalId,
+        int timeoutMs,
+        AdminCallbacks.ForceTerminateTransactionCallback callback,
+        IntPtr userData);
+
+    // ---- M15/P8: fenceProducers (result shape 1, per-transactional-id) ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_fence_producers_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientFenceProducersAsync(
+        IntPtr admin,
+        IntPtr[] transactionalIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.FenceProducersCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int FenceProducersResultCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_transactional_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr FenceProducersResultGetTransactionalId(IntPtr result, int index);
+
+    /// <summary>That id's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr FenceProducersResultGetError(IntPtr result, int index);
+
+    /// <summary>⚠ <c>-1</c> is <c>ProducerIdAndEpoch.NONE</c>, not an absence discriminant.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_producer_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long FenceProducersResultGetProducerId(IntPtr result, int index);
+
+    /// <summary>⚠ <c>int16_t</c> — a <see langword="short"/>, matching Java's <c>epoch</c> field.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_get_epoch_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short FenceProducersResultGetEpochId(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_FenceProducersResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void FenceProducersResultDestroy(IntPtr result);
+
+    // ---- M15/P8: describeTransactions (result shape 1, per-transactional-id) ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_transactions_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeTransactionsAsync(
+        IntPtr admin,
+        IntPtr[] transactionalIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeTransactionsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeTransactionsResultCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_transactional_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTransactionsResultGetTransactionalId(IntPtr result, int index);
+
+    /// <summary>That id's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTransactionsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_coordinator_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeTransactionsResultGetCoordinatorId(IntPtr result, int index);
+
+    /// <summary>
+    /// Java's <c>toString()</c> spelling, ⚠ <b>BORROWED</b> — decoded by
+    /// <see cref="TransactionMarshal"/>, never by <see cref="Enum.Parse(Type, string)"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_state", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTransactionsResultGetState(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_producer_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long DescribeTransactionsResultGetProducerId(IntPtr result, int index);
+
+    /// <summary>⚠ <c>int32_t</c> here, although Java's <c>producerEpoch()</c> is an <c>int</c> too.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_producer_epoch", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeTransactionsResultGetProducerEpoch(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long DescribeTransactionsResultGetTransactionTimeoutMs(IntPtr result, int index);
+
+    /// <summary>
+    /// Java's <c>OptionalLong</c>: ⚠ false means <b>empty</b> and leaves <paramref name="value"/>
+    /// untouched. <c>I1</c> because the C <c>bool</c> is one byte.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool DescribeTransactionsResultGetTransactionStartTimeMs(
+        IntPtr result, int index, out long value);
+
+    /// <summary>⚠ That row's own partition count — never the outer <c>count</c>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_topic_partition_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeTransactionsResultGetTopicPartitionCount(IntPtr result, int index);
+
+    /// <summary>⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_topic_partition_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeTransactionsResultGetTopicPartitionTopic(
+        IntPtr result, int index, int partitionIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_get_topic_partition_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeTransactionsResultGetTopicPartitionPartition(
+        IntPtr result, int index, int partitionIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTransactionsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeTransactionsResultDestroy(IntPtr result);
+
+    // ---- M15/P8: describeProducers (result shape 1, per-topic-partition) ----
+
+    /// <summary>
+    /// ⚠ The partitions cross as <b>parallel arrays</b>: entry <c>i</c> is
+    /// <c>(topics[i], partitions[i])</c>. <paramref name="hasBrokerId"/> is Java's
+    /// <c>OptionalInt brokerId</c> discriminant — the setter accepts any <c>int</c>, so no
+    /// sentinel is free (<c>h:10310-10315</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_producers_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeProducersAsync(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        [MarshalAs(UnmanagedType.I1)] bool hasBrokerId,
+        int brokerId,
+        int timeoutMs,
+        AdminCallbacks.DescribeProducersCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeProducersResultCount(IntPtr result);
+
+    /// <summary>⚠ <b>BORROWED</b>; the other half of the composite key.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeProducersResultGetTopic(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeProducersResultGetPartition(IntPtr result, int index);
+
+    /// <summary>That partition's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeProducersResultGetError(IntPtr result, int index);
+
+    /// <summary>⚠ That row's own producer count — never the outer <c>count</c>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_producer_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeProducersResultGetProducerCount(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_producer_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long DescribeProducersResultGetProducerId(
+        IntPtr result, int index, int producerIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_producer_epoch", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeProducersResultGetProducerEpoch(
+        IntPtr result, int index, int producerIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_last_sequence", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeProducersResultGetLastSequence(
+        IntPtr result, int index, int producerIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_last_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long DescribeProducersResultGetLastTimestamp(
+        IntPtr result, int index, int producerIndex);
+
+    /// <summary>
+    /// Java's <c>OptionalLong</c>: ⚠ false means <b>empty</b> and leaves
+    /// <paramref name="value"/> untouched — every <c>long</c> is a legal start offset, so no
+    /// sentinel is free.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_current_transaction_start_offset", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool DescribeProducersResultGetCurrentTransactionStartOffset(
+        IntPtr result, int index, int producerIndex, out long value);
+
+    /// <summary>Java's <c>OptionalInt</c>: ⚠ false means <b>empty</b> and leaves the out-param.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_get_coordinator_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool DescribeProducersResultGetCoordinatorEpoch(
+        IntPtr result, int index, int producerIndex, out int value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeProducersResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeProducersResultDestroy(IntPtr result);
+
+    // ---- M15/P8: listTransactions (one aggregate future over a broker-keyed map) ----
+
+    /// <summary>
+    /// ⚠ <b>Two independent filters, each with its own count.</b> The states are
+    /// <c>TransactionState.toString()</c> names, matched case-sensitively;
+    /// <paramref name="durationMs"/> is neutral at any negative value (Java's own <c>-1</c>
+    /// default); and <paramref name="transactionalIdPattern"/> distinguishes NULL (no filter)
+    /// from an empty string (<c>h:10638-10652</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_list_transactions_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientListTransactionsAsync(
+        IntPtr admin,
+        IntPtr[] states,
+        int stateCount,
+        long[] producerIds,
+        int producerIdCount,
+        long durationMs,
+        IntPtr transactionalIdPattern,
+        int timeoutMs,
+        AdminCallbacks.ListTransactionsCallback callback,
+        IntPtr userData);
+
+    /// <summary>⚠ The number of <b>brokers</b>, not of listings.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListTransactionsResultCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_broker_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListTransactionsResultGetBrokerId(IntPtr result, int index);
+
+    /// <summary>That broker's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListTransactionsResultGetError(IntPtr result, int index);
+
+    /// <summary>⚠ That broker's own listing count — never the outer broker count.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_listing_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListTransactionsResultGetListingCount(IntPtr result, int index);
+
+    /// <summary>⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_transactional_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListTransactionsResultGetTransactionalId(
+        IntPtr result, int index, int listingIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_producer_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ListTransactionsResultGetProducerId(
+        IntPtr result, int index, int listingIndex);
+
+    /// <summary>Java's <c>toString()</c> spelling, ⚠ <b>BORROWED</b> — decoded by <see cref="TransactionMarshal"/>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_get_state", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ListTransactionsResultGetState(
+        IntPtr result, int index, int listingIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListTransactionsResultDestroy(IntPtr result);
 }

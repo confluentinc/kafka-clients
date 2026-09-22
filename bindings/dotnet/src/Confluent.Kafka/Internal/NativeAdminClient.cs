@@ -797,6 +797,80 @@ internal sealed class NativeAdminClient : IDisposable
         AdminCallbacks.UpdateFeaturesCallback callback,
         IntPtr userData);
 
+    // ---- M15/P8 submit shapes, injectable so the tests can assert on the marshalled scalars ----
+
+    /// <summary>
+    /// The <c>abort_transaction_async</c> submit shape — no arrays, and ⚠ no result handle,
+    /// so the callback is <c>(error, user_data)</c>.
+    /// </summary>
+    internal delegate void NativeAbortTransactionSubmit(
+        IntPtr admin,
+        IntPtr topic,
+        int partition,
+        long producerId,
+        int producerEpoch,
+        int coordinatorEpoch,
+        int timeoutMs,
+        AdminCallbacks.AbortTransactionCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>force_terminate_transaction_async</c> submit shape.</summary>
+    internal delegate void NativeForceTerminateTransactionSubmit(
+        IntPtr admin,
+        IntPtr transactionalId,
+        int timeoutMs,
+        AdminCallbacks.ForceTerminateTransactionCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>fence_producers_async</c> submit shape.</summary>
+    internal delegate void NativeFenceProducersSubmit(
+        IntPtr admin,
+        IntPtr[] transactionalIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.FenceProducersCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>describe_transactions_async</c> submit shape.</summary>
+    internal delegate void NativeDescribeTransactionsSubmit(
+        IntPtr admin,
+        IntPtr[] transactionalIds,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeTransactionsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>list_transactions_async</c> submit shape — ⚠ <b>two independent filters, each
+    /// with its own count</b>.
+    /// </summary>
+    internal delegate void NativeListTransactionsSubmit(
+        IntPtr admin,
+        IntPtr[] states,
+        int stateCount,
+        long[] producerIds,
+        int producerIdCount,
+        long durationMs,
+        IntPtr transactionalIdPattern,
+        int timeoutMs,
+        AdminCallbacks.ListTransactionsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>describe_producers_async</c> submit shape — parallel topic/partition arrays plus
+    /// the broker-id <c>OptionalInt</c>'s explicit discriminant.
+    /// </summary>
+    internal delegate void NativeDescribeProducersSubmit(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        bool hasBrokerId,
+        int brokerId,
+        int timeoutMs,
+        AdminCallbacks.DescribeProducersCallback callback,
+        IntPtr userData);
+
     internal SafeAdminHandle Handle => _handle;
 
     /// <summary>
@@ -4337,6 +4411,547 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         return new UpdateFeaturesResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal FenceProducersResult FenceProducers(
+        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options) =>
+        FenceProducers(transactionalIds, options, NativeMethods.AdminClientFenceProducersAsync);
+
+    /// <summary>
+    /// Submits <c>fenceProducers</c> and returns immediately with one awaitable per
+    /// transactional id (result shape 1, value <c>ProducerIdAndEpoch</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>No empty-input guard.</b> Java builds a future from the collection and calls
+    /// <c>invokeDriver</c> with no validation (<c>KafkaAdminClient.java:4889-4895</c>), so an
+    /// empty request succeeds with an empty result; adding a Java-less throw would be the
+    /// defect.
+    /// </para>
+    /// <para>
+    /// The ids are de-duplicated because Java keys its result on a <c>Map</c>, and a null
+    /// element is rejected because the header <em>skips</em> one silently.
+    /// </para>
+    /// </remarks>
+    internal FenceProducersResult FenceProducers(
+        IReadOnlyCollection<string> transactionalIds,
+        FenceProducersOptions? options,
+        NativeFenceProducersSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (transactionalIds is null)
+        {
+            throw new ArgumentNullException(nameof(transactionalIds));
+        }
+
+        int timeoutMs = options is null
+            ? UnsetTimeoutMs
+            : ValidateTimeoutMs(options.TimeoutMs, nameof(FenceProducersOptions));
+
+        List<string> keys = DistinctNames(transactionalIds, "transactional ids", nameof(transactionalIds));
+
+        KeyedAdminOperation<string, ProducerIdAndEpoch> operation =
+            new KeyedAdminOperation<string, ProducerIdAndEpoch>(
+                "fenceProducers", keys, StringComparer.Ordinal);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                PinNames(keys, pinned),
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.FenceProducers,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the ids out during the submit.
+            foreach (Utf8Marshal.PinnedUtf8String pin in pinned)
+            {
+                pin.Dispose();
+            }
+        }
+
+        return new FenceProducersResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal DescribeTransactionsResult DescribeTransactions(
+        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options) =>
+        DescribeTransactions(
+            transactionalIds, options, NativeMethods.AdminClientDescribeTransactionsAsync);
+
+    /// <summary>
+    /// Submits <c>describeTransactions</c> and returns immediately with one awaitable per
+    /// transactional id (result shape 1, value <c>TransactionDescription</c>).
+    /// </summary>
+    /// <remarks>
+    /// Like <c>fenceProducers</c>: Java adds no empty-input guard
+    /// (<c>KafkaAdminClient.java:4833-4839</c>), the ids are de-duplicated because Java keys
+    /// its result on a map, and a null element is rejected because the header skips one
+    /// silently.
+    /// </remarks>
+    internal DescribeTransactionsResult DescribeTransactions(
+        IReadOnlyCollection<string> transactionalIds,
+        DescribeTransactionsOptions? options,
+        NativeDescribeTransactionsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (transactionalIds is null)
+        {
+            throw new ArgumentNullException(nameof(transactionalIds));
+        }
+
+        int timeoutMs = options is null
+            ? UnsetTimeoutMs
+            : ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeTransactionsOptions));
+
+        List<string> keys = DistinctNames(transactionalIds, "transactional ids", nameof(transactionalIds));
+
+        KeyedAdminOperation<string, TransactionDescription> operation =
+            new KeyedAdminOperation<string, TransactionDescription>(
+                "describeTransactions", keys, StringComparer.Ordinal);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                PinNames(keys, pinned),
+                keys.Count,
+                timeoutMs,
+                AdminCallbacks.DescribeTransactions,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the ids out during the submit.
+            foreach (Utf8Marshal.PinnedUtf8String pin in pinned)
+            {
+                pin.Dispose();
+            }
+        }
+
+        return new DescribeTransactionsResult(operation.Tasks);
+    }
+
+    internal DescribeProducersResult DescribeProducers(
+        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options) =>
+        DescribeProducers(partitions, options, NativeMethods.AdminClientDescribeProducersAsync);
+
+    /// <summary>
+    /// Submits <c>describeProducers</c> and returns immediately with one awaitable per topic
+    /// partition (result shape 1, value <c>PartitionProducerState</c>).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>options.BrokerId</c> is Java's <c>OptionalInt</c> and crosses as an explicit
+    /// discriminant plus a value: Java's <c>brokerId(int)</c> setter accepts any <c>int</c>
+    /// (<c>DescribeProducersOptions.java:44</c>), so no sentinel is free and a negative broker
+    /// id is a request the ABI must be able to carry — the timeout's negative guard
+    /// deliberately does not apply to it.
+    /// </remarks>
+    internal DescribeProducersResult DescribeProducers(
+        IReadOnlyCollection<TopicPartition> partitions,
+        DescribeProducersOptions? options,
+        NativeDescribeProducersSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (partitions is null)
+        {
+            throw new ArgumentNullException(nameof(partitions));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        int brokerId = 0;
+        bool hasBrokerId = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeProducersOptions));
+            hasBrokerId = options.BrokerId.HasValue;
+            brokerId = options.BrokerId ?? 0;
+        }
+
+        // De-duplicated because Java keys its result on a Map, and null-topic-checked because
+        // the ABI would skip such an entry silently and desynchronize the parallel arrays.
+        List<TopicPartition> keys = DistinctPartitions(partitions, nameof(partitions));
+
+        KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation =
+            new KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState>(
+                "describeProducers", keys, EqualityComparer<TopicPartition>.Default);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            IntPtr[] topics = new IntPtr[keys.Count];
+            int[] partitionIds = new int[keys.Count];
+            for (int i = 0; i < keys.Count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(keys[i].Topic);
+                pinned.Add(topic);
+                topics[i] = topic.Pointer;
+                partitionIds[i] = keys[i].Partition;
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                topics,
+                partitionIds,
+                keys.Count,
+                hasBrokerId,
+                brokerId,
+                timeoutMs,
+                AdminCallbacks.DescribeProducers,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the topics out during the submit.
+            foreach (Utf8Marshal.PinnedUtf8String pin in pinned)
+            {
+                pin.Dispose();
+            }
+        }
+
+        return new DescribeProducersResult(operation.Tasks);
+    }
+
+    internal ListTransactionsResult ListTransactions(ListTransactionsOptions? options) =>
+        ListTransactions(options, NativeMethods.AdminClientListTransactionsAsync);
+
+    /// <summary>
+    /// Submits <c>listTransactions</c> and returns immediately with the one broker-keyed
+    /// awaitable Java's result holds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>Two independent filters, each with its own count.</b> Each array and its count
+    /// come from one helper call, so there is no free-standing count at the call site to
+    /// transpose — the two filters have different lengths in the submit-seam test for exactly
+    /// that reason.
+    /// </para>
+    /// <para>
+    /// ⚠ Three different neutral encodings survive to the wire: an empty filter array means
+    /// "every value"; a <b>negative</b> duration means no duration filter, so a <c>0</c> is a
+    /// real one; and a null pattern is distinct from an empty pattern, which the broker
+    /// evaluates (<c>h:10645-10652</c>).
+    /// </para>
+    /// </remarks>
+    internal ListTransactionsResult ListTransactions(
+        ListTransactionsOptions? options, NativeListTransactionsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = options is null
+            ? UnsetTimeoutMs
+            : ValidateTimeoutMs(options.TimeoutMs, nameof(ListTransactionsOptions));
+
+        // Java's own -1 default. Any negative value is "no filter", so this is a pass-through
+        // value rather than a sentinel the binding may normalize.
+        long durationMs = options?.FilteredDuration ?? -1L;
+
+        (long[] Values, int Count) producerIds = ProducerIdFilter(options);
+
+        SingleAdminOperation<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>
+            operation =
+                new SingleAdminOperation<
+                    IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>(
+                    "listTransactions");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>();
+        Utf8Marshal.PinnedUtf8String? pattern = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            (IntPtr[] Values, int Count) states = StateFilter(options, pinned);
+
+            // ⚠ null stays NULL: an empty pattern is a legal value the broker evaluates.
+            if (options?.FilteredTransactionalIdPattern is not null)
+            {
+                pattern = Utf8Marshal.Pin(options.FilteredTransactionalIdPattern);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                states.Values,
+                states.Count,
+                producerIds.Values,
+                producerIds.Count,
+                durationMs,
+                pattern?.Pointer ?? IntPtr.Zero,
+                timeoutMs,
+                AdminCallbacks.ListTransactions,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the names out during the submit.
+            pattern?.Dispose();
+            foreach (Utf8Marshal.PinnedUtf8String pin in pinned)
+            {
+                pin.Dispose();
+            }
+        }
+
+        return new ListTransactionsResult(operation.Task);
+    }
+
+    /// <summary>
+    /// The state filter and its count, produced together — see the transposition note on
+    /// <see cref="ListTransactions(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
+    /// </summary>
+    /// <param name="options">The request options, or null.</param>
+    /// <param name="pinned">Receives the call-scoped pins the returned pointers borrow from.</param>
+    /// <returns>The pinned <c>TransactionState.toString()</c> names and their count.</returns>
+    private static (IntPtr[] Values, int Count) StateFilter(
+        ListTransactionsOptions? options, List<Utf8Marshal.PinnedUtf8String> pinned)
+    {
+        IReadOnlyCollection<TransactionState> states =
+            options?.FilteredStates ?? (IReadOnlyCollection<TransactionState>)Array.Empty<TransactionState>();
+
+        IntPtr[] names = new IntPtr[states.Count];
+        int next = 0;
+        foreach (TransactionState state in states)
+        {
+            // ⚠ Java's toString(), never name() — TransactionMarshal owns the spelling.
+            Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(TransactionMarshal.WireName(state));
+            pinned.Add(name);
+            names[next] = name.Pointer;
+            next++;
+        }
+
+        return (names, names.Length);
+    }
+
+    /// <summary>
+    /// The producer-id filter and its count, produced together — see the transposition note on
+    /// <see cref="ListTransactions(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
+    /// </summary>
+    /// <param name="options">The request options, or null.</param>
+    /// <returns>The producer ids and their count.</returns>
+    private static (long[] Values, int Count) ProducerIdFilter(ListTransactionsOptions? options)
+    {
+        IReadOnlyCollection<long> producerIds =
+            options?.FilteredProducerIds ?? (IReadOnlyCollection<long>)Array.Empty<long>();
+
+        long[] values = new long[producerIds.Count];
+        int next = 0;
+        foreach (long producerId in producerIds)
+        {
+            values[next] = producerId;
+            next++;
+        }
+
+        return (values, values.Length);
+    }
+
+    internal AbortTransactionResult AbortTransaction(
+        AbortTransactionSpec spec, AbortTransactionOptions? options) =>
+        AbortTransaction(spec, options, NativeMethods.AdminClientAbortTransactionAsync);
+
+    /// <summary>
+    /// Submits <c>abortTransaction</c> and returns immediately with the single awaitable
+    /// Java's <c>AbortTransactionResult</c> publishes (result shape 6 — no result handle).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>The ABI fires the completion callback synchronously on this thread for a rejected
+    /// input</b> (a NULL topic, or an epoch outside 16 bits — <c>h:10474-10486</c>), so the
+    /// <c>GCHandle</c> and the operation are published before the P/Invoke, exactly as for
+    /// every other admin submit.
+    /// </para>
+    /// <para>
+    /// Of those two ABI rejections only the NULL topic is reachable from C#, and it is
+    /// rejected here first: <see cref="AbortTransactionSpec.ProducerEpoch"/> is a
+    /// <see langword="short"/>, so an out-of-16-bit epoch cannot be expressed.
+    /// </para>
+    /// </remarks>
+    internal AbortTransactionResult AbortTransaction(
+        AbortTransactionSpec spec, AbortTransactionOptions? options, NativeAbortTransactionSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (spec is null)
+        {
+            throw new ArgumentNullException(nameof(spec));
+        }
+
+        if (spec.TopicPartition.Topic is null)
+        {
+            throw new ArgumentException(
+                "The abort transaction spec must not carry a topic partition with a null topic.",
+                nameof(spec));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(AbortTransactionOptions));
+        }
+
+        SingleAdminOperation<bool> operation = new SingleAdminOperation<bool>("abortTransaction");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        Utf8Marshal.PinnedUtf8String? topic = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            topic = Utf8Marshal.Pin(spec.TopicPartition.Topic);
+            submit(
+                _handle.DangerousGetHandle(),
+                topic.Pointer,
+                spec.TopicPartition.Partition,
+                spec.ProducerId,
+                spec.ProducerEpoch,
+                spec.CoordinatorEpoch,
+                timeoutMs,
+                AdminCallbacks.AbortTransaction,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            topic?.Dispose();
+        }
+
+        return new AbortTransactionResult(operation.Task);
+    }
+
+    internal TerminateTransactionResult ForceTerminateTransaction(
+        string transactionalId, TerminateTransactionOptions? options) =>
+        ForceTerminateTransaction(
+            transactionalId, options, NativeMethods.AdminClientForceTerminateTransactionAsync);
+
+    /// <summary>
+    /// Submits <c>forceTerminateTransaction</c> and returns immediately with the single
+    /// awaitable Java's <c>TerminateTransactionResult</c> publishes as <c>result()</c>
+    /// (result shape 6 — no result handle).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A NULL transactional id fires the callback synchronously on this thread
+    /// (<c>h:10535-10546</c>); it is rejected here first, before any pin.
+    /// </remarks>
+    internal TerminateTransactionResult ForceTerminateTransaction(
+        string transactionalId,
+        TerminateTransactionOptions? options,
+        NativeForceTerminateTransactionSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (transactionalId is null)
+        {
+            throw new ArgumentNullException(nameof(transactionalId));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(TerminateTransactionOptions));
+        }
+
+        SingleAdminOperation<bool> operation =
+            new SingleAdminOperation<bool>("forceTerminateTransaction");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        Utf8Marshal.PinnedUtf8String? pinnedId = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinnedId = Utf8Marshal.Pin(transactionalId);
+            submit(
+                _handle.DangerousGetHandle(),
+                pinnedId.Pointer,
+                timeoutMs,
+                AdminCallbacks.ForceTerminateTransaction,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            pinnedId?.Dispose();
+        }
+
+        return new TerminateTransactionResult(operation.Task);
     }
 
     internal ListPartitionReassignmentsResult ListPartitionReassignments(

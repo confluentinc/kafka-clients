@@ -1286,6 +1286,137 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         UpdateFeaturesOptions? options = null);
 
     /// <summary>
+    /// Fences out every active producer using the given transactional ids — Java's
+    /// <c>fenceProducers(Collection, FenceProducersOptions)</c>. Returns <b>immediately</b>,
+    /// without waiting for the broker.
+    /// </summary>
+    /// <param name="transactionalIds">
+    /// The transactional ids to fence. De-duplicated, because Java keys its result on a map.
+    /// An empty collection is a valid request that succeeds with an empty result, as Java's is.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>One awaitable per id, plus the three derived views. See <see cref="FenceProducersResult"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
+    /// silently.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    FenceProducersResult FenceProducers(
+        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null);
+
+    /// <summary>
+    /// Describes the ongoing transactions of the given transactional ids — Java's
+    /// <c>describeTransactions(Collection, DescribeTransactionsOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="transactionalIds">
+    /// The transactional ids to describe. De-duplicated, because Java keys its result on a map.
+    /// An empty collection is a valid request that succeeds with an empty result, as Java's is.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>One awaitable per id. See <see cref="DescribeTransactionsResult"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
+    /// silently.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeTransactionsResult DescribeTransactions(
+        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null);
+
+    /// <summary>
+    /// Describes the active producers of the given partitions — Java's
+    /// <c>describeProducers(Collection, DescribeProducersOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="partitions">
+    /// The partitions to describe. De-duplicated, because Java keys its result on a map. An
+    /// empty collection is a valid request that succeeds with an empty result, as Java's is.
+    /// </param>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults. <c>BrokerId</c> is
+    /// Java's <c>OptionalInt</c>: unset sends the request to each partition's leader.
+    /// </param>
+    /// <returns>One awaitable per partition. See <see cref="DescribeProducersResult"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="partitions"/> contains a topic partition with a null topic, which the
+    /// ABI would skip silently.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeProducersResult DescribeProducers(
+        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null);
+
+    /// <summary>
+    /// Lists the cluster's transactions, fanning out to every broker — Java's
+    /// <c>listTransactions(ListTransactionsOptions)</c>. Returns <b>immediately</b>, without
+    /// waiting for the brokers.
+    /// </summary>
+    /// <param name="options">
+    /// Request filters, or <see langword="null"/> for Java's defaults (every state, every
+    /// producer, no duration filter, no transactional-id pattern).
+    /// </param>
+    /// <returns>
+    /// The three views over one broker-keyed future. ⚠ A broker that fails is not a call
+    /// failure — see <see cref="ListTransactionsResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>. ⚠ A negative
+    /// <c>options.FilteredDuration</c> is <b>not</b> rejected: it is Java's own "no duration
+    /// filter" default.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ListTransactionsResult ListTransactions(ListTransactionsOptions? options = null);
+
+    /// <summary>
+    /// Aborts one hanging transaction on a partition — Java's
+    /// <c>abortTransaction(AbortTransactionSpec, AbortTransactionOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="spec">Which transaction to abort.</param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>The single awaitable Java publishes. See <see cref="AbortTransactionResult"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="spec"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="spec"/> carries a <c>default(TopicPartition)</c>, whose topic is null.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AbortTransactionResult AbortTransaction(
+        AbortTransactionSpec spec, AbortTransactionOptions? options = null);
+
+    /// <summary>
+    /// Forcefully terminates the ongoing transaction of one transactional id — Java's
+    /// <c>forceTerminateTransaction(String, TerminateTransactionOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="transactionalId">Whose transaction to terminate.</param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// The single awaitable Java publishes — ⚠ as <c>Result()</c>, not <c>All()</c>. See
+    /// <see cref="TerminateTransactionResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    TerminateTransactionResult ForceTerminateTransaction(
+        string transactionalId, TerminateTransactionOptions? options = null);
+
+    /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background
     /// task to finish — Java's <c>close(Duration)</c>. Idempotent: closing an
     /// already-closed client completes without error.
