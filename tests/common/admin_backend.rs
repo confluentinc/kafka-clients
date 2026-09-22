@@ -1926,15 +1926,36 @@ pub fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> 
     if factory.needs_container_bootstrap() {
         ctx.container_bootstrap_servers().to_string()
     } else {
-        ctx.bootstrap_servers().to_string()
+        ctx.protocol_bootstrap_servers().to_string()
     }
+}
+
+/// Inject the selected protocol's security keys into `config`, but only for a
+/// native (in-process) backend. The gRPC/container backends reach the broker
+/// over its PLAINTEXT container listener and must stay plaintext.
+pub fn apply_backend_security<F: AdminBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    config: &mut HashMap<String, String>,
+) {
+    if !factory.needs_container_bootstrap() {
+        ctx.apply_security(config);
+    }
+}
+
+/// [`admin_config`] for the factory's reachable bootstrap, with the selected
+/// protocol's security keys injected for a native backend.
+pub fn admin_config_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
+    let mut config = admin_config(&bootstrap_for(factory, ctx));
+    apply_backend_security(factory, ctx, &mut config);
+    config
 }
 
 /// Build the admin client for the backend under test, panicking with the
 /// backend's name on failure.
 pub async fn admin_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> F::Admin {
     factory
-        .create(admin_config(&bootstrap_for(factory, ctx)))
+        .create(admin_config_for(factory, ctx))
         .await
         .unwrap_or_else(|e| panic!("{} backend: create admin client: {e}", factory.name()))
 }

@@ -94,10 +94,18 @@ blocks:
             # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
             - r2 code-review --verbose --timeout=15m || true
 
-  - name: "Verify Rust (Linux amd64)"
+  - name: "Verify Rust (Linux amd64) — PLAINTEXT"
     # Verification that happens on every new commit, whether created manually
     # or by the translation agent. The agent runs in a detached worktree and
     # pushes new commits when promotions run either manually or automatically.
+    #
+    # `make verify-rust` runs format/lint + the full unit and functional
+    # integration suite (the latter over the default PLAINTEXT protocol) + the
+    # perf tail. The two blocks below re-run only the functional integration
+    # suite over SSL and SASL_SSL, and depend on this one so they run only once
+    # the PLAINTEXT baseline is green (and never race it for Docker). See
+    # tests/common/test_context.rs (INTEGRATION_TEST_PROTOCOL / TestProtocol)
+    # for how one cluster's four listeners are selected per run.
     dependencies: []
     task:
       prologue:
@@ -107,6 +115,36 @@ blocks:
         - name: "verify-rust (Linux amd64)"
           commands:
             - make verify-rust
+
+  - name: "Verify Rust (Linux amd64) — SSL"
+    # Re-runs the functional integration suite with every native client
+    # connecting over the broker's SSL listener (:9096). Attached to the
+    # PLAINTEXT block so it starts only after that baseline passes.
+    dependencies:
+      - "Verify Rust (Linux amd64) — PLAINTEXT"
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "integration-ssl (Linux amd64)"
+          commands:
+            - make test-integration-ssl
+
+  - name: "Verify Rust (Linux amd64) — SASL_SSL (PLAIN)"
+    # Re-runs the functional integration suite with every native client
+    # connecting over the broker's SASL_SSL listener (:9097) using SASL/PLAIN
+    # (admin/admin-secret). Attached to the PLAINTEXT block, like the SSL one.
+    dependencies:
+      - "Verify Rust (Linux amd64) — PLAINTEXT"
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "integration-sasl-ssl (Linux amd64)"
+          commands:
+            - make test-integration-sasl-ssl
 
   - name: "Verify language bindings (Linux amd64)"
     # `dependencies: []` so this starts alongside "Verify Rust" rather than

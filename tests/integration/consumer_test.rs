@@ -92,50 +92,53 @@ impl Deserializer<String> for StringDeserializer {
 
 /// Build a `ConsumerConfig` aligned with the producer integration
 /// tests (PLAINTEXT listener), with KIP-848 group protocol.
-fn make_consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.id".to_string(), group_id.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 /// Variant of `make_consumer_config` without a `group.id` — for the
 /// assignment-only test below.
-fn make_consumer_config_groupless(bootstrap: &str) -> ConsumerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_consumer_config_groupless(ctx: &TestContext) -> ConsumerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer-noassign".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 /// Build a `ProducerConfig` matching the existing producer integration
 /// test pattern (acks=all, short linger/max-block to avoid hangs).
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Produce `count` records with deterministic keys `k0..k{count-1}` and
 /// values `v0..v{count-1}` to the given topic, blocking on each ack so
 /// the consumer is guaranteed to see them. Producer is closed on exit.
-async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usize) {
+async fn produce_deterministic_records(ctx: &TestContext, topic: &str, count: usize) {
     let producer: KafkaProducer<String, String> = KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(StringSerializer),
         Box::new(StringSerializer),
     )
@@ -162,10 +165,10 @@ async fn test_subscribe_and_poll_records() {
     let topic = ctx.topic("subscribe_poll");
     let group_id = ctx.group_id("g1");
 
-    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 10).await;
+    produce_deterministic_records(&ctx, &topic, 10).await;
 
     let mut consumer = KafkaConsumer::new::<String, String>(
-        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
@@ -238,10 +241,10 @@ async fn test_assign_partitions_and_poll() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
     let topic = ctx.topic("assign_poll");
 
-    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 5).await;
+    produce_deterministic_records(&ctx, &topic, 5).await;
 
     let mut consumer = KafkaConsumer::new::<String, String>(
-        make_consumer_config_groupless(ctx.bootstrap_servers()),
+        make_consumer_config_groupless(&ctx),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
@@ -278,7 +281,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
     let topic = ctx.topic("commit_resume");
     let group_id = ctx.group_id("g_resume");
 
-    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 10).await;
+    produce_deterministic_records(&ctx, &topic, 10).await;
 
     // Consumer 1: poll 5 records, commit, close.
     //
@@ -291,8 +294,8 @@ async fn test_commit_sync_then_resume_in_same_group() {
     // mirrors the Java `KafkaConsumerTest` "commit-then-resume"
     // pattern.
     {
-        let consumer1_props = HashMap::from([
-            ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        let mut consumer1_props = HashMap::from([
+            ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
             ("group.id".to_string(), group_id.clone()),
             ("group.protocol".to_string(), "consumer".to_string()),
             ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -300,6 +303,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
             ("enable.auto.commit".to_string(), "false".to_string()),
             ("max.poll.records".to_string(), "5".to_string()),
         ]);
+        ctx.apply_security(&mut consumer1_props);
         let consumer1_config = ConsumerConfig::new(&consumer1_props).expect("invalid test config");
 
         let mut consumer1 = KafkaConsumer::new::<String, String>(
@@ -336,7 +340,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
     // Consumer 2: same group, polls only the remaining records.
     {
         let mut consumer2 = KafkaConsumer::new::<String, String>(
-            make_consumer_config(ctx.bootstrap_servers(), &group_id),
+            make_consumer_config(&ctx, &group_id),
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),
         )
@@ -383,10 +387,10 @@ async fn test_seek_to_beginning_re_reads_records() {
     let topic = ctx.topic("seek_to_beginning");
     let group_id = ctx.group_id("g_seek");
 
-    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 5).await;
+    produce_deterministic_records(&ctx, &topic, 5).await;
 
     let mut consumer = KafkaConsumer::new::<String, String>(
-        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
@@ -493,10 +497,10 @@ async fn test_fetch_partitions_after_failed_listener() {
     let topic = ctx.topic("failed_listener");
     let group_id = ctx.group_id("g_failed_listener");
 
-    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 1).await;
+    produce_deterministic_records(&ctx, &topic, 1).await;
 
     let mut consumer = KafkaConsumer::new::<String, String>(
-        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
@@ -568,10 +572,10 @@ async fn test_fetch_partitions_with_always_failed_listener() {
     let topic = ctx.topic("always_failed_listener");
     let group_id = ctx.group_id("g_always_failed_listener");
 
-    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 1).await;
+    produce_deterministic_records(&ctx, &topic, 1).await;
 
     let mut consumer = KafkaConsumer::new::<String, String>(
-        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        make_consumer_config(&ctx, &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )

@@ -46,17 +46,18 @@ from soakclient import (
     EXIT_TRANSIENT_STARTUP,
     NON_RETRIABLE_POLL_FAILURE_LIMIT,
     PRODUCER_CONFIG_KEYS,
+    FatalStartupError,
     HighWaterMarks,
     LastValueGauges,
     SoakClient,
     SoakMetrics,
     SoakRecord,
+    check_admin_credentials,
     error_code,
     error_is_retriable,
     error_message,
     filter_config,
     jaas_credentials,
-    librdkafka_admin_config,
     parse_config_file,
     route_shared_config,
     stringify_config,
@@ -403,6 +404,9 @@ def test_parse_config_file_rejects_a_line_without_a_separator():
         parse_config_file(io.StringIO("bootstrap.servers\n"))
 
 
+# ---------------------------------------------------------------------------
+# JAAS credential parsing + startup credential check
+# ---------------------------------------------------------------------------
 def test_jaas_credentials_extraction():
     jaas = ("org.apache.kafka.common.security.plain.PlainLoginModule required \n\t"
             'username="API_KEY" \n\tpassword="API_SECRET";')
@@ -433,6 +437,23 @@ def test_jaas_credentials_does_not_match_a_longer_field_name():
     assert jaas_credentials(jaas)[0] == "right"
 
 
+def test_jaas_credentials_does_not_match_a_key_inside_a_quoted_value():
+    # A `username=` sequence embedded in another option's quoted value must not be
+    # picked up (a regex `search` did pick it up). The real `username` option must
+    # win, matching the Rust parser, so the fast-fail cannot be fooled into
+    # passing a config whose real username is absent.
+    jaas = 'PlainLoginModule required password="username=x" username="right";'
+    assert jaas_credentials(jaas) == ("right", "username=x")
+
+
+def test_jaas_credentials_handles_escaped_quote_in_value():
+    # An escaped quote inside a value must not terminate it or misalign later
+    # options; `username` after it still resolves. Value is returned raw (escapes
+    # not expanded), matching the Rust parser.
+    jaas = 'PlainLoginModule required password="a\\"b" username="right";'
+    assert jaas_credentials(jaas) == ("right", 'a\\"b')
+
+
 def test_jaas_credentials_absent():
     assert jaas_credentials("org.apache...PlainLoginModule required;") == (None, None)
 
@@ -443,28 +464,25 @@ def test_jaas_credentials_preserves_special_characters_in_the_secret():
     assert jaas_credentials(jaas) == ("K/EY+1", "a+b/c=d==")
 
 
-def test_librdkafka_admin_config_refuses_sasl_without_credentials():
-    """A SASL config whose credentials cannot be recovered must fail loudly.
-
-    Forwarding no credentials is the one outcome worth refusing: it turns a typo
-    into an opaque broker-side authentication error minutes later.
-    """
-    with pytest.raises(ValueError) as exc:
-        librdkafka_admin_config({
+def test_check_admin_credentials_refuses_sasl_without_credentials():
+    """A SASL config whose credentials cannot be recovered must fail loudly at
+    startup — the one outcome worth refusing turns a typo into an opaque broker
+    auth error minutes later, or a two-week soak against the wrong thing."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
             "bootstrap.servers": "host:9092",
             "security.protocol": "SASL_SSL",
             "sasl.mechanism": "PLAIN",
-            # `sasl.username`/`sasl.password` are not keys of this client, so a
-            # config written that way carries no usable credentials.
+            # `sasl.jaas.config` is absent, so no credentials can be recovered.
         })
     message = str(exc.value)
     assert "sasl.jaas.config" in message
     assert "username and password" in message
 
 
-def test_librdkafka_admin_config_refuses_a_half_parsed_jaas():
-    with pytest.raises(ValueError) as exc:
-        librdkafka_admin_config({
+def test_check_admin_credentials_refuses_a_half_parsed_jaas():
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
             "bootstrap.servers": "host:9092",
             "security.protocol": "SASL_SSL",
             "sasl.mechanism": "PLAIN",
@@ -473,10 +491,73 @@ def test_librdkafka_admin_config_refuses_a_half_parsed_jaas():
     assert "password" in str(exc.value)
 
 
-def test_librdkafka_admin_config_allows_plaintext_without_credentials():
+def test_check_admin_credentials_triggers_on_sasl_mechanism_alone():
+    # SASL implied by sasl.mechanism even when security.protocol is unset.
+    with pytest.raises(FatalStartupError):
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "sasl.mechanism": "PLAIN",
+        })
+
+
+def test_check_admin_credentials_refuses_sasl_mechanism_with_plaintext_protocol():
+    """SASL is configured (mechanism set) but security.protocol=PLAINTEXT, so the
+    client would connect unauthenticated — refuse, even though credentials happen
+    to be present, because the protocol would not use them."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "PLAINTEXT",
+            "sasl.mechanism": "PLAIN",
+            "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
+                                 'PlainLoginModule required username="u" '
+                                 'password="p";'),
+        })
+    message = str(exc.value)
+    assert "not a SASL protocol" in message
+    assert "WITHOUT SASL" in message
+
+
+def test_check_admin_credentials_refuses_sasl_mechanism_without_protocol():
+    """sasl.mechanism set but security.protocol absent: the Rust default is
+    PLAINTEXT, so this too would connect unauthenticated and must be refused."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "sasl.mechanism": "PLAIN",
+        })
+    assert "not a SASL protocol" in str(exc.value)
+
+
+def test_check_admin_credentials_refuses_jaas_creds_with_plaintext_protocol():
+    """Credentials via sasl.jaas.config but security.protocol=PLAINTEXT (no
+    mechanism): still a SASL-configured-but-PLAINTEXT mismatch to refuse."""
+    with pytest.raises(FatalStartupError) as exc:
+        check_admin_credentials({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "PLAINTEXT",
+            "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
+                                 'PlainLoginModule required username="u" '
+                                 'password="p";'),
+        })
+    assert "not a SASL protocol" in str(exc.value)
+
+
+def test_check_admin_credentials_passes_with_valid_jaas():
+    # A jaas with an extractable user+pass is accepted (no exception).
+    check_admin_credentials({
+        "bootstrap.servers": "host:9092",
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
+                             'PlainLoginModule required username="u" '
+                             'password="p";'),
+    })
+
+
+def test_check_admin_credentials_allows_plaintext_without_credentials():
     # No SASL configured: absent credentials are correct, not an error.
-    assert librdkafka_admin_config({"bootstrap.servers": "host:9092"}) == {
-        "bootstrap.servers": "host:9092"}
+    check_admin_credentials({"bootstrap.servers": "host:9092"})
 
 
 # ---------------------------------------------------------------------------
@@ -910,29 +991,6 @@ def test_run_sh_agrees_on_the_fatal_exit_code():
     match = re.search(r'^EXIT_FATAL=(\d+)$', source, re.MULTILINE)
     assert match is not None, "run.sh no longer defines EXIT_FATAL"
     assert int(match.group(1)) == EXIT_FATAL
-
-
-def test_librdkafka_admin_config_translates_jaas():
-    conf = {
-        "bootstrap.servers": "host:9092",
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "PLAIN",
-        "sasl.jaas.config": ('org.apache.kafka.common.security.plain.'
-                             'PlainLoginModule required username="u" '
-                             'password="p";'),
-        "linger.ms": "5",
-    }
-    admin = librdkafka_admin_config(conf)
-    assert admin == {
-        "bootstrap.servers": "host:9092",
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "PLAIN",
-        "sasl.username": "u",
-        "sasl.password": "p",
-    }
-    # librdkafka errors on unknown keys, so Java-only keys must not leak.
-    assert "sasl.jaas.config" not in admin
-    assert "linger.ms" not in admin
 
 
 def test_latency_gauges_record_ms_and_export_seconds(tmp_path):
