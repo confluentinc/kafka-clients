@@ -207,8 +207,6 @@ unreachable (`User:ANONYMOUS` is a super user), and `electLeaders` reaches only
 ## 3. Environment notes
 
 - `docker pull` on the dev machine fails with a credential-helper timeout.
-  Bypass with a scratch `DOCKER_CONFIG` (`{"auths":{}}`, no `currentContext`)
-  **plus** an explicit `DOCKER_HOST=unix:///Users/pratyush/.docker/run/docker.sock`.
   Both base images (`python:3.11-slim`, `debian:trixie-slim`) are now cached.
 - Point `CARGO_TARGET_DIR` outside the repo for container builds, or Linux
   artifacts land in the working tree.
