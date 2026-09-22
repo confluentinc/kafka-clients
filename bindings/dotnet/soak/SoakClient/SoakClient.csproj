@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The .NET soak-test client (M16/P1) — a long-running producer/consumer endurance
+    harness driven through the binding's PUBLIC API, the analog of the Python soak
+    at bindings/python/soak/. It is an operational tool, not a test of the binding's
+    internals: it constructs AsyncKafkaProducer / AsyncKafkaConsumer / KafkaAdminClient
+    exactly as a user would.
+
+    Kept OUT of Confluent.Kafka.sln (PLAN D11), following the grpc-server / PerfV2 /
+    PerfV3 precedent: an operational tool with extra dependencies must not sit on the
+    functional gate's critical path, and `dotnet build $(SOLUTION)` must not restore
+    the OpenTelemetry tree. The CONSEQUENCE, stated so it is not lost: the solution's
+    format-verify pass does not cover this project either, so
+    bindings/dotnet/Makefile's `test-soak-dotnet` formats it BY PATH.
+
+    ⚠ NEW EXTERNAL DEPENDENCY (PLAN D12, root CLAUDE.md §1.2): the three OpenTelemetry
+    packages below. They are scoped to this project and never reach src/Confluent.Kafka.
+    The Python sibling took the equivalent dependency (opentelemetry-distro,
+    opentelemetry-exporter-otlp) for the same reason: real OTLP export from the soak box.
+
+    Two-stage build (CLAUDE.md §7.1): the `cargo build` ffi step must produce the
+    native cdylib FIRST; the ProjectReference to Confluent.Kafka carries it transitively
+    into this exe's output, where default [DllImport] probing resolves it.
+
+    Directory.Build.props (at bindings/dotnet/) auto-applies: #nullable enable,
+    dotnet/runtime code style, TreatWarningsAsErrors, strong-name signing.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Soak</RootNamespace>
+    <AssemblyName>SoakClient</AssemblyName>
+    <!-- Operational tool — never packed, no XML doc file (so no CS1591). -->
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!--
+      CA1031: the soak catches System.Exception broadly on purpose, in a faithful port
+      of soakclient.py's `except Exception` guards — a per-record failure, a failed
+      delivery, a telemetry pipeline that cannot be built, or a loop's own crash are
+      logged and counted, never allowed to take a multi-week run down. This is the soak
+      contract, not a defect (the PerformanceCommon / grpc-server NoWarn precedent).
+    -->
+    <NoWarn>$(NoWarn);CA1031</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.18.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Confluent.Kafka/Confluent.Kafka.csproj" />
+  </ItemGroup>
+
+  <!-- The soak's own types are `internal` (the PerfV3 / grpc-server Exe precedent);
+       the unit-test assembly needs them. Both assemblies are strong-named from the one
+       shared key in Directory.Build.props, so the friend grant carries that key. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="SoakClient.Tests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+  </ItemGroup>
+
+</Project>
