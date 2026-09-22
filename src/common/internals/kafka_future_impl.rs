@@ -25,6 +25,7 @@ use tokio::sync::Notify;
 use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::KafkaFutureOps;
+use crate::common::kafka_future::CompletionCallback;
 
 /// The shared, completable state behind a [`KafkaFutureImpl`].
 ///
@@ -37,10 +38,6 @@ struct Completable<T: Clone + Send + Sync + 'static> {
     inner: Mutex<CompletableInner<T>>,
     notify: Notify,
 }
-
-/// A completion callback registered on a [`Completable`], invoked with a
-/// reference to the result when the future completes.
-type CompletionCallback<T> = Box<dyn FnOnce(&Result<T, Error>) + Send>;
 
 struct CompletableInner<T: Clone + Send + Sync + 'static> {
     result: Option<Result<T, Error>>,
@@ -81,10 +78,10 @@ impl<T: Clone + Send + Sync + 'static> Completable<T> {
     /// Register a callback to run when this future completes. If the future is
     /// already complete, the callback runs immediately on the calling task.
     ///
-    /// Only reached via [`KafkaFutureImpl::when_complete`], whose sole consumer
-    /// (the `AdminApiDriver` `describeCluster().nodes()` chaining) arrives with
-    /// a later admin tier.
-    #[allow(dead_code)]
+    /// Reached via [`KafkaFutureImpl::when_complete`] and via the
+    /// [`KafkaFutureOps::register_completion`] override below (which backs the
+    /// public [`KafkaFuture::when_complete`] used by the admin client's per-key
+    /// async FFI delivery).
     fn on_complete(&self, callback: CompletionCallback<T>) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(result) = guard.result.clone() {
@@ -132,6 +129,16 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
 
     fn is_done(&self) -> bool {
         self.inner.lock().unwrap().result.is_some()
+    }
+
+    /// Fire `callback` eagerly and synchronously when this future completes
+    /// (immediately if already complete), overriding the trait default's
+    /// spawn-a-task behavior. This is what makes the admin client's per-key
+    /// async FFI delivery fire exactly one callback per key the instant that
+    /// key's future is completed — no task hop, no polling, no missed wakeup —
+    /// matching Java's eager `KafkaFutureImpl` completion.
+    fn register_completion(self: Arc<Self>, callback: CompletionCallback<T>) {
+        self.on_complete(callback);
     }
 }
 

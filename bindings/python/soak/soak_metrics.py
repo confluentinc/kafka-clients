@@ -66,11 +66,10 @@ def recreate_topic(config, topic, partitions=-1):
     namespace the Rust producer/consumer use, so no credential translation is
     needed; the Rust admin client parses `sasl.jaas.config` itself.
 
-    Each RPC returns one already-resolved result per key (`create_topics`
-    -> `{name: TopicMetadataAndConfig | KafkaError}`, `delete_topics`
-    -> `{name: None | KafkaError}`): a per-key `KafkaError` (whose `.code` is
-    the wire error code) marks that key's failure, and the whole call raises a
-    `KafkaError` on a call-level failure.
+    Each RPC returns one `concurrent.futures.Future` per key (`create_topics`
+    -> `{name: Future}`, `delete_topics` -> `{name: Future}`): `fut.result()`
+    blocks until it resolves, returning the value on success and raising a
+    `KafkaError` (whose `.code` is the wire error code) on a per-key failure.
 
     The admin binding is imported lazily so this module stays importable (and
     unit-testable) without the Rust bindings, which build on Linux only.
@@ -82,9 +81,8 @@ def recreate_topic(config, topic, partitions=-1):
     # (imported lazily to avoid a soakclient <-> soak_metrics import cycle).
     from soakclient import FatalStartupError, TransientStartupError
 
-    # `Errors` wire codes (src/common/protocol/errors.rs); a per-key value is a
-    # `KafkaError` carrying one of these on a per-key failure, and the whole
-    # call raises a `KafkaError` on a call-level failure.
+    # `Errors` wire codes (src/common/protocol/errors.rs); `.result()` raises a
+    # `KafkaError` carrying one of these on a per-key failure.
     UNKNOWN_TOPIC_OR_PARTITION = 3
     TOPIC_ALREADY_EXISTS = 36
     # Authentication / authorization failures never clear by retrying; every
@@ -122,18 +120,12 @@ def recreate_topic(config, topic, partitions=-1):
     admin = AdminClient(dict(config))
     try:
         print(f">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...", flush=True)
-        try:
-            del_results = admin.delete_topics([topic], timeout=30)
-        except KafkaError as e:
-            # The old admin interface raises a whole-call KafkaError from the
-            # call itself; classify it the same way as a per-key error.
-            _classify("delete", topic, e, UNKNOWN_TOPIC_OR_PARTITION)
-        else:
-            for _t, result in del_results.items():
-                if isinstance(result, KafkaError):
-                    _classify("delete", _t, result, UNKNOWN_TOPIC_OR_PARTITION)
-                else:
-                    print(f">>> deleted '{_t}'", flush=True)
+        for _t, fut in admin.delete_topics([topic], timeout=30).items():
+            try:
+                fut.result()
+                print(f">>> deleted '{_t}'", flush=True)
+            except KafkaError as e:
+                _classify("delete", _t, e, UNKNOWN_TOPIC_OR_PARTITION)
         print(">>> waiting 10s after delete ...", flush=True)
         time.sleep(10)
 
@@ -141,16 +133,12 @@ def recreate_topic(config, topic, partitions=-1):
               f"(partitions={'broker-default' if partitions < 0 else partitions}, "
               f"rf=broker-default) ...", flush=True)
         new_topic = NewTopic(topic, num_partitions=partitions, replication_factor=-1)
-        try:
-            create_results = admin.create_topics([new_topic])
-        except KafkaError as e:
-            _classify("create", topic, e, TOPIC_ALREADY_EXISTS)
-        else:
-            for _t, result in create_results.items():
-                if isinstance(result, KafkaError):
-                    _classify("create", _t, result, TOPIC_ALREADY_EXISTS)
-                else:
-                    print(f">>> created '{_t}'", flush=True)
+        for _t, fut in admin.create_topics([new_topic]).items():
+            try:
+                fut.result()
+                print(f">>> created '{_t}'", flush=True)
+            except KafkaError as e:
+                _classify("create", _t, e, TOPIC_ALREADY_EXISTS)
         print(">>> waiting 10s after create ...", flush=True)
         time.sleep(10)
     finally:
