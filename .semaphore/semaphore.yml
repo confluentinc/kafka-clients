@@ -28,14 +28,18 @@ name: build-test-release
 #   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
 #   2. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
-#      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
+#   3. "Verify language bindings (Linux amd64)" -- verify-c, verify-python, and
+#      verify-dotnet, including the gRPC multilanguage arm (__grpc_c /
+#      __grpc_python / __grpc_dotnet). .NET has a HARD amd64
+#      requirement the other two don't: Grpc.Tools ships an arm64 protoc that
+#      SIGSEGVs during C# codegen, so building it needs an amd64-native agent.
 #   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   5. "Build + unit test bindings (macOS)" -- verify-c (ctest) and
-#      verify-python (pytest test/unit). No container is used, so the block sets
-#      MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
+#   5. "Build + unit test bindings (macOS)" -- verify-c (ctest), verify-python
+#      (pytest test/unit), and verify-dotnet (dotnet test, net8.0 + net10.0).
+#      No container is used, so the block sets MACOS_SKIP_COLIMA=true and
+#      dependencies-macos.sh skips Colima.
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -118,8 +122,8 @@ blocks:
     dependencies: []
     task:
       prologue:
-        # Runs before EACH job in this block; verify-c and verify-python are
-        # separate VMs with their own checkout.
+        # Runs before EACH job in this block; verify-c / verify-python /
+        # verify-dotnet are separate VMs with their own checkout.
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
@@ -129,6 +133,15 @@ blocks:
         - name: "verify-python (Linux amd64)"
           commands:
             - make verify-python
+        - name: "verify-dotnet (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - which dotnet
+            - dotnet --list-runtimes
+            - make verify-dotnet
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
@@ -152,9 +165,10 @@ blocks:
             - make verify-rust-macos-docker
 
   - name: "Build + unit test bindings (macOS)"
-    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. No
-    # container is used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh
-    # to skip Colima. The gRPC multilanguage arm runs on Linux only.
+    # verify-c runs the C ctest suite; verify-python runs pytest test/unit;
+    # verify-dotnet runs dotnet test on net8.0 + net10.0. No container is
+    # used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh to skip
+    # Colima. The gRPC multilanguage arm runs on Linux only.
     dependencies: []
     task:
       agent:
@@ -175,6 +189,15 @@ blocks:
         - name: "verify-python (macOS arm64)"
           commands:
             - make verify-python-macos-docker
+        - name: "verify-dotnet (macOS arm64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - which dotnet
+            - dotnet --list-runtimes
+            - make verify-dotnet-macos-docker
 
 promotions:
   - name: Start translation plan
