@@ -40,15 +40,17 @@
 //! secret key changes nothing, because the gate is the *client's* security
 //! protocol.
 //!
-//! The blocker is therefore client-side and out of scope here
-//! (`PLAN-multilanguage-admin.md` §0): `AdminClientConfig` recognises no
-//! `security.protocol` / `sasl.*` key and `KafkaAdminClient::new`
-//! (`src/admin/kafka_admin_client.rs:283-291`) passes a literal
-//! `SecurityProtocol::Plaintext`, so the admin client cannot authenticate at all.
-//! The fixture *does* already expose SASL_PLAINTEXT and SASL_SSL listeners with a
-//! `PLAIN` user, so the moment the admin client can speak SASL this becomes
-//! reachable with no fixture work — the gap is recorded in
-//! `design/current/status.md:606-609`.
+//! The admin client authenticates over TLS/SASL: `AdminClientConfig` parses
+//! `security.protocol` / `sasl.*` / `ssl.*`, and `KafkaAdminClient::new` selects
+//! the matching channel builder (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL),
+//! which is what allows the other admin tests in this suite to run over the SSL
+//! and SASL_SSL protocol matrix. A delegation token can only be minted over an
+//! authenticated channel, however, and this scenario asserts the rejection, so
+//! it is pinned to PLAINTEXT (via [`admin_for_plaintext`]) rather than following
+//! `INTEGRATION_TEST_PROTOCOL`. PLAINTEXT and 1-way SSL both trip the broker gate
+//! and return code 64, whereas SASL_SSL passes the gate and returns
+//! `DelegationTokenAuthDisabled`; pinning keeps the code-64 assertion identical
+//! across all three runs.
 //!
 //! [`delegation_token_rpcs_are_rejected_on_a_plaintext_connection`] pins that
 //! error path on all four backends. It is not vacuous: it drives the *request*

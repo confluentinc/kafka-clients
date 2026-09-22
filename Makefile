@@ -18,8 +18,11 @@ endif
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
 	test test-rust test-integration test-integration-python test-integration-c \
+	test-integration-python-ssl test-integration-python-sasl-ssl \
+	test-integration-c-ssl test-integration-c-sasl-ssl \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-rust-all-features \
+	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
@@ -273,6 +276,26 @@ test-integration-c:
 		$(MAKE) build-grpc-images-c && \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c; \
 	fi
+
+# ── Protocol-scoped container-backed multilanguage arms ──────────────────
+#
+# The gRPC Python/C arms above default to the PLAINTEXT CONTAINER listener.
+# These variants drive the same arm over the SSL / SASL_SSL CONTAINER
+# listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
+# of the client SSL/SASL_SSL listeners, advertised on the container hostname
+# so a sibling gRPC container can reach them). INTEGRATION_TEST_PROTOCOL is
+# read by TestProtocol::from_env(); the harness injects the matching
+# security.protocol / TLS truststore / SASL settings into the config it
+# forwards verbatim to the gRPC server's client constructor. They inherit the
+# non-Linux SELF-SKIP from the targets they delegate to.
+test-integration-python-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-python
+test-integration-python-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-python
+test-integration-c-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-c
+test-integration-c-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-c
 
 # ── Performance integration tests ────────────────────────────────────────
 #

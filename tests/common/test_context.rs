@@ -143,8 +143,45 @@ impl TestContext {
     /// test harness — the python and c gRPC server containers cannot
     /// reach the broker via the host's `127.0.0.1` loopback, so they
     /// use these container-internal addresses instead.
+    ///
+    /// This is the PLAINTEXT container listener; the SSL and SASL_SSL twins are
+    /// [`container_ssl_bootstrap_servers`](Self::container_ssl_bootstrap_servers)
+    /// and
+    /// [`container_sasl_ssl_bootstrap_servers`](Self::container_sasl_ssl_bootstrap_servers),
+    /// selected per run by
+    /// [`container_protocol_bootstrap_servers`](Self::container_protocol_bootstrap_servers).
     pub fn container_bootstrap_servers(&self) -> &str {
         self.cluster.container_bootstrap_servers()
+    }
+
+    /// Container-network bootstrap servers for the SSL listener.
+    pub fn container_ssl_bootstrap_servers(&self) -> &str {
+        self.cluster.container_ssl_bootstrap_servers()
+    }
+
+    /// Container-network bootstrap servers for the SASL_SSL listener.
+    pub fn container_sasl_ssl_bootstrap_servers(&self) -> &str {
+        self.cluster.container_sasl_ssl_bootstrap_servers()
+    }
+
+    /// Container-network bootstrap servers for the [`protocol`](Self::protocol)
+    /// selected this run: PLAINTEXT -> `:9099`, SSL -> `:9100`,
+    /// SASL_SSL -> `:9101`.
+    ///
+    /// The container-side analogue of
+    /// [`protocol_bootstrap_servers`](Self::protocol_bootstrap_servers): the
+    /// address a gRPC/container backend should use, so it connects over the same
+    /// protocol as the native clients this run. Pair it with
+    /// [`apply_security`](Self::apply_security), which injects the same security
+    /// keys (the CA-cert PEM truststore and, for SASL_SSL, SASL/PLAIN) — those
+    /// travel through the gRPC config map to the containerized client, so no cert
+    /// files need mounting.
+    pub fn container_protocol_bootstrap_servers(&self) -> &str {
+        match self.protocol() {
+            TestProtocol::Plaintext => self.cluster.container_bootstrap_servers(),
+            TestProtocol::Ssl => self.cluster.container_ssl_bootstrap_servers(),
+            TestProtocol::SaslSsl => self.cluster.container_sasl_ssl_bootstrap_servers(),
+        }
     }
 
     /// Docker network name used by this cluster. Sibling gRPC client
@@ -170,10 +207,12 @@ impl TestContext {
     /// SASL_SSL -> `:9097`.
     ///
     /// This is the address native (in-process Rust) clients should use.
-    /// Container-backed gRPC backends must keep calling
-    /// [`container_bootstrap_servers`](Self::container_bootstrap_servers)
-    /// instead — their broker listener is PLAINTEXT-only and unaffected by the
-    /// protocol selector.
+    /// Container-backed gRPC backends must instead call
+    /// [`container_protocol_bootstrap_servers`](Self::container_protocol_bootstrap_servers),
+    /// which selects the protocol-matched CONTAINER listener
+    /// (PLAINTEXT `:9099` / SSL `:9100` / SASL_SSL `:9101`) advertised on the
+    /// broker's container hostname — reachable from a sibling container, unlike
+    /// these host-loopback addresses.
     pub fn protocol_bootstrap_servers(&self) -> &str {
         match self.protocol() {
             TestProtocol::Plaintext => self.cluster.bootstrap_servers(),
