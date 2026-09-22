@@ -19,8 +19,8 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::common::metric::Metric;
-use crate::common::metrics::metrics::MetricsShared;
+use crate::common::Metric;
+use crate::common::metrics::MetricsShared;
 use crate::common::metrics::{
     CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, QuotaViolationError,
     Stat, Time,
@@ -224,22 +224,36 @@ impl Sensor {
         self.recording_level.should_record(self.config.record_level().id())
     }
 
-    /// Record an occurrence; short-hand for `record(1.0)`.
-    pub fn record_occurrence(&self) {
+    // Java's `record` overloads (`Sensor.java:183,195,209`, plus the
+    // `checkQuotas` form deferred below) have an EMPTY parameter-name
+    // intersection, and the no-arg `record()` (`:183`) matches it — so that one
+    // keeps the plain name and the others carry their Rust parameters
+    // (CLAUDE.md §2). Note this is the reverse of the pre-rule shape, where the
+    // one-argument form held the plain name and the no-arg form was called
+    // `record_occurrence`.
+
+    /// Record an occurrence; short-hand for `record_value(1.0)`.
+    ///
+    /// Mirrors Java's `record()` (`Sensor.java:183`).
+    pub fn record(&self) {
         if self.should_record() {
             self.record_internal(1.0, self.time.milliseconds());
         }
     }
 
     /// Record a value with this sensor at the current time.
-    pub fn record(&self, value: f64) {
+    ///
+    /// Mirrors Java's `record(double value)` (`Sensor.java:195`).
+    pub fn record_value(&self, value: f64) {
         if self.should_record() {
             self.record_internal(value, self.time.milliseconds());
         }
     }
 
     /// Record a value at a known time.
-    pub fn record_at(&self, value: f64, time_ms: i64) {
+    ///
+    /// Mirrors Java's `record(double value, long timeMs)` (`Sensor.java:209`).
+    pub fn record_value_time_ms(&self, value: f64, time_ms: i64) {
         if self.should_record() {
             self.record_internal(value, time_ms);
         }
@@ -257,9 +271,9 @@ impl Sensor {
         // Java runs `if (checkQuotas) checkQuotas(timeMs);` here
         // (`Sensor.java:239-240`) and lets the `QuotaViolationException`
         // propagate out of `record`. The check itself IS translated — see
-        // [`check_quotas`](Self::check_quotas) / [`check_quotas_at`] — but it
+        // [`check_quotas`](Self::check_quotas) / [`check_quotas_time_ms`] — but it
         // cannot be called from here yet, and the blocker is the signature, not
-        // the stats: `record` / `record_at` / `record_occurrence` return `()`,
+        // the stats: `record` / `record_value` / `record_value_time_ms` return `()`,
         // so there is nowhere to put the `Result` that CLAUDE.md §9.1/§10.2
         // requires, and Java's `record(value, timeMs, checkQuotas)` overload —
         // the boolean that selects enforcement — has no Rust counterpart for the
@@ -273,16 +287,18 @@ impl Sensor {
         // `check_quotas()` itself, which is what Java's broker-side
         // `ClientQuotaManager` does too.
         for parent in &self.parents {
-            parent.record_at(value, time_ms);
+            parent.record_value_time_ms(value, time_ms);
         }
     }
 
     /// Check whether any metric with a configured quota has been violated, at
     /// the current time.
     ///
-    /// Mirrors Java's `checkQuotas()` (`Sensor.java:247-249`).
+    /// Mirrors Java's `checkQuotas()` (`Sensor.java:247-249`). The group's
+    /// parameter-name intersection is empty and this no-arg form matches it, so
+    /// it keeps the plain name and its sibling is suffixed (CLAUDE.md §2).
     pub fn check_quotas(&self) -> Result<(), Error> {
-        self.check_quotas_at(self.time.milliseconds())
+        self.check_quotas_time_ms(self.time.milliseconds())
     }
 
     /// Check whether any metric with a configured quota has been violated, as of
@@ -300,7 +316,7 @@ impl Sensor {
     ///    `common::metrics::stats::TokenBucket`), so no metric can take that
     ///    branch and only `Quota::acceptable` is consulted. The branch must be
     ///    restored together with `TokenBucket`.
-    pub fn check_quotas_at(&self, time_ms: i64) -> Result<(), Error> {
+    pub fn check_quotas_time_ms(&self, time_ms: i64) -> Result<(), Error> {
         // The metrics are cloned out of the guard rather than measured under it:
         // `measurable_value` calls into user-supplied `Measurable` code, and
         // holding the sensor lock across that would let a measurable that
@@ -326,17 +342,33 @@ impl Sensor {
         Ok(())
     }
 
+    // Java's four `add` overloads (`Sensor.java:279,290,316,328`) all name their
+    // statistic parameter `stat`, so the parameter-name intersection is `{stat}`
+    // — and the overload whose parameters are exactly that is the COMPOUND form
+    // `add(CompoundStat stat)` (`:279`). So the compound form keeps the plain
+    // name `add` and the metric-name forms are suffixed with their Rust
+    // parameters beyond the intersection (CLAUDE.md §2). The two families differ
+    // in type as well as arity, but the derived names are already distinct, so
+    // §2's type tie-break does not fire.
+
     /// Register a metric with this sensor.
+    ///
+    /// Mirrors Java's `add(MetricName metricName, MeasurableStat stat)`
+    /// (`Sensor.java:316`). Suffixed per the note above.
     ///
     /// Returns `Ok(true)` if added, `Ok(false)` if the sensor is expired,
     /// `Err` if the metric name already exists in the registry under a
     /// different sensor (Java's `IllegalArgumentException`).
-    pub fn add(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, Error> {
-        self.add_with_config(metric_name, stat, None)
+    pub fn add_metric_name(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, Error> {
+        self.add_metric_name_config(metric_name, stat, None)
     }
 
     /// Register a metric with this sensor with an optional per-metric config.
-    pub fn add_with_config(
+    ///
+    /// Mirrors Java's
+    /// `add(MetricName metricName, MeasurableStat stat, MetricConfig config)`
+    /// (`Sensor.java:328`).
+    pub fn add_metric_name_config(
         &self,
         metric_name: MetricName,
         stat: Box<dyn MeasurableStat>,
@@ -380,25 +412,24 @@ impl Sensor {
         Ok(true)
     }
 
-    /// Register a compound statistic with this sensor with no config override
-    /// (Java `Sensor.add(CompoundStat)`).
-    pub fn add_compound(&self, stat: Box<dyn CompoundStat>) -> Result<bool, Error> {
-        self.add_compound_with_config(stat, None)
+    /// Register a compound statistic with this sensor with no config override.
+    ///
+    /// Mirrors Java's `add(CompoundStat stat)` (`Sensor.java:279`), whose
+    /// parameter list is exactly the `add` group's intersection `{stat}` — so
+    /// this form keeps the plain name (CLAUDE.md §2).
+    pub fn add(&self, stat: Box<dyn CompoundStat>) -> Result<bool, Error> {
+        self.add_config(stat, None)
     }
 
     /// Register a compound statistic with this sensor which yields multiple
-    /// measurable quantities (like a histogram) (Java
-    /// `Sensor.add(CompoundStat, config)`).
+    /// measurable quantities (like a histogram). Mirrors Java's
+    /// `add(CompoundStat stat, MetricConfig config)` (`Sensor.java:290`).
     ///
     /// The compound stat is recorded once per `record`; each `NamedMeasurable`
     /// child gets its own `KafkaMetric` reading the (constant) `statConfig`. The
     /// child measurables share state with the compound stat, so a record is
     /// reflected in every child's measured value.
-    pub fn add_compound_with_config(
-        &self,
-        stat: Box<dyn CompoundStat>,
-        config: Option<Arc<MetricConfig>>,
-    ) -> Result<bool, Error> {
+    pub fn add_config(&self, stat: Box<dyn CompoundStat>, config: Option<Arc<MetricConfig>>) -> Result<bool, Error> {
         if self.has_expired() {
             return Ok(false);
         }
@@ -493,10 +524,10 @@ impl Stat for CompoundStatBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{CumulativeCount, Value};
-    use crate::common::metrics::time::mock::MockTime;
     use crate::common::metrics::{Quota, SystemTime};
-    use crate::common::protocol::Errors;
     use std::collections::BTreeMap;
 
     fn level_id(level: RecordingLevel) -> i16 {
@@ -504,13 +535,13 @@ mod tests {
     }
 
     fn info_config() -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info))
+        Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Info))
     }
     fn debug_config() -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Debug))
+        Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Debug))
     }
     fn trace_config() -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Trace))
+        Arc::new(MetricConfig::new().set_record_level(RecordingLevel::Trace))
     }
 
     fn standalone(config: Arc<MetricConfig>, expiration_secs: i64, level: RecordingLevel) -> Sensor {
@@ -522,7 +553,7 @@ mod tests {
     }
 
     fn quota_config(quota: Quota) -> Arc<MetricConfig> {
-        Arc::new(MetricConfig::new().with_quota(quota).with_record_level(RecordingLevel::Info))
+        Arc::new(MetricConfig::new().set_quota(quota).set_record_level(RecordingLevel::Info))
     }
 
     /// `SensorTest.testStrictQuotaEnforcement`, reduced to the check itself:
@@ -536,16 +567,16 @@ mod tests {
     fn test_check_quotas_reports_an_upper_bound_violation() {
         let sensor = standalone(quota_config(Quota::upper_bound(5.0)), 60, RecordingLevel::Info);
         let metric_name = name("value", "test-group");
-        assert!(sensor.add(metric_name.clone(), Box::new(Value::new())).unwrap());
+        assert!(sensor.add_metric_name(metric_name.clone(), Box::new(Value::new())).unwrap());
 
         // Under the bound: no violation, in either accessor.
-        sensor.record_at(4.0, 1);
-        assert!(sensor.check_quotas_at(1).is_ok());
+        sensor.record_value_time_ms(4.0, 1);
+        assert!(sensor.check_quotas_time_ms(1).is_ok());
         assert!(sensor.check_quotas().is_ok());
 
         // Over it: Java throws `QuotaViolationException(metric, value, bound)`.
-        sensor.record_at(10.0, 2);
-        let error = sensor.check_quotas_at(2).expect_err("10.0 exceeds the upper bound of 5.0");
+        sensor.record_value_time_ms(10.0, 2);
+        let error = sensor.check_quotas_time_ms(2).expect_err("10.0 exceeds the upper bound of 5.0");
         let Error::QuotaViolation(violation) = &error else {
             panic!("expected a quota violation, got {error:?}");
         };
@@ -574,13 +605,17 @@ mod tests {
     #[test]
     fn test_check_quotas_reports_a_lower_bound_violation() {
         let sensor = standalone(quota_config(Quota::lower_bound(5.0)), 60, RecordingLevel::Info);
-        assert!(sensor.add(name("value", "test-group"), Box::new(Value::new())).unwrap());
+        assert!(
+            sensor
+                .add_metric_name(name("value", "test-group"), Box::new(Value::new()))
+                .unwrap()
+        );
 
-        sensor.record_at(10.0, 1);
-        assert!(sensor.check_quotas_at(1).is_ok());
+        sensor.record_value_time_ms(10.0, 1);
+        assert!(sensor.check_quotas_time_ms(1).is_ok());
 
-        sensor.record_at(1.0, 2);
-        let error = sensor.check_quotas_at(2).expect_err("1.0 is below the lower bound of 5.0");
+        sensor.record_value_time_ms(1.0, 2);
+        let error = sensor.check_quotas_time_ms(2).expect_err("1.0 is below the lower bound of 5.0");
         let Error::QuotaViolation(violation) = &error else {
             panic!("expected a quota violation, got {error:?}");
         };
@@ -593,9 +628,13 @@ mod tests {
     #[test]
     fn test_check_quotas_is_a_no_op_without_a_quota() {
         let sensor = standalone(info_config(), 60, RecordingLevel::Info);
-        assert!(sensor.add(name("value", "test-group"), Box::new(Value::new())).unwrap());
-        sensor.record_at(f64::MAX, 1);
-        assert!(sensor.check_quotas_at(1).is_ok());
+        assert!(
+            sensor
+                .add_metric_name(name("value", "test-group"), Box::new(Value::new()))
+                .unwrap()
+        );
+        sensor.record_value_time_ms(f64::MAX, 1);
+        assert!(sensor.check_quotas_time_ms(1).is_ok());
         assert!(sensor.check_quotas().is_ok());
     }
 
@@ -605,14 +644,18 @@ mod tests {
     #[test]
     fn test_check_quotas_in_multiple_threads() {
         let sensor = Arc::new(standalone(quota_config(Quota::upper_bound(f64::MAX)), 60, RecordingLevel::Info));
-        assert!(sensor.add(name("test-metric", "test-group"), Box::new(Value::new())).unwrap());
+        assert!(
+            sensor
+                .add_metric_name(name("test-metric", "test-group"), Box::new(Value::new()))
+                .unwrap()
+        );
 
         let mut handles = Vec::new();
         for index in 0..10i64 {
             let sensor = Arc::clone(&sensor);
             handles.push(std::thread::spawn(move || {
                 for j in 0..20i64 {
-                    sensor.record_at((j * index) as f64, j);
+                    sensor.record_value_time_ms((j * index) as f64, j);
                     sensor.check_quotas().expect("an upper bound of f64::MAX is never violated");
                 }
             }));
@@ -683,9 +726,11 @@ mod tests {
     fn should_return_presence_of_metrics() {
         let sensor = standalone(Arc::new(MetricConfig::new()), i64::MAX, RecordingLevel::Info);
         assert!(!sensor.has_metrics());
-        sensor.add(name("name1", "group1"), Box::new(CumulativeCount::new())).unwrap();
+        sensor
+            .add_metric_name(name("name1", "group1"), Box::new(CumulativeCount::new()))
+            .unwrap();
         assert!(sensor.has_metrics());
-        sensor.add(name("name2", "group2"), Box::new(Value::new())).unwrap();
+        sensor.add_metric_name(name("name2", "group2"), Box::new(Value::new())).unwrap();
         assert!(sensor.has_metrics());
     }
 
@@ -715,8 +760,12 @@ mod tests {
         .unwrap();
 
         // Before expiry, adds succeed.
-        assert!(sensor.add(name("test1", "grp1"), Box::new(CumulativeCount::new())).unwrap());
-        assert!(sensor.add(name("test2", "grp1"), Box::new(Value::new())).unwrap());
+        assert!(
+            sensor
+                .add_metric_name(name("test1", "grp1"), Box::new(CumulativeCount::new()))
+                .unwrap()
+        );
+        assert!(sensor.add_metric_name(name("test2", "grp1"), Box::new(Value::new())).unwrap());
         assert_eq!(2, sensor.metrics().len());
         assert!(!sensor.has_expired());
 
@@ -726,10 +775,14 @@ mod tests {
 
         // Adds to an expired sensor are a no-op returning `false`; the metric is
         // NOT registered (count unchanged).
-        assert!(!sensor.add(name("test3", "grp1"), Box::new(CumulativeCount::new())).unwrap());
         assert!(
             !sensor
-                .add_with_config(name("test4", "grp1"), Box::new(Value::new()), None)
+                .add_metric_name(name("test3", "grp1"), Box::new(CumulativeCount::new()))
+                .unwrap()
+        );
+        assert!(
+            !sensor
+                .add_metric_name_config(name("test4", "grp1"), Box::new(Value::new()), None)
                 .unwrap()
         );
         assert_eq!(2, sensor.metrics().len());
@@ -737,7 +790,7 @@ mod tests {
         // Java's `record` does not gate on expiry; recording resets
         // `last_record_time`, so the sensor is no longer expired afterwards and
         // the metric count remains unchanged.
-        sensor.record(1.0);
+        sensor.record_value(1.0);
         assert!(!sensor.has_expired());
         assert_eq!(2, sensor.metrics().len());
     }
@@ -745,7 +798,7 @@ mod tests {
     // ---------------------------------------------------------------------
     // Milestone-9 Phase M8 — pure in-process micro-bench (no broker needed).
     //
-    // Quantifies the per-call cost of `Sensor::record_at` on a realistic
+    // Quantifies the per-call cost of `Sensor::record_value_time_ms` on a realistic
     // fetch-shaped sensor (a `Meter` = Rate + CumulativeSum, plus `Avg` +
     // `Max` — the stat shape used by `bytes-fetched` / `fetch-latency` and
     // friends). This is the unit of cost that the consumer pays PER FETCH /
@@ -778,17 +831,15 @@ mod tests {
         )
         .unwrap();
         // Realistic fetch-sensor stat shape: a Meter (rate + total) + Avg + Max.
-        sensor
-            .add_compound(Box::new(Meter::new(name("rate", "g"), name("total", "g"))))
-            .unwrap();
-        sensor.add(name("avg", "g"), Box::new(Avg::new())).unwrap();
-        sensor.add(name("max", "g"), Box::new(Max::new())).unwrap();
+        sensor.add(Box::new(Meter::new(name("rate", "g"), name("total", "g")))).unwrap();
+        sensor.add_metric_name(name("avg", "g"), Box::new(Avg::new())).unwrap();
+        sensor.add_metric_name(name("max", "g"), Box::new(Max::new())).unwrap();
 
         // Warm up (JIT-free, but warms caches / branch predictors and forces
         // the first sample-buffer allocation outside the timed loop).
         let mut now = time.milliseconds();
         for i in 0..10_000 {
-            sensor.record_at(i as f64, now);
+            sensor.record_value_time_ms(i as f64, now);
         }
 
         const ITERS: u64 = 2_000_000;
@@ -799,12 +850,12 @@ mod tests {
             if i % 4096 == 0 {
                 now += 1;
             }
-            sensor.record_at(i as f64, now);
+            sensor.record_value_time_ms(i as f64, now);
         }
         let elapsed = start.elapsed();
         let ns_per_call = elapsed.as_nanos() as f64 / ITERS as f64;
         eprintln!(
-            "M8 micro-bench: Sensor::record_at over Meter+Avg+Max = {ns_per_call:.1} ns/call \
+            "M8 micro-bench: Sensor::record_value_time_ms over Meter+Avg+Max = {ns_per_call:.1} ns/call \
              ({ITERS} iters in {elapsed:?})"
         );
         // Sanity floor: the work is non-trivial (mutex + 3 compound stats), so

@@ -24,7 +24,7 @@ use crate::common::simple_example_message_data::{
     MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct, TestCommonStruct,
 };
 use confluent_kafka::common::Uuid;
-use confluent_kafka::common::protocol::message_util::to_byte_buffer_accessor;
+use confluent_kafka::common::protocol::MessageUtil;
 use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 
 /// Helper: compute hash of a value
@@ -36,7 +36,7 @@ fn hash_of<T: Hash>(val: &T) -> u64 {
 
 /// Deserialize a SimpleExampleMessageData from a buffer at a given version.
 fn deserialize(buf: &[u8], version: i16) -> SimpleExampleMessageData {
-    let mut accessor = ByteBufferAccessor::from_bytes(buf.to_vec());
+    let mut accessor = ByteBufferAccessor::new(buf.to_vec());
     let mut message = SimpleExampleMessageData::new();
     Message::read(&mut message, &mut accessor, version).unwrap();
     message
@@ -45,7 +45,7 @@ fn deserialize(buf: &[u8], version: i16) -> SimpleExampleMessageData {
 /// Serialize a SimpleExampleMessageData to a buffer at a given version,
 /// also verifying that the computed size matches the actual serialized size.
 fn round_trip_serde(message: &mut SimpleExampleMessageData, version: i16) -> SimpleExampleMessageData {
-    let acc = to_byte_buffer_accessor(message, version).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(message, version).unwrap();
     let buf = acc.buffer();
     // Check size calculation
     let mut cache = ObjectSerializationCache::new();
@@ -114,7 +114,7 @@ fn test_should_return_error_if_cannot_write_non_ignorable_field() {
     out.set_process_id(Uuid::random_uuid());
     let cache = ObjectSerializationCache::new();
 
-    let mut buf = ByteBufferAccessor::new(64);
+    let mut buf = ByteBufferAccessor::new(Vec::with_capacity(64));
     let err = Message::write(&mut out, &mut buf, &cache, 0)
         .expect_err("a non-default processId at v0 must be rejected, not dropped");
     assert!(
@@ -126,7 +126,7 @@ fn test_should_return_error_if_cannot_write_non_ignorable_field() {
     // The default value is still writable at v0 — the guard tests the value, not the
     // mere presence of a version-gated field.
     let mut defaulted = SimpleExampleMessageData::new();
-    let mut buf = ByteBufferAccessor::new(64);
+    let mut buf = ByteBufferAccessor::new(Vec::with_capacity(64));
     Message::write(&mut defaulted, &mut buf, &cache, 0).expect("a default processId at v0 is fine");
 }
 
@@ -154,7 +154,7 @@ fn test_should_round_trip_field_through_buffer() {
     out.set_process_id(uuid);
     out.set_zero_copy_byte_buffer(buf.clone());
 
-    let acc = to_byte_buffer_accessor(&mut out, 1).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(&mut out, 1).unwrap();
     let buffer = acc.buffer();
 
     let read_in = deserialize(buffer, 1);
@@ -178,7 +178,7 @@ fn test_should_round_trip_field_through_buffer_with_nullable() {
     out.set_zero_copy_byte_buffer(buf1.clone());
     out.set_nullable_zero_copy_byte_buffer(Some(buf2.clone()));
 
-    let acc = to_byte_buffer_accessor(&mut out, 1).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(&mut out, 1).unwrap();
     let buffer = acc.buffer();
 
     let read_in = deserialize(buffer, 1);
@@ -431,7 +431,7 @@ fn test_my_struct_unsupported_version() {
     let mut cache = ObjectSerializationCache::new();
     let size_result = msg.size(&mut cache, 1);
     if let Ok(size) = size_result {
-        let mut buf = ByteBufferAccessor::new(size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         let result = Message::write(&mut msg, &mut buf, &cache, 1);
         // At version 1, myStruct should not be written (version < 2),
         // so even if non-default, it's silently dropped.

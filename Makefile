@@ -25,7 +25,7 @@ endif
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint clean
+	verify-sandbox format-check lint install-rust-analyzer clean
 
 build: init-hooks build-all
 
@@ -338,6 +338,19 @@ verify-sandbox: build-rust build-c format-check lint test-integration test-c
 init-hooks:
 	@git config core.hooksPath .githooks
 	@chmod +x .githooks/pre-commit
+
+# Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
+# component for the toolchain pinned in rust-toolchain.toml, and, if the
+# `claude` CLI is on PATH, the matching Claude Code LSP plugin. Not a
+# prerequisite of `init`/`build`/`verify` -- not every contributor's editor or
+# workflow needs rust-analyzer, so this is run by hand.
+install-rust-analyzer:
+	rustup component add rust-analyzer
+	@if command -v claude >/dev/null 2>&1; then \
+		claude plugin install rust-analyzer-lsp@claude-plugins-official; \
+	else \
+		echo "claude CLI not found on PATH, skipping Claude Code rust-analyzer-lsp plugin install"; \
+	fi
 
 format-check:
 	cargo xtask format-check

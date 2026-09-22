@@ -17,8 +17,10 @@
 //! Provides runtime schema metadata for Kafka protocol messages, enabling
 //! field lookup by name and schema traversal.
 
-pub mod schema_error;
+mod raw_tagged_field;
+mod schema_error;
 
+pub use raw_tagged_field::RawTaggedField;
 pub use schema_error::SchemaError;
 
 use std::collections::HashMap;

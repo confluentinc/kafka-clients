@@ -19,20 +19,20 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::admin::transaction_description::TransactionDescription;
-use crate::admin::transaction_state::TransactionState;
-use crate::common::protocol::Errors;
+use crate::DescribeTransactionsRequestData;
+use crate::admin::TransactionDescription;
+use crate::admin::TransactionState;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeTransactionsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
-use crate::describe_transactions_request_data::DescribeTransactionsRequestData;
 use crate::{kafka_debug, kafka_warn};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// Handler for `describeTransactions`.
 ///
@@ -242,10 +242,9 @@ impl AdminApiHandler<CoordinatorKey, TransactionDescription> for DescribeTransac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DescribeTransactionsResponseData;
     use crate::common::requests::DescribeTransactionsResponse;
-    use crate::describe_transactions_response_data::{
-        DescribeTransactionsResponseData, TopicData, TransactionState as WireTransactionState,
-    };
+    use crate::describe_transactions_response_data::{TopicData, TransactionState as WireTransactionState};
 
     fn log_context() -> LogContext {
         LogContext::new("[test] ")

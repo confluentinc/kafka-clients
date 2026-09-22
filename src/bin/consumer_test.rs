@@ -25,12 +25,13 @@
 //! cargo run --bin consumer_test
 //! ```
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::{ConsumerConfig, new_consumer};
+use confluent_kafka::consumer::{ConsumerConfig, KafkaConsumer};
 
 const BOOTSTRAP_SERVERS: &str = "localhost:9092";
 const TOPIC: &str = "test-topic-consumer";
@@ -68,18 +69,21 @@ async fn poll_with_timing(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // KIP-848 ("consumer") group protocol — the only protocol this client
     // supports today. The default ("classic") is rejected by the factory.
-    let config = ConsumerConfig::new(vec![BOOTSTRAP_SERVERS.to_string()])
-        .with_client_id("consumer-test")
-        .with_group_id(GROUP_ID)
-        .with_group_protocol("consumer")
-        .with_auto_offset_reset("earliest")
-        // Commit explicitly after each batch instead of on a timer.
-        .with_enable_auto_commit(false);
+    let config = ConsumerConfig::new(&HashMap::from([(
+        "bootstrap.servers".to_string(),
+        BOOTSTRAP_SERVERS.to_string(),
+    )]))?
+    .set_client_id("consumer-test")
+    .set_group_id(GROUP_ID)
+    .set_group_protocol("consumer")
+    .set_auto_offset_reset("earliest")
+    // Commit explicitly after each batch instead of on a timer.
+    .set_enable_auto_commit(false);
 
     let mut consumer =
-        new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
+        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
 
-    consumer.subscribe(vec![TOPIC.to_string()]).await?;
+    consumer.subscribe_with_topics(vec![TOPIC.to_string()]).await?;
     println!("Subscribed to '{TOPIC}' on {BOOTSTRAP_SERVERS}. Press Ctrl-C to stop.");
 
     loop {

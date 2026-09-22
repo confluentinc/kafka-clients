@@ -437,6 +437,23 @@ def test_jaas_credentials_does_not_match_a_longer_field_name():
     assert jaas_credentials(jaas)[0] == "right"
 
 
+def test_jaas_credentials_does_not_match_a_key_inside_a_quoted_value():
+    # A `username=` sequence embedded in another option's quoted value must not be
+    # picked up (a regex `search` did pick it up). The real `username` option must
+    # win, matching the Rust parser, so the fast-fail cannot be fooled into
+    # passing a config whose real username is absent.
+    jaas = 'PlainLoginModule required password="username=x" username="right";'
+    assert jaas_credentials(jaas) == ("right", "username=x")
+
+
+def test_jaas_credentials_handles_escaped_quote_in_value():
+    # An escaped quote inside a value must not terminate it or misalign later
+    # options; `username` after it still resolves. Value is returned raw (escapes
+    # not expanded), matching the Rust parser.
+    jaas = 'PlainLoginModule required password="a\\"b" username="right";'
+    assert jaas_credentials(jaas) == ("right", 'a\\"b')
+
+
 def test_jaas_credentials_absent():
     assert jaas_credentials("org.apache...PlainLoginModule required;") == (None, None)
 

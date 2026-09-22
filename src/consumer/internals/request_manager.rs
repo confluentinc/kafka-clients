@@ -21,7 +21,7 @@
 
 #![allow(dead_code)]
 
-use super::network_client_delegate::PollResult;
+use super::PollResult;
 
 /// The common interface for consumer request managers. Implementations
 /// return a [`PollResult`] from [`Self::poll`] describing either the
@@ -34,11 +34,11 @@ use super::network_client_delegate::PollResult;
 ///   contract: `poll` is documented as non-blocking ("no network I/O
 ///   occurs in this method"). Sync `fn` is the correct surface.
 /// - **`Send + 'static`** so that
-///   [`super::request_managers::RequestManagers::entries`] can return
+///   [`super::RequestManagers::entries`] can return
 ///   `Vec<&mut dyn RequestManager>` and the bg task can own `Box<dyn
 ///   RequestManager>` references.
 /// - **`&mut self`** on the mutating methods — they update the manager's
-///   internal [`super::request_state::RequestState`] (backoff, attempt
+///   internal [`super::RequestState`] (backoff, attempt
 ///   count, etc.).
 pub(crate) trait RequestManager: Send + 'static {
     /// During normal operation, a manager may need to send out network

@@ -87,13 +87,13 @@ impl std::fmt::Display for ClientQuotaFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::quota::client_quota_entity::USER;
+    use crate::common::quota::ClientQuotaEntity;
 
     // New test, no Java original: the four `common/quota` classes have no
     // dedicated Java test files (upstream gap, see DoD #3 note in PLAN.md).
     #[test]
     fn contains_is_not_strict() {
-        let f = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(USER, "u1")]);
+        let f = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1")]);
         assert!(!f.strict());
         assert_eq!(f.components().len(), 1);
     }
@@ -101,7 +101,9 @@ mod tests {
     // New test, no Java original.
     #[test]
     fn contains_only_is_strict() {
-        let f = ClientQuotaFilter::contains_only(vec![ClientQuotaFilterComponent::of_default_entity(USER)]);
+        let f = ClientQuotaFilter::contains_only(vec![ClientQuotaFilterComponent::of_default_entity(
+            ClientQuotaEntity::USER,
+        )]);
         assert!(f.strict());
     }
 
@@ -116,7 +118,7 @@ mod tests {
     // New test, no Java original.
     #[test]
     fn equality_considers_components_and_strict() {
-        let c = vec![ClientQuotaFilterComponent::of_entity(USER, "u1")];
+        let c = vec![ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1")];
         assert_eq!(ClientQuotaFilter::contains(c.clone()), ClientQuotaFilter::contains(c.clone()));
         assert_ne!(ClientQuotaFilter::contains(c.clone()), ClientQuotaFilter::contains_only(c));
     }

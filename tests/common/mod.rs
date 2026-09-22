@@ -26,7 +26,7 @@
 pub use confluent_kafka::common::Uuid;
 pub use confluent_kafka::common::protocol;
 
-#[allow(dead_code, clippy::all)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod test_generated {
     include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
 }

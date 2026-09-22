@@ -524,12 +524,17 @@ namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
 config through verbatim: no `sasl.jaas.config` → `sasl.username`/`sasl.password`
 translation, and no `confluent-kafka` dependency. The security-protocol support
 on the client makes this work against SASL/SSL clusters (Confluent Cloud). Each
-RPC returns one `concurrent.futures.Future` per key (`create_topics()` and
-`delete_topics()` both yield `{name: Future}`), matching Java's per-key
-`KafkaFuture` and librdkafka's dict-of-futures: `fut.result()` blocks until the
-key resolves, returning its value on success and raising a `KafkaError` (with a
-numeric `.code`) on a per-key failure — so the soak's existing
-`for _t, fut in ....items(): fut.result()` loop carries over unchanged.
+multi-key RPC returns one **`concurrent.futures.Future` per key**, matching
+Java's `KafkaFuture` and librdkafka's dict-of-futures: `create_topics()` yields
+`{name: Future}` (each future resolves to a `TopicMetadataAndConfig`) and
+`delete_topics()` yields `{name: Future}` (each future resolves to `None`), and
+the whole call still raises a `KafkaError` on a call-level failure. Calling
+`fut.result()` returns that key's success value or **raises** the key's
+`KafkaError` (whose numeric `.code` is the wire error code) — so the soak
+iterates `for _t, fut in ....items(): try: fut.result() except KafkaError: ...`,
+classifying each key independently (see `_classify` in `soak_metrics.py`, which
+tolerates the benign `TOPIC_ALREADY_EXISTS` / `UNKNOWN_TOPIC_OR_PARTITION`
+codes and treats the rest as fatal/transient).
 
 ## Threading
 

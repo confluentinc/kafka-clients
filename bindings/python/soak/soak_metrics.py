@@ -76,11 +76,46 @@ def recreate_topic(config, topic, partitions=-1):
     """
     from admin import AdminClient, NewTopic
     from producer import KafkaError
+    # Reuse the startup fatal/transient classification so an ACL / auth failure
+    # here surfaces as EXIT_FATAL rather than looping under the supervisor
+    # (imported lazily to avoid a soakclient <-> soak_metrics import cycle).
+    from soakclient import FatalStartupError, TransientStartupError
 
     # `Errors` wire codes (src/common/protocol/errors.rs); `.result()` raises a
     # `KafkaError` carrying one of these on a per-key failure.
     UNKNOWN_TOPIC_OR_PARTITION = 3
     TOPIC_ALREADY_EXISTS = 36
+    # Authentication / authorization failures never clear by retrying; every
+    # other error (broker unreachable, metadata timeout) might. Mirrors
+    # `SoakClient._create_topic`.
+    auth_codes = {
+        29,   # TOPIC_AUTHORIZATION_FAILED
+        30,   # GROUP_AUTHORIZATION_FAILED
+        31,   # CLUSTER_AUTHORIZATION_FAILED
+        33,   # UNSUPPORTED_SASL_MECHANISM
+        34,   # ILLEGAL_SASL_STATE
+        58,   # SASL_AUTHENTICATION_FAILED
+    }
+
+    def _classify(op, _topic, ex, benign_code):
+        """Turn one topic's `KafkaError` (per-key value or whole-call) into an
+        `ok` log, a `FatalStartupError`, or a `TransientStartupError`, exactly as
+        `_create_topic` does. `benign_code` is the wire code that means "already
+        in the desired state" for this op (topic absent on delete / present on
+        create)."""
+        code = ex.code
+        if code == benign_code:
+            benign = "did not exist" if op == "delete" else "already exists"
+            print(f">>> '{_topic}' {benign} (ok)", flush=True)
+        elif code in auth_codes:
+            raise FatalStartupError(
+                "authentication/authorization failed on {} of topic {!r}: {}. "
+                "Check sasl.jaas.config (username/password) and the API key's "
+                "ACLs. Restarting will not fix this.".format(op, _topic, ex.message)) from ex
+        else:
+            raise TransientStartupError(
+                "could not {} topic {!r}: {}. If the cluster is reachable this "
+                "may clear on retry.".format(op, _topic, ex.message)) from ex
 
     admin = AdminClient(dict(config))
     try:
@@ -90,10 +125,7 @@ def recreate_topic(config, topic, partitions=-1):
                 fut.result()
                 print(f">>> deleted '{_t}'", flush=True)
             except KafkaError as e:
-                if e.code == UNKNOWN_TOPIC_OR_PARTITION:
-                    print(f">>> '{_t}' did not exist (ok)", flush=True)
-                else:
-                    raise
+                _classify("delete", _t, e, UNKNOWN_TOPIC_OR_PARTITION)
         print(">>> waiting 10s after delete ...", flush=True)
         time.sleep(10)
 
@@ -106,10 +138,7 @@ def recreate_topic(config, topic, partitions=-1):
                 fut.result()
                 print(f">>> created '{_t}'", flush=True)
             except KafkaError as e:
-                if e.code == TOPIC_ALREADY_EXISTS:
-                    print(f">>> '{_t}' already exists (ok)", flush=True)
-                else:
-                    raise
+                _classify("create", _t, e, TOPIC_ALREADY_EXISTS)
         print(">>> waiting 10s after create ...", flush=True)
         time.sleep(10)
     finally:

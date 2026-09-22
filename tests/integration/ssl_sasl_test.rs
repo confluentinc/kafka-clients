@@ -26,12 +26,18 @@ use std::net::SocketAddr;
 use confluent_kafka::common::config::{SaslConfig, SslConfig};
 use confluent_kafka::common::network::NetworkSend;
 use confluent_kafka::common::network::SaslChannelBuilder;
+use confluent_kafka::common::network::Selectable;
+use confluent_kafka::common::network::Selector;
 use confluent_kafka::common::network::SslChannelBuilder;
-use confluent_kafka::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
-use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
+
+/// Java writes `Selectable.USE_DEFAULT_BUFFER_SIZE`; Rust cannot name a trait
+/// constant without a `Self` type (E0790), so bind it once per file.
+const USE_DEFAULT_BUFFER_SIZE: i32 = <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
-use confluent_kafka::common::requests::{ApiVersionsRequestBuilder, RequestBuilder, RequestHeader};
+use confluent_kafka::common::requests::{
+    ApiVersionsRequestBuilder, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder,
+};
 use confluent_kafka::common::security::SecurityProtocol;
 use confluent_kafka::common::security::SslFactory;
 use confluent_kafka::common::utils::LogContext;
@@ -66,7 +72,7 @@ fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
     };
     let ssl_factory = SslFactory::new(&ssl_config).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
-    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder)
+    Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
@@ -86,7 +92,7 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
         LogContext::empty(),
     )
     .unwrap();
-    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
+    Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
@@ -112,7 +118,7 @@ fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -
         LogContext::empty(),
     )
     .unwrap();
-    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
+    Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
 }
 
 /// Helper: poll until the channel is fully ready (transport + auth complete).
@@ -168,8 +174,16 @@ fn build_request_send(
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header =
-        RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
+    let header = RequestHeader::with_options(
+        RequestHeaderOptionsBuilder::new()
+            .set_request_api_key(api_key)
+            .set_request_version(version)
+            .set_client_id(client_id)
+            .set_correlation_id(correlation_id)
+            .build()
+            .unwrap(),
+    )
+    .expect("Failed to create request header");
 
     let send = request.to_send(&header).expect("Failed to serialize request");
     let network_send = NetworkSend::new(destination, Box::new(send));
@@ -179,7 +193,7 @@ fn build_request_send(
 
 /// Helper: parse a response from a completed receive.
 fn parse_response(payload: &[u8], request_header: &RequestHeader) -> ConcreteResponse {
-    let mut buffer = ByteBufferAccessor::from_bytes(payload.to_vec());
+    let mut buffer = ByteBufferAccessor::new(payload.to_vec());
     ConcreteResponse::parse_response(&mut buffer, request_header).expect("Failed to parse response")
 }
 
@@ -322,7 +336,7 @@ async fn test_sasl_unsupported_mechanism() {
         LogContext::empty(),
     )
     .unwrap();
-    let mut selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
+    let mut selector = Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
     let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector

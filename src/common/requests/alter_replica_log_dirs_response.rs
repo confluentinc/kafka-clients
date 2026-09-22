@@ -22,10 +22,10 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::alter_replica_log_dirs_response_data::AlterReplicaLogDirsResponseData;
+use crate::AlterReplicaLogDirsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An AlterReplicaLogDirs response.
 ///
@@ -72,7 +72,7 @@ impl AlterReplicaLogDirsResponse {
         let mut counts = HashMap::new();
         for topic_result in &self.data.results {
             for partition_result in &topic_result.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition_result.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition_result.error_code));
             }
         }
         counts

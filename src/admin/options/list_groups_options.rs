@@ -16,10 +16,10 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.ListGroupsOptions`.
 
+use crate::consumer::internals::ConsumerProtocol;
 use std::collections::HashSet;
 
 use crate::common::{GroupState, GroupType};
-use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
 
 /// Options for `Admin::list_groups`.
 ///
@@ -45,7 +45,7 @@ impl ListGroupsOptions {
     pub fn for_consumer_groups() -> Self {
         Self::new()
             .with_types(HashSet::from([GroupType::Classic, GroupType::Consumer]))
-            .with_protocol_types(HashSet::from([String::new(), PROTOCOL_TYPE.to_string()]))
+            .with_protocol_types(HashSet::from([String::new(), ConsumerProtocol::PROTOCOL_TYPE.to_string()]))
     }
 
     /// Options selecting only share groups.
@@ -85,7 +85,7 @@ impl ListGroupsOptions {
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
@@ -106,7 +106,7 @@ impl ListGroupsOptions {
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -123,16 +123,19 @@ mod tests {
         assert_eq!(*options.types(), HashSet::from([GroupType::Consumer, GroupType::Classic]));
         assert_eq!(
             *options.protocol_types(),
-            HashSet::from([String::new(), PROTOCOL_TYPE.to_string()])
+            HashSet::from([String::new(), ConsumerProtocol::PROTOCOL_TYPE.to_string()])
         );
 
         let options = options
             .in_group_states(HashSet::from([GroupState::Stable]))
             .with_types(HashSet::from([GroupType::Consumer]))
-            .with_protocol_types(HashSet::from([PROTOCOL_TYPE.to_string()]));
+            .with_protocol_types(HashSet::from([ConsumerProtocol::PROTOCOL_TYPE.to_string()]));
         assert_eq!(*options.group_states(), HashSet::from([GroupState::Stable]));
         assert_eq!(*options.types(), HashSet::from([GroupType::Consumer]));
-        assert_eq!(*options.protocol_types(), HashSet::from([PROTOCOL_TYPE.to_string()]));
+        assert_eq!(
+            *options.protocol_types(),
+            HashSet::from([ConsumerProtocol::PROTOCOL_TYPE.to_string()])
+        );
     }
 
     /// Translated from `ListGroupsOptionsTest.testForShareGroups`.

@@ -68,9 +68,9 @@ impl Measurable for Max {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::Time;
-    use crate::common::metrics::internals::metrics_utils::TimeUnit;
-    use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::internals::TimeUnit;
 
     #[test]
     fn max_of_records() {
@@ -89,8 +89,8 @@ mod tests {
         let window_ms = 100i64;
         let samples = 2;
         let config = MetricConfig::new()
-            .with_time_window(window_ms, TimeUnit::Milliseconds)
-            .with_samples(samples);
+            .set_time_window(window_ms, TimeUnit::Milliseconds)
+            .set_samples(samples);
         let time = MockTime::new();
         max.record(&config, 50.0, time.milliseconds());
         time.sleep(samples as i64 * window_ms);

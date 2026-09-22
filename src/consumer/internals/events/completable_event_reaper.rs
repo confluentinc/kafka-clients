@@ -16,14 +16,14 @@
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper`.
-//! Tracks [`super::completable_event::CompletableEventErasedHandle`]s and
+//! Tracks [`super::CompletableEventErasedHandle`]s and
 //! expires any whose deadline has passed, by failing their inner oneshot
 //! sender with [`Error::timeout`].
 //!
 //! Java uses `List<CompletableEvent<?>>` with explicit iterator-remove;
 //! Rust uses `Vec<Arc<dyn CompletableEventErasedHandle>>` with
 //! [`Vec::retain`]. Identity comparison goes via
-//! [`super::completable_event::CompletableEventErasedHandle::inner_id`]
+//! [`super::CompletableEventErasedHandle::inner_id`]
 //! (the stable pointer to the underlying `HandleInner`) to preserve
 //! Java's `List.contains(event)` reference-equality semantics across
 //! repeated `CompletableEventHandle::erased()` calls.
@@ -34,7 +34,7 @@ use log::{debug, trace};
 
 use crate::common::Error;
 
-use super::completable_event::CompletableEventErasedHandle;
+use super::CompletableEventErasedHandle;
 
 /// Tracks [`CompletableEventErasedHandle`]s and expires deadline-exceeded
 /// events.
@@ -232,7 +232,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::completable_event::make_completable_event;
+    use super::super::CompletableEvent;
     use super::*;
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn expired_event_is_failed_and_removed() {
         let mut reaper = CompletableEventReaper::new();
-        let (_handle, mut rx, erased) = make_completable_event::<()>(100);
+        let (_handle, mut rx, erased) = CompletableEvent::make_completable_event::<()>(100);
         reaper.add(erased);
 
         // Not yet past deadline.
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn completed_event_is_removed_but_not_counted_as_expired() {
         let mut reaper = CompletableEventReaper::new();
-        let (handle, mut rx, erased) = make_completable_event::<()>(100);
+        let (handle, mut rx, erased) = CompletableEvent::make_completable_event::<()>(100);
         reaper.add(erased);
 
         // Complete it normally.
@@ -283,10 +283,10 @@ mod tests {
     #[test]
     fn reap_on_close_expires_tracked_and_extra() {
         let mut reaper = CompletableEventReaper::new();
-        let (_h1, mut rx1, erased1) = make_completable_event::<()>(1_000);
+        let (_h1, mut rx1, erased1) = CompletableEvent::make_completable_event::<()>(1_000);
         reaper.add(erased1);
 
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(1_000);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(1_000);
         // erased2 is NOT added to the reaper — only passed in.
         let mut extras = vec![erased2];
 
@@ -302,11 +302,11 @@ mod tests {
     #[test]
     fn contains_uses_ptr_eq() {
         let mut reaper = CompletableEventReaper::new();
-        let (_h, _rx, erased) = make_completable_event::<()>(0);
+        let (_h, _rx, erased) = CompletableEvent::make_completable_event::<()>(0);
         reaper.add(Arc::clone(&erased));
         assert!(reaper.contains(&erased));
 
-        let (_h2, _rx2, erased2) = make_completable_event::<()>(0);
+        let (_h2, _rx2, erased2) = CompletableEvent::make_completable_event::<()>(0);
         assert!(!reaper.contains(&erased2));
     }
 
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn contains_works_across_erased_recreation() {
         let mut reaper = CompletableEventReaper::new();
-        let (handle, _rx) = super::super::completable_event::CompletableEventHandle::<()>::new(0);
+        let (handle, _rx) = super::super::CompletableEventHandle::<()>::new(0);
         let erased_a = handle.erased();
         reaper.add(erased_a);
 
@@ -336,8 +336,8 @@ mod tests {
     #[test]
     fn completed_and_expired() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, _rx1, erased1) = make_completable_event::<()>(100);
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(100);
+        let (h1, _rx1, erased1) = CompletableEvent::make_completable_event::<()>(100);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(100);
         reaper.add(erased1);
         reaper.add(erased2);
 
@@ -364,8 +364,8 @@ mod tests {
     #[test]
     fn reap_on_close_handles_queue_only_events() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, mut rx1, erased1) = make_completable_event::<()>(1_000);
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(1_000);
+        let (h1, mut rx1, erased1) = CompletableEvent::make_completable_event::<()>(1_000);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(1_000);
 
         // Complete h1 in advance.
         assert!(h1.complete(()));
@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn reap_on_close_handles_tracked_only_events() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, mut rx1, erased1) = make_completable_event::<()>(1_000);
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(1_000);
+        let (h1, mut rx1, erased1) = CompletableEvent::make_completable_event::<()>(1_000);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(1_000);
         reaper.add(erased1);
         reaper.add(erased2);
 
@@ -414,8 +414,8 @@ mod tests {
     #[test]
     fn uncompleted_events_filters_done() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, _rx1, erased1) = make_completable_event::<()>(0);
-        let (_h2, _rx2, erased2) = make_completable_event::<()>(0);
+        let (h1, _rx1, erased1) = CompletableEvent::make_completable_event::<()>(0);
+        let (_h2, _rx2, erased2) = CompletableEvent::make_completable_event::<()>(0);
         reaper.add(erased1);
         reaper.add(erased2);
 

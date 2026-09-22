@@ -21,14 +21,15 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::common::Error;
-use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
+use crate::common::KafkaFuture;
+use crate::common::internals::KafkaFutureImpl;
 
 /// The broker id used for keys that have no cached mapping.
 ///
 /// Corresponds to `AdminApiFuture.UNKNOWN_BROKER_ID`.
 pub(crate) const UNKNOWN_BROKER_ID: i32 = -1;
 
-/// The future bundle that the [`AdminApiDriver`](super::admin_api_driver::AdminApiDriver)
+/// The future bundle that the [`AdminApiDriver`](super::AdminApiDriver)
 /// completes as keys are resolved.
 ///
 /// Corresponds to `AdminApiFuture<K, V>`. Kept a plain (non-`async`) trait per
@@ -81,7 +82,7 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
 ///
 /// Corresponds to `AdminApiFuture.SimpleAdminApiFuture` (created via
 /// `AdminApiFuture.forKeys(keys)`). Used by the group-describe handlers, which
-/// key their futures by [`CoordinatorKey`](super::coordinator_key::CoordinatorKey).
+/// key their futures by [`CoordinatorKey`](super::CoordinatorKey).
 pub(crate) struct SimpleAdminApiFuture<K, V>
 where
     K: Clone + Eq + Hash,

@@ -17,9 +17,9 @@
 
 use std::sync::Arc;
 
-use crate::common::metrics::internals::metrics_utils::{TimeUnit, convert};
+use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
 use crate::common::metrics::stats::SampledStat;
-use crate::common::metrics::stats::windowed_sum::WindowedSum;
+use crate::common::metrics::stats::WindowedSum;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// The rate of the given quantity. By default this is the total observed over a
@@ -135,16 +135,16 @@ impl Stat for Rate {
 impl Measurable for Rate {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         let value = self.stat.measure(config, now);
-        value / convert(self.window_size(config, now), self.unit)
+        value / MetricsUtils::convert(self.window_size(config, now), self.unit)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::Time;
-    use crate::common::metrics::internals::metrics_utils::convert;
-    use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::internals::MetricsUtils;
 
     const EPS: f64 = 0.000001;
 
@@ -154,8 +154,8 @@ mod tests {
         // {numSample, sampleWindowSizeSec}
         for (num_sample, sample_window_size_sec) in [(1, 1), (1, 11), (11, 1), (11, 11)] {
             let config = MetricConfig::new()
-                .with_samples(num_sample)
-                .with_time_window(sample_window_size_sec, TimeUnit::Seconds);
+                .set_samples(num_sample)
+                .set_time_window(sample_window_size_sec, TimeUnit::Seconds);
             let rate = Rate::new();
             let time = MockTime::new();
             let sample_value = 50.0;
@@ -170,7 +170,7 @@ mod tests {
 
             // The rate calculation assumes N-1 prior samples of value 0.
             let dummy_prior_samples_assumed = (num_sample - 1) as f64;
-            let window_size = convert(measurement_time, TimeUnit::Seconds)
+            let window_size = MetricsUtils::convert(measurement_time, TimeUnit::Seconds)
                 + (dummy_prior_samples_assumed * sample_window_size_sec as f64);
             let expected_rate_per_sec = sample_value / window_size;
             assert!(
@@ -183,7 +183,7 @@ mod tests {
     // RateTest.testRateIsConsistentAfterTheFirstWindow
     #[test]
     fn test_rate_is_consistent_after_the_first_window() {
-        let config = MetricConfig::new().with_time_window(1, TimeUnit::Seconds).with_samples(2);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let rate = Rate::new();
         let time = MockTime::new();
         let steps = [0, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100];

@@ -293,7 +293,7 @@ let network_thread_close = NetworkThreadCloseHandle::new(
 ```
 
 Finally, build the `AsyncKafkaConsumerComponents` struct and call the
-existing `Self::new_with_components(...)`. This preserves the
+existing `Self::with_components(...)`. This preserves the
 Phase-11 test seam exactly — no duplicated init code. The
 `new_with_components` body already does the `ConsumerStateNotifier`
 creation; we just additionally register it onto the membership

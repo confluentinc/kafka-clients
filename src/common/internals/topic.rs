@@ -17,31 +17,6 @@
 //!
 //! Corresponds to `org.apache.kafka.common.internals.Topic`.
 
-/// Consumer offsets internal topic name.
-pub const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
-
-/// Transaction state internal topic name.
-pub const TRANSACTION_STATE_TOPIC_NAME: &str = "__transaction_state";
-
-/// Share group state internal topic name.
-pub const SHARE_GROUP_STATE_TOPIC_NAME: &str = "__share_group_state";
-
-/// Cluster metadata internal topic name.
-pub const CLUSTER_METADATA_TOPIC_NAME: &str = "__cluster_metadata";
-
-/// Legal characters for Kafka topic names.
-pub const LEGAL_CHARS: &str = "[a-zA-Z0-9._-]";
-
-/// Maximum topic name length.
-const MAX_NAME_LENGTH: usize = 249;
-
-/// Set of internal topic names.
-const INTERNAL_TOPICS: &[&str] = &[
-    GROUP_METADATA_TOPIC_NAME,
-    TRANSACTION_STATE_TOPIC_NAME,
-    SHARE_GROUP_STATE_TOPIC_NAME,
-];
-
 /// Topic name utilities.
 ///
 /// This is a namespace for topic-related utility functions, matching the Java
@@ -49,9 +24,34 @@ const INTERNAL_TOPICS: &[&str] = &[
 pub struct Topic;
 
 impl Topic {
+    /// Consumer offsets internal topic name.
+    pub const GROUP_METADATA_TOPIC_NAME: &'static str = "__consumer_offsets";
+
+    /// Transaction state internal topic name.
+    pub const TRANSACTION_STATE_TOPIC_NAME: &'static str = "__transaction_state";
+
+    /// Share group state internal topic name.
+    pub const SHARE_GROUP_STATE_TOPIC_NAME: &'static str = "__share_group_state";
+
+    /// Cluster metadata internal topic name.
+    pub const CLUSTER_METADATA_TOPIC_NAME: &'static str = "__cluster_metadata";
+
+    /// Legal characters for Kafka topic names.
+    pub const LEGAL_CHARS: &'static str = "[a-zA-Z0-9._-]";
+
+    /// Maximum topic name length.
+    const MAX_NAME_LENGTH: usize = 249;
+
+    /// Set of internal topic names.
+    const INTERNAL_TOPICS: &'static [&'static str] = &[
+        Self::GROUP_METADATA_TOPIC_NAME,
+        Self::TRANSACTION_STATE_TOPIC_NAME,
+        Self::SHARE_GROUP_STATE_TOPIC_NAME,
+    ];
+
     /// Returns `true` if the topic is an internal Kafka topic.
     pub fn is_internal(topic: &str) -> bool {
-        INTERNAL_TOPICS.contains(&topic)
+        Self::INTERNAL_TOPICS.contains(&topic)
     }
 
     /// Validates a topic name, returning an error message if invalid.
@@ -65,10 +65,11 @@ impl Topic {
         if name == ".." {
             return Some("'..' is not allowed".to_string());
         }
-        if name.len() > MAX_NAME_LENGTH {
+        if name.len() > Self::MAX_NAME_LENGTH {
             return Some(format!(
                 "the length of '{}' is longer than the max allowed length {}",
-                name, MAX_NAME_LENGTH
+                name,
+                Self::MAX_NAME_LENGTH
             ));
         }
         if !Self::contains_valid_pattern(name) {
@@ -114,11 +115,11 @@ mod tests {
 
     #[test]
     fn test_is_internal() {
-        assert!(Topic::is_internal(GROUP_METADATA_TOPIC_NAME));
-        assert!(Topic::is_internal(TRANSACTION_STATE_TOPIC_NAME));
-        assert!(Topic::is_internal(SHARE_GROUP_STATE_TOPIC_NAME));
+        assert!(Topic::is_internal(Topic::GROUP_METADATA_TOPIC_NAME));
+        assert!(Topic::is_internal(Topic::TRANSACTION_STATE_TOPIC_NAME));
+        assert!(Topic::is_internal(Topic::SHARE_GROUP_STATE_TOPIC_NAME));
         assert!(!Topic::is_internal("my-topic"));
-        assert!(!Topic::is_internal(CLUSTER_METADATA_TOPIC_NAME));
+        assert!(!Topic::is_internal(Topic::CLUSTER_METADATA_TOPIC_NAME));
     }
 
     #[test]
