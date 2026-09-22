@@ -3493,4 +3493,325 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AlterClientQuotasResultDestroy(IntPtr result);
+
+    // ====================================================================================
+    // M15/P7 — SCRAM credentials, delegation tokens, features.
+    // ====================================================================================
+
+    // ---- kafka_common_KafkaPrincipal_t / TokenInformation_t / DelegationToken_t ----
+    // Every accessor below is `const` → BORROWED: never destroyed, and dead once the
+    // owning *Result_t root is destroyed.
+
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaPrincipal_principal_type", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr KafkaPrincipalPrincipalType(IntPtr principal);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaPrincipal_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr KafkaPrincipalName(IntPtr principal);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaPrincipal_token_authenticated", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool KafkaPrincipalTokenAuthenticated(IntPtr principal);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_token_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TokenInformationTokenId(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_owner", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TokenInformationOwner(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_token_requester", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TokenInformationTokenRequester(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_renewer_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TokenInformationRenewerCount(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_get_renewer", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TokenInformationGetRenewer(IntPtr info, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_issue_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long TokenInformationIssueTimestamp(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_expiry_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long TokenInformationExpiryTimestamp(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_TokenInformation_max_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long TokenInformationMaxTimestamp(IntPtr info);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_DelegationToken_token_info", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DelegationTokenTokenInfo(IntPtr token);
+
+    /// <summary>
+    /// <c>kafka_common_DelegationToken_hmac</c> — the raw MAC bytes, <b>borrowed</b>, with the
+    /// length written to <paramref name="outLength"/>.
+    /// <para>
+    /// ⚠⚠ <b>LENGTH-DELIMITED, the first such slice on the admin surface</b>
+    /// (<c>confluent_kafka.h:8740-8746</c>): the bytes are <b>not</b> NUL-terminated and may
+    /// contain NUL, so <paramref name="outLength"/> is the only way to know how many there
+    /// are. A NUL-scan truncates roughly one MAC in eight at its first zero byte, and the
+    /// truncation round-trips into a broker-side rejection rather than a local failure.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_DelegationToken_hmac", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DelegationTokenHmac(IntPtr token, out int outLength);
+
+    // ---- M15/P7: describeUserScramCredentials (result shape 1, nested inline values) ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_user_scram_credentials_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeUserScramCredentialsAsync(
+        IntPtr admin,
+        IntPtr[] users,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeUserScramCredentialsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeUserScramCredentialsResultCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_user", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultGetUser(IntPtr result, int index);
+
+    /// <summary>
+    /// That user's error, or null on success. ⚠ <b>BORROWED</b> — read with
+    /// <see cref="KafkaException.FromBorrowedHandle"/>, never <c>FromHandle</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultGetError(IntPtr result, int index);
+
+    /// <summary>
+    /// The number of credential infos for user <paramref name="index"/> — <b>the bound of the
+    /// inner walk</b>, which is never the outer <c>count</c>. Zero for a failed user.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_credential_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeUserScramCredentialsResultGetCredentialCount(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeUserScramCredentialsResultGetCredentialMechanism(
+        IntPtr result, int index, int credentialIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeUserScramCredentialsResultGetCredentialIterations(
+        IntPtr result, int index, int credentialIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeUserScramCredentialsResultDestroy(IntPtr result);
+
+    // ---- M15/P7: alterUserScramCredentials (result shape 2; ten parallel input arrays) ----
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_async</c> — ten parallel
+    /// arrays, row <c>i</c> describing one alteration.
+    /// <para>
+    /// ⚠ <paramref name="isDeletions"/> and <paramref name="hasSalts"/> are <c>const bool *</c>
+    /// and cross as pinned <c>byte[]</c>s of 0/1 behind an <see cref="IntPtr"/>: a
+    /// <c>bool[]</c> parameter marshals as 4-byte Win32 <c>BOOL</c>s by default.
+    /// </para>
+    /// <para>
+    /// ⚠ <paramref name="hasSalts"/> is an <b>explicit discriminant</b>: cleared selects
+    /// Java's three-argument upsertion constructor, which <em>generates</em> a random salt;
+    /// set takes the supplied salt verbatim, including a zero-length one
+    /// (<c>confluent_kafka.h:8865-8872</c>). A length of 0 cannot carry that distinction.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_user_scram_credentials_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientAlterUserScramCredentialsAsync(
+        IntPtr admin,
+        IntPtr[] users,
+        IntPtr isDeletions,
+        int[] mechanisms,
+        int[] iterations,
+        IntPtr[] passwords,
+        int[] passwordLens,
+        IntPtr[] salts,
+        int[] saltLens,
+        IntPtr hasSalts,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.AlterUserScramCredentialsCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int AlterUserScramCredentialsResultCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_get_user", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterUserScramCredentialsResultGetUser(IntPtr result, int index);
+
+    /// <summary>That user's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AlterUserScramCredentialsResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AlterUserScramCredentialsResultDestroy(IntPtr result);
+
+    // ---- M15/P7: createDelegationToken (no count, no index — one value on the root) ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_create_delegation_token_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientCreateDelegationTokenAsync(
+        IntPtr admin,
+        IntPtr[] renewerPrincipalTypes,
+        IntPtr[] renewerNames,
+        int renewerCount,
+        IntPtr ownerPrincipalType,
+        IntPtr ownerName,
+        long maxLifetimeMs,
+        int timeoutMs,
+        AdminCallbacks.CreateDelegationTokenCallback callback,
+        IntPtr userData);
+
+    /// <summary>The issued token, <b>borrowed</b> from the result root.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreateDelegationTokenResult_get_token", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr CreateDelegationTokenResultGetToken(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_CreateDelegationTokenResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void CreateDelegationTokenResultDestroy(IntPtr result);
+
+    // ---- M15/P7: renew / expireDelegationToken (no count, no index — one inline scalar) ----
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_renew_delegation_token_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientRenewDelegationTokenAsync(
+        IntPtr admin,
+        IntPtr hmac,
+        int hmacLength,
+        long renewTimePeriodMs,
+        int timeoutMs,
+        AdminCallbacks.RenewDelegationTokenCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_RenewDelegationTokenResult_expiry_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long RenewDelegationTokenResultExpiryTimestamp(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_RenewDelegationTokenResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void RenewDelegationTokenResultDestroy(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_expire_delegation_token_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientExpireDelegationTokenAsync(
+        IntPtr admin,
+        IntPtr hmac,
+        int hmacLength,
+        long expiryTimePeriodMs,
+        int timeoutMs,
+        AdminCallbacks.ExpireDelegationTokenCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ExpireDelegationTokenResult_expiry_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ExpireDelegationTokenResultExpiryTimestamp(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ExpireDelegationTokenResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ExpireDelegationTokenResultDestroy(IntPtr result);
+
+    // ---- M15/P7: describeDelegationToken (sub-shape 3b — no get_error) ----
+
+    /// <summary>
+    /// ⚠ <paramref name="hasOwnersFilter"/> is an <b>explicit discriminant</b>
+    /// (<c>confluent_kafka.h:9177-9181</c>): cleared is Java's null <c>owners</c> — "every
+    /// token I may see" — while set with a count of 0 filters by nothing.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_delegation_token_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeDelegationTokenAsync(
+        IntPtr admin,
+        [MarshalAs(UnmanagedType.I1)] bool hasOwnersFilter,
+        IntPtr[] ownerPrincipalTypes,
+        IntPtr[] ownerNames,
+        int ownerCount,
+        int timeoutMs,
+        AdminCallbacks.DescribeDelegationTokenCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeDelegationTokenResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeDelegationTokenResultCount(IntPtr result);
+
+    /// <summary>The token at <paramref name="index"/>, <b>borrowed</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeDelegationTokenResult_get_token", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeDelegationTokenResultGetToken(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeDelegationTokenResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeDelegationTokenResultDestroy(IntPtr result);
+
+    // ---- M15/P7: describeFeatures (two non-co-indexed tables + an optional scalar) ----
+
+    /// <summary>
+    /// ⚠ <paramref name="hasNodeId"/> is an <b>explicit discriminant</b>: <c>0</c> is a legal
+    /// broker id, so no sentinel could spell "unset" (<c>confluent_kafka.h:9261-9262</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_describe_features_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientDescribeFeaturesAsync(
+        IntPtr admin,
+        [MarshalAs(UnmanagedType.I1)] bool hasNodeId,
+        int nodeId,
+        int timeoutMs,
+        AdminCallbacks.DescribeFeaturesCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_finalized_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeFeaturesResultFinalizedCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_get_finalized_feature", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeFeaturesResultGetFinalizedFeature(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short DescribeFeaturesResultGetFinalizedMinVersionLevel(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short DescribeFeaturesResultGetFinalizedMaxVersionLevel(IntPtr result, int index);
+
+    /// <summary>
+    /// Writes the finalized-features epoch and returns whether there is one.
+    /// <para>
+    /// ⚠ <b>Presence is the return value, never a sentinel:</b> every <c>int64_t</c>, <c>0</c>
+    /// and <c>-1</c> included, is a legal epoch (<c>confluent_kafka.h:9666-9669</c>).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_finalized_features_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool DescribeFeaturesResultFinalizedFeaturesEpoch(IntPtr result, out long epoch);
+
+    /// <summary>
+    /// The supported-feature count. ⚠ The two tables are <b>not co-indexed</b> and can differ
+    /// in both size and contents (<c>confluent_kafka.h:9682-9684</c>) — walk each by its own
+    /// count.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_supported_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeFeaturesResultSupportedCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_get_supported_feature", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeFeaturesResultGetSupportedFeature(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_get_supported_min_version", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short DescribeFeaturesResultGetSupportedMinVersion(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_get_supported_max_version", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short DescribeFeaturesResultGetSupportedMaxVersion(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DescribeFeaturesResultDestroy(IntPtr result);
+
+    // ---- M15/P7: updateFeatures (result shape 2) ----
+
+    /// <summary>
+    /// ⚠ <paramref name="maxVersionLevels"/> is <c>const int16_t *</c> — <c>short</c>, not
+    /// <c>int</c>, throughout the features family (<c>confluent_kafka.h:9342</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_update_features_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AdminClientUpdateFeaturesAsync(
+        IntPtr admin,
+        IntPtr[] features,
+        short[] maxVersionLevels,
+        int[] upgradeTypes,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool validateOnly,
+        AdminCallbacks.UpdateFeaturesCallback callback,
+        IntPtr userData);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int UpdateFeaturesResultCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_get_feature", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr UpdateFeaturesResultGetFeature(IntPtr result, int index);
+
+    /// <summary>That feature's error, or null on success. ⚠ <b>BORROWED</b>.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr UpdateFeaturesResultGetError(IntPtr result, int index);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesResult_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void UpdateFeaturesResultDestroy(IntPtr result);
 }

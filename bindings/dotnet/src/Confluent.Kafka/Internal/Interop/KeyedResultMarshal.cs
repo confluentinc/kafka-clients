@@ -251,6 +251,25 @@ internal static class KeyedResultMarshal
         ?? throw new KafkaException("The admin result produced no key for an index within its own count.");
 
     /// <summary>
+    /// Builds a string-key reader over one result's own key accessor — the
+    /// <see cref="AclRowMarshal.BindingReader"/> / <see cref="ClientQuotaMarshal.EntityReader"/>
+    /// shape, for the RPCs whose key is a plain name.
+    /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>A factory rather than an inline lambda, because the wiring guard can only see a
+    /// CLOSURE.</b> <c>AdminP4ReaderWiringTests</c> discovers readers by scanning what a
+    /// delegate captures, so a non-capturing lambda calling <c>NativeMethods.*</c> directly is
+    /// invisible to it — and the sibling <c>_get_user</c> / <c>_get_feature</c> accessors are
+    /// byte-identical, so a cross-wired one returns a plausible name rather than failing.
+    /// Measured on M15/P7: swapping either reader's target left the suite green. New
+    /// string-key readers belong here; the inline ones predating M15/P7 are unchanged.
+    /// </remarks>
+    /// <param name="getKey">That result's own <c>get_&lt;key&gt;(i)</c>.</param>
+    /// <returns>A reader over <c>(result, index)</c>.</returns>
+    internal static Func<IntPtr, int, string> StringKeyReader(IndexedAccessor getKey) =>
+        (result, index) => ReadStringKey(getKey(result, index));
+
+    /// <summary>
     /// <b>Shape 1 and the inline-scalar sub-shape.</b> Walks <paramref name="result"/> and
     /// resolves every per-key awaiter on <paramref name="operation"/>, reading each key's
     /// own value. Runs on whichever thread the completion callback fired on, and must

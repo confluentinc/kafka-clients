@@ -305,6 +305,61 @@ public sealed class MockAdminClient : IAdmin
         _native.AlterClientQuotas(entries, options);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.describeUserScramCredentials</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:1254</c>); the Rust mock mirrors that as one exceptional future
+    /// for the whole call (<c>admin-client.md</c> §9), so every accessor faults with that
+    /// message. This is faithful, not a gap.
+    /// </remarks>
+    public DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users = null,
+        DescribeUserScramCredentialsOptions? options = null) =>
+        _native.DescribeUserScramCredentials(users, options);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Java's <c>MockAdminClient.alterUserScramCredentials</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c>
+    /// (<c>MockAdminClient.java:1259</c>); the Rust mock mirrors that <em>per user</em>, so
+    /// every user's awaitable faults with that message.
+    /// </remarks>
+    public AlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations,
+        AlterUserScramCredentialsOptions? options = null) =>
+        _native.AlterUserScramCredentials(alterations, options);
+
+    /// <inheritdoc/>
+    public CreateDelegationTokenResult CreateDelegationToken(
+        CreateDelegationTokenOptions? options = null) =>
+        _native.CreateDelegationToken(options);
+
+    /// <inheritdoc/>
+    public RenewDelegationTokenResult RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options = null) =>
+        _native.RenewDelegationToken(hmac, options);
+
+    /// <inheritdoc/>
+    public ExpireDelegationTokenResult ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
+        _native.ExpireDelegationToken(hmac, options);
+
+    /// <inheritdoc/>
+    public DescribeDelegationTokenResult DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options = null) =>
+        _native.DescribeDelegationToken(options);
+
+    /// <inheritdoc/>
+    public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
+        _native.DescribeFeatures(options);
+
+    /// <inheritdoc/>
+    public UpdateFeaturesResult UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
+        UpdateFeaturesOptions? options = null) =>
+        _native.UpdateFeatures(featureUpdates, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

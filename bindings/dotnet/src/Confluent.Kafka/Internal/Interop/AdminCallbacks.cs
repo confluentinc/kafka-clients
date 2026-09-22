@@ -1104,6 +1104,305 @@ internal static class AdminCallbacks
     internal static readonly Func<IntPtr, int, ClientQuotaEntity> AlterClientQuotasKey =
         ClientQuotaMarshal.EntityReader(NativeMethods.AlterClientQuotasResultGetEntity);
 
+    // ====================================================================================
+    // M15/P7 — SCRAM credentials, delegation tokens, features.
+    //
+    // Four of the eight RPCs have no count and no index: their whole result is one value
+    // read off the root, so they bypass KeyedResultMarshal entirely and resolve
+    // SingleAdminOperation<T> directly through CompleteRootValueRpc below. No walker
+    // callable is added or edited by this phase.
+    // ====================================================================================
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_user_scram_credentials_callback_t</c>. ⚠ A
+    /// <b>per-user</b> failure arrives inside <paramref name="result"/>, borrowed; a non-null
+    /// <paramref name="error"/> means the whole call failed and is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeUserScramCredentialsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_callback_t</c>. Same ownership
+    /// split as above.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void AlterUserScramCredentialsCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_create_delegation_token_callback_t</c>. ⚠ No per-key error
+    /// channel exists, so <paramref name="error"/> is the only failure and is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void CreateDelegationTokenCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_renew_delegation_token_callback_t</c>. <paramref name="error"/>
+    /// is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void RenewDelegationTokenCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_expire_delegation_token_callback_t</c>. <paramref name="error"/>
+    /// is <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ExpireDelegationTokenCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_delegation_token_callback_t</c>. <paramref name="error"/>
+    /// is <b>owned</b>; the result declares no <c>get_error</c>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeDelegationTokenCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_describe_features_callback_t</c>. <paramref name="error"/> is
+    /// <b>owned</b>; the result declares no <c>get_error</c>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void DescribeFeaturesCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_admin_AdminClient_update_features_callback_t</c>. ⚠ A <b>per-feature</b> failure
+    /// arrives inside <paramref name="result"/>, borrowed; <paramref name="error"/> is
+    /// <b>owned</b>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void UpdateFeaturesCallback(IntPtr result, IntPtr error, IntPtr userData);
+
+    /// <summary>The rooted instance passed to every <c>describe_user_scram_credentials_async</c> submission.</summary>
+    internal static readonly DescribeUserScramCredentialsCallback DescribeUserScramCredentials =
+        OnDescribeUserScramCredentials;
+
+    /// <summary>The rooted instance passed to every <c>alter_user_scram_credentials_async</c> submission.</summary>
+    internal static readonly AlterUserScramCredentialsCallback AlterUserScramCredentials =
+        OnAlterUserScramCredentials;
+
+    /// <summary>The rooted instance passed to every <c>create_delegation_token_async</c> submission.</summary>
+    internal static readonly CreateDelegationTokenCallback CreateDelegationToken = OnCreateDelegationToken;
+
+    /// <summary>The rooted instance passed to every <c>renew_delegation_token_async</c> submission.</summary>
+    internal static readonly RenewDelegationTokenCallback RenewDelegationToken = OnRenewDelegationToken;
+
+    /// <summary>The rooted instance passed to every <c>expire_delegation_token_async</c> submission.</summary>
+    internal static readonly ExpireDelegationTokenCallback ExpireDelegationToken = OnExpireDelegationToken;
+
+    /// <summary>The rooted instance passed to every <c>describe_delegation_token_async</c> submission.</summary>
+    internal static readonly DescribeDelegationTokenCallback DescribeDelegationToken =
+        OnDescribeDelegationToken;
+
+    /// <summary>The rooted instance passed to every <c>describe_features_async</c> submission.</summary>
+    internal static readonly DescribeFeaturesCallback DescribeFeatures = OnDescribeFeatures;
+
+    /// <summary>The rooted instance passed to every <c>update_features_async</c> submission.</summary>
+    internal static readonly UpdateFeaturesCallback UpdateFeatures = OnUpdateFeatures;
+
+    /// <summary>
+    /// <c>describeUserScramCredentials</c>' row reader: the user, that user's <b>borrowed</b>
+    /// error, and the user's credential infos.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The inner walk is bounded by <c>get_credential_count(i)</c> — <b>never</b> by the
+    /// outer <c>count</c>; the two are unrelated, and the inner count is <c>0</c> for a failed
+    /// user (<c>confluent_kafka.h:9424-9425</c>).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, UserScramCredentialEntry> DescribeUserScramCredentialsEntry =
+        UserScramCredentialMarshal.ReadEntry;
+
+    /// <summary>
+    /// <c>alterUserScramCredentials</c>' universal accessors — result <b>shape 2</b>: Java's
+    /// per-user future is <c>KafkaFuture&lt;Void&gt;</c>
+    /// (<c>AlterUserScramCredentialsResult.java:31</c>), so a null per-user error <em>is</em>
+    /// the success value.
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors AlterUserScramCredentialsAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.AlterUserScramCredentialsResultCount,
+            NativeMethods.AlterUserScramCredentialsResultGetError);
+
+    /// <summary>
+    /// <c>alterUserScramCredentials</c>' key reader, built over <b>its own</b>
+    /// <c>get_user(i)</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <c>kafka_admin_UpdateFeaturesResult_t</c> (and P6's <c>CreateAclsResult</c>) declare a
+    /// byte-identical accessor set, so a cross-wired reader returns a plausible answer rather
+    /// than failing. Built through <see cref="KeyedResultMarshal.StringKeyReader"/> so it
+    /// <b>captures</b> that symbol and the wiring guard can read it back — as an inline lambda
+    /// it was invisible to the guard's discovery, and a swap went undetected (M15/P7, 77.3).
+    /// </remarks>
+    internal static readonly Func<IntPtr, int, string> AlterUserScramCredentialsKey =
+        KeyedResultMarshal.StringKeyReader(NativeMethods.AlterUserScramCredentialsResultGetUser);
+
+    /// <summary>
+    /// <c>describeDelegationToken</c>' element reader — sub-shape 3b, one collection, no key
+    /// and no per-element error.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, Confluent.Kafka.DelegationToken> DescribeDelegationTokenValue =
+        DelegationTokenMarshal.TokenReader(NativeMethods.DescribeDelegationTokenResultGetToken);
+
+    /// <summary>
+    /// <c>updateFeatures</c>' universal accessors — result <b>shape 2</b>
+    /// (<c>UpdateFeaturesResult.java:29</c>).
+    /// </summary>
+    internal static readonly KeyedResultMarshal.Accessors UpdateFeaturesAccessors =
+        new KeyedResultMarshal.Accessors(
+            NativeMethods.UpdateFeaturesResultCount,
+            NativeMethods.UpdateFeaturesResultGetError);
+
+    /// <summary>
+    /// <c>updateFeatures</c>' key reader, built over <b>its own</b> <c>get_feature(i)</c>. ⚠ See
+    /// <see cref="AlterUserScramCredentialsKey"/> on the byte-identical twin.
+    /// </summary>
+    internal static readonly Func<IntPtr, int, string> UpdateFeaturesKey =
+        KeyedResultMarshal.StringKeyReader(NativeMethods.UpdateFeaturesResultGetFeature);
+
+    private static readonly Action<IntPtr> s_destroyDescribeUserScramCredentialsResult =
+        NativeMethods.DescribeUserScramCredentialsResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyAlterUserScramCredentialsResult =
+        NativeMethods.AlterUserScramCredentialsResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyCreateDelegationTokenResult =
+        NativeMethods.CreateDelegationTokenResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyRenewDelegationTokenResult =
+        NativeMethods.RenewDelegationTokenResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyExpireDelegationTokenResult =
+        NativeMethods.ExpireDelegationTokenResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyDescribeDelegationTokenResult =
+        NativeMethods.DescribeDelegationTokenResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyDescribeFeaturesResult =
+        NativeMethods.DescribeFeaturesResultDestroy;
+
+    private static readonly Action<IntPtr> s_destroyUpdateFeaturesResult =
+        NativeMethods.UpdateFeaturesResultDestroy;
+
+    private static readonly KeyedResultMarshal.CountAccessor s_describeUserScramCredentialsCount =
+        NativeMethods.DescribeUserScramCredentialsResultCount;
+
+    private static readonly KeyedResultMarshal.CountAccessor s_describeDelegationTokenCount =
+        NativeMethods.DescribeDelegationTokenResultCount;
+
+    /// <summary>
+    /// The completion body the four <b>count-less</b> P7 trampolines share: read one value off
+    /// the result root and resolve the single awaiter with it.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="error"/> is <b>OWNED</b> — none of these results declares a
+    /// <c>get_error</c>, so nothing on this path is borrowed and
+    /// <see cref="KafkaException.FromHandle"/> is what frees it exactly once. The
+    /// <c>finally</c> discharges the usual three obligations, with the destroy strictly after
+    /// the read because every value read is borrowed from that root.
+    /// </remarks>
+    private static void CompleteRootValueRpc<TValue>(
+        IntPtr result,
+        IntPtr error,
+        IntPtr userData,
+        Func<IntPtr, TValue> readRoot,
+        Action<IntPtr> destroyResult)
+    {
+        SingleAdminOperation<TValue>? context = null;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (SingleAdminOperation<TValue>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                context.SetException(KafkaException.FromHandle(error)!);
+            }
+            else
+            {
+                context.SetResult(readRoot(result));
+            }
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Task.
+            context?.SetException(exception);
+        }
+        finally
+        {
+            destroyResult(result);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
+
+    private static void OnDescribeUserScramCredentials(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteListRpc(
+            result,
+            error,
+            userData,
+            s_describeUserScramCredentialsCount,
+            DescribeUserScramCredentialsEntry,
+            s_destroyDescribeUserScramCredentialsResult);
+
+    private static void OnAlterUserScramCredentials(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            AlterUserScramCredentialsAccessors,
+            AlterUserScramCredentialsKey,
+            s_destroyAlterUserScramCredentialsResult);
+
+    private static void OnCreateDelegationToken(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            root => DelegationTokenMarshal.Read(NativeMethods.CreateDelegationTokenResultGetToken(root)),
+            s_destroyCreateDelegationTokenResult);
+
+    private static void OnRenewDelegationToken(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            NativeMethods.RenewDelegationTokenResultExpiryTimestamp,
+            s_destroyRenewDelegationTokenResult);
+
+    private static void OnExpireDelegationToken(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            NativeMethods.ExpireDelegationTokenResultExpiryTimestamp,
+            s_destroyExpireDelegationTokenResult);
+
+    private static void OnDescribeDelegationToken(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteListRpc(
+            result,
+            error,
+            userData,
+            s_describeDelegationTokenCount,
+            DescribeDelegationTokenValue,
+            s_destroyDescribeDelegationTokenResult);
+
+    private static void OnDescribeFeatures(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteRootValueRpc(
+            result,
+            error,
+            userData,
+            FeatureMetadataMarshal.CopyOut,
+            s_destroyDescribeFeaturesResult);
+
+    private static void OnUpdateFeatures(IntPtr result, IntPtr error, IntPtr userData) =>
+        CompleteKeyedVoid(
+            result,
+            error,
+            userData,
+            UpdateFeaturesAccessors,
+            UpdateFeaturesKey,
+            s_destroyUpdateFeaturesResult);
+
     /// <summary>
     /// <c>deleteConsumerGroups</c>' universal accessors — result <b>shape 2</b>: Java's
     /// per-group future is <c>KafkaFuture&lt;Void&gt;</c>

@@ -696,6 +696,107 @@ internal sealed class NativeAdminClient : IDisposable
         AdminCallbacks.AlterClientQuotasCallback callback,
         IntPtr userData);
 
+    // ---- M15/P7 submit shapes, injectable so the tests can assert on the marshalled rows ----
+
+    /// <summary>The <c>describe_user_scram_credentials_async</c> submit shape.</summary>
+    internal delegate void NativeDescribeUserScramCredentialsSubmit(
+        IntPtr admin,
+        IntPtr[] users,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.DescribeUserScramCredentialsCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>alter_user_scram_credentials_async</c> submit shape — the phase's largest
+    /// marshalling job at ten parallel arrays, and the one with no mock happy path, so the
+    /// tests assert its rows here rather than end to end.
+    /// </summary>
+    internal delegate void NativeAlterUserScramCredentialsSubmit(
+        IntPtr admin,
+        IntPtr[] users,
+        IntPtr isDeletions,
+        int[] mechanisms,
+        int[] iterations,
+        IntPtr[] passwords,
+        int[] passwordLens,
+        IntPtr[] salts,
+        int[] saltLens,
+        IntPtr hasSalts,
+        int count,
+        int timeoutMs,
+        AdminCallbacks.AlterUserScramCredentialsCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>create_delegation_token_async</c> submit shape.</summary>
+    internal delegate void NativeCreateDelegationTokenSubmit(
+        IntPtr admin,
+        IntPtr[] renewerPrincipalTypes,
+        IntPtr[] renewerNames,
+        int renewerCount,
+        IntPtr ownerPrincipalType,
+        IntPtr ownerName,
+        long maxLifetimeMs,
+        int timeoutMs,
+        AdminCallbacks.CreateDelegationTokenCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>renew_delegation_token_async</c> submit shape.</summary>
+    internal delegate void NativeRenewDelegationTokenSubmit(
+        IntPtr admin,
+        IntPtr hmac,
+        int hmacLength,
+        long renewTimePeriodMs,
+        int timeoutMs,
+        AdminCallbacks.RenewDelegationTokenCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The <c>expire_delegation_token_async</c> submit shape — byte-identical to
+    /// <see cref="NativeRenewDelegationTokenSubmit"/> save for the callback type, which is what
+    /// makes the two cross-wirable.
+    /// </summary>
+    internal delegate void NativeExpireDelegationTokenSubmit(
+        IntPtr admin,
+        IntPtr hmac,
+        int hmacLength,
+        long expiryTimePeriodMs,
+        int timeoutMs,
+        AdminCallbacks.ExpireDelegationTokenCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>describe_delegation_token_async</c> submit shape.</summary>
+    internal delegate void NativeDescribeDelegationTokenSubmit(
+        IntPtr admin,
+        [MarshalAs(UnmanagedType.I1)] bool hasOwnersFilter,
+        IntPtr[] ownerPrincipalTypes,
+        IntPtr[] ownerNames,
+        int ownerCount,
+        int timeoutMs,
+        AdminCallbacks.DescribeDelegationTokenCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>describe_features_async</c> submit shape.</summary>
+    internal delegate void NativeDescribeFeaturesSubmit(
+        IntPtr admin,
+        [MarshalAs(UnmanagedType.I1)] bool hasNodeId,
+        int nodeId,
+        int timeoutMs,
+        AdminCallbacks.DescribeFeaturesCallback callback,
+        IntPtr userData);
+
+    /// <summary>The <c>update_features_async</c> submit shape — <c>short</c> version levels.</summary>
+    internal delegate void NativeUpdateFeaturesSubmit(
+        IntPtr admin,
+        IntPtr[] features,
+        short[] maxVersionLevels,
+        int[] upgradeTypes,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool validateOnly,
+        AdminCallbacks.UpdateFeaturesCallback callback,
+        IntPtr userData);
+
     internal SafeAdminHandle Handle => _handle;
 
     /// <summary>
@@ -3594,6 +3695,650 @@ internal sealed class NativeAdminClient : IDisposable
         return new AlterClientQuotasResult(operation.Tasks, operation.KeyComparer);
     }
 
+    // ====================================================================================
+    // M15/P7 — SCRAM credentials, delegation tokens, features.
+    // ====================================================================================
+
+    internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users, DescribeUserScramCredentialsOptions? options) =>
+        DescribeUserScramCredentials(
+            users, options, NativeMethods.AdminClientDescribeUserScramCredentialsAsync);
+
+    /// <summary>
+    /// Submits <c>describeUserScramCredentials</c> and returns immediately with the single
+    /// awaitable over the flattened result table.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A <see langword="null"/> or empty <paramref name="users"/> describes <b>every</b> user
+    /// (<c>confluent_kafka.h:8784-8785</c>), which is why this cannot use a per-key bridge: the
+    /// keys are discovered from the response. That matches Java, whose stored field is one
+    /// future over raw response data — see <see cref="UserScramCredentialEntry"/>.
+    /// </remarks>
+    internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users,
+        DescribeUserScramCredentialsOptions? options,
+        NativeDescribeUserScramCredentialsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = options is null
+            ? UnsetTimeoutMs
+            : ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeUserScramCredentialsOptions));
+
+        List<string> requested = users is null
+            ? new List<string>()
+            : DistinctNames(users, "users", nameof(users));
+
+        SingleAdminOperation<IReadOnlyCollection<UserScramCredentialEntry>> operation =
+            new SingleAdminOperation<IReadOnlyCollection<UserScramCredentialEntry>>(
+                "describeUserScramCredentials");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(requested.Count);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                PinNames(requested, pinned),
+                requested.Count,
+                timeoutMs,
+                AdminCallbacks.DescribeUserScramCredentials,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies the names out during the submit.
+            foreach (Utf8Marshal.PinnedUtf8String pin in pinned)
+            {
+                pin.Dispose();
+            }
+        }
+
+        return new DescribeUserScramCredentialsResult(operation.Task);
+    }
+
+    internal AlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations, AlterUserScramCredentialsOptions? options) =>
+        AlterUserScramCredentials(
+            alterations, options, NativeMethods.AdminClientAlterUserScramCredentialsAsync);
+
+    /// <summary>
+    /// Submits <c>alterUserScramCredentials</c> and returns immediately with one awaitable per
+    /// user (result shape 2).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>A repeated user is passed through, not rejected</b> — two rows naming the same user
+    /// (a <c>SCRAM_SHA_256</c> deletion plus a <c>SCRAM_SHA_512</c> upsertion, say) both reach
+    /// the broker, and Java keys one future per user so they collapse to one outcome row
+    /// (<c>confluent_kafka.h:8875-8886</c>). Hence <b>every</b> alteration is marshalled while
+    /// the bridge's key set is de-duplicated. This is the deliberate inverse of
+    /// <see cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions?)"/>,
+    /// whose compound key a caller could not re-derive.
+    /// </remarks>
+    internal AlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations,
+        AlterUserScramCredentialsOptions? options,
+        NativeAlterUserScramCredentialsSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (alterations is null)
+        {
+            throw new ArgumentNullException(nameof(alterations));
+        }
+
+        int timeoutMs = options is null
+            ? UnsetTimeoutMs
+            : ValidateTimeoutMs(options.TimeoutMs, nameof(AlterUserScramCredentialsOptions));
+
+        List<UserScramCredentialAlteration> rows = new List<UserScramCredentialAlteration>();
+        List<string> keys = new List<string>();
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (UserScramCredentialAlteration alteration in alterations)
+        {
+            if (alteration is null)
+            {
+                throw new ArgumentException(
+                    "The SCRAM credential alterations must not contain a null element.",
+                    nameof(alterations));
+            }
+
+            rows.Add(alteration);
+            if (seen.Add(alteration.User))
+            {
+                keys.Add(alteration.User);
+            }
+        }
+
+        VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+            "alterUserScramCredentials", keys, StringComparer.Ordinal);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        AlterUserScramCredentialsMarshal.Rows? pinned = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinned = AlterUserScramCredentialsMarshal.Pin(rows);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                pinned.Users,
+                pinned.IsDeletions,
+                pinned.Mechanisms,
+                pinned.Iterations,
+                pinned.Passwords,
+                pinned.PasswordLens,
+                pinned.Salts,
+                pinned.SaltLens,
+                pinned.HasSalts,
+                pinned.Count,
+                timeoutMs,
+                AdminCallbacks.AlterUserScramCredentials,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            // Call-scoped pins (ffi §A4): the ABI copies every row out during the submit.
+            pinned?.Dispose();
+        }
+
+        return new AlterUserScramCredentialsResult(operation.Tasks, operation.KeyComparer);
+    }
+
+    internal CreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options) =>
+        CreateDelegationToken(options, NativeMethods.AdminClientCreateDelegationTokenAsync);
+
+    /// <summary>
+    /// Submits <c>createDelegationToken</c> and returns immediately with the single awaitable
+    /// over the issued token. The result carries no table, so the completion resolves the
+    /// awaiter straight off the root.
+    /// </summary>
+    internal CreateDelegationTokenResult CreateDelegationToken(
+        CreateDelegationTokenOptions? options, NativeCreateDelegationTokenSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        IReadOnlyList<KafkaPrincipal> renewers = Array.Empty<KafkaPrincipal>();
+        KafkaPrincipal? owner = null;
+        long maxLifetimeMs = -1L;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(CreateDelegationTokenOptions));
+            renewers = options.Renewers
+                ?? throw new ArgumentException(
+                    "CreateDelegationTokenOptions.Renewers must not be null; use an empty list.",
+                    nameof(options));
+            owner = options.Owner;
+            maxLifetimeMs = options.MaxLifetimeMs;
+        }
+
+        for (int i = 0; i < renewers.Count; i++)
+        {
+            if (renewers[i] is null)
+            {
+                throw new ArgumentException(
+                    "CreateDelegationTokenOptions.Renewers must not contain a null element.",
+                    nameof(options));
+            }
+        }
+
+        SingleAdminOperation<DelegationToken> operation =
+            new SingleAdminOperation<DelegationToken>("createDelegationToken");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        DelegationTokenMarshal.PrincipalRows? pinnedRenewers = null;
+        Utf8Marshal.PinnedUtf8String? ownerType = null;
+        Utf8Marshal.PinnedUtf8String? ownerName = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinnedRenewers = DelegationTokenMarshal.PinPrincipals(renewers);
+            if (owner is not null)
+            {
+                ownerType = Utf8Marshal.Pin(owner.PrincipalType);
+                ownerName = Utf8Marshal.Pin(owner.Name);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                pinnedRenewers.PrincipalTypes,
+                pinnedRenewers.Names,
+                pinnedRenewers.Count,
+                ownerType?.Pointer ?? IntPtr.Zero,
+                ownerName?.Pointer ?? IntPtr.Zero,
+                maxLifetimeMs,
+                timeoutMs,
+                AdminCallbacks.CreateDelegationToken,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            pinnedRenewers?.Dispose();
+            ownerType?.Dispose();
+            ownerName?.Dispose();
+        }
+
+        return new CreateDelegationTokenResult(operation.Task);
+    }
+
+    internal RenewDelegationTokenResult RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options) =>
+        RenewDelegationToken(hmac, options, NativeMethods.AdminClientRenewDelegationTokenAsync);
+
+    /// <summary>
+    /// Submits <c>renewDelegationToken</c> and returns immediately with the single awaitable
+    /// over the token's new expiry timestamp.
+    /// </summary>
+    internal RenewDelegationTokenResult RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options, NativeRenewDelegationTokenSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (hmac is null)
+        {
+            throw new ArgumentNullException(nameof(hmac));
+        }
+
+        long renewTimePeriodMs = -1L;
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(RenewDelegationTokenOptions));
+            renewTimePeriodMs = options.RenewTimePeriodMs;
+        }
+
+        SingleAdminOperation<long> operation = new SingleAdminOperation<long>("renewDelegationToken");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        GCHandle hmacPin = default;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            hmacPin = GCHandle.Alloc(hmac, GCHandleType.Pinned);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                hmac.Length == 0 ? IntPtr.Zero : hmacPin.AddrOfPinnedObject(),
+                hmac.Length,
+                renewTimePeriodMs,
+                timeoutMs,
+                AdminCallbacks.RenewDelegationToken,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (hmacPin.IsAllocated)
+            {
+                hmacPin.Free();
+            }
+        }
+
+        return new RenewDelegationTokenResult(operation.Task);
+    }
+
+    internal ExpireDelegationTokenResult ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options) =>
+        ExpireDelegationToken(hmac, options, NativeMethods.AdminClientExpireDelegationTokenAsync);
+
+    /// <summary>
+    /// Submits <c>expireDelegationToken</c> and returns immediately with the single awaitable
+    /// over the token's expiry timestamp.
+    /// </summary>
+    internal ExpireDelegationTokenResult ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options, NativeExpireDelegationTokenSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (hmac is null)
+        {
+            throw new ArgumentNullException(nameof(hmac));
+        }
+
+        long expiryTimePeriodMs = -1L;
+        int timeoutMs = UnsetTimeoutMs;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(ExpireDelegationTokenOptions));
+            expiryTimePeriodMs = options.ExpiryTimePeriodMs;
+        }
+
+        SingleAdminOperation<long> operation = new SingleAdminOperation<long>("expireDelegationToken");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        GCHandle hmacPin = default;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            hmacPin = GCHandle.Alloc(hmac, GCHandleType.Pinned);
+
+            submit(
+                _handle.DangerousGetHandle(),
+                hmac.Length == 0 ? IntPtr.Zero : hmacPin.AddrOfPinnedObject(),
+                hmac.Length,
+                expiryTimePeriodMs,
+                timeoutMs,
+                AdminCallbacks.ExpireDelegationToken,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            if (hmacPin.IsAllocated)
+            {
+                hmacPin.Free();
+            }
+        }
+
+        return new ExpireDelegationTokenResult(operation.Task);
+    }
+
+    internal DescribeDelegationTokenResult DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options) =>
+        DescribeDelegationToken(options, NativeMethods.AdminClientDescribeDelegationTokenAsync);
+
+    /// <summary>
+    /// Submits <c>describeDelegationToken</c> and returns immediately with the single awaitable
+    /// over the token list (sub-shape 3b).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A <see langword="null"/> <c>Owners</c> and an <b>empty</b> one are different requests,
+    /// and the difference travels in <c>has_owners_filter</c>, never in the count.
+    /// </remarks>
+    internal DescribeDelegationTokenResult DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options, NativeDescribeDelegationTokenSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        IReadOnlyList<KafkaPrincipal>? owners = null;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeDelegationTokenOptions));
+            owners = options.Owners;
+        }
+
+        for (int i = 0; owners is not null && i < owners.Count; i++)
+        {
+            if (owners[i] is null)
+            {
+                throw new ArgumentException(
+                    "DescribeDelegationTokenOptions.Owners must not contain a null element.",
+                    nameof(options));
+            }
+        }
+
+        SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation =
+            new SingleAdminOperation<IReadOnlyCollection<DelegationToken>>("describeDelegationToken");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        DelegationTokenMarshal.PrincipalRows? pinned = null;
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            pinned = DelegationTokenMarshal.PinPrincipals(
+                owners ?? (IReadOnlyList<KafkaPrincipal>)Array.Empty<KafkaPrincipal>());
+
+            submit(
+                _handle.DangerousGetHandle(),
+                owners is not null,
+                pinned.PrincipalTypes,
+                pinned.Names,
+                pinned.Count,
+                timeoutMs,
+                AdminCallbacks.DescribeDelegationToken,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            pinned?.Dispose();
+        }
+
+        return new DescribeDelegationTokenResult(operation.Task);
+    }
+
+    internal DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options) =>
+        DescribeFeatures(options, NativeMethods.AdminClientDescribeFeaturesAsync);
+
+    /// <summary>
+    /// Submits <c>describeFeatures</c> and returns immediately with the <b>single</b> awaitable
+    /// Java publishes, over the whole composite.
+    /// </summary>
+    internal DescribeFeaturesResult DescribeFeatures(
+        DescribeFeaturesOptions? options, NativeDescribeFeaturesSubmit submit)
+    {
+        ThrowIfClosed();
+
+        int timeoutMs = UnsetTimeoutMs;
+        int? nodeId = null;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DescribeFeaturesOptions));
+            nodeId = options.NodeId;
+        }
+
+        SingleAdminOperation<FeatureMetadata> operation =
+            new SingleAdminOperation<FeatureMetadata>("describeFeatures");
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            // ⚠ Presence travels in has_node_id, never in the value: 0 is a legal broker id.
+            submit(
+                _handle.DangerousGetHandle(),
+                nodeId.HasValue,
+                nodeId ?? 0,
+                timeoutMs,
+                AdminCallbacks.DescribeFeatures,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return new DescribeFeaturesResult(operation.Task);
+    }
+
+    internal UpdateFeaturesResult UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates, UpdateFeaturesOptions? options) =>
+        UpdateFeatures(featureUpdates, options, NativeMethods.AdminClientUpdateFeaturesAsync);
+
+    /// <summary>
+    /// Submits <c>updateFeatures</c> and returns immediately with one awaitable per feature
+    /// (result shape 2).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <c>max_version_levels</c> is <c>short</c>, not <c>int</c>, all the way through the
+    /// features family.
+    /// </para>
+    /// <para>
+    /// ⚠⚠ <b>The empty-map and blank-name guards are load-bearing, not defensive.</b> With zero
+    /// keys the bridge mints zero awaitables, so <c>All()</c> is <c>WhenAll(&lt;empty&gt;)</c> and
+    /// reports <b>success</b> — the whole-call error the ABI delivers has nowhere to go. Java
+    /// rejects both inputs before it enqueues anything
+    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>).
+    /// </para>
+    /// </remarks>
+    internal UpdateFeaturesResult UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
+        UpdateFeaturesOptions? options,
+        NativeUpdateFeaturesSubmit submit)
+    {
+        ThrowIfClosed();
+
+        if (featureUpdates is null)
+        {
+            throw new ArgumentNullException(nameof(featureUpdates));
+        }
+
+        if (featureUpdates.Count == 0)
+        {
+            throw new ArgumentException(
+                "Feature updates can not be null or empty.", nameof(featureUpdates));
+        }
+
+        int timeoutMs = UnsetTimeoutMs;
+        bool validateOnly = false;
+        if (options is not null)
+        {
+            timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(UpdateFeaturesOptions));
+            validateOnly = options.ValidateOnly;
+        }
+
+        List<string> keys = new List<string>(featureUpdates.Count);
+        short[] maxVersionLevels = new short[featureUpdates.Count];
+        int[] upgradeTypes = new int[featureUpdates.Count];
+        int next = 0;
+        foreach (KeyValuePair<string, FeatureUpdate> entry in featureUpdates)
+        {
+            if (entry.Key is null)
+            {
+                throw new ArgumentException(
+                    "The feature updates must not contain a null feature name.", nameof(featureUpdates));
+            }
+
+            if (IsBlank(entry.Key))
+            {
+                throw new ArgumentException(
+                    "Provided feature can not be empty.", nameof(featureUpdates));
+            }
+
+            if (entry.Value is null)
+            {
+                throw new ArgumentException(
+                    "The feature updates must not contain a null update.", nameof(featureUpdates));
+            }
+
+            keys.Add(entry.Key);
+            maxVersionLevels[next] = entry.Value.MaxVersionLevel;
+            upgradeTypes[next] = (int)entry.Value.Type;
+            next++;
+        }
+
+        VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+            "updateFeatures", keys, StringComparer.Ordinal);
+        GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
+        operation.SetGcHandle(gcHandle);
+
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(keys.Count);
+        try
+        {
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                operation.SetHandleRef(_handle);
+            }
+
+            submit(
+                _handle.DangerousGetHandle(),
+                PinNames(keys, pinned),
+                maxVersionLevels,
+                upgradeTypes,
+                keys.Count,
+                timeoutMs,
+                validateOnly,
+                AdminCallbacks.UpdateFeatures,
+                GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            operation.AbandonBeforeSubmit();
+            throw;
+        }
+        finally
+        {
+            foreach (Utf8Marshal.PinnedUtf8String pin in pinned)
+            {
+                pin.Dispose();
+            }
+        }
+
+        return new UpdateFeaturesResult(operation.Tasks, operation.KeyComparer);
+    }
+
     internal ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options) =>
         ListPartitionReassignments(
@@ -4909,6 +5654,35 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         return keys;
+    }
+
+    /// <summary>
+    /// Java's <c>Utils.isBlank</c> (<c>Utils.java:1569-1571</c>) — <c>str == null ||
+    /// str.trim().isEmpty()</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Not <see cref="string.IsNullOrWhiteSpace"/>: Java's <c>trim</c> strips every char
+    /// <c>&lt;= ' '</c>, so it treats a control character as blank where
+    /// <c>char.IsWhiteSpace</c> does not.
+    /// </remarks>
+    /// <param name="value">The value to test.</param>
+    /// <returns><c>true</c> when Java would call it blank.</returns>
+    private static bool IsBlank(string? value)
+    {
+        if (value is null)
+        {
+            return true;
+        }
+
+        foreach (char character in value)
+        {
+            if (character > ' ')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

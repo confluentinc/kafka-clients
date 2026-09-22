@@ -244,6 +244,48 @@ public sealed class KafkaAdminClient : IAdmin
         _native.AlterClientQuotas(entries, options);
 
     /// <inheritdoc/>
+    public DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users = null,
+        DescribeUserScramCredentialsOptions? options = null) =>
+        _native.DescribeUserScramCredentials(users, options);
+
+    /// <inheritdoc/>
+    public AlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations,
+        AlterUserScramCredentialsOptions? options = null) =>
+        _native.AlterUserScramCredentials(alterations, options);
+
+    /// <inheritdoc/>
+    public CreateDelegationTokenResult CreateDelegationToken(
+        CreateDelegationTokenOptions? options = null) =>
+        _native.CreateDelegationToken(options);
+
+    /// <inheritdoc/>
+    public RenewDelegationTokenResult RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options = null) =>
+        _native.RenewDelegationToken(hmac, options);
+
+    /// <inheritdoc/>
+    public ExpireDelegationTokenResult ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
+        _native.ExpireDelegationToken(hmac, options);
+
+    /// <inheritdoc/>
+    public DescribeDelegationTokenResult DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options = null) =>
+        _native.DescribeDelegationToken(options);
+
+    /// <inheritdoc/>
+    public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
+        _native.DescribeFeatures(options);
+
+    /// <inheritdoc/>
+    public UpdateFeaturesResult UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
+        UpdateFeaturesOptions? options = null) =>
+        _native.UpdateFeatures(featureUpdates, options);
+
+    /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);
 
     /// <inheritdoc/>

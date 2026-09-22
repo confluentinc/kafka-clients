@@ -295,6 +295,46 @@ public sealed class AdminP4ReaderWiringTests
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeAclsValue))));
 
     /// <summary>
+    /// ⚠⚠ Each P7 <b>string-key</b> reader captures <b>its own</b> result's key accessor
+    /// (M15/P7, finding 77.3).
+    /// </summary>
+    /// <remarks>
+    /// <c>AlterUserScramCredentialsResult_get_user</c>, <c>UpdateFeaturesResult_get_feature</c>
+    /// and P6's <c>CreateAclsResult_get_binding</c> are byte-identical, so a cross-wired reader
+    /// returns a plausible name. Both were inline lambdas until this finding and were therefore
+    /// invisible to <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/>'s scan;
+    /// re-measured on the reviewed commit, a throw planted in <c>UpdateFeaturesKey</c> left
+    /// <c>UpdateFeatures_SurfacesTheRejectionOnEveryKey</c> <b>green</b> — the reader was never
+    /// executed at all. They are now built through
+    /// <see cref="KeyedResultMarshal.StringKeyReader"/>, so the capture exists and the
+    /// discovery reaches them by construction rather than by a name list.
+    /// </remarks>
+    [Theory]
+    [InlineData(
+        nameof(AdminCallbacks.AlterUserScramCredentialsKey),
+        "kafka_admin_AlterUserScramCredentialsResult_get_user")]
+    [InlineData(
+        nameof(AdminCallbacks.UpdateFeaturesKey),
+        "kafka_admin_UpdateFeaturesResult_get_feature")]
+    public void EachP7StringKeyReader_CapturesItsOwnAccessor(string readerName, string entryPoint) =>
+        Assert.Equal(new[] { entryPoint }, CapturedEntryPoints(Reader(readerName)));
+
+    /// <summary>
+    /// <c>describeDelegationToken</c>' <b>element</b> reader captures
+    /// <c>kafka_admin_DescribeDelegationTokenResult_get_token</c> (M15/P7).
+    /// </summary>
+    /// <remarks>
+    /// The <c>createDelegationToken</c> / <c>renew</c> / <c>expire</c> results declare a
+    /// byte-identical <c>get_token</c>, so a cross-wired reader returns a plausible token
+    /// rather than failing.
+    /// </remarks>
+    [Fact]
+    public void DescribeDelegationTokenValue_CapturesItsOwnTokenAccessor() =>
+        Assert.Equal(
+            new[] { "kafka_admin_DescribeDelegationTokenResult_get_token" },
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeDelegationTokenValue))));
+
+    /// <summary>
     /// <c>describeClientQuotas</c>' <b>key</b> reader captures
     /// <c>kafka_admin_DescribeClientQuotasResult_get_entity</c> — its own, not
     /// <c>alterClientQuotas</c>' byte-identical twin (M15/P6).
@@ -370,6 +410,9 @@ public sealed class AdminP4ReaderWiringTests
             nameof(AdminCallbacks.DescribeClientQuotasKey),
             nameof(AdminCallbacks.DescribeClientQuotasValue),
             nameof(AdminCallbacks.AlterClientQuotasKey),
+            nameof(AdminCallbacks.DescribeDelegationTokenValue),
+            nameof(AdminCallbacks.AlterUserScramCredentialsKey),
+            nameof(AdminCallbacks.UpdateFeaturesKey),
         };
 
         List<string> signatures = readers
@@ -425,6 +468,7 @@ public sealed class AdminP4ReaderWiringTests
                 nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
                 nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
                 nameof(AdminCallbacks.AlterPartitionReassignmentsKey),
+                nameof(AdminCallbacks.AlterUserScramCredentialsKey),
                 nameof(AdminCallbacks.CreateAclsKey),
                 nameof(AdminCallbacks.DeleteAclsFilterResults),
                 nameof(AdminCallbacks.DeleteAclsKey),
@@ -434,11 +478,13 @@ public sealed class AdminP4ReaderWiringTests
                 nameof(AdminCallbacks.DescribeAclsValue),
                 nameof(AdminCallbacks.DescribeClientQuotasKey),
                 nameof(AdminCallbacks.DescribeClientQuotasValue),
+                nameof(AdminCallbacks.DescribeDelegationTokenValue),
                 nameof(AdminCallbacks.ElectLeadersKey),
                 nameof(AdminCallbacks.ElectLeadersOptionalError),
                 nameof(AdminCallbacks.ListOffsetsKey),
                 nameof(AdminCallbacks.ListPartitionReassignmentsKey),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
+                nameof(AdminCallbacks.UpdateFeaturesKey),
             },
             discovered);
     }
@@ -554,6 +600,118 @@ public sealed class AdminP4ReaderWiringTests
     }
 
     /// <summary>
+    /// ⚠⚠ Every member of <c>describeUserScramCredentials</c>' bundle is bound to <b>its
+    /// own</b> ABI symbol, positionally (M15/P7).
+    /// </summary>
+    /// <remarks>
+    /// Two same-typed pairs are transposable here, and each transposition is silent:
+    /// <c>GetUser</c>/<c>GetError</c> swaps a key for a borrowed error, and
+    /// <c>GetCredentialMechanism</c>/<c>GetCredentialIterations</c> swaps a mechanism code
+    /// for an iteration count — <c>4096</c> decoding to <see cref="ScramMechanism.Unknown"/>
+    /// rather than to an error.
+    /// </remarks>
+    [Fact]
+    public void UserScramCredentialAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        UserScramCredentialMarshal.Accessors accessors = UserScramCredentialMarshal.NativeAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "GetUser=kafka_admin_DescribeUserScramCredentialsResult_get_user",
+                "GetError=kafka_admin_DescribeUserScramCredentialsResult_get_error",
+                "GetCredentialCount=kafka_admin_DescribeUserScramCredentialsResult_get_credential_count",
+                "GetCredentialMechanism=kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism",
+                "GetCredentialIterations=kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations",
+            },
+            new[]
+            {
+                "GetUser=" + EntryPointOf(accessors.GetUser),
+                "GetError=" + EntryPointOf(accessors.GetError),
+                "GetCredentialCount=" + EntryPointOf(accessors.GetCredentialCount),
+                "GetCredentialMechanism=" + EntryPointOf(accessors.GetCredentialMechanism),
+                "GetCredentialIterations=" + EntryPointOf(accessors.GetCredentialIterations),
+            });
+    }
+
+    /// <summary>
+    /// ⚠⚠ Every member of <c>describeFeatures</c>' bundle is bound to <b>its own</b> ABI
+    /// symbol, positionally (M15/P7).
+    /// </summary>
+    /// <remarks>
+    /// This is the bundle with the most transposable members in the binding: the two counts,
+    /// the two name accessors and the <b>four</b> version accessors are each same-typed, so a
+    /// finalized/supported mix-up compiles and returns plausible version numbers. It is also
+    /// the one bundle whose mis-wiring the mock cannot surface — it derives both tables from
+    /// one seeded key set, so finalized and supported always agree there.
+    /// </remarks>
+    [Fact]
+    public void FeatureMetadataAccessors_BindEveryMemberToItsOwnAbiSymbol()
+    {
+        FeatureMetadataMarshal.Accessors accessors = FeatureMetadataMarshal.NativeAccessors;
+
+        Assert.Equal(
+            new[]
+            {
+                "FinalizedCount=kafka_admin_DescribeFeaturesResult_finalized_count",
+                "GetFinalizedFeature=kafka_admin_DescribeFeaturesResult_get_finalized_feature",
+                "GetFinalizedMinVersionLevel=kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level",
+                "GetFinalizedMaxVersionLevel=kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level",
+                "SupportedCount=kafka_admin_DescribeFeaturesResult_supported_count",
+                "GetSupportedFeature=kafka_admin_DescribeFeaturesResult_get_supported_feature",
+                "GetSupportedMinVersion=kafka_admin_DescribeFeaturesResult_get_supported_min_version",
+                "GetSupportedMaxVersion=kafka_admin_DescribeFeaturesResult_get_supported_max_version",
+                "FinalizedFeaturesEpoch=kafka_admin_DescribeFeaturesResult_finalized_features_epoch",
+            },
+            new[]
+            {
+                "FinalizedCount=" + EntryPointOf(accessors.FinalizedCount),
+                "GetFinalizedFeature=" + EntryPointOf(accessors.GetFinalizedFeature),
+                "GetFinalizedMinVersionLevel=" + EntryPointOf(accessors.GetFinalizedMinVersionLevel),
+                "GetFinalizedMaxVersionLevel=" + EntryPointOf(accessors.GetFinalizedMaxVersionLevel),
+                "SupportedCount=" + EntryPointOf(accessors.SupportedCount),
+                "GetSupportedFeature=" + EntryPointOf(accessors.GetSupportedFeature),
+                "GetSupportedMinVersion=" + EntryPointOf(accessors.GetSupportedMinVersion),
+                "GetSupportedMaxVersion=" + EntryPointOf(accessors.GetSupportedMaxVersion),
+                "FinalizedFeaturesEpoch=" + EntryPointOf(accessors.FinalizedFeaturesEpoch),
+            });
+    }
+
+    /// <summary>
+    /// ⚠⚠ <b>The four count-less P7 trampolines each destroy THEIR OWN result root.</b> The
+    /// four types declare byte-identical destroys, so a cross-wired one frees the right
+    /// pointer through the wrong destructor — undetectable by any behavioural assertion
+    /// (M15/P7).
+    /// </summary>
+    [Theory]
+    [InlineData(
+        "s_destroyCreateDelegationTokenResult",
+        "kafka_admin_CreateDelegationTokenResult_destroy")]
+    [InlineData(
+        "s_destroyRenewDelegationTokenResult",
+        "kafka_admin_RenewDelegationTokenResult_destroy")]
+    [InlineData(
+        "s_destroyExpireDelegationTokenResult",
+        "kafka_admin_ExpireDelegationTokenResult_destroy")]
+    [InlineData(
+        "s_destroyDescribeDelegationTokenResult",
+        "kafka_admin_DescribeDelegationTokenResult_destroy")]
+    [InlineData(
+        "s_destroyDescribeFeaturesResult",
+        "kafka_admin_DescribeFeaturesResult_destroy")]
+    [InlineData(
+        "s_destroyDescribeUserScramCredentialsResult",
+        "kafka_admin_DescribeUserScramCredentialsResult_destroy")]
+    [InlineData(
+        "s_destroyAlterUserScramCredentialsResult",
+        "kafka_admin_AlterUserScramCredentialsResult_destroy")]
+    [InlineData(
+        "s_destroyUpdateFeaturesResult",
+        "kafka_admin_UpdateFeaturesResult_destroy")]
+    public void EachP7Destroy_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        Assert.Equal(entryPoint, EntryPointOf(Reader(fieldName)));
+
+    /// <summary>
     /// ⚠⚠ <b>The tracked bundle set is COMPLETE: every shared accessor bundle in the binding
     /// is pinned by one of the three assertions above.</b> The bundle-level twin of
     /// <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/>.
@@ -592,6 +750,8 @@ public sealed class AdminP4ReaderWiringTests
                 "AclRowMarshal.NativeFilterAccessors",
                 "AdminCallbacks.s_offsetAndMetadataMapAccessors",
                 "ClientQuotaMarshal.NativeEntityAccessors",
+                "FeatureMetadataMarshal.NativeAccessors",
+                "UserScramCredentialMarshal.NativeAccessors",
             },
             discovered);
     }

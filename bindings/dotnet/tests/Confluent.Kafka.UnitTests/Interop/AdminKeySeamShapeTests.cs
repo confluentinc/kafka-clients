@@ -239,6 +239,16 @@ public sealed class AdminKeySeamShapeTests
     /// walk over <c>listGroups</c>' two independent lists — and this assertion went red as
     /// designed, which is the reaction the paragraphs above describe working.
     /// </para>
+    /// <para>
+    /// M15/P7 (finding 77.3) added <see cref="KeyedResultMarshal.StringKeyReader"/> and it
+    /// went red again, likewise as designed. ⚠ <b>That is not a new result shape and does not
+    /// touch D40</b>, which governs the <c>Complete*</c> <em>walk</em> callables — this is a
+    /// key-reader factory, the same category as the
+    /// <see cref="KeyedResultMarshal.ReadStringKey"/> already in the set below. It exists
+    /// because a non-capturing key reader is invisible to
+    /// <c>AdminP4ReaderWiringTests</c>'s closure scan, so two P7 readers went unpinned; the
+    /// factory makes the capture exist. The five walk callables are unchanged.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheWalker_ExposesExactlyTheKnownCallables()
@@ -259,6 +269,7 @@ public sealed class AdminKeySeamShapeTests
                 nameof(KeyedResultMarshal.CompleteList),
                 nameof(KeyedResultMarshal.CompleteTwoLists),
                 nameof(KeyedResultMarshal.ReadStringKey),
+                nameof(KeyedResultMarshal.StringKeyReader),
             },
             callables);
     }

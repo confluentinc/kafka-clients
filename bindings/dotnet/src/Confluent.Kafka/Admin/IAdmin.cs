@@ -1111,6 +1111,181 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null);
 
     /// <summary>
+    /// Describes users' SASL/SCRAM credentials — Java's
+    /// <c>describeUserScramCredentials(List&lt;String&gt;, DescribeUserScramCredentialsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="users">
+    /// The users to describe, or <see langword="null"/> (or empty) to describe <b>every</b>
+    /// user — Java's no-argument overload.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// The three derived accessors Java publishes. See
+    /// <see cref="DescribeUserScramCredentialsResult"/>, including its recorded
+    /// <c>RESOURCE_NOT_FOUND</c> divergence.
+    /// </returns>
+    /// <exception cref="ArgumentException"><paramref name="users"/> contains a null element.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users = null,
+        DescribeUserScramCredentialsOptions? options = null);
+
+    /// <summary>
+    /// Upserts and deletes users' SASL/SCRAM credentials — Java's
+    /// <c>alterUserScramCredentials(List&lt;UserScramCredentialAlteration&gt;, AlterUserScramCredentialsOptions)</c>.
+    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="alterations">
+    /// The alterations to apply. ⚠ A repeated user is <b>passed through</b>, as Java does: both
+    /// rows reach the broker and collapse to one outcome keyed by that user. An <b>empty
+    /// password</b> is likewise not rejected here — Java reports it per-user.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable per user — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
+    /// <see cref="AlterUserScramCredentialsResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="alterations"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="alterations"/> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    AlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations,
+        AlterUserScramCredentialsOptions? options = null);
+
+    /// <summary>
+    /// Creates a delegation token — Java's
+    /// <c>createDelegationToken(CreateDelegationTokenOptions)</c>. Returns <b>immediately</b>,
+    /// without waiting for the broker.
+    /// </summary>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable over the issued token. See <see cref="CreateDelegationTokenResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// <c>options.Renewers</c> is null or contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    CreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options = null);
+
+    /// <summary>
+    /// Renews a delegation token — Java's
+    /// <c>renewDelegationToken(byte[], RenewDelegationTokenOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="hmac">
+    /// The token's MAC, passed back <b>verbatim</b> from
+    /// <see cref="Confluent.Kafka.DelegationToken.Hmac"/>. ⚠ It may contain interior zero
+    /// bytes, so it must never be treated as a NUL-terminated string.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable over the new expiry timestamp. See <see cref="RenewDelegationTokenResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    RenewDelegationTokenResult RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options = null);
+
+    /// <summary>
+    /// Expires a delegation token — Java's
+    /// <c>expireDelegationToken(byte[], ExpireDelegationTokenOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="hmac">
+    /// The token's MAC, passed back verbatim — see <see cref="RenewDelegationToken"/>.
+    /// </param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable over the expiry timestamp. See <see cref="ExpireDelegationTokenResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    ExpireDelegationTokenResult ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options = null);
+
+    /// <summary>
+    /// Describes delegation tokens — Java's
+    /// <c>describeDelegationToken(DescribeDelegationTokenOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="options">
+    /// Request options, or <see langword="null"/> for Java's defaults. ⚠ A null
+    /// <c>Owners</c> describes every token the caller may see, while an <b>empty</b> one
+    /// filters by nothing.
+    /// </param>
+    /// <returns>
+    /// One awaitable over the token list. See <see cref="DescribeDelegationTokenResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// <c>options.Owners</c> contains a null element.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeDelegationTokenResult DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options = null);
+
+    /// <summary>
+    /// Describes the cluster's finalized and supported features — Java's
+    /// <c>describeFeatures(DescribeFeaturesOptions)</c>. Returns <b>immediately</b>, without
+    /// waiting for the broker.
+    /// </summary>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// The <b>single</b> awaitable Java publishes, over the whole composite. See
+    /// <see cref="DescribeFeaturesResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null);
+
+    /// <summary>
+    /// Applies feature updates — Java's
+    /// <c>updateFeatures(Map&lt;String, FeatureUpdate&gt;, UpdateFeaturesOptions)</c>. Returns
+    /// <b>immediately</b>, without waiting for the broker.
+    /// </summary>
+    /// <param name="featureUpdates">The update to apply to each feature, keyed by feature name.</param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>
+    /// One awaitable per feature — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
+    /// <see cref="UpdateFeaturesResult"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="featureUpdates"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="featureUpdates"/> is empty, or contains a blank or null name, or a null
+    /// update — the two Java rejects before enqueuing anything
+    /// (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>).
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.TimeoutMs</c> is negative — see <see cref="ListTopics"/>.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    UpdateFeaturesResult UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
+        UpdateFeaturesOptions? options = null);
+
+    /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background
     /// task to finish — Java's <c>close(Duration)</c>. Idempotent: closing an
     /// already-closed client completes without error.
