@@ -6,12 +6,7 @@
 ## Summary
 
 Align each client's public API and configuration with the Apache Kafka Java client. This
-umbrella document states the shared principles; the Rust proposal below covers the concrete
-API of the native core.
-
-| Language | Proposal |
-| --- | --- |
-| Rust | [rust.md](rust.md) |
+umbrella document states the shared principles that apply across all languages.
 
 The Python, .NET, JavaScript, and C/C++ bindings, and the Go client, are covered separately
 and are not part of this RFC set.
