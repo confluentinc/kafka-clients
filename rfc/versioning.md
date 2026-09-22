@@ -38,6 +38,10 @@ PATCH = AK_patch * 100 + core_patch * 10 + binding_patch
   flows to every binding.
 - **Ones digit:** a fix specific to a single language binding.
 
+Each digit resets to 0 when any digit to its left increments. Incrementing the core patch
+resets the binding patch; a new Apache Kafka patch resets both.
+A higher `PATCH` always contains every earlier fix and SemVer-aware upgrades stay safe.
+
 ### Worked examples
 
 | Version | Meaning |
@@ -52,8 +56,14 @@ Ordering stays correct because each Apache Kafka patch occupies its own hundreds
 Apache Kafka 4.3.0 releases occupy `4.3.0`–`4.3.99`, and 4.3.1 releases start at `4.3.100`,
 so `4.3.99 < 4.3.100`.
 
-The trade-off is that the core and per-binding patch streams are each a single digit (0–9)
-within one Apache Kafka minor release.
+### Use cases
+
+Here are some examples of how the versioning applies for use cases:
+
+| Case | Example | What happens |
+| --- | --- | --- | 
+| No leading zeros | `4.3.021` is really `4.3.21` | SemVer forbids leading zeros in `PATCH` reducing readability. |
+| Resets carry fixes forward | `4.0.101` upgrades safely to `4.0.200` | Bumping the Apache Kafka patch resets core and binding to 0, but the Apache Kafka 4.0.2 rebuild carries the earlier binding fix forward. |
 
 ## Defaults and divergence
 
