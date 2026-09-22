@@ -56,28 +56,29 @@ fn make_config(bootstrap_servers: &str) -> HashMap<String, String> {
     ])
 }
 
-/// Pick the bootstrap address the factory's backend can actually reach.
-/// gRPC backends run in containers and need the broker's CONTAINER
-/// listener; native rust uses the host loopback.
+/// Pick the bootstrap address the factory's backend can actually reach, over the
+/// run's selected protocol. gRPC backends run in containers and reach the broker
+/// via its CONTAINER-family listener (PLAINTEXT / SSL / SASL_SSL by container
+/// hostname); native Rust uses the host loopback for the same protocol.
 fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
     if factory.needs_container_bootstrap() {
-        ctx.container_bootstrap_servers().to_string()
+        ctx.container_protocol_bootstrap_servers().to_string()
     } else {
         ctx.protocol_bootstrap_servers().to_string()
     }
 }
 
-/// Inject the selected protocol's security keys into `config`, but only for a
-/// native (in-process) backend. The gRPC/container backends reach the broker
-/// over its PLAINTEXT container listener and must stay plaintext.
+/// Inject the selected protocol's security keys into `config` for every backend.
+/// The gRPC/container backends reach the broker over its CONTAINER-family
+/// SSL / SASL_SSL listener, and the keys (the CA-cert PEM truststore and any
+/// SASL/PLAIN settings) travel through the gRPC config map to the containerized
+/// client — so no cert files need mounting.
 fn apply_backend_security<F: ProducerBackendFactory>(
-    factory: &F,
+    _factory: &F,
     ctx: &TestContext,
     config: &mut HashMap<String, String>,
 ) {
-    if !factory.needs_container_bootstrap() {
-        ctx.apply_security(config);
-    }
+    ctx.apply_security(config);
 }
 
 /// [`make_config`] for the factory's reachable bootstrap, with the selected
@@ -447,7 +448,7 @@ async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(ctx: &m
     // address. 127.0.0.1:1/2 are valid IP literals (so bootstrap
     // validation passes) but ports 1/2 are unused, so connection
     // attempts get RST'd and the producer hits max.block.ms. Same
-    // behavior for native rust (loopback on the test process) and the
+    // behavior for native Rust (loopback on the test process) and the
     // gRPC backends (loopback inside their container).
     let bootstrap = "127.0.0.1:1,127.0.0.1:2";
     let mut config = make_config(bootstrap);
