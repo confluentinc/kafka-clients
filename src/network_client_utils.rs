@@ -86,14 +86,15 @@ impl NetworkClientUtils {
     ///
     /// * `client` - The Kafka client to use
     /// * `node` - The node to await readiness for
-    /// * `now_ms_fn` - A function that returns the current time in milliseconds. `Send`
-    ///   and `Sync` because this future is awaited inside the producer's spawned
-    ///   `Sender` task, and `&dyn Fn()` is only `Send` when the trait object is `Sync`
+    /// * `now_ms_fn` - A function that returns the current time in milliseconds. `Sync`
+    ///   because this future is awaited inside the producer's spawned `Sender` task, so
+    ///   the `&dyn Fn()` reference must be `Send` — and a shared reference `&T` is `Send`
+    ///   exactly when `T: Sync`. `+ Send` on the trait object itself would be redundant.
     /// * `timeout_ms` - The maximum time to wait in milliseconds
     pub async fn await_ready<C: KafkaClient>(
         client: &mut C,
         node: &Node,
-        now_ms_fn: &(dyn Fn() -> i64 + Send + Sync),
+        now_ms_fn: &(dyn Fn() -> i64 + Sync),
         timeout_ms: i64,
     ) -> (Vec<ClientResponse>, io::Result<bool>) {
         if timeout_ms < 0 {

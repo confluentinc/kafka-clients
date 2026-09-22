@@ -12,11 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Staged ahead of its callers: `TransactionManager` (Phase 3/5) and the send
-// path (Phase 4) are the only consumers, so under `#![deny(warnings)]` these
-// methods are dead code until then. Same mechanism as `network_client.rs:15`.
-#![allow(dead_code)]
-
 //! Per-partition idempotence/transaction bookkeeping, keyed by topic-partition.
 
 use crate::common::requests::ProduceResponse;

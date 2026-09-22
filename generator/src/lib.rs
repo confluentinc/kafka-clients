@@ -4144,12 +4144,22 @@ fn generate_field_write(
             // The length prefix is written into the main buffer; the data
             // is moved into a separate scatter-gather buffer.
             if nullable {
-                // accessor is _nv (owned Vec<u8> from .take())
+                // accessor is _nv, a `Bytes` handle cloned from the field (see the
+                // accessor comment: clone, not take, so `write` has no side effect).
                 generate_bytes_length_prefix_write(file, &accessor, flexible_versions, ind)?;
                 writeln!(file, "{}writable.write_records({})?;", ind, accessor)?;
             } else {
-                // Non-nullable: take ownership first, then write length prefix + data
-                writeln!(file, "{}let _records_data = std::mem::take(&mut {});", ind, accessor)?;
+                // Non-nullable: clone the owned handle rather than `std::mem::take`.
+                // A `bytes::Bytes` clone is a reference-count bump that copies no
+                // payload (still zero-copy per CLAUDE.md §12), and — unlike
+                // `std::mem::take` — it does NOT mutate the message as a side effect
+                // of serialising, mirroring the nullable path above. `std::mem::take`
+                // left the field empty after a `write`, so a second `write` emitted an
+                // empty record set and a `size()` computed after a `write` disagreed
+                // with the bytes written (the same bug the nullable path was fixed to
+                // avoid; `records` is the sole non-nullable case today —
+                // `FetchSnapshotResponse.UnalignedRecords`).
+                writeln!(file, "{}let _records_data = {}.clone();", ind, accessor)?;
                 generate_bytes_length_prefix_write(file, "_records_data", flexible_versions, ind)?;
                 writeln!(file, "{}writable.write_records(_records_data)?;", ind)?;
             }
