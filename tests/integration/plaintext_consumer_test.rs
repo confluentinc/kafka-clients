@@ -750,11 +750,13 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
 /// Translates Java's `testAsyncConsumerConsumeMessagesWithLogAppendTime`
 /// (line 735). Uses a dedicated broker-wide-LogAppendTime cluster; asserts
 /// `timestamp_type == LogAppendTime` and the broker-stamped timestamp is in
-/// `[startTime, now]`.
+/// `[startTime, now]` widened by a clock-skew slack (see
+/// `CLOCK_SKEW_SLACK_MS` below).
 ///
-/// Translation deviation: the compressed-message half is SKIPped (no gzip
+/// Translation deviations: the compressed-message half is SKIPped (no gzip
 /// producer helper); the non-compressed half covers the LogAppendTime
-/// timestamp-type gap.
+/// timestamp-type gap. The timestamp range bound carries a skew slack Java
+/// does not need.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_consume_messages_with_log_append_time() {
     let mut ctx = TestContext::new(cluster_config_log_append_time()).await;
@@ -778,6 +780,47 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
 
     let records = consume_records(consumer.as_mut(), num_records).await;
     let now = current_time_ms();
+
+    // Translation deviation (CLAUDE.md #4 / DoD #7): Java bounds the
+    // broker-stamped timestamp by `[startingTimestamp, now]` with ZERO
+    // tolerance (`ClientsTestUtils.consumeAndVerifyRecordsWithTimeTypeLogAppend`).
+    // That holds in Java only because `ClusterInstance` runs the KRaft brokers
+    // IN-PROCESS: `record.timestamp` (read by the broker at append) and `now`
+    // (read by the client) then come from one `CLOCK_REALTIME`, so the append
+    // provably precedes the read and flooring to millis preserves the order.
+    //
+    // This harness runs the brokers in containers. On a shared-kernel Docker
+    // the clock is still literally the same variable (identical `/proc/stat
+    // btime`, no time namespace), but where the daemon is VM-backed -- Docker
+    // Desktop on macOS/Windows, Colima, Lima -- the VM keeps its own realtime
+    // clock and resyncs to the host only periodically, so the two readings can
+    // disagree by milliseconds in either direction. With zero tolerance that
+    // makes the assertion flaky for reasons unrelated to this client; observed
+    // as `timestamp 1789641102389 should be within [1789641101901,
+    // 1789641102387]`, i.e. 2 ms past the upper bound.
+    //
+    // The slack's exact size is a judgement call, NOT a measurement: the skew
+    // is environment-dependent with no upper bound derivable here, and this
+    // bound's detection power is flat across a huge range. What it can still
+    // catch are gross errors -- `NO_TIMESTAMP`, a zero stamp, epoch seconds or
+    // micros read as millis, an i32 truncation -- and the NEAREST of those sits
+    // ~1.79e12 ms (~57 years) from `now`, so any slack from milliseconds up to
+    // years is equally detective. 50 ms is picked as roughly an order of
+    // magnitude above the skew the failure implies (2 ms past the bound, so a
+    // low-tens-of-ms offset once the append-to-observe latency is added back)
+    // while staying ~10 orders of magnitude below the errors it must catch,
+    // which keeps the bound visibly tight and retains detection of mid-scale
+    // anomalies. It is deliberately NOT sized for pathological drift: a
+    // VM-backed Docker whose host has slept can be further out than this, and
+    // such a run is meant to fail here rather than be silently tolerated.
+    //
+    // What no choice of slack can catch is a `base_timestamp + timestamp_delta`
+    // (CreateTime) regression: `send_records` supplies `start_time + i` for
+    // `i < 50`, so those values land INSIDE even the untightened range. The
+    // LogAppendTime decode is pinned by the `timestamp_type` assertion below,
+    // not by this range.
+    const CLOCK_SKEW_SLACK_MS: i64 = 50;
+
     for (i, record) in records.iter().take(num_records).enumerate() {
         assert_eq!(record.topic, tp.topic());
         assert_eq!(record.partition, tp.partition());
@@ -787,8 +830,9 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
             "timestamp_type should be LogAppendTime"
         );
         assert!(
-            record.timestamp >= start_time && record.timestamp <= now,
-            "timestamp {} should be within [{start_time}, {now}]",
+            record.timestamp >= start_time - CLOCK_SKEW_SLACK_MS && record.timestamp <= now + CLOCK_SKEW_SLACK_MS,
+            "timestamp {} should be within [{start_time}, {now}] widened by the \
+             {CLOCK_SKEW_SLACK_MS} ms broker/client clock-skew slack",
             record.timestamp
         );
         assert_eq!(record.offset, i as i64);
