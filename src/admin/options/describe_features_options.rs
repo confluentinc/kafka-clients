@@ -34,14 +34,14 @@ impl DescribeFeaturesOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
@@ -49,7 +49,7 @@ impl DescribeFeaturesOptions {
     ///
     /// Mirrors `DescribeFeaturesOptions.nodeId(int)`.
     #[must_use]
-    pub fn node_id(mut self, node_id: i32) -> Self {
+    pub fn set_node_id(mut self, node_id: i32) -> Self {
         self.node_id = Some(node_id);
         self
     }
@@ -58,7 +58,7 @@ impl DescribeFeaturesOptions {
     /// will be sent to an arbitrary controller/broker.
     ///
     /// Mirrors `DescribeFeaturesOptions.nodeId()`.
-    pub fn get_node_id(&self) -> Option<i32> {
+    pub fn node_id(&self) -> Option<i32> {
         self.node_id
     }
 }
@@ -70,14 +70,14 @@ mod tests {
     #[test]
     fn defaults_match_java() {
         let options = DescribeFeaturesOptions::new();
-        assert_eq!(options.timeout(), None);
-        assert_eq!(options.get_node_id(), None);
+        assert_eq!(options.timeout_ms(), None);
+        assert_eq!(options.node_id(), None);
     }
 
     #[test]
     fn fluent_setters() {
-        let options = DescribeFeaturesOptions::new().timeout_ms(Some(100)).node_id(0);
-        assert_eq!(options.timeout(), Some(100));
-        assert_eq!(options.get_node_id(), Some(0));
+        let options = DescribeFeaturesOptions::new().set_timeout_ms(Some(100)).set_node_id(0);
+        assert_eq!(options.timeout_ms(), Some(100));
+        assert_eq!(options.node_id(), Some(0));
     }
 }

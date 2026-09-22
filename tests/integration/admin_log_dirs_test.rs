@@ -65,9 +65,9 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     AlterReplicaLogDirsOptions, DescribeClusterOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
 };
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::TopicPartitionReplica;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
@@ -91,13 +91,13 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).expect("valid producer config");
+    let config = ProducerConfig::new(&props).expect("valid producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::from_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
             .expect("build producer");
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(format!("key {i}").into_bytes()),
@@ -112,7 +112,7 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     }
     producer.flush().await.expect("flush");
     if let Some(f) = last {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send");
+        f.get_with_timeout(Duration::from_secs(30)).await.expect("last send");
     }
     producer.close().await.expect("producer close");
 }

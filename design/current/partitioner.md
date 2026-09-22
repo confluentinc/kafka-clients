@@ -195,7 +195,7 @@ crate already knows. Two resolution paths exist, mirroring how Java resolves
   non-built-in value is already rejected at config-construction time with Java's
   exact `ConfigException` text (Phase 1), so no unknown class name reaches
   `resolve_partitioner`.
-- **By instance (`KafkaProducer::from_config_with_partitioner`)** — because a
+- **By instance (`KafkaProducer::with_partitioner`)** — because a
   user-written partitioner cannot be named reflectively, the caller supplies it
   as a constructed `Box<dyn Partitioner<K, V>>`. An explicit instance **takes
   precedence** over any built-in that `partitioner.class` would otherwise name,
@@ -264,7 +264,7 @@ working. This is a DoD §7 justified deviation, recorded in the
 ### Bindings: built-in partitioners reach FFI / Python for free
 
 Because `resolve_partitioner` runs *inside* config construction
-(`ProducerConfig::from_properties` → `from_config`), any client built from a
+(`ProducerConfig::new` → `KafkaProducer::new`), any client built from a
 property map — including the C FFI and the Python binding, which both construct
 producers from properties — automatically gets a `RoundRobinPartitioner` when
 `partitioner.class=RoundRobinPartitioner` is set, and the CRC-32 / murmur2 hash

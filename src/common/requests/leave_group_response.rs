@@ -29,10 +29,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::LeaveGroupResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::leave_group_response_data::{LeaveGroupResponseData, MemberResponse};
+use crate::leave_group_response_data::MemberResponse;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A `LeaveGroup` response.
 ///
@@ -113,9 +114,9 @@ impl LeaveGroupResponse {
     /// errors. Mirrors Java's `errorCounts`.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         for member_response in &self.data.members {
-            update_error_counts(&mut counts, Errors::for_code(member_response.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(member_response.error_code));
         }
         counts
     }
@@ -215,7 +216,7 @@ mod tests {
             0x00, 0x01, 0x69, // group_instance_id "i"
             0x00, 0x19, // error_code 25
         ];
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes);
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
         let response = LeaveGroupResponse::parse(&mut readable, 3).unwrap();
         assert_eq!(response.top_level_error(), Errors::None);
         assert_eq!(response.member_responses().len(), 1);
@@ -249,7 +250,7 @@ mod tests {
             0x00, // member tagged fields
             0x00, // top-level tagged fields
         ];
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes);
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
         let response = LeaveGroupResponse::parse(&mut readable, 5).unwrap();
         assert_eq!(response.top_level_error(), Errors::None);
         assert_eq!(response.member_responses().len(), 1);

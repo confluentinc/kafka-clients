@@ -18,12 +18,10 @@
 
 use std::collections::HashMap;
 
+use crate::CommonClientConfigs;
 use crate::common::Error;
-use crate::common::config::sasl_configs;
-use crate::common::config::ssl_configs;
-use crate::common::config::{SaslConfig, SslConfig};
+use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::security::SecurityProtocol;
-use crate::common_client_configs;
 
 /// Configuration for the admin client.
 ///
@@ -82,11 +80,11 @@ impl AdminClientConfig {
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
     /// `security.protocol`
-    pub const SECURITY_PROTOCOL_CONFIG: &'static str = common_client_configs::SECURITY_PROTOCOL_CONFIG;
+    pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
     /// `sasl.mechanism`
-    pub const SASL_MECHANISM_CONFIG: &'static str = sasl_configs::SASL_MECHANISM;
+    pub const SASL_MECHANISM_CONFIG: &'static str = SaslConfigs::SASL_MECHANISM;
     /// `sasl.jaas.config`
-    pub const SASL_JAAS_CONFIG: &'static str = sasl_configs::SASL_JAAS_CONFIG;
+    pub const SASL_JAAS_CONFIG: &'static str = SaslConfigs::SASL_JAAS_CONFIG;
 
     /// Creates a config from a property map. `bootstrap.servers` is required.
     ///
@@ -94,7 +92,7 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
     /// or a numeric value fails to parse.
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
+    pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
         let mut bootstrap_set = false;
 
@@ -119,7 +117,7 @@ impl AdminClientConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             key,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
@@ -137,7 +135,7 @@ impl AdminClientConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    ssl_configs::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 // Unknown keys are accepted silently, as in Java.
                 _ => {},
@@ -145,7 +143,7 @@ impl AdminClientConfig {
         }
 
         if !bootstrap_set || config.bootstrap_servers.is_empty() {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Missing required configuration \"{}\" which has no default value.",
                 Self::BOOTSTRAP_SERVERS_CONFIG
             )));
@@ -253,11 +251,11 @@ impl Default for AdminClientConfig {
 }
 
 fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
 #[cfg(test)]
@@ -268,7 +266,7 @@ mod tests {
     fn defaults_and_required_bootstrap() {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "a:9092, b:9092".to_string());
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_servers(), &["a:9092".to_string(), "b:9092".to_string()]);
         assert_eq!(config.request_timeout_ms(), 30_000);
         assert_eq!(config.default_api_timeout_ms(), 60_000);
@@ -279,7 +277,7 @@ mod tests {
     #[test]
     fn missing_bootstrap_is_error_with_exact_message() {
         let props = HashMap::new();
-        let err = AdminClientConfig::from_properties(&props).unwrap_err();
+        let err = AdminClientConfig::new(&props).unwrap_err();
         assert_eq!(
             err.message(),
             "Missing required configuration \"bootstrap.servers\" which has no default value."
@@ -293,7 +291,7 @@ mod tests {
         props.insert("client.id".to_string(), "admin-1".to_string());
         props.insert("request.timeout.ms".to_string(), "5000".to_string());
         props.insert("some.unknown.key".to_string(), "ignored".to_string());
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.client_id(), "admin-1");
         assert_eq!(config.request_timeout_ms(), 5000);
     }
@@ -303,7 +301,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
         props.insert("request.timeout.ms".to_string(), "not-a-number".to_string());
-        assert!(AdminClientConfig::from_properties(&props).is_err());
+        assert!(AdminClientConfig::new(&props).is_err());
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`, adapted
@@ -313,7 +311,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         props.insert("security.protocol".to_string(), "abc".to_string());
-        let err = AdminClientConfig::from_properties(&props).unwrap_err();
+        let err = AdminClientConfig::new(&props).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("security.protocol"),
@@ -329,7 +327,7 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.security_protocol(), SecurityProtocol::SaslSsl);
     }
 
@@ -343,7 +341,7 @@ mod tests {
             "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"secret\";"
                 .to_string(),
         );
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.sasl_config().mechanism, "PLAIN");
         assert_eq!(config.sasl_config().resolve_username(), Some("alice"));
         assert_eq!(config.sasl_config().resolve_password(), Some("secret"));
@@ -356,7 +354,7 @@ mod tests {
         props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
         props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
         props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
-        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(
             config.ssl_config().truststore_location.as_deref(),
             Some("/path/to/truststore.pem")

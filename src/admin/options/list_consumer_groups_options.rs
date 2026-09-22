@@ -65,7 +65,7 @@ impl ListConsumerGroupsOptions {
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
@@ -87,7 +87,7 @@ impl ListConsumerGroupsOptions {
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }

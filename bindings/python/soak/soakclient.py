@@ -44,7 +44,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import resource
 import signal
 import socket
@@ -88,7 +87,7 @@ _SOAK_DIR = os.path.dirname(os.path.abspath(__file__))
 #
 # The Rust client only *warns* on an unknown configuration key
 # (src/producer/producer_config.rs, src/consumer/consumer_config.rs, both end
-# their from_properties() match with a `warn!("Unknown ... key")` arm), so a
+# their new() match with a `warn!("Unknown ... key")` arm), so a
 # typo would silently start a soak with the default value — e.g. an
 # unauthenticated PLAINTEXT connection. A multi-day run must not begin that
 # way, so the soak validates its own configuration up front and refuses to
@@ -156,7 +155,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "interceptor.classes",
     "internal.throw.on.fetch.stable.offset.unsupported",
     "isolation.level",
-    "key.deserializer",
     "max.partition.fetch.bytes",
     "max.poll.interval.ms",
     "max.poll.records",
@@ -184,7 +182,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "share.acquire.mode",
     "socket.connection.setup.timeout.max.ms",
     "socket.connection.setup.timeout.ms",
-    "value.deserializer",
 ])
 
 # Both configs route every `ssl.*` key to apply_ssl_config_key() rather than
@@ -541,22 +538,74 @@ def jaas_field(jaas_config, name):
     ``username="k"``, ``username = "k"``, ``username='k'`` and bare
     ``username=k``. Returns ``None`` only when the field is genuinely absent.
 
-    The previous hand-rolled scanner required ``name="`` with no space and double
-    quotes, so ``username = "k"`` silently yielded no credentials at all — the
-    admin client then attempted SASL PLAIN unauthenticated and the failure
-    surfaced as an opaque broker error. Hence both the tolerance here and the
-    hard failure in :func:`check_admin_credentials`.
+    This mirrors the Rust parser (``SaslConfig::parse_jaas_option``) byte for
+    byte so the client and this validator never disagree: the key is recognized
+    only at an **option start** (beginning of string or after whitespace), quoted
+    regions are skipped wholesale **honoring backslash escapes**, and the value
+    may be double-quoted, single-quoted, or bare. A ``name=`` sequence that lives
+    inside another option's quoted value is therefore never mistaken for the
+    option (e.g. ``password="username=x" username="right"`` resolves ``username``
+    to ``right``, not ``x``) — a regex ``search`` did make that mistake and let a
+    missing-username config pass the fast-fail. The returned value is the raw
+    inner content between the quotes (escapes are honored for boundary detection
+    but not expanded), matching the Rust parser.
+
+    A hand-rolled scanner (rather than a regex) is required precisely because a
+    regex cannot skip escaped quotes / balanced quoting the way the Rust lexer
+    does; the two must agree so the hard failure in
+    :func:`check_admin_credentials` is reliable.
     """
-    # (?<![\w.]) so `serviceName=` / `foo.username=` cannot match `username=`.
-    pattern = re.compile(
-        r'(?<![\w.])' + re.escape(name) + r'\s*=\s*'
-        r'(?:"([^"]*)"|\'([^\']*)\'|([^\s;]+))')
-    match = pattern.search(jaas_config)
-    if match is None:
-        return None
-    for group in match.groups():
-        if group is not None:
-            return group
+    s = jaas_config
+    n = len(s)
+
+    def skip_quoted(i):
+        # Advance past a quoted region opening at s[i], honoring '\' escapes.
+        quote = s[i]
+        i += 1
+        while i < n:
+            if s[i] == '\\':
+                i += 2
+                continue
+            if s[i] == quote:
+                return i + 1
+            i += 1
+        return i
+
+    i = 0
+    while i < n:
+        c = s[i]
+        if c == '"' or c == "'":
+            i = skip_quoted(i)
+            continue
+        at_option_start = i == 0 or s[i - 1].isspace()
+        if at_option_start and s.startswith(name, i):
+            j = i + len(name)
+            while j < n and s[j].isspace():
+                j += 1
+            if j < n and s[j] == '=':
+                j += 1
+                while j < n and s[j].isspace():
+                    j += 1
+                if j >= n:
+                    return None
+                quote = s[j]
+                if quote == '"' or quote == "'":
+                    start = j + 1
+                    k = start
+                    while k < n:
+                        if s[k] == '\\':
+                            k += 2
+                            continue
+                        if s[k] == quote:
+                            return s[start:k]
+                        k += 1
+                    return None  # unterminated quote — malformed
+                # Bare value: read until whitespace or ';'.
+                k = j
+                while k < n and not s[k].isspace() and s[k] != ';':
+                    k += 1
+                return s[j:k]
+        i += 1
     return None
 
 

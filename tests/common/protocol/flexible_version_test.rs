@@ -21,57 +21,57 @@ use confluent_kafka::common::protocol::{ByteBufferAccessor, RawTaggedField, Read
 
 #[test]
 fn test_read_unsigned_varint() {
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0x00]);
+    let mut accessor = ByteBufferAccessor::new(vec![0x00]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 0);
 
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0x01]);
+    let mut accessor = ByteBufferAccessor::new(vec![0x01]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 1);
 
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0x7F]);
+    let mut accessor = ByteBufferAccessor::new(vec![0x7F]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 127);
 
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0x80, 0x01]);
+    let mut accessor = ByteBufferAccessor::new(vec![0x80, 0x01]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 128);
 
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0xFF, 0x01]);
+    let mut accessor = ByteBufferAccessor::new(vec![0xFF, 0x01]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 255);
 
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0x80, 0x02]);
+    let mut accessor = ByteBufferAccessor::new(vec![0x80, 0x02]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 256);
 
     // Max value (2^32 - 1)
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+    let mut accessor = ByteBufferAccessor::new(vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
     assert_eq!(accessor.read_unsigned_varint().unwrap(), 0xFFFFFFFF);
 }
 
 #[test]
 fn test_write_unsigned_varint() {
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(0).unwrap();
     assert_eq!(accessor.buffer(), &[0x00]);
 
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(1).unwrap();
     assert_eq!(accessor.buffer(), &[0x01]);
 
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(127).unwrap();
     assert_eq!(accessor.buffer(), &[0x7F]);
 
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(128).unwrap();
     assert_eq!(accessor.buffer(), &[0x80, 0x01]);
 
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(255).unwrap();
     assert_eq!(accessor.buffer(), &[0xFF, 0x01]);
 
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(256).unwrap();
     assert_eq!(accessor.buffer(), &[0x80, 0x02]);
 
     // Max value (2^32 - 1)
-    let mut accessor = ByteBufferAccessor::new(10);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
     accessor.write_unsigned_varint(0xFFFFFFFF).unwrap();
     assert_eq!(accessor.buffer(), &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
 }
@@ -83,10 +83,10 @@ fn test_unsigned_varint_round_trip() {
     ];
 
     for value in test_values {
-        let mut accessor = ByteBufferAccessor::new(10);
+        let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(10));
         accessor.write_unsigned_varint(value).unwrap();
 
-        let mut read_accessor = ByteBufferAccessor::from_bytes(accessor.buffer().to_vec());
+        let mut read_accessor = ByteBufferAccessor::new(accessor.buffer().to_vec());
         let read_value = read_accessor.read_unsigned_varint().unwrap();
 
         assert_eq!(value, read_value, "Round trip failed for value {}", value);
@@ -116,7 +116,7 @@ fn test_raw_tagged_field_equality() {
 #[test]
 fn test_read_unknown_tagged_field() {
     // Create a buffer with tagged field data: tag=3, size=5, data=[1,2,3,4,5]
-    let mut accessor = ByteBufferAccessor::from_bytes(vec![1, 2, 3, 4, 5]);
+    let mut accessor = ByteBufferAccessor::new(vec![1, 2, 3, 4, 5]);
 
     let unknowns = Vec::new();
     let unknowns = accessor.read_unknown_tagged_field(unknowns, 3, 5).unwrap();
@@ -131,11 +131,11 @@ fn test_multiple_unknown_tagged_fields() {
     let unknowns = Vec::new();
 
     // Add first tagged field
-    let mut accessor1 = ByteBufferAccessor::from_bytes(vec![10, 20, 30]);
+    let mut accessor1 = ByteBufferAccessor::new(vec![10, 20, 30]);
     let unknowns = accessor1.read_unknown_tagged_field(unknowns, 1, 3).unwrap();
 
     // Add second tagged field
-    let mut accessor2 = ByteBufferAccessor::from_bytes(vec![40, 50]);
+    let mut accessor2 = ByteBufferAccessor::new(vec![40, 50]);
     let unknowns = accessor2.read_unknown_tagged_field(unknowns, 2, 2).unwrap();
 
     assert_eq!(unknowns.len(), 2);
@@ -152,7 +152,7 @@ fn test_flexible_string_encoding() {
     // empty string: varint(1)
     // "hello": varint(6) + "hello" bytes
 
-    let mut accessor = ByteBufferAccessor::new(20);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(20));
 
     // Write flexible version string "hello"
     let s = "hello";
@@ -160,7 +160,7 @@ fn test_flexible_string_encoding() {
     accessor.write_bytes(s.as_bytes()).unwrap();
 
     // Read it back
-    let mut read_accessor = ByteBufferAccessor::from_bytes(accessor.buffer().to_vec());
+    let mut read_accessor = ByteBufferAccessor::new(accessor.buffer().to_vec());
     let length = read_accessor.read_unsigned_varint().unwrap();
     assert_eq!(length, 6);
 
@@ -176,7 +176,7 @@ fn test_flexible_bytes_encoding() {
     // empty bytes: varint(1)
     // [1,2,3]: varint(4) + [1,2,3]
 
-    let mut accessor = ByteBufferAccessor::new(20);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(20));
 
     // Write flexible version bytes
     let data = vec![1u8, 2, 3];
@@ -184,7 +184,7 @@ fn test_flexible_bytes_encoding() {
     accessor.write_bytes(&data).unwrap();
 
     // Read it back
-    let mut read_accessor = ByteBufferAccessor::from_bytes(accessor.buffer().to_vec());
+    let mut read_accessor = ByteBufferAccessor::new(accessor.buffer().to_vec());
     let length = read_accessor.read_unsigned_varint().unwrap();
     assert_eq!(length, 4);
 
@@ -198,7 +198,7 @@ fn test_flexible_array_encoding() {
     // empty array: varint(1)
     // [10, 20, 30]: varint(4) + elements
 
-    let mut accessor = ByteBufferAccessor::new(20);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(20));
 
     // Write flexible version array of int32
     let array = vec![10i32, 20, 30];
@@ -208,7 +208,7 @@ fn test_flexible_array_encoding() {
     }
 
     // Read it back
-    let mut read_accessor = ByteBufferAccessor::from_bytes(accessor.buffer().to_vec());
+    let mut read_accessor = ByteBufferAccessor::new(accessor.buffer().to_vec());
     let length = read_accessor.read_unsigned_varint().unwrap();
     assert_eq!(length, 4);
 
@@ -225,7 +225,7 @@ fn test_tagged_fields_serialization() {
     // Format: num_tagged_fields (varint), then for each field:
     //   tag (varint), size (varint), data
 
-    let mut accessor = ByteBufferAccessor::new(50);
+    let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(50));
 
     // Write 2 tagged fields
     accessor.write_unsigned_varint(2).unwrap(); // 2 tagged fields
@@ -241,7 +241,7 @@ fn test_tagged_fields_serialization() {
     accessor.write_bytes(&[200, 201, 202]).unwrap();
 
     // Read it back
-    let mut read_accessor = ByteBufferAccessor::from_bytes(accessor.buffer().to_vec());
+    let mut read_accessor = ByteBufferAccessor::new(accessor.buffer().to_vec());
     let num_fields = read_accessor.read_unsigned_varint().unwrap();
     assert_eq!(num_fields, 2);
 

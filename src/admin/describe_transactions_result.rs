@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::admin::transaction_description::TransactionDescription;
+use crate::admin::TransactionDescription;
 use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::describe_transactions`.
@@ -67,8 +67,8 @@ impl DescribeTransactionsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::transaction_state::TransactionState;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::admin::TransactionState;
+    use crate::common::internals::KafkaFutureImpl;
     use std::collections::HashSet;
 
     fn description() -> TransactionDescription {

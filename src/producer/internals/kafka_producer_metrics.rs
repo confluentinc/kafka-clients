@@ -29,21 +29,6 @@ use crate::common::MetricName;
 use crate::common::metrics::stats::CumulativeSum;
 use crate::common::metrics::{Metrics, Sensor};
 
-/// The metric group name for producer-level latency metrics.
-///
-/// Mirrors Java's `KafkaProducerMetrics.GROUP`.
-pub(crate) const GROUP: &str = "producer-metrics";
-
-const FLUSH: &str = "flush";
-const TXN_INIT: &str = "txn-init";
-const TXN_BEGIN: &str = "txn-begin";
-const TXN_SEND_OFFSETS: &str = "txn-send-offsets";
-const TXN_COMMIT: &str = "txn-commit";
-const TXN_ABORT: &str = "txn-abort";
-const TXN_PREPARE: &str = "txn-prepare";
-const TOTAL_TIME_SUFFIX: &str = "-time-ns-total";
-const METADATA_WAIT: &str = "metadata-wait";
-
 /// Records producer latency timing metrics. Mirrors Java's
 /// `KafkaProducerMetrics implements AutoCloseable`.
 ///
@@ -66,45 +51,71 @@ pub(crate) struct KafkaProducerMetrics {
 }
 
 impl KafkaProducerMetrics {
+    /// The metric group name for producer-level latency metrics.
+    ///
+    /// Mirrors Java's `KafkaProducerMetrics.GROUP`.
+    pub(crate) const GROUP: &str = "producer-metrics";
+
+    const FLUSH: &str = "flush";
+
+    const TXN_INIT: &str = "txn-init";
+
+    const TXN_BEGIN: &str = "txn-begin";
+
+    const TXN_SEND_OFFSETS: &str = "txn-send-offsets";
+
+    const TXN_COMMIT: &str = "txn-commit";
+
+    const TXN_ABORT: &str = "txn-abort";
+
+    const TXN_PREPARE: &str = "txn-prepare";
+
+    const TOTAL_TIME_SUFFIX: &str = "-time-ns-total";
+
+    const METADATA_WAIT: &str = "metadata-wait";
+
     /// Registers all 8 latency sensors in the `producer-metrics` group.
     ///
     /// Java: `KafkaProducerMetrics(Metrics metrics)`.
     pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
-        let flush_time_sensor =
-            Self::new_latency_sensor(&metrics, FLUSH, "Total time producer has spent in flush in nanoseconds.");
+        let flush_time_sensor = Self::new_latency_sensor(
+            &metrics,
+            KafkaProducerMetrics::FLUSH,
+            "Total time producer has spent in flush in nanoseconds.",
+        );
         let init_time_sensor = Self::new_latency_sensor(
             &metrics,
-            TXN_INIT,
+            KafkaProducerMetrics::TXN_INIT,
             "Total time producer has spent in initTransactions in nanoseconds.",
         );
         let begin_txn_time_sensor = Self::new_latency_sensor(
             &metrics,
-            TXN_BEGIN,
+            KafkaProducerMetrics::TXN_BEGIN,
             "Total time producer has spent in beginTransaction in nanoseconds.",
         );
         let send_offsets_sensor = Self::new_latency_sensor(
             &metrics,
-            TXN_SEND_OFFSETS,
+            KafkaProducerMetrics::TXN_SEND_OFFSETS,
             "Total time producer has spent in sendOffsetsToTransaction in nanoseconds.",
         );
         let commit_txn_sensor = Self::new_latency_sensor(
             &metrics,
-            TXN_COMMIT,
+            KafkaProducerMetrics::TXN_COMMIT,
             "Total time producer has spent in commitTransaction in nanoseconds.",
         );
         let abort_txn_sensor = Self::new_latency_sensor(
             &metrics,
-            TXN_ABORT,
+            KafkaProducerMetrics::TXN_ABORT,
             "Total time producer has spent in abortTransaction in nanoseconds.",
         );
         let prepare_txn_sensor = Self::new_latency_sensor(
             &metrics,
-            TXN_PREPARE,
+            KafkaProducerMetrics::TXN_PREPARE,
             "Total time producer has spent in prepareTransaction in nanoseconds.",
         );
         let metadata_wait_sensor = Self::new_latency_sensor(
             &metrics,
-            METADATA_WAIT,
+            KafkaProducerMetrics::METADATA_WAIT,
             "Total time producer has spent waiting on topic metadata in nanoseconds.",
         );
 
@@ -123,7 +134,7 @@ impl KafkaProducerMetrics {
 
     /// Java: `recordFlush(long duration)`.
     pub(crate) fn record_flush(&self, duration: i64) {
-        self.flush_time_sensor.record(duration as f64);
+        self.flush_time_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordInit(long duration)`.
@@ -132,35 +143,35 @@ impl KafkaProducerMetrics {
     /// [`Producer`](crate::producer::Producer) trait. Retained for parity —
     /// Java registers the sensor regardless — and wired when transactions land.
     pub(crate) fn record_init(&self, duration: i64) {
-        self.init_time_sensor.record(duration as f64);
+        self.init_time_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordBeginTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_begin_txn(&self, duration: i64) {
-        self.begin_txn_time_sensor.record(duration as f64);
+        self.begin_txn_time_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordSendOffsets(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_send_offsets(&self, duration: i64) {
-        self.send_offsets_sensor.record(duration as f64);
+        self.send_offsets_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordCommitTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_commit_txn(&self, duration: i64) {
-        self.commit_txn_sensor.record(duration as f64);
+        self.commit_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordAbortTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_abort_txn(&self, duration: i64) {
-        self.abort_txn_sensor.record(duration as f64);
+        self.abort_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordPrepareTxn(long duration)`.
@@ -169,24 +180,24 @@ impl KafkaProducerMetrics {
     /// transactional API lands (Java registers `txn-prepare` but has no
     /// `recordPrepareTxn` call site of its own either). Retained for parity.
     pub(crate) fn record_prepare_txn(&self, duration: i64) {
-        self.prepare_txn_sensor.record(duration as f64);
+        self.prepare_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordMetadataWait(long duration)`.
     pub(crate) fn record_metadata_wait(&self, duration: i64) {
-        self.metadata_wait_sensor.record(duration as f64);
+        self.metadata_wait_sensor.record_value(duration as f64);
     }
 
     /// Java: `close()` (`AutoCloseable`). Removes all 8 latency sensors.
     pub(crate) fn close(&self) {
-        Self::remove_metric(&self.metrics, FLUSH);
-        Self::remove_metric(&self.metrics, TXN_INIT);
-        Self::remove_metric(&self.metrics, TXN_BEGIN);
-        Self::remove_metric(&self.metrics, TXN_SEND_OFFSETS);
-        Self::remove_metric(&self.metrics, TXN_COMMIT);
-        Self::remove_metric(&self.metrics, TXN_ABORT);
-        Self::remove_metric(&self.metrics, TXN_PREPARE);
-        Self::remove_metric(&self.metrics, METADATA_WAIT);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::FLUSH);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_INIT);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_BEGIN);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_SEND_OFFSETS);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_COMMIT);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_ABORT);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_PREPARE);
+        Self::remove_metric(&self.metrics, KafkaProducerMetrics::METADATA_WAIT);
     }
 
     /// Java: `newLatencySensor(String name, String description)`.
@@ -194,25 +205,25 @@ impl KafkaProducerMetrics {
     /// The sensor is named `<name>-time-ns-total` and carries a single
     /// `CumulativeSum` metric of the same name.
     fn new_latency_sensor(metrics: &Arc<Metrics>, name: &str, description: &str) -> Arc<Sensor> {
-        let sensor_name = format!("{name}{TOTAL_TIME_SUFFIX}");
+        let sensor_name = format!("{name}{}", KafkaProducerMetrics::TOTAL_TIME_SUFFIX);
         let sensor = metrics
             .sensor(&sensor_name)
             .unwrap_or_else(|_| panic!("creating {sensor_name} sensor"));
         sensor
-            .add(Self::metric_name(metrics, name, description), Box::new(CumulativeSum::new()))
+            .add_metric_name(Self::metric_name(metrics, name, description), Box::new(CumulativeSum::new()))
             .unwrap_or_else(|_| panic!("adding {sensor_name} metric"));
         sensor
     }
 
     /// Java: `metricName(String name, String description)`.
     ///
-    /// `Metrics::metric_name` already merges the registry's default tags (the
+    /// `Metrics::metric_name_description_tags` already merges the registry's default tags (the
     /// `client-id` tag), so an empty explicit tag map yields the same effective
     /// name as Java passing `metrics.config().tags()`.
     fn metric_name(metrics: &Arc<Metrics>, name: &str, description: &str) -> MetricName {
-        metrics.metric_name(
-            format!("{name}{TOTAL_TIME_SUFFIX}"),
-            GROUP,
+        metrics.metric_name_description_tags(
+            format!("{name}{}", KafkaProducerMetrics::TOTAL_TIME_SUFFIX),
+            KafkaProducerMetrics::GROUP,
             description,
             std::collections::BTreeMap::new(),
         )
@@ -220,7 +231,7 @@ impl KafkaProducerMetrics {
 
     /// Java: `removeMetric(String name)`.
     fn remove_metric(metrics: &Arc<Metrics>, name: &str) {
-        metrics.remove_sensor(&format!("{name}{TOTAL_TIME_SUFFIX}"));
+        metrics.remove_sensor(&format!("{name}{}", KafkaProducerMetrics::TOTAL_TIME_SUFFIX));
     }
 }
 
@@ -229,7 +240,7 @@ mod tests {
     //! `KafkaProducerMetricsTest` (Java) is fully translated here.
 
     use super::*;
-    use crate::common::metric::Metric;
+    use crate::common::Metric;
 
     const METRIC_VALUE: i64 = 123;
     const FLUSH_TIME_TOTAL: &str = "flush-time-ns-total";
@@ -252,13 +263,13 @@ mod tests {
     }
 
     fn assert_metric_value(metrics: &Metrics, name: &str) {
-        let mn = metrics.metric_name_group(name, GROUP);
+        let mn = metrics.metric_name(name, KafkaProducerMetrics::GROUP);
         let metric = metrics.metric(&mn).expect("metric present");
         assert_eq!(metric.metric_value().as_double(), Some(METRIC_VALUE as f64));
     }
 
     fn assert_metric_removed(metrics: &Metrics, name: &str) {
-        let mn = metrics.metric_name_group(name, GROUP);
+        let mn = metrics.metric_name(name, KafkaProducerMetrics::GROUP);
         assert!(metrics.metric(&mn).is_none());
     }
 

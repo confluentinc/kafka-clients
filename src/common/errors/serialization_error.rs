@@ -14,7 +14,7 @@
 
 //! Translated from `org.apache.kafka.common.errors.SerializationException`.
 
-use crate::common::kafka_error::kafka_error_class;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// Any exception during serialization in the producer, or deserialization

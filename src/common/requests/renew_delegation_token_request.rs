@@ -19,8 +19,8 @@
 
 use std::io;
 
+use crate::RenewDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
 
 use super::{ConcreteRequest, ConcreteResponse, RenewDelegationTokenResponse, RequestBuilder};
 
@@ -99,7 +99,7 @@ pub struct RenewDelegationTokenRequestBuilder {
 
 impl RenewDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: RenewDelegationTokenRequestData) -> Self {
+    pub fn new(data: RenewDelegationTokenRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::RENEW_DELEGATION_TOKEN.oldest_version(),
@@ -167,7 +167,7 @@ mod tests {
         let mut request =
             ConcreteRequest::RenewDelegationToken(RenewDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = RenewDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().hmac, b"the-hmac");
         assert_eq!(parsed.data().renew_period_ms, 3_600_000);

@@ -54,14 +54,14 @@ impl ListOffsetsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
@@ -80,14 +80,14 @@ mod tests {
     #[test]
     fn defaults_match_java() {
         let options = ListOffsetsOptions::new();
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert_eq!(options.isolation_level(), IsolationLevel::ReadUncommitted);
     }
 
     #[test]
-    fn with_isolation_level_and_timeout() {
-        let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).timeout_ms(Some(200));
+    fn new_isolation_level_and_timeout() {
+        let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(200));
         assert_eq!(options.isolation_level(), IsolationLevel::ReadCommitted);
-        assert_eq!(options.timeout(), Some(200));
+        assert_eq!(options.timeout_ms(), Some(200));
     }
 }

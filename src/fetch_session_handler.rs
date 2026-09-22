@@ -47,19 +47,19 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use log::{debug, info, trace};
 
+use crate::common::Errors;
 use crate::common::TopicIdPartition;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
-use crate::common::protocol::Errors;
-use crate::common::requests::fetch_metadata::{FetchMetadata, INVALID_SESSION_ID};
+use crate::common::requests::FetchMetadata;
+use crate::common::requests::FetchResponse;
 use crate::common::requests::fetch_request::PartitionData;
-use crate::common::requests::fetch_response::FetchResponse;
 
 /// The state and diff produced by [`FetchSessionHandler::build_request`].
 ///
 /// Mirrors Java's `FetchSessionHandler.FetchRequestData` (the inner class is
 /// renamed here to `FetchSessionRequestData` to avoid collision with the
-/// auto-generated [`crate::fetch_request_data::FetchRequestData`]).
+/// auto-generated [`crate::FetchRequestData`]).
 ///
 /// `pub(crate)` to match Java's package-private visibility — only
 /// `AbstractFetch` and Phase 7b's `FetchRequestManager` consume this
@@ -98,6 +98,15 @@ pub struct FetchSessionHandler {
 }
 
 impl FetchSessionHandler {
+    /// Returns items in `to_find` that are missing from `to_search`.
+    ///
+    /// Mirrors Java's static `findMissing` (which uses `LinkedHashSet`); the
+    /// Rust translation returns `HashSet` because the consumers (`verify*`
+    /// methods) don't depend on iteration order.
+    pub fn find_missing<T: Clone + Eq + std::hash::Hash>(to_find: &HashSet<T>, to_search: &HashSet<T>) -> HashSet<T> {
+        to_find.iter().filter(|item| !to_search.contains(*item)).cloned().collect()
+    }
+
     /// Constructs a fresh handler for the given broker node id.
     pub fn new(node: i32) -> Self {
         Self {
@@ -226,7 +235,7 @@ impl FetchSessionHandler {
                 self.next_metadata = FetchMetadata::INITIAL;
                 return false;
             }
-            if response.session_id() == INVALID_SESSION_ID {
+            if response.session_id() == FetchMetadata::INVALID_SESSION_ID {
                 debug!("Node {} sent a full fetch response with no session.", self.node);
                 self.next_metadata = FetchMetadata::INITIAL;
                 true
@@ -236,7 +245,7 @@ impl FetchSessionHandler {
                     self.node,
                     response.session_id()
                 );
-                self.next_metadata = FetchMetadata::new_incremental(response.session_id());
+                self.next_metadata = FetchMetadata::with_incremental(response.session_id());
                 true
             }
         } else {
@@ -248,7 +257,7 @@ impl FetchSessionHandler {
                 self.next_metadata = self.next_metadata.next_close_existing_attempt_new();
                 return false;
             }
-            if response.session_id() == INVALID_SESSION_ID {
+            if response.session_id() == FetchMetadata::INVALID_SESSION_ID {
                 debug!(
                     "Node {} sent an incremental fetch response closing session {}",
                     self.node,
@@ -419,11 +428,11 @@ impl FetchSessionHandler {
         version: i16,
     ) -> Option<String> {
         let session: HashSet<TopicPartition> = self.session_partitions.keys().cloned().collect();
-        let extra = find_missing(topic_partitions, &session);
-        let omitted = find_missing(&session, topic_partitions);
+        let extra = FetchSessionHandler::find_missing(topic_partitions, &session);
+        let omitted = FetchSessionHandler::find_missing(&session, topic_partitions);
         let extra_ids: HashSet<Uuid> = if version >= 13 {
             let session_ids: HashSet<Uuid> = self.session_topic_names.keys().cloned().collect();
-            find_missing(ids, &session_ids)
+            FetchSessionHandler::find_missing(ids, &session_ids)
         } else {
             HashSet::new()
         };
@@ -453,10 +462,10 @@ impl FetchSessionHandler {
         version: i16,
     ) -> Option<String> {
         let session: HashSet<TopicPartition> = self.session_partitions.keys().cloned().collect();
-        let extra = find_missing(topic_partitions, &session);
+        let extra = FetchSessionHandler::find_missing(topic_partitions, &session);
         let extra_ids: HashSet<Uuid> = if version >= 13 {
             let session_ids: HashSet<Uuid> = self.session_topic_names.keys().cloned().collect();
-            find_missing(ids, &session_ids)
+            FetchSessionHandler::find_missing(ids, &session_ids)
         } else {
             HashSet::new()
         };
@@ -508,15 +517,6 @@ impl Builder {
     }
 }
 
-/// Returns items in `to_find` that are missing from `to_search`.
-///
-/// Mirrors Java's static `findMissing` (which uses `LinkedHashSet`); the
-/// Rust translation returns `HashSet` because the consumers (`verify*`
-/// methods) don't depend on iteration order.
-pub fn find_missing<T: Clone + Eq + std::hash::Hash>(to_find: &HashSet<T>, to_search: &HashSet<T>) -> HashSet<T> {
-    to_find.iter().filter(|item| !to_search.contains(*item)).cloned().collect()
-}
-
 fn join_partitions(set: &HashSet<TopicPartition>) -> String {
     set.iter().map(|tp| tp.to_string()).collect::<Vec<_>>().join(", ")
 }
@@ -528,8 +528,9 @@ fn join_ids(set: &HashSet<Uuid>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::ApiKeys;
-    use crate::fetch_response_data::{FetchResponseData, FetchableTopicResponse, PartitionData as RespPartitionData};
+    use crate::FetchResponseData;
+    use crate::common::ApiKeys;
+    use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
 
     fn tp(name: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(name.to_string(), partition)
@@ -602,24 +603,24 @@ mod tests {
             arr.into_iter().collect()
         }
 
-        assert!(find_missing(&s(vec![foo0.clone()]), &s(vec![foo0.clone()])).is_empty());
+        assert!(FetchSessionHandler::find_missing(&s(vec![foo0.clone()]), &s(vec![foo0.clone()])).is_empty());
         assert_eq!(
             s(vec![foo0.clone()]),
-            find_missing(&s(vec![foo0.clone()]), &s(vec![foo1.clone()]))
+            FetchSessionHandler::find_missing(&s(vec![foo0.clone()]), &s(vec![foo1.clone()]))
         );
         assert_eq!(
             s(vec![foo0.clone(), foo1.clone()]),
-            find_missing(&s(vec![foo0.clone(), foo1.clone()]), &s(vec![baz0.clone()])),
+            FetchSessionHandler::find_missing(&s(vec![foo0.clone(), foo1.clone()]), &s(vec![baz0.clone()])),
         );
         assert_eq!(
             s(vec![bar1.clone(), foo0.clone(), foo1.clone()]),
-            find_missing(
+            FetchSessionHandler::find_missing(
                 &s(vec![foo0.clone(), foo1.clone(), bar0.clone(), bar1.clone()]),
                 &s(vec![bar0.clone(), baz0.clone(), baz1.clone()]),
             ),
         );
         assert!(
-            find_missing(
+            FetchSessionHandler::find_missing(
                 &s(vec![foo0.clone(), foo1.clone(), bar0.clone(), bar1.clone(), baz1.clone()]),
                 &s(vec![foo0, foo1, bar0, bar1, baz0, baz1]),
             )
@@ -644,13 +645,13 @@ mod tests {
             let data = handler.build_request(builder);
             assert_eq!(2, data.to_send.len());
             assert_eq!(data.to_send, data.session_partitions);
-            assert_eq!(INVALID_SESSION_ID, data.metadata.session_id());
-            assert_eq!(crate::common::requests::fetch_metadata::INITIAL_EPOCH, data.metadata.epoch());
+            assert_eq!(FetchMetadata::INVALID_SESSION_ID, data.metadata.session_id());
+            assert_eq!(FetchMetadata::INITIAL_EPOCH, data.metadata.epoch());
 
             // Sessionless response: session id == INVALID_SESSION_ID.
             let response = build_response(
                 Errors::None,
-                INVALID_SESSION_ID,
+                FetchMetadata::INVALID_SESSION_ID,
                 0,
                 &[("foo".to_string(), foo_id, 0, 0), ("foo".to_string(), foo_id, 1, 0)],
             );
@@ -660,8 +661,8 @@ mod tests {
             let mut b2 = handler.new_builder();
             b2.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
             let data2 = handler.build_request(b2);
-            assert_eq!(INVALID_SESSION_ID, data2.metadata.session_id());
-            assert_eq!(crate::common::requests::fetch_metadata::INITIAL_EPOCH, data2.metadata.epoch());
+            assert_eq!(FetchMetadata::INVALID_SESSION_ID, data2.metadata.session_id());
+            assert_eq!(FetchMetadata::INITIAL_EPOCH, data2.metadata.epoch());
             assert_eq!(1, data2.to_send.len());
         }
     }
@@ -711,7 +712,7 @@ mod tests {
             assert!(handler.handle_response(&r2, version));
 
             // Round 3: simulate invalid fetch session epoch — should reset.
-            let r3 = build_response(Errors::InvalidFetchSessionEpoch, INVALID_SESSION_ID, 0, &[]);
+            let r3 = build_response(Errors::InvalidFetchSessionEpoch, FetchMetadata::INVALID_SESSION_ID, 0, &[]);
             assert!(!handler.handle_response(&r3, version));
 
             // Round 4: full fetch (since session was reset on round 3).
@@ -724,7 +725,7 @@ mod tests {
             // Session id retained from previous round (close-existing-attempt-new
             // preserves session id but sets epoch=INITIAL_EPOCH).
             assert_eq!(123, d4.metadata.session_id());
-            assert_eq!(crate::common::requests::fetch_metadata::INITIAL_EPOCH, d4.metadata.epoch());
+            assert_eq!(FetchMetadata::INITIAL_EPOCH, d4.metadata.epoch());
             assert_eq!(d4.to_send, d4.session_partitions);
         }
     }
@@ -778,7 +779,7 @@ mod tests {
             assert!(forgotten.contains(&tp("bar", 0)));
 
             // Round 3: FETCH_SESSION_ID_NOT_FOUND -> reset to INITIAL.
-            let r2 = build_response(Errors::FetchSessionIdNotFound, INVALID_SESSION_ID, 0, &[]);
+            let r2 = build_response(Errors::FetchSessionIdNotFound, FetchMetadata::INVALID_SESSION_ID, 0, &[]);
             assert!(!handler.handle_response(&r2, version));
 
             // Round 4: full fetch with brand-new (INVALID) session id.
@@ -786,8 +787,8 @@ mod tests {
             b3.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
             let d3 = handler.build_request(b3);
             assert!(d3.metadata.is_full());
-            assert_eq!(INVALID_SESSION_ID, d3.metadata.session_id());
-            assert_eq!(crate::common::requests::fetch_metadata::INITIAL_EPOCH, d3.metadata.epoch());
+            assert_eq!(FetchMetadata::INVALID_SESSION_ID, d3.metadata.session_id());
+            assert_eq!(FetchMetadata::INITIAL_EPOCH, d3.metadata.epoch());
         }
     }
 
@@ -1101,7 +1102,7 @@ mod tests {
             // Before any session — every partition is "extra".
             let resp1 = build_response(
                 Errors::None,
-                INVALID_SESSION_ID,
+                FetchMetadata::INVALID_SESSION_ID,
                 0,
                 &[
                     ("foo".to_string(), foo_id, 0, 0),
@@ -1126,7 +1127,7 @@ mod tests {
 
             let resp2 = build_response(
                 Errors::None,
-                INVALID_SESSION_ID,
+                FetchMetadata::INVALID_SESSION_ID,
                 0,
                 &[
                     ("foo".to_string(), foo_id, 0, 0),
@@ -1145,7 +1146,7 @@ mod tests {
             // Drop bar/0 from the response — should be reported omitted.
             let resp3 = build_response(
                 Errors::None,
-                INVALID_SESSION_ID,
+                FetchMetadata::INVALID_SESSION_ID,
                 0,
                 &[("foo".to_string(), foo_id, 0, 0), ("foo".to_string(), foo_id, 1, 0)],
             );
@@ -1184,7 +1185,7 @@ mod tests {
         // "extra".
         let resp1 = build_response(
             Errors::None,
-            INVALID_SESSION_ID,
+            FetchMetadata::INVALID_SESSION_ID,
             0,
             &[
                 ("foo".to_string(), foo_id, 0, 0),
@@ -1209,7 +1210,7 @@ mod tests {
         // Response still includes extra2 → extraIds should be reported.
         let resp2 = build_response(
             Errors::None,
-            INVALID_SESSION_ID,
+            FetchMetadata::INVALID_SESSION_ID,
             0,
             &[
                 ("foo".to_string(), foo_id, 0, 0),
@@ -1228,7 +1229,7 @@ mod tests {
         // Response without extra2 → no issue.
         let resp3 = build_response(
             Errors::None,
-            INVALID_SESSION_ID,
+            FetchMetadata::INVALID_SESSION_ID,
             0,
             &[("foo".to_string(), foo_id, 0, 0), ("bar".to_string(), bar_id, 0, 0)],
         );
@@ -1255,8 +1256,8 @@ mod tests {
         b1.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
         b1.add(tp("foo", 1), pd(foo_id, 10, 110, 210));
         let d1 = handler.build_request(b1);
-        assert_eq!(INVALID_SESSION_ID, d1.metadata.session_id());
-        assert_eq!(crate::common::requests::fetch_metadata::INITIAL_EPOCH, d1.metadata.epoch());
+        assert_eq!(FetchMetadata::INVALID_SESSION_ID, d1.metadata.session_id());
+        assert_eq!(FetchMetadata::INITIAL_EPOCH, d1.metadata.epoch());
 
         let r1 = build_response(
             Errors::None,
@@ -1276,7 +1277,7 @@ mod tests {
         let b3 = handler.new_builder();
         let d3 = handler.build_request(b3);
         assert_eq!(123, d3.metadata.session_id());
-        assert_eq!(crate::common::requests::fetch_metadata::INITIAL_EPOCH, d3.metadata.epoch());
+        assert_eq!(FetchMetadata::INITIAL_EPOCH, d3.metadata.epoch());
     }
 
     /// Empty full-fetch responses with throttle_time_ms > 0 should be
@@ -1295,7 +1296,7 @@ mod tests {
         let next = handler.new_builder();
         let d = handler.build_request(next);
         assert!(d.metadata.is_full());
-        assert_eq!(INVALID_SESSION_ID, d.metadata.session_id());
+        assert_eq!(FetchMetadata::INVALID_SESSION_ID, d.metadata.session_id());
     }
 
     /// `notify_close` and `handle_error` advance metadata to close-existing
@@ -1314,18 +1315,12 @@ mod tests {
         // notify_close should drive epoch to FINAL_EPOCH.
         handler.notify_close();
         assert_eq!(42, handler.session_id());
-        assert_eq!(
-            crate::common::requests::fetch_metadata::FINAL_EPOCH,
-            handler.next_metadata.epoch()
-        );
+        assert_eq!(FetchMetadata::FINAL_EPOCH, handler.next_metadata.epoch());
 
         // handle_error should reset epoch to INITIAL_EPOCH (close + new).
         handler.handle_error(&crate::common::Error::local_illegal_state("simulated"));
         assert_eq!(42, handler.session_id());
-        assert_eq!(
-            crate::common::requests::fetch_metadata::INITIAL_EPOCH,
-            handler.next_metadata.epoch()
-        );
+        assert_eq!(FetchMetadata::INITIAL_EPOCH, handler.next_metadata.epoch());
     }
 
     /// `session_topic_partitions` returns the current session's TPs.

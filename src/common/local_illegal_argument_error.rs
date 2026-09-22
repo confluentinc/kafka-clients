@@ -19,7 +19,7 @@
 //! its subpackage — and they have no wire code, because a broker never reports
 //! them.
 
-use crate::common::kafka_error::message_only_error;
+use crate::common::error::message_only_error;
 
 message_only_error! {
     /// Illegal argument error — an invalid argument was provided to a method.

@@ -26,9 +26,9 @@
 
 use std::io;
 
+use crate::SaslHandshakeRequestData;
+use crate::SaslHandshakeResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
-use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;
@@ -216,7 +216,7 @@ mod tests {
     /// expected error about insufficient bytes.
     #[test]
     fn test_invalid_sasl_handshake_request() {
-        use crate::common::protocol::ByteBufferAccessor;
+        use crate::common::ByteBufferAccessor;
         use crate::common::requests::ConcreteRequest;
 
         let mut data = SaslHandshakeRequestData::new();
@@ -231,7 +231,7 @@ mod tests {
         corrupted[0] = corrupted_len[0];
         corrupted[1] = corrupted_len[1];
 
-        let mut buf = ByteBufferAccessor::from_bytes(corrupted);
+        let mut buf = ByteBufferAccessor::new(corrupted);
         let err = ConcreteRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
         assert_eq!(
             err.to_string(),

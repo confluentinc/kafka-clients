@@ -28,10 +28,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DeleteGroupsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::delete_groups_response_data::DeleteGroupsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A `DeleteGroups` response.
 ///
@@ -89,7 +89,7 @@ impl DeleteGroupsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }
@@ -168,7 +168,7 @@ mod tests {
             0x00, 0x01, 0x67, // group_id "g"
             0x00, 0x44, // error_code 68
         ];
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes);
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
         let response = DeleteGroupsResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(response.data().throttle_time_ms, 0);
         assert_eq!(response.data().results.len(), 1);

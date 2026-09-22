@@ -26,16 +26,6 @@ use std::fmt;
 
 use crate::common::utils::ExponentialBackoff;
 
-/// Default exponent base for retry backoff.
-///
-/// Java: `RequestState.RETRY_BACKOFF_EXP_BASE`.
-pub(crate) const RETRY_BACKOFF_EXP_BASE: i32 = 2;
-
-/// Default jitter factor for retry backoff.
-///
-/// Java: `RequestState.RETRY_BACKOFF_JITTER`.
-pub(crate) const RETRY_BACKOFF_JITTER: f64 = 0.2;
-
 /// Per-manager exponential-backoff bookkeeping shared across all
 /// `RequestManager` implementations.
 ///
@@ -70,6 +60,16 @@ pub(crate) struct RequestState {
 }
 
 impl RequestState {
+    /// Default exponent base for retry backoff.
+    ///
+    /// Java: `RequestState.RETRY_BACKOFF_EXP_BASE`.
+    pub(crate) const RETRY_BACKOFF_EXP_BASE: i32 = 2;
+
+    /// Default jitter factor for retry backoff.
+    ///
+    /// Java: `RequestState.RETRY_BACKOFF_JITTER`.
+    pub(crate) const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
     /// Creates a new [`RequestState`] using the default exponent base
     /// ([`RETRY_BACKOFF_EXP_BASE`]) and jitter ([`RETRY_BACKOFF_JITTER`]).
     ///
@@ -79,9 +79,9 @@ impl RequestState {
         Self::with_backoff_params(
             owner,
             retry_backoff_ms,
-            RETRY_BACKOFF_EXP_BASE,
+            RequestState::RETRY_BACKOFF_EXP_BASE,
             retry_backoff_max_ms,
-            RETRY_BACKOFF_JITTER,
+            RequestState::RETRY_BACKOFF_JITTER,
         )
     }
 
@@ -199,7 +199,7 @@ impl RequestState {
 
     /// Returns the comma-separated key=value pairs that Java's
     /// `toStringBase()` produces. Visible to subclasses (e.g.
-    /// [`super::timed_request_state::TimedRequestState`]) so they can append
+    /// [`super::TimedRequestState`]) so they can append
     /// their own state without duplicating each field.
     pub(crate) fn to_string_base(&self) -> String {
         format!(

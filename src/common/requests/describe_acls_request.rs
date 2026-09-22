@@ -18,11 +18,11 @@
 
 use std::io;
 
+use crate::DescribeAclsRequestData;
+use crate::DescribeAclsResponseData;
 use crate::common::acl::{AccessControlEntryFilter, AclBindingFilter, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePatternFilter, ResourceType};
-use crate::describe_acls_request_data::DescribeAclsRequestData;
-use crate::describe_acls_response_data::DescribeAclsResponseData;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeAclsResponse, RequestBuilder};
 
@@ -121,7 +121,7 @@ pub struct DescribeAclsRequestBuilder {
 impl DescribeAclsRequestBuilder {
     /// Creates a builder from an [`AclBindingFilter`], mirroring
     /// `DescribeAclsRequest.Builder(AclBindingFilter)`.
-    pub fn from_filter(filter: &AclBindingFilter) -> Self {
+    pub fn new(filter: &AclBindingFilter) -> Self {
         let pattern_filter = filter.pattern_filter();
         let entry_filter = filter.entry_filter();
         let mut data = DescribeAclsRequestData::new();
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn builder_maps_filter_fields() {
-        let mut builder = DescribeAclsRequestBuilder::from_filter(&sample_filter());
+        let mut builder = DescribeAclsRequestBuilder::new(&sample_filter());
         let request = builder.build().unwrap();
         let ConcreteRequest::DescribeAcls(r) = request else {
             panic!("expected DescribeAcls request");
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn filter_round_trips_through_data() {
-        let mut builder = DescribeAclsRequestBuilder::from_filter(&sample_filter());
+        let mut builder = DescribeAclsRequestBuilder::new(&sample_filter());
         let ConcreteRequest::DescribeAcls(r) = builder.build().unwrap() else {
             panic!("expected DescribeAcls request");
         };
@@ -217,14 +217,14 @@ mod tests {
 
     #[test]
     fn serialize_parse_round_trip() {
-        let mut builder = DescribeAclsRequestBuilder::from_filter(&sample_filter());
+        let mut builder = DescribeAclsRequestBuilder::new(&sample_filter());
         let version = ApiKeys::DESCRIBE_ACLS.latest_version();
         let ConcreteRequest::DescribeAcls(r) = builder.build().unwrap() else {
             panic!("expected DescribeAcls request");
         };
         let mut request = ConcreteRequest::DescribeAcls(r);
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filter(), sample_filter());
     }
@@ -235,7 +235,7 @@ mod tests {
             ResourcePatternFilter::new(ResourceType::Unknown, Some("t".to_string()), PatternType::Literal),
             AccessControlEntryFilter::new(None, None, AclOperation::Read, AclPermissionType::Allow),
         );
-        let mut builder = DescribeAclsRequestBuilder::from_filter(&filter);
+        let mut builder = DescribeAclsRequestBuilder::new(&filter);
         assert!(builder.build().is_err());
     }
 
@@ -252,7 +252,7 @@ mod tests {
                 AclPermissionType::Allow,
             ),
         );
-        let mut builder = DescribeAclsRequestBuilder::from_filter(&filter);
+        let mut builder = DescribeAclsRequestBuilder::new(&filter);
         let mut request = builder.build_version(3).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         // int8 resource_type=2 (TOPIC)

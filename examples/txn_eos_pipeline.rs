@@ -100,7 +100,7 @@ async fn run() -> Result<(), String> {
     println!("--- attempt 1: consume ---");
     let mut consumer_1 = build_consumer(&bootstrap, &group, "read_committed")?;
     consumer_1
-        .subscribe(vec![input_topic.clone()])
+        .subscribe_with_topics(vec![input_topic.clone()])
         .await
         .map_err(|e| format!("subscribe: {e}"))?;
     let consumed_1 = consume_exactly(&mut consumer_1, INPUT_VALUES.len(), true).await?;
@@ -161,7 +161,7 @@ async fn run() -> Result<(), String> {
     consumer_1.close().await.map_err(|e| format!("close consumer 1: {e}"))?;
     let mut consumer_2 = build_consumer(&bootstrap, &group, "read_committed")?;
     consumer_2
-        .subscribe(vec![input_topic.clone()])
+        .subscribe_with_topics(vec![input_topic.clone()])
         .await
         .map_err(|e| format!("subscribe #2: {e}"))?;
     let consumed_2 = consume_exactly(&mut consumer_2, INPUT_VALUES.len(), true).await?;
